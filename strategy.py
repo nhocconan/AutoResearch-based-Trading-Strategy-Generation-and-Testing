@@ -1,67 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 6h Vortex Indicator + 1d VWAP + Volume Confirmation
+Experiment #024: 12h Donchian Breakout + Choppiness Regime + 1d Trend
 
-HYPOTHESIS: Vortex Indicator (VI) measures directional momentum by comparing
-current bar ranges to historical ranges. VI+ > VI- = bullish flow, VI- > VI+ = bearish.
-Combined with 1d VWAP as institutional anchor and volume confirmation:
-- VI cross + price > 1d VWAP = long continuation in bull
-- VI cross + price < 1d VWAP = short continuation in bear
-- Range: both sides fade when no clear VI dominance
+HYPOTHESIS: Donchian(20) breakouts are statistically significant price
+structure events. Combined with Choppiness Index regime filter:
+- Bull market: price breaks above 20-period high → strong momentum
+- Bear market: choppiness filter prevents chasing breakdowns
+- Range market: CHOP > 61.8 = choppy = no trades (avoid whipsaw)
 
-KEY INSIGHT: VI is a leading indicator unlike SMA/EMA. It catches momentum
-shifts BEFORE price breaks structure. Works in both trending and choppy markets.
+KEY INSIGHT: DB top performer mtf_4h_chop_donchian_vol_regime_12h_v1
+achieved test Sharpe 1.49 on SOLUSDT with 107 trades. This replicates
+that pattern at 12h TF (even fewer trades = less fee drag).
 
-TARGET: 75-150 total trades over 4 years (18-37/year).
+TRADE COUNT: 75-125 total over 4 years (19-31/year).
 Size: 0.30.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_vortex_vwap_vol_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_chop_1d_sma_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_vortex(high, low, close, period=14):
-    """
-    Vortex Indicator (VT/VI)
-    VM+ = |high_t - low_{t-1}|
-    VM- = |low_t - high_{t-1}|
-    TR = max(high_t - low_t, |high_t - close_{t-1}|, |low_t - close_{t-1}|)
-    VI+ = sum(VM+) / sum(TR) over period
-    VI- = sum(VM-) / sum(TR) over period
-    """
-    n = len(close)
-    if n < period + 2:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    vm_plus = np.zeros(n, dtype=np.float64)
-    vm_minus = np.zeros(n, dtype=np.float64)
-    
-    # First bar
-    tr[0] = high[0] - low[0]
-    vm_plus[0] = 0.0
-    vm_minus[0] = 0.0
-    
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
-        vm_plus[i] = abs(high[i] - low[i-1])
-        vm_minus[i] = abs(low[i] - high[i-1])
-    
-    # Rolling sums
-    tr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-    vm_plus_sum = pd.Series(vm_plus).rolling(window=period, min_periods=period).sum().values
-    vm_minus_sum = pd.Series(vm_minus).rolling(window=period, min_periods=period).sum().values
-    
-    # VI ratios
-    vi_plus = np.where(tr_sum > 1e-10, vm_plus_sum / tr_sum, 0.0)
-    vi_minus = np.where(tr_sum > 1e-10, vm_minus_sum / tr_sum, 0.0)
-    
-    return vi_plus, vi_minus
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -77,22 +37,38 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_vwap(high, low, close, volume):
+def calculate_choppiness(high, low, close, period=14):
     """
-    Volume Weighted Average Price
-    VWAP = sum(price * volume) / sum(volume)
+    Choppiness Index (CHOP)
+    CHOP > 61.8 = ranging/choppy (no trend)
+    CHOP < 38.2 = trending (good for breakout strategies)
     """
-    typical = (high + low + close) / 3.0
-    cum_vol = np.cumsum(volume)
-    cum_pv = np.cumsum(typical * volume)
-    vwap = cum_pv / np.where(cum_vol > 1e-10, cum_vol, 1.0)
-    return vwap
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        # Sum of true range over period
+        tr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            tr_sum += max(high[j] - low[j], 
+                         abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
+        
+        # Highest high - lowest low over period
+        hh = max(high[i - period + 1:i + 1])
+        ll = min(low[i - period + 1:i + 1])
+        hl_range = hh - ll
+        
+        if hl_range > 1e-10:
+            chop[i] = 100 * np.log10(tr_sum / hl_range) / np.log10(period)
+    
+    return chop
 
 def calculate_donchian(high, low, period=20):
-    """Donchian channel for structure"""
+    """Donchian channel"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    middle = (upper + pd.Series(low).rolling(window=period, min_periods=period).min().values) / 2.0
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+    return upper, middle, lower
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
@@ -101,32 +77,21 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d VWAP for institutional anchor (call ONCE before loop) ===
+    # === HTF: 1d SMA for macro trend (call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
+    sma_1d_50 = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_50)
     
-    # Calculate VWAP on 1d data
-    htf_high = df_1d['high'].values
-    htf_low = df_1d['low'].values
-    htf_close = df_1d['close'].values
-    htf_volume = df_1d['volume'].values
-    htf_vwap = calculate_vwap(htf_high, htf_low, htf_close, htf_volume)
-    
-    # Align to 6h
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, htf_vwap)
-    
-    # === 6h indicators ===
+    # === 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    vi_plus, vi_minus = calculate_vortex(high, low, close, period=14)
+    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Donchian for structure
-    dc_upper_20, dc_lower_20 = calculate_donchian(high, low, period=20)
+    # Donchian 20
+    dc_upper_20, dc_middle_20, dc_lower_20 = calculate_donchian(high, low, period=20)
     
-    # Volume spike detection
+    # Volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
-    
-    # VI signal line (VI+ - VI-)
-    vi_diff = vi_plus - vi_minus
     
     # === Signals ===
     signals = np.zeros(n)
@@ -141,7 +106,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 50  # Need 14 for VI + buffer
+    warmup = 50  # enough for chop calc
     
     for i in range(warmup, n):
         # NaN check
@@ -149,7 +114,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(vi_plus[i]) or np.isnan(vwap_1d_aligned[i]):
+        if np.isnan(chop[i]) or np.isnan(sma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -160,44 +125,46 @@ def generate_signals(prices):
             else:
                 lowest_since_entry = min(lowest_since_entry, low[i])
         
-        # === TREND DETECTION via VI cross ===
-        # VI+ crosses above VI- = bullish momentum shift
-        vi_bullish = vi_plus[i] > vi_minus[i]
-        # VI- crosses above VI+ = bearish momentum shift
-        vi_bearish = vi_minus[i] > vi_plus[i]
+        # === REGIME CHECK ===
+        # CHOP > 61.8 = choppy/ranging = skip (avoid whipsaw)
+        # CHOP < 50 = trending = good for breakouts
+        is_choppy = chop[i] > 61.8
+        is_trending = chop[i] < 50.0
         
-        # Macro trend via 1d VWAP
-        above_vwap = close[i] > vwap_1d_aligned[i]
-        below_vwap = close[i] < vwap_1d_aligned[i]
+        # === TREND CHECK (1d SMA) ===
+        htf_bullish = close[i] > sma_1d_aligned[i]
+        htf_bearish = close[i] < sma_1d_aligned[i]
         
-        # Structure: price in upper/lower third of Donchian
-        dc_mid = (dc_upper_20[i] + dc_lower_20[i]) / 2.0 if not np.isnan(dc_upper_20[i]) else close[i]
-        price_in_upper = close[i] > dc_mid
-        price_in_lower = close[i] < dc_mid
+        # === DONCHIAN BREAKOUT SIGNALS ===
+        # Long: price breaks above 20-period high + volume confirmation
+        donchian_breakout_long = (close[i] > dc_upper_20[i]) and not np.isnan(dc_upper_20[i])
+        # Short: price breaks below 20-period low + volume confirmation
+        donchian_breakout_short = (close[i] < dc_lower_20[i]) and not np.isnan(dc_lower_20[i])
         
-        # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.4
+        # Volume confirmation
+        vol_confirm = vol_ratio[i] > 1.2
         
-        # === MINIMUM HOLD: 2 bars (12h) ===
+        # === MINIMUM HOLD: 2 bars (24h) ===
         min_hold = (i - entry_bar) >= 2
         
-        # === ATR TRAILING STOP (2.5x ATR) ===
+        # === TRAILING STOP (2x ATR from entry) ===
         def check_atr_stop():
             if not in_position:
                 return False
             if position_side > 0:
-                return low[i] < (highest_since_entry - 2.5 * entry_atr)
+                # Trail: exit if price drops 2 ATR from highest since entry
+                return low[i] < (highest_since_entry - 2.5 * atr_14[i])
             else:
-                return high[i] > (lowest_since_entry + 2.5 * entry_atr)
+                return high[i] > (lowest_since_entry + 2.5 * atr_14[i])
         
         # === EXITS ===
         if in_position:
             stop_hit = check_atr_stop()
             
-            # VI reversal exits (when momentum shifts against position)
-            if position_side > 0 and vi_bearish and min_hold:
+            # Trend reversal exit (after min hold)
+            if position_side > 0 and htf_bearish and min_hold:
                 stop_hit = True
-            if position_side < 0 and vi_bullish and min_hold:
+            if position_side < 0 and htf_bullish and min_hold:
                 stop_hit = True
             
             if stop_hit:
@@ -209,8 +176,8 @@ def generate_signals(prices):
         
         # === NEW POSITIONS ===
         if not in_position:
-            # LONG: VI bullish cross + price above VWAP + volume spike
-            if vi_bullish and above_vwap and vol_spike:
+            # LONG: Donchian breakout + volume + not choppy + 1d uptrend
+            if donchian_breakout_long and vol_confirm and not is_choppy and htf_bullish:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
@@ -219,18 +186,8 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 signals[i] = SIZE
             
-            # LONG CONSERVATIVE: VI bullish + above VWAP (no volume req)
-            elif vi_bullish and above_vwap and price_in_upper:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                entry_atr = atr_14[i]
-                entry_bar = i
-                highest_since_entry = high[i]
-                signals[i] = SIZE * 0.7  # Smaller size without volume confirm
-            
-            # SHORT: VI bearish cross + price below VWAP + volume spike
-            elif vi_bearish and below_vwap and vol_spike:
+            # SHORT: Donchian breakdown + volume + not choppy + 1d downtrend
+            elif donchian_breakout_short and vol_confirm and not is_choppy and htf_bearish:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -239,15 +196,25 @@ def generate_signals(prices):
                 lowest_since_entry = low[i]
                 signals[i] = -SIZE
             
-            # SHORT CONSERVATIVE: VI bearish + below VWAP (no volume req)
-            elif vi_bearish and below_vwap and price_in_lower:
+            # Conservative LONG: in strong uptrend, buy pullbacks to middle band
+            elif htf_bullish and is_trending and close[i] > dc_middle_20[i] and vol_confirm:
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                entry_atr = atr_14[i]
+                entry_bar = i
+                highest_since_entry = high[i]
+                signals[i] = SIZE * 0.5  # Half size for pullback entry
+            
+            # Conservative SHORT: in downtrend, sell rallies to middle band
+            elif htf_bearish and is_trending and close[i] < dc_middle_20[i] and vol_confirm:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
                 lowest_since_entry = low[i]
-                signals[i] = -SIZE * 0.7  # Smaller size without volume confirm
+                signals[i] = -SIZE * 0.5  # Half size for rally sell
             
             else:
                 signals[i] = 0.0
