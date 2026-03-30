@@ -1,34 +1,64 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 6h Elder Ray + Volume + 1d EMA Trend
+Experiment #027: 12h Camarilla Pivot + 1w Trend + Choppiness Regime
 
-HYPOTHESIS: Elder Ray (Bull/Bear Power) measures institutional buying/selling pressure
-relative to a smoothed average. Unlike RSI or Williams %R which are bounded oscillators,
-Elder Ray captures the MAGNITUDE of force behind moves. Combined with 1d EMA for trend
-and volume for confirmation, this catches genuine breakouts while avoiding whipsaws.
+HYPOTHESIS: Camarilla pivot levels represent institutional support/resistance zones.
+By combining Camarilla touch signals on 12h with 1w SMA200 for trend direction
+and Choppiness Index for regime filtering, we capture mean-reversion trades at 
+key levels with institutional confirmation.
 
-WHY IT WORKS IN BULL AND BEAR:
-- Bull Power > 0 in uptrends = institutional buying confirms rallies
-- Bear Power < 0 in downtrends = institutional selling confirms selloffs  
-- Divergence signals exhaustion BEFORE reversals
-- Symmetric: works on both long and short sides
+WHY 12h: 50-150 target trades over 4 years. Slower than 6h/4h = fewer but
+higher-quality signals. 12h Camarilla = 4x daily levels = major institutional zones.
 
-WHY 6h: Slower than 4h reduces fee drag, faster than 12h catches more setups.
-6h bars capture institutional sessions without noise.
+WHY IT WORKS IN BULL AND BEAR: Camarilla is symmetrical (S3-S5 vs R3-R5).
+In bull: price respects S3-S5 as support on pullbacks.
+In bear: price respects R3-R5 as resistance on rallies.
+Choppiness keeps us out of whipsaws.
 
-WHY NOVEL: Elder Ray is DIFFERENT from RSI/WR/TRIX - it measures absolute power
-above/below EMA, not relative position. Not tried in previous experiments.
+ENTRY RULES (STRICT - 2-3 conditions only):
+- Long: price touches S3/S4 with 1w SMA200 rising AND not choppy
+- Short: price touches R3/R4 with 1w SMA200 falling AND not choppy
+- Volume confirmation required
 
-TARGET: 75-150 total trades over 4 years (19-37/year). HARD MAX: 200.
-Signal size: 0.25.
+TARGET: 50-150 total trades over 4 years = 12-37/year. HARD MAX: 200.
+Signal size: 0.30
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_elder_ray_vol_1d_ema_v1"
-timeframe = "6h"
+name = "mtf_12h_camarilla_chop_1w_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_camarilla(high, low, close, period=24):
+    """Camarilla pivot levels - institutional support/resistance"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    pivots = np.full((n, 6), np.nan)  # S1-S5, R1-R5
+    
+    for i in range(period, n):
+        h = high[i]
+        l = low[i]
+        c = close[i]
+        rng = h - l
+        
+        # Classic Camarilla
+        pivots[i, 0] = c - rng * 1.1 / 12    # S1
+        pivots[i, 1] = c - rng * 1.1 / 6     # S2
+        pivots[i, 2] = c - rng * 1.1 / 4     # S3
+        pivots[i, 3] = c - rng * 1.1 / 3     # S4
+        pivots[i, 4] = c - rng * 1.1 / 2     # S5 (extreme)
+        
+        pivots[i, 5] = c + rng * 1.1 / 12    # R1
+        pivots[i, 6] = c + rng * 1.1 / 6     # R2
+        pivots[i, 7] = c + rng * 1.1 / 4     # R3
+        pivots[i, 8] = c + rng * 1.1 / 3     # R4
+        pivots[i, 9] = c + rng * 1.1 / 2     # R5 (extreme)
+    
+    return pivots
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -44,29 +74,29 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_ema(values, period, min_periods=None):
-    """Exponential Moving Average"""
-    if min_periods is None:
-        min_periods = period
-    return pd.Series(values).ewm(span=period, min_periods=min_periods, adjust=False).mean().values
-
-def calculate_elder_ray(high, low, close, ema_period=13):
-    """
-    Elder Ray: Measures buying/selling pressure relative to EMA
-    Bull Power = High - EMA (positive = buying pressure)
-    Bear Power = Low - EMA (negative = selling pressure)
-    """
-    n = len(close)
-    ema = calculate_ema(close, ema_period, min_periods=ema_period)
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - lower = trending, higher = choppy"""
+    n = len(high)
+    chop = np.full(n, np.nan, dtype=np.float64)
     
-    bull_power = np.zeros(n, dtype=np.float64)
-    bear_power = np.zeros(n, dtype=np.float64)
+    for i in range(period, n):
+        tr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            if j > 0:
+                tr = max(high[j] - low[j], abs(high[j] - close[j-1]))
+            else:
+                tr = high[j] - low[j]
+            tr_sum += tr
+        
+        if tr_sum > 0:
+            hh = np.max(high[i - period + 1:i + 1])
+            ll = np.min(low[i - period + 1:i + 1])
+            range_hl = hh - ll
+            
+            if range_hl > 0:
+                chop[i] = 100 * np.log10(tr_sum / range_hl) / np.log10(period)
     
-    for i in range(n):
-        bull_power[i] = high[i] - ema[i]
-        bear_power[i] = low[i] - ema[i]
-    
-    return bull_power, bear_power, ema
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -76,26 +106,44 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d EMA for trend direction (26-period = one month)
-    ema_1d = calculate_ema(df_1d['close'].values, 26, min_periods=26)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # 1w SMA200 for long-term trend
+    sma_1w = pd.Series(df_1w['close'].values).rolling(window=200, min_periods=200).mean().values
+    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
     
-    # Local 6h indicators
+    # 1w SMA50 for trend direction (faster)
+    sma50_1w = pd.Series(df_1w['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma50_1w_aligned = align_htf_to_ltf(prices, df_1w, sma50_1w)
+    
+    # Local indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    bull_power, bear_power, ema_local = calculate_elder_ray(high, low, close, ema_period=13)
+    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Volume confirmation
+    # Volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # EMA of Elder Ray for smoothing (avoid noise)
-    bull_power_smooth = pd.Series(bull_power).ewm(span=3, min_periods=3, adjust=False).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=3, min_periods=3, adjust=False).mean().values
+    # Camarilla levels (using 24-period = 12 days for 12h)
+    # We'll calculate S3, S4, R3, R4
+    s3_levels = np.full(n, np.nan)
+    s4_levels = np.full(n, np.nan)
+    r3_levels = np.full(n, np.nan)
+    r4_levels = np.full(n, np.nan)
+    
+    for i in range(24, n):
+        h = high[i]
+        l = low[i]
+        c = close[i]
+        rng = h - l
+        
+        s3_levels[i] = c - rng * 1.1 / 4   # S3
+        s4_levels[i] = c - rng * 1.1 / 3   # S4
+        r3_levels[i] = c + rng * 1.1 / 4   # R3
+        r4_levels[i] = c + rng * 1.1 / 3   # R4
     
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -107,7 +155,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 100  # Need enough for all indicators
+    warmup = 250  # Need enough for 1w SMA200 + Camarilla(24)
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -117,46 +165,60 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(sma_1w_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION (1d EMA26) ===
-        price_above_1d_ema = close[i] > ema_1d_aligned[i]
-        price_below_1d_ema = close[i] < ema_1d_aligned[i]
+        if np.isnan(chop[i]):
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
         
-        # === ELDER RAY SIGNALS ===
-        bull = bull_power_smooth[i]
-        bear = bear_power_smooth[i]
+        # === TREND DIRECTION (1w SMA200) ===
+        price_above_1w_sma = close[i] > sma_1w_aligned[i]
+        sma_1w_rising = sma50_1w_aligned[i] > sma_1w_aligned[i] if not np.isnan(sma50_1w_aligned[i]) else price_above_1w_sma
         
-        # Strong institutional buying: Bull Power breaks above threshold
-        strong_bull = bull > atr_14[i] * 0.3
+        is_bull_trend = price_above_1w_sma and sma_1w_rising
+        is_bear_trend = not price_above_1w_sma and not sma_1w_rising
         
-        # Strong institutional selling: Bear Power breaks below threshold
-        strong_bear = bear < -atr_14[i] * 0.3
+        # === REGIME (Choppiness Index) ===
+        # Skip if too choppy (CHOP > 61.8) when entering new position
+        is_choppy = chop[i] > 61.8
+        is_trending = chop[i] < 50.0
         
-        # Volume confirmation
-        vol_confirm = vol_ratio[i] > 1.5
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.3
+        
+        # === CAMARILLA LEVEL TOUCH ===
+        # Check if price touches S3/S4 or R3/R4
+        prev_close = close[i - 1] if i > 0 else close[i]
+        
+        # Long signal: price drops to S3/S4 zone
+        touch_s3 = (low[i] <= s3_levels[i]) and (prev_close > s3_levels[i])
+        touch_s4 = (low[i] <= s4_levels[i]) and (prev_close > s4_levels[i])
+        
+        # Short signal: price rises to R3/R4 zone
+        touch_r3 = (high[i] >= r3_levels[i]) and (prev_close < r3_levels[i])
+        touch_r4 = (high[i] >= r4_levels[i]) and (prev_close < r4_levels[i])
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Strong bull power + uptrend + volume ===
-            # Institutional buying pressure pushing price above EMA
-            if strong_bull and price_above_1d_ema:
-                if vol_confirm:
+            # === LONG: Touch S3/S4 in bull trend with volume ===
+            if (touch_s3 or touch_s4) and is_bull_trend:
+                if vol_spike or is_trending:
                     desired_signal = SIZE
             
-            # === SHORT: Strong bear power + downtrend + volume ===
-            # Institutional selling pressure pushing price below EMA
-            if strong_bear and price_below_1d_ema:
-                if vol_confirm:
+            # === SHORT: Touch R3/R4 in bear trend with volume ===
+            if (touch_r3 or touch_r4) and is_bear_trend:
+                if vol_spike or is_trending:
                     desired_signal = -SIZE
         
-        # === STOPLOSS CHECK (2.5 ATR trailing) ===
+        # === STOPLOSS CHECK (2.5 ATR) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
@@ -176,15 +238,20 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TIME-BASED EXIT (hold at least 8 bars = 2 days) ===
+        # === TIME-BASED EXIT (hold at least 4 bars = 2 days) ===
         bars_held = i - entry_bar
         
-        if in_position and bars_held >= 8:
-            # Exit if Elder Ray reverses
-            if position_side > 0 and bear < -atr_14[i] * 0.1:
-                desired_signal = 0.0
-            if position_side < 0 and bull > atr_14[i] * 0.1:
-                desired_signal = 0.0
+        if in_position and bars_held >= 4:
+            # Exit if price reverts to Camarilla middle
+            midpoint = (s3_levels[i] + r3_levels[i]) / 2 if not np.isnan(s3_levels[i]) else close[i]
+            
+            if position_side > 0 and close[i] > midpoint + 0.5 * atr_14[i]:
+                # Target hit: +2R, reduce size
+                desired_signal = SIZE / 2
+            
+            if position_side < 0 and close[i] < midpoint - 0.5 * atr_14[i]:
+                # Target hit: +2R, reduce size
+                desired_signal = -SIZE / 2
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
