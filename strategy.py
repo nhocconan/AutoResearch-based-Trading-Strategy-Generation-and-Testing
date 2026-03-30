@@ -1,30 +1,83 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 6h Keltner Channel Breakout + 1d SMA + Volatility-Adjusted ATR Stop
+Experiment #024: 4h TRIX + Choppiness Regime + Donchian Confirmation
 
-HYPOTHESIS: Keltner Channel breakouts identify when price finally escapes
-consolidation. Unlike Camarilla (mean reversion at pivot levels), this catches
-the START of new moves. Combined with 1d SMA trend filter and volume confirmation:
-- 2021 bull: Keltner breakouts above 1d SMA capture trending continuations
-- 2022 bear: Breakouts below 1d SMA catch short-side moves after consolidations
-- 2025 range: False breakouts filtered by requiring strong volume
+HYPOTHESIS: TRIX (triple-smoothed momentum) catches trend reversals earlier
+and more reliably than HMA or single-smoothed indicators. Combined with:
+1. Choppiness Index regime filter (avoid trades in range-bound markets)
+2. Donchian(20) confirmation (price must break structure)
+3. Volume spike confirmation (institutional participation)
+4. 1d SMA trend filter (macro direction alignment)
 
-KEY INSIGHT: Previous Camarilla (#007) fades extremes. This ADDS a breakout
-strategy for 6h - different edge, same timeframe, complementary signals.
+This should work in both:
+- 2021 bull: TRIX cross up + break above Donchian + 1d uptrend
+- 2022 bear: TRIX cross down + break below Donchian + 1d downtrend
+- 2025 range: Choppiness filter keeps us flat when no trend
 
-TRADE COUNT: 100-200 total over 4 years (25-50/year). HARD MAX: 300.
-Size: 0.30.
+TARGET: 75-200 trades over 4 years (19-50/year). Size: 0.30.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_keltner_breakout_1d_sma_v1"
-timeframe = "6h"
+name = "mtf_4h_trix_chop_donchian_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
+def calculate_trix(close, period=15):
+    """
+    TRIX: Triple-smoothed rate of change.
+    More noise-resistant than RSI, catches reversals earlier than moving averages.
+    """
+    n = len(close)
+    if n < period + 3:
+        return np.full(n, np.nan)
+    
+    # Triple EMA smoothing
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
+    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    # Rate of change of triple EMA
+    trix = np.zeros(n)
+    trix[period*3:] = (ema3.values[period*3:] - ema3.values[period*3 - period:]) / ema3.values[period*3 - period:] * 100
+    
+    return trix
+
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    CHOP < 38.2 = trending market (good for momentum strategies)
+    CHOP > 61.8 = ranging market (avoid mean reversion)
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, 50.0)
+    
+    chop = np.full(n, 50.0)
+    
+    for i in range(period, n):
+        highest_high = high[i - period + 1:i + 1].max()
+        lowest_low = low[i - period + 1:i + 1].min()
+        
+        if highest_high - lowest_low > 1e-10:
+            sum_tr = 0.0
+            for j in range(i - period + 1, i + 1):
+                tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
+                sum_tr += tr
+            
+            chop[i] = 100 * np.log10(sum_tr / (highest_high - lowest_low)) / np.log10(period)
+    
+    return chop
+
+def calculate_donchian(high, low, period=20):
+    """Donchian channel"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    middle = (upper + pd.Series(low).rolling(window=period, min_periods=period).min().values) / 2
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, middle, lower
+
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Average True Range for stops"""
     n = len(close)
     if n < 2:
         return np.full(n, np.nan)
@@ -36,21 +89,6 @@ def calculate_atr(high, low, close, period=14):
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_keltner(high, low, close, ema_period=20, atr_period=20, multiplier=2.5):
-    """
-    Keltner Channel:
-    Middle = EMA(close, period)
-    Upper = EMA + multiplier * ATR
-    Lower = EMA - multiplier * ATR
-    """
-    ema = pd.Series(close).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
-    atr = calculate_atr(high, low, close, period=atr_period)
-    
-    upper = ema + multiplier * atr
-    lower = ema - multiplier * atr
-    
-    return upper, ema, lower
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
@@ -64,19 +102,28 @@ def generate_signals(prices):
     sma_1d_50 = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
     sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_50)
     
-    # === 6h indicators ===
+    # === 4h indicators ===
+    trix = calculate_trix(close, period=15)
+    chop = calculate_choppiness_index(high, low, close, period=14)
+    dc_upper, dc_middle, dc_lower = calculate_donchian(high, low, period=20)
     atr_14 = calculate_atr(high, low, close, period=14)
-    kelt_upper, kelt_mid, kelt_lower = calculate_keltner(high, low, close, 
-                                                          ema_period=20, 
-                                                          atr_period=20, 
-                                                          multiplier=2.5)
     
-    # Volume analysis
+    # Volume ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
     
-    # ATR for stop loss
-    atr_20 = calculate_atr(high, low, close, period=20)
+    # === Pre-compute TRIX crosses ===
+    trix_cross_up = np.zeros(n, dtype=bool)
+    trix_cross_down = np.zeros(n, dtype=bool)
+    prev_trix = np.full(n, np.nan)
+    
+    for i in range(1, n):
+        if not np.isnan(trix[i]) and not np.isnan(trix[i-1]):
+            if trix[i-1] <= 0 and trix[i] > 0:
+                trix_cross_up[i] = True
+            elif trix[i-1] >= 0 and trix[i] < 0:
+                trix_cross_down[i] = True
+            prev_trix[i] = trix[i-1]
     
     # === Signals ===
     signals = np.zeros(n)
@@ -85,121 +132,114 @@ def generate_signals(prices):
     # Position tracking
     in_position = False
     position_side = 0
-    entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 80  # Need 50 for 1d SMA + 20 for Keltner + buffer
+    warmup = 80  # Need enough for TRIX triple smoothing
     
     for i in range(warmup, n):
-        # NaN check
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        # NaN checks
+        if np.isnan(trix[i]) or np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma_1d_aligned[i]) or np.isnan(kelt_upper[i]):
+        if np.isnan(sma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # Update highest/lowest for trailing stop
+        # === REGIME FILTER: Choppiness ===
+        # CHOP > 61.8 = ranging, avoid trading
+        # CHOP < 50 = trending, allow momentum trades
+        is_choppy = chop[i] > 61.8
+        is_trending = chop[i] < 50.0
+        
+        # === HTF TREND ===
+        htf_bullish = close[i] > sma_1d_aligned[i]
+        htf_bearish = close[i] < sma_1d_aligned[i]
+        
+        # === DONCHIAN CONFIRMATION ===
+        # Price broke above upper band = bullish momentum confirmed
+        # Price broke below lower band = bearish momentum confirmed
+        donchian_bull = close[i] > dc_upper[i] if not np.isnan(dc_upper[i]) else False
+        donchian_bear = close[i] < dc_lower[i] if not np.isnan(dc_lower[i]) else False
+        
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.4
+        
+        # === MINIMUM HOLD: 3 bars (12h) to avoid chop ===
+        min_hold = (i - entry_bar) >= 3
+        
+        # === Update highest/lowest for trailing stop ===
         if in_position:
             if position_side > 0:
                 highest_since_entry = max(highest_since_entry, high[i])
             else:
                 lowest_since_entry = min(lowest_since_entry, low[i])
         
-        # === TREND FILTER ===
-        htf_bullish = close[i] > sma_1d_aligned[i]
-        htf_bearish = close[i] < sma_1d_aligned[i]
-        
-        # === KELTNER BREAKOUT DETECTION ===
-        # Price breaks above upper band = bullish breakout
-        breakout_above = close[i] > kelt_upper[i]
-        # Price breaks below lower band = bearish breakout
-        breakout_below = close[i] < kelt_lower[i]
-        
-        # Price within bands = no breakout
-        within_bands = not breakout_above and not breakout_below
-        
-        # === VOLUME CONFIRMATION ===
-        vol_confirm = vol_ratio[i] > 1.4
-        
-        # === MINIMUM HOLD: 2 bars (12h) ===
-        min_hold = (i - entry_bar) >= 2
-        
-        # === ATR TRAILING STOP ===
-        def check_atr_stop():
-            if not in_position:
-                return False
-            if position_side > 0:
-                # Long stop: price dropped 2.5 ATR from highest
-                return low[i] < (highest_since_entry - 2.5 * entry_atr)
-            else:
-                # Short stop: price rose 2.5 ATR from lowest
-                return high[i] > (lowest_since_entry + 2.5 * entry_atr)
-        
-        # === EXITS ===
+        # === ATR TRAILING STOP (2.5x ATR) ===
         if in_position:
-            stop_hit = check_atr_stop()
+            if position_side > 0:
+                stop_price = highest_since_entry - 2.5 * entry_atr
+                if low[i] < stop_price:
+                    signals[i] = 0.0
+                    in_position = False
+                    position_side = 0
+                    continue
+            else:
+                stop_price = lowest_since_entry + 2.5 * entry_atr
+                if high[i] > stop_price:
+                    signals[i] = 0.0
+                    in_position = False
+                    position_side = 0
+                    continue
             
-            # Exit if trend reverses and we've held minimum
-            if position_side > 0 and htf_bearish and min_hold:
-                stop_hit = True
-            if position_side < 0 and htf_bullish and min_hold:
-                stop_hit = True
-            
-            if stop_hit:
+            # Exit on trend reversal with hold period
+            if position_side > 0 and trix_cross_down[i] and min_hold:
                 signals[i] = 0.0
                 in_position = False
                 position_side = 0
-            else:
-                signals[i] = position_side * SIZE
+                continue
+            if position_side < 0 and trix_cross_up[i] and min_hold:
+                signals[i] = 0.0
+                in_position = False
+                position_side = 0
+                continue
+            
+            # Exit on HTF trend reversal
+            if position_side > 0 and htf_bearish and min_hold:
+                signals[i] = 0.0
+                in_position = False
+                position_side = 0
+                continue
+            if position_side < 0 and htf_bullish and min_hold:
+                signals[i] = 0.0
+                in_position = False
+                position_side = 0
+                continue
+            
+            # Hold signal
+            signals[i] = position_side * SIZE
+            continue
         
         # === NEW POSITIONS ===
-        if not in_position:
-            # LONG: Breakout above Keltner upper + volume + uptrend
-            if breakout_above and vol_confirm and htf_bullish:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                entry_atr = atr_20[i] if not np.isnan(atr_20[i]) else atr_14[i]
-                entry_bar = i
-                highest_since_entry = high[i]
-                signals[i] = SIZE
-            
-            # LONG WEAK: Breakout but no volume (partial position)
-            elif breakout_above and htf_bullish and not vol_confirm:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                entry_atr = atr_20[i] if not np.isnan(atr_20[i]) else atr_14[i]
-                entry_bar = i
-                highest_since_entry = high[i]
-                signals[i] = SIZE * 0.5  # Half size without volume confirm
-            
-            # SHORT: Breakout below Keltner lower + volume + downtrend
-            elif breakout_below and vol_confirm and htf_bearish:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                entry_atr = atr_20[i] if not np.isnan(atr_20[i]) else atr_14[i]
-                entry_bar = i
-                lowest_since_entry = low[i]
-                signals[i] = -SIZE
-            
-            # SHORT WEAK: Breakout but no volume (partial position)
-            elif breakout_below and htf_bearish and not vol_confirm:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                entry_atr = atr_20[i] if not np.isnan(atr_20[i]) else atr_14[i]
-                entry_bar = i
-                lowest_since_entry = low[i]
-                signals[i] = -SIZE * 0.5  # Half size without volume confirm
-            
-            else:
-                signals[i] = 0.0
+        # LONG: TRIX cross up + Donchian break + volume + 1d uptrend
+        if trix_cross_up[i] and donchian_bull and htf_bullish:
+            in_position = True
+            position_side = 1
+            entry_atr = atr_14[i]
+            entry_bar = i
+            highest_since_entry = high[i]
+            signals[i] = SIZE
+        
+        # LONG WEAKER: TRIX cross up + 1d uptrend + volume spike (no Donchian break)
+        elif trix_cross_up[i] and htf_bullish and vol_spike and not is_choppy:
+            in_position = True
+            position_side = 1
+            entry_atr = atr_14[i]
+            entry_bar = i
+            highest_since_entry = high[i]
+            signals[i] = SIZE * 0.7  # Smaller size without Donchian confirm
     
     return signals
