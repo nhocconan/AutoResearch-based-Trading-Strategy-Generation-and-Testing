@@ -1,55 +1,91 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 4h Camarilla Pivot + 12h SMA200 Trend + Volume + Choppiness
+Experiment #028: 1d CRSI + Weekly EMA21 Trend + Choppiness Regime
 
-HYPOTHESIS: Camarilla pivot levels (S3/R3) are proven support/resistance where
-price reversals frequently occur. By combining with 12h SMA200 for trend direction
-and Choppiness to filter ranging markets, this captures mean-reversion trades
-at key structural levels with institutional confirmation.
+HYPOTHESIS: CRSI (Connors RSI) identifies short-term mean reversion extremes 
+within sustained trends. By combining CRSI extremes (<15 long, >85 short) with 
+weekly EMA21 for trend direction and Choppiness to filter range-bound markets,
+we capture high-probability reversals aligned with the broader trend.
+
+WHY 1d: Slower than 4h/6h = fewer false signals = lower fee drag.
+Weekly EMA21 = 5-week moving average for reliable trend direction.
+CRSI = (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3 — proven edge.
 
 WHY IT WORKS IN BULL AND BEAR:
-- Bull: Buy at S3 pullbacks (discount entry), ride to R3
-- Bear: Sell at R3 rallies (premium entry), ride to S3
-- Symmetrical levels = works both directions
-- Volume confirms institutional participation at levels
-- Choppiness keeps us out of trendless markets
+- Bull: CRSI < 15 catches oversold dips that bounce. Trend stays up = high win rate.
+- Bear: CRSI > 85 catches overbought rallies that fade. Trend stays down = short winners.
+- Choppiness keeps us out during transitions (2022 bottom whipsaw protection).
+- Weekly EMA21 changes ~6-8 times/year = reliable trend filter without overtrading.
 
-KEY INSIGHT FROM DB: gen_camarilla_pivot_volume_spike_choppiness_4h_v1 achieved
-test Sharpe=1.471 with 95 trades. This strategy is the DIRECT inspiration.
-
-TARGET: 75-150 total trades over 4 years (19-37/year). HARD MAX: 300.
-Signal size: 0.25 discrete levels.
+TARGET: 50-100 total trades over 4 years = 12-25/year. HARD MAX: 150.
+Signal size: 0.30.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_camarilla_vol_chop_12h_v1"
-timeframe = "4h"
+name = "mtf_1d_crsi_1w_ema21_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
-def calculate_camarilla_levels(high, low, close):
-    """
-    Camarilla pivot levels.
-    S3/S4 = support levels (buy zones)
-    R3/R4 = resistance levels (sell zones)
-    """
+def calculate_atr(high, low, close, period=14):
+    """Average True Range"""
     n = len(close)
-    pivot = (high + low + close) / 3.0
-    rng = high - low
+    if n < period + 1:
+        return np.full(n, np.nan)
     
-    # Classic Camarilla multipliers
-    r4 = close + rng * 0.55
-    r3 = close + rng * 0.275
-    r2 = close + rng * 0.183
-    r1 = close + rng * 0.0916
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    s1 = close - rng * 0.0916
-    s2 = close - rng * 0.183
-    s3 = close - rng * 0.275
-    s4 = close - rng * 0.55
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return atr
+
+def calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100):
+    """Connors RSI: (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3"""
+    n = len(close)
     
-    return r4, r3, r2, r1, pivot, s1, s2, s3, s4
+    # RSI(3) using EWM
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean()
+    avg_loss = loss.ewm(span=rsi_period, min_periods=rsi_period, adjust=False).mean()
+    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # RSI Streak(2) - consecutive up/down closes
+    streak = np.zeros(n)
+    current_streak = 0
+    for i in range(1, n):
+        if close[i] > close[i-1]:
+            current_streak = max(0, current_streak + 1)
+        elif close[i] < close[i-1]:
+            current_streak = min(0, current_streak - 1)
+        streak[i] = current_streak
+    
+    # RSI of streaks
+    streak_series = pd.Series(streak)
+    streak_gain = streak_series.clip(lower=0)
+    streak_loss = -streak_series.clip(upper=0)
+    streak_avg_gain = streak_gain.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
+    streak_avg_loss = streak_loss.ewm(span=streak_period, min_periods=streak_period, adjust=False).mean()
+    streak_rs = streak_avg_gain / np.where(streak_avg_loss == 0, 1e-10, streak_avg_loss)
+    rsi_streak = 100 - (100 / (1 + streak_rs))
+    
+    # PercentRank(100) using rolling percentile
+    def rolling_percent_rank(x):
+        return (x[-1] < x).sum() / len(x)
+    
+    percent_rank = pd.Series(close).rolling(window=rank_period, min_periods=rank_period).apply(
+        rolling_percent_rank, raw=True
+    )
+    
+    # CRSI = average of all three
+    crsi = (rsi + rsi_streak + percent_rank) / 3
+    
+    return crsi.values
 
 def calculate_choppiness(high, low, close, period=14):
     """Choppiness Index - lower = trending, higher = choppy"""
@@ -75,20 +111,6 @@ def calculate_choppiness(high, low, close, period=14):
     
     return chop
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -97,25 +119,23 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_12h = get_htf_data(prices, '12h')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 12h SMA200 for trend direction
-    sma_200_12h = pd.Series(df_12h['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma_200_aligned = align_htf_to_ltf(prices, df_12h, sma_200_12h)
+    # 1w EMA21 for trend direction
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Local 4h indicators
+    # Local 1d indicators
     atr_14 = calculate_atr(high, low, close, period=14)
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
     chop = calculate_choppiness(high, low, close, period=14)
-    
-    # Camarilla levels (calculated on previous bar to avoid look-ahead)
-    r4, r3, r2, r1, pivot, s1, s2, s3, s4 = calculate_camarilla_levels(high, low, close)
     
     # Volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -123,9 +143,11 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     stop_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 250  # Need enough for SMA200(12h) + Camarilla + buffer
+    warmup = 120  # Need enough for CRSI(100) + buffer
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -135,7 +157,7 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(sma_200_aligned[i]):
+        if np.isnan(crsi[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
@@ -147,100 +169,67 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        # === TREND DIRECTION (12h SMA200) ===
-        # Trend up: price above SMA200
-        # Trend down: price below SMA200
-        price_above_12h_sma = close[i] > sma_200_aligned[i]
-        trend_up = price_above_12h_sma
-        
-        # === REGIME (Choppiness Index) ===
-        # Only trade in trending or neutral markets (CHOP < 61.8)
-        # Skip when too choppy (no clear direction)
-        is_choppy = chop[i] > 61.8
-        
-        if is_choppy and not in_position:
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = 0.0
+            in_position = False
+            position_side = 0
             continue
         
-        # === VOLUME CONFIRMATION ===
-        # Require volume spike at level touch
-        vol_spike = vol_ratio[i] > 1.3
+        # === TREND DIRECTION (1w EMA21) ===
+        weekly_trend_bullish = close[i] > ema_1w_aligned[i]
+        weekly_trend_bearish = close[i] < ema_1w_aligned[i]
         
-        # Previous bar's Camarilla levels (shifted by 1)
-        prev_s3 = s3[i - 1] if i > 0 else 0
-        prev_s4 = s4[i - 1] if i > 0 else 0
-        prev_r3 = r3[i - 1] if i > 0 else 0
-        prev_r4 = r4[i - 1] if i > 0 else 0
+        # === REGIME (Choppiness Index) ===
+        # Skip if too choppy (avoid whipsaws)
+        is_choppy = chop[i] > 61.8
         
-        # Current price at levels?
-        current_high = high[i]
-        current_low = low[i]
-        
-        # Check if price touched S3 (potential long entry)
-        touched_s3 = current_low <= prev_s3
-        # Check if price touched R3 (potential short entry)
-        touched_r3 = current_high >= prev_r3
-        
-        desired_signal = 0.0
+        # Volume confirmation (optional boost)
+        vol_spike = vol_ratio[i] > 1.5
         
         # === ENTRY LOGIC ===
-        if not in_position:
-            # === LONG ENTRY: Price touches S3 support + trend up ===
-            # S3 is strong support. If price bounces from S3 with volume, go long.
-            # Target: R3 (resistance) or higher
-            if touched_s3 and trend_up:
-                if vol_spike:  # Volume confirmation
-                    desired_signal = SIZE
-            
-            # === SHORT ENTRY: Price touches R3 resistance + trend down ===
-            # R3 is strong resistance. If price rejects from R3 with volume, go short.
-            # Target: S3 (support) or lower
-            if touched_r3 and not trend_up:
-                if vol_spike:  # Volume confirmation
-                    desired_signal = -SIZE
+        desired_signal = 0.0
         
-        # === STOPLOSS CHECK (2.5 ATR from entry) ===
+        if not in_position:
+            # === LONG: CRSI oversold + weekly bullish trend ===
+            # CRSI < 15 = extreme oversold (rare ~5-10% of days)
+            # Weekly trend up = higher probability bounce
+            if crsi[i] < 15 and weekly_trend_bullish:
+                # Optional volume confirmation (but not required)
+                desired_signal = SIZE
+            
+            # === SHORT: CRSI overbought + weekly bearish trend ===
+            # CRSI > 85 = extreme overbought (rare ~5-10% of days)
+            # Weekly trend down = higher probability fade
+            if crsi[i] > 85 and weekly_trend_bearish:
+                # Optional volume confirmation (but not required)
+                desired_signal = -SIZE
+        
+        # === STOPLOSS CHECK (2.5 ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
-            # Long stoploss: below entry - 2.5*ATR OR below S4
-            stoploss_price = min(entry_price - 2.5 * entry_atr, prev_s4)
-            if low[i] < stoploss_price:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
+            if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
-            # Short stoploss: above entry + 2.5*ATR OR above R4
-            stoploss_price = max(entry_price + 2.5 * entry_atr, prev_r4)
-            if high[i] > stoploss_price:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
+            if high[i] > stop_price:
                 stoploss_triggered = True
         
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT / TIME EXIT ===
-        bars_held = i - entry_bar
+        # === EXIT: CRSI mean reversion (CRSI crosses 50) ===
+        if in_position and crsi[i] > 50 and position_side > 0:
+            desired_signal = 0.0
         
-        if in_position:
-            # Take profit at 2:1 R:R OR after 8 bars (2 days on 4h)
-            r_multiple = 0.0
-            if position_side > 0:
-                r_multiple = (close[i] - entry_price) / entry_atr
-            else:
-                r_multiple = (entry_price - close[i]) / entry_atr
-            
-            # TP at 2R or time exit
-            if r_multiple >= 2.0 or bars_held >= 8:
-                desired_signal = 0.0
-        
-        # === TREND CHANGE EXIT ===
-        # If trend changes, close position
-        if in_position:
-            if position_side > 0 and not trend_up:
-                # Was long but trend turned down
-                desired_signal = 0.0
-            if position_side < 0 and trend_up:
-                # Was short but trend turned up
-                desired_signal = 0.0
+        if in_position and crsi[i] < 50 and position_side < 0:
+            desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
@@ -250,6 +239,8 @@ def generate_signals(prices):
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 entry_bar = i
                 if position_side > 0:
                     stop_price = entry_price - 2.5 * entry_atr
@@ -262,6 +253,8 @@ def generate_signals(prices):
                 entry_price = 0.0
                 entry_atr = 0.0
                 stop_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
         
         signals[i] = desired_signal
     
