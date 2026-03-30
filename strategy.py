@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #025: 4h RSI Extreme + Volume Spike + Daily SMA200
+Experiment #007: 6h Donchian Breakout + Daily EMA21 Trend + Volume (6h)
 
-HYPOTHESIS: RSI extremes (30/70) capture high-probability reversal zones.
-Volume spike confirms the move has conviction. Daily SMA200 filters countertrend.
-4h timeframe gives enough bars for meaningful sample size while avoiding fee drag.
+HYPOTHESIS: Simplify from 4 conditions to 3 core conditions:
+1. Daily EMA21 for trend direction (less lag than weekly VWAP)
+2. Donchian(20) breakout for entry signal
+3. Volume spike for confirmation
 
 WHY IT SHOULD WORK IN BOTH MARKETS:
-- Bull: RSI<30 + volume spike + above SMA200 = oversold bounce (50-100% gains common)
-- Bear: RSI>70 + volume spike + below SMA200 = distribution/reversal (captures tops)
-- Mean reversion works in both directions - not biased to bull or bear
+- Bull: Price above EMA21 + breakout above 20-bar high + volume spike = strong momentum
+- Bear: Price below EMA21 + breakdown below 20-bar low + volume spike = strong short
+- 2.5 ATR stop allows surviving pullbacks; EMA21 exit catches trend reversals
 
-EXPECTED TRADES: 150-250 total over 4 years (37-62/year per symbol)
-- RSI(14) extreme triggers: ~50-100/year per symbol
-- Volume spike filter (1.5x): reduces by ~30%
-- SMA200 trend filter: reduces by ~20%
-- Final: ~150-250 trades = statistical validity
+EXPECTED TRADES: 200-400 total over 4 years (50-100/year per symbol)
+- Donchian(20) on 6h = 1 breakout per 20-40 bars = ~200-400/year potential
+- Volume spike (1.5x) → reduces by ~40%
+- EMA21 trend filter → reduces by ~30%
+- Final: ~300-500 total over 4 years (needs to verify not overtrading)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_rsi_extreme_vol_sma200_v1"
-timeframe = "4h"
+name = "mtf_6h_donchian_ema21_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -39,20 +40,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_rsi(prices, period=14):
-    """RSI with min_periods"""
-    close = pd.Series(prices)
-    delta = close.diff()
-    gain = delta.where(delta > 0, 0.0)
-    loss = (-delta).where(delta < 0, 0.0)
-    
-    avg_gain = gain.ewm(span=period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -63,13 +50,16 @@ def generate_signals(prices):
     # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily SMA200
-    sma200_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma200_aligned = align_htf_to_ltf(prices, df_1d, sma200_1d)
+    # Daily EMA21 for trend (align to 6h)
+    daily_ema21 = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema21_aligned = align_htf_to_ltf(prices, df_1d, daily_ema21)
     
-    # === Local 4h indicators ===
+    # === Local 6h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    rsi_14 = calculate_rsi(close, period=14)
+    
+    # Donchian Channel(20)
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume average (20 bars)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -88,101 +78,86 @@ def generate_signals(prices):
     trailing_high = 0.0
     trailing_low = 0.0
     
-    warmup = 250  # Enough for RSI(14), ATR(14), SMA200(1d)
+    warmup = 60  # Enough for Donchian20, ATR14, EMA21 alignment
     
     for i in range(warmup, n):
+        # NaN checks
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma200_aligned[i]):
+        if np.isnan(ema21_aligned[i]):
             signals[i] = 0.0
             continue
+        
+        # === TREND DIRECTION: Daily EMA21 ===
+        bull_trend = close[i] > ema21_aligned[i]
+        bear_trend = close[i] < ema21_aligned[i]
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
-        # === TREND DIRECTION ===
-        above_daily_sma = close[i] > sma200_aligned[i]
-        below_daily_sma = close[i] < sma200_aligned[i]
+        # === DONCHIAN BREAKOUT ===
+        prev_donchian_high = donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else np.nan
+        prev_donchian_low = donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else np.nan
         
-        # === RSI EXTREME CONDITIONS ===
-        rsi_oversold = rsi_14[i] < 30
-        rsi_overbought = rsi_14[i] > 70
+        bullish_breakout = (not np.isnan(prev_donchian_high) and 
+                           high[i] > prev_donchian_high)
+        bearish_breakout = (not np.isnan(prev_donchian_low) and 
+                           low[i] < prev_donchian_low)
         
-        # RSI neutralization for exit
-        rsi_neutral_long = rsi_14[i] > 55  # Exit long when RSI recovers
-        rsi_neutral_short = rsi_14[i] < 45  # Exit short when RSI drops
+        # === MINIMUM HOLD: 3 bars to reduce fee churn ===
+        min_hold_passed = (i - entry_bar) >= 3 if in_position else True
         
-        # === ENTRY LOGIC ===
-        desired_signal = 0.0
-        
-        if not in_position:
-            # LONG: RSI oversold + volume spike + above daily SMA
-            if rsi_oversold and vol_spike and above_daily_sma:
-                desired_signal = SIZE
-            
-            # SHORT: RSI overbought + volume spike + below daily SMA
-            elif rsi_overbought and vol_spike and below_daily_sma:
-                desired_signal = -SIZE
-        
-        # === EXIT LOGIC ===
+        # === EXITS ===
         if in_position:
+            # Update trailing high/low
             if position_side > 0:
-                # Trailing high
-                if i == entry_bar or high[i] > trailing_high:
+                if high[i] > trailing_high:
                     trailing_high = high[i]
-                
-                # Stop: 2.5 ATR from highest
-                stop_price = trailing_high - 2.5 * entry_atr
-                if low[i] < stop_price:
-                    desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
-                
-                # Exit if RSI neutralizes (mean reversion complete)
-                elif rsi_neutral_long:
-                    desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
-                    
-            elif position_side < 0:
-                # Trailing low
-                if i == entry_bar or low[i] < trailing_low:
+            else:
+                if low[i] < trailing_low:
                     trailing_low = low[i]
-                
-                # Stop: 2.5 ATR from lowest
-                stop_price = trailing_low + 2.5 * entry_atr
-                if high[i] > stop_price:
-                    desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
-                
-                # Exit if RSI neutralizes
-                elif rsi_neutral_short:
-                    desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
+            
+            # Stop-loss: 2.5 ATR from entry
+            stop_price = entry_price - 2.5 * entry_atr if position_side > 0 else entry_price + 2.5 * entry_atr
+            stop_hit = (position_side > 0 and low[i] < stop_price) or (position_side < 0 and high[i] > stop_price)
+            
+            # Trend exit
+            trend_exit = (position_side > 0 and close[i] < ema21_aligned[i]) or \
+                        (position_side < 0 and close[i] > ema21_aligned[i])
+            
+            if stop_hit or (min_hold_passed and trend_exit):
+                signals[i] = 0.0
+                in_position = False
+                position_side = 0
+            else:
+                signals[i] = position_side * SIZE
         
-        # === MINIMUM HOLD: 2 bars to reduce fee churn ===
-        if in_position and (i - entry_bar) < 2:
-            desired_signal = position_side * SIZE
-        
-        # === EXECUTE NEW POSITION ===
-        if desired_signal != 0.0:
-            if not in_position or np.sign(desired_signal) != position_side:
+        # === NEW POSITIONS ===
+        if not in_position:
+            # LONG: Bullish breakout + volume spike + bull trend
+            if bullish_breakout and vol_spike and bull_trend:
                 in_position = True
-                position_side = int(np.sign(desired_signal))
+                position_side = 1
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
                 trailing_high = high[i]
+                signals[i] = SIZE
+            
+            # SHORT: Bearish breakout + volume spike + bear trend
+            elif bearish_breakout and vol_spike and bear_trend:
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                entry_atr = atr_14[i]
+                entry_bar = i
                 trailing_low = low[i]
-        
-        signals[i] = desired_signal
+                signals[i] = -SIZE
     
     return signals
