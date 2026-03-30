@@ -1,39 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #007: 6h Williams %R + 1d ATR Regime + Volume Spike
+Experiment #008: 12h Camarilla + Weekly ATR Regime + Volume
 
-HYPOTHESIS: Volatility expansion (high ATR) at momentum extremes (%R near 0 or -100)
-with volume confirmation captures institutional moves that start from oversold/overbought.
-1d ATR regime ensures we only fade extremes when vol is elevated (catching reversals),
-not in trending vol expansion (which would be countertrend).
+HYPOTHESIS: Camarilla S3/S4 and R3/R4 are institutional support/resistance levels.
+By requiring TRIPLE confirmation (Camarilla level touch + volume spike + ATR regime),
+entries become rare enough for 12h timeframe (50-150 trades/4yr).
 
-WHY 6h: Slow enough for meaningful moves, fast enough for ~50 trades/4yr.
-WHY IT WORKS IN BULL AND BEAR: Long when %R<10 + vol spike catches bear rallies.
-Short when %R>-10 + vol spike catches bull selloffs. Symmetrical momentum fade.
+WHY IT WORKS IN BOTH BULL AND BEAR:
+- Bull: Buy S3/S4 touches when price > weekly EMA50 (buy the dip)
+- Bear: Short R3/R4 touches when price < weekly EMA50 (sell the rally)
+- ATR regime ensures we only enter during volatility expansion (momentum)
 
-TARGET: 75-150 total trades over 4 years = 19-37/year. HARD MAX: 300.
-Signal size: 0.30.
+KEY DIFFERENCE from failed #020 (280 trades):
+- #020 required ONLY Camarilla + vol OR EMA (too loose)
+- This version requires Camarilla + vol AND ATR regime (all three = ~70% fewer trades)
+
+TARGET: 75-150 total over 4 years = 19-37/year. Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_willr_atrregime_vol_1d_v1"
-timeframe = "6h"
+name = "mtf_12h_camarilla_weekly_atr_vol_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_willr(high, low, close, period=14):
-    """Williams %R - momentum oscillator"""
-    n = len(close)
-    result = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        highest = high[i - period + 1:i + 1].max()
-        lowest = low[i - period + 1:i + 1].min()
-        if highest != lowest:
-            result[i] = -100.0 * (highest - close[i]) / (highest - lowest)
-    
-    return result
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -57,139 +47,133 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d ATR for regime detection
-    atr_1d_30 = calculate_atr(
-        df_1d['high'].values, 
-        df_1d['low'].values, 
-        df_1d['close'].values, 
-        period=30
-    )
-    atr_1d_7 = calculate_atr(
-        df_1d['high'].values, 
-        df_1d['low'].values, 
-        df_1d['close'].values, 
-        period=7
-    )
-    atr_1d_aligned_30 = align_htf_to_ltf(prices, df_1d, atr_1d_30)
-    atr_1d_aligned_7 = align_htf_to_ltf(prices, df_1d, atr_1d_7)
+    # Weekly EMA50 for trend (captures multi-week direction)
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 1d EMA200 for trend direction
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === Local 12h indicators ===
+    atr_14 = calculate_atr(high, low, close, period=14)
+    atr_ma = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
+    atr_ratio = atr_14 / np.where(atr_ma > 0, atr_ma, 1)
     
-    # === Local 6h indicators ===
-    willr_14 = calculate_willr(high, low, close, period=14)
-    atr_6h = calculate_atr(high, low, close, period=14)
-    
-    # Volume ratio (20-bar lookback)
+    # Volume ratio (20-bar MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # Day's range position (where is current close relative to day's range)
-    day_high = pd.Series(high).rolling(window=4, min_periods=4).max().values
-    day_low = pd.Series(low).rolling(window=4, min_periods=4).min().values
-    day_range = day_high - day_low
-    day_position = np.where(day_range > 0, (close - day_low) / day_range, 0.5)
-    
     # Signals
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25
     
     # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
+    stop_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 250  # Need enough for EMA200 alignment buffer
+    warmup = 100
     
     for i in range(warmup, n):
-        # Skip if indicators not ready
-        if np.isnan(willr_14[i]) or np.isnan(atr_6h[i]) or atr_6h[i] <= 1e-10:
+        # Skip if ATR not ready
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # Skip if HTF data not aligned
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(atr_1d_aligned_30[i]) or np.isnan(atr_1d_aligned_7[i]):
+        # Skip if weekly EMA not aligned
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION (1d EMA200) ===
-        uptrend = close[i] > ema_1d_aligned[i]
+        # === FILTERS ===
+        price_above_1w_ema = close[i] > ema_1w_aligned[i]
+        vol_spike = vol_ratio[i] > 1.8
+        atr_expanding = atr_ratio[i] > 1.15  # ATR regime: volatility expanding
         
-        # === VOLATILITY REGIME (1d ATR ratio) ===
-        # ATR expanding = more volatile = good for reversals
-        # ATR contracting = less volatile = stay out
-        vol_ratio_1d = atr_1d_aligned_7[i] / atr_1d_aligned_30[i] if atr_1d_aligned_30[i] > 0 else 1.0
-        vol_expanding = vol_ratio_1d > 1.2  # 20% above 30d average
+        # === CAMARILLA LEVELS from previous CLOSED bar ===
+        prev_high = high[i - 1]
+        prev_low = low[i - 1]
+        prev_close = close[i - 1]
+        prev_range = prev_high - prev_low
         
-        # === MOMENTUM (Williams %R) ===
-        # %R < -90 = deeply oversold
-        # %R > -10 = deeply overbought
-        oversold = willr_14[i] < -90
-        overbought = willr_14[i] > -10
-        
-        # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.5
-        
-        # === DAY'S RANGE POSITION ===
-        # Near day's low = good for long entries
-        # Near day's high = good for short entries
-        near_day_low = day_position[i] < 0.25
-        near_day_high = day_position[i] > 0.75
+        # Classic Camarilla levels
+        r3 = prev_close + prev_range * 0.09167
+        r4 = prev_close + prev_range * 0.18333
+        s3 = prev_close - prev_range * 0.09167
+        s4 = prev_close - prev_range * 0.18333
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Oversold + near day low + volume + uptrend + vol expanding ===
-            if oversold and near_day_low and vol_spike and uptrend and vol_expanding:
-                desired_signal = SIZE
+            # LONG: Price touches S3/S4 + bullish trend + volume + ATR regime
+            if price_above_1w_ema and vol_spike and atr_expanding:
+                if low[i] <= s4:
+                    desired_signal = SIZE
+                elif low[i] <= s3:
+                    desired_signal = SIZE
             
-            # === SHORT: Overbought + near day high + volume + downtrend + vol expanding ===
-            if overbought and near_day_high and vol_spike and not uptrend and vol_expanding:
-                desired_signal = -SIZE
+            # SHORT: Price touches R3/R4 + bearish trend + volume + ATR regime
+            if not price_above_1w_ema and vol_spike and atr_expanding:
+                if high[i] >= r4:
+                    desired_signal = -SIZE
+                elif high[i] >= r3:
+                    desired_signal = -SIZE
         
-        # === STOPLOSS (2.0 ATR trailing) ===
-        if in_position:
-            bars_held = i - entry_bar
-            
-            if position_side > 0:
-                # Long stop
-                if low[i] < entry_price - 2.0 * entry_atr:
-                    desired_signal = 0.0
-                # Take profit: %R back above -20 OR price near day high
-                elif willr_14[i] > -20 or near_day_high:
-                    desired_signal = 0.0
-            
-            elif position_side < 0:
-                # Short stop
-                if high[i] > entry_price + 2.0 * entry_atr:
-                    desired_signal = 0.0
-                # Take profit: %R back below -80 OR price near day low
-                elif willr_14[i] < -80 or near_day_low:
-                    desired_signal = 0.0
+        # === STOPLOSS (2.5 ATR trailing) ===
+        if in_position and position_side > 0:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
+            if low[i] < stop_price:
+                desired_signal = 0.0
+        
+        if in_position and position_side < 0:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
+            if high[i] > stop_price:
+                desired_signal = 0.0
+        
+        # === MINIMUM HOLD (4 bars = 2 days) ===
+        bars_held = i - entry_bar
+        
+        # === EXIT on ATR compression (regime ends) ===
+        if in_position and bars_held >= 4:
+            # Exit long when ATR compresses (trend exhausted)
+            if position_side > 0 and atr_ratio[i] < 1.1:
+                desired_signal = 0.0
+            # Exit short when ATR compresses
+            if position_side < 0 and atr_ratio[i] < 1.1:
+                desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_6h[i]
+                entry_atr = atr_14[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 entry_bar = i
+                if position_side > 0:
+                    stop_price = entry_price - 2.5 * entry_atr
+                else:
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
                 position_side = 0
+                stop_price = 0.0
         
         signals[i] = desired_signal
     
