@@ -1,88 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #021: Simple 4h Donchian Breakout + Volume + ADX (1d HTF)
+Experiment #022: 1d Williams %R Cross + Weekly HTF + SMA Filter (1d primary)
 
-HYPOTHESIS: Keep it simple - ONE strong signal (Donchian breakout) + volume confirmation
-+ regime filter (ADX) + HTF trend. This mirrors proven DB winners.
+HYPOTHESIS: Williams %R crossing OUT of extreme territory with weekly trend
+confirmation catches mean reversion trades aligned with larger timeframe.
+%R crossing = more selective than just extreme reading = fewer but better trades.
 
 WHY IT SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull: Price breaks 20-high + volume spike + ADX>22 + 1d trend bull = long
-- Bear: Price breaks 20-low + volume spike + ADX>22 + 1d trend bear = short
-- Range: ADX<22 = no trade (filters chop)
-- Simple = fewer trades = less fee drag = better generalization
+- Bull: %R crosses above -80 (recovering from oversold) + price>SMA50 + weekly bull
+- Bear: %R crosses below -20 (falling from overbought) + price<SMA50 + weekly bear
+- HTF trend alignment prevents catching knives
+- Volume confirms institutional interest
 
-KEY INSIGHT: DB winners have 75-300 total 4h trades. The Ichimoku+Alligator strategy
-had too many conditions. This simpler version will generate trades.
-
-TARGET: 75-200 total over 4 years (19-50/year)
+Keep rate target: 45-55%. Total trades: 50-80 over 4 years (12-20/year).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_vol_adx_simple_v1"
-timeframe = "4h"
+name = "mtf_1d_willr_cross_weekly_v1"
+timeframe = "1d"
 leverage = 1.0
-
-
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 2:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-
-def calculate_adx(high, low, close, period=14):
-    """Average Directional Index"""
-    n = len(close)
-    if n < period + 2:
-        return np.full(n, np.nan)
-    
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    
-    for i in range(1, n):
-        high_diff = high[i] - high[i-1]
-        low_diff = low[i-1] - low[i]
-        
-        if high_diff > low_diff and high_diff > 0:
-            plus_dm[i] = high_diff
-        if low_diff > high_diff and low_diff > 0:
-            minus_dm[i] = low_diff
-    
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    di_plus = np.zeros(n)
-    di_minus = np.zeros(n)
-    dx = np.zeros(n)
-    
-    for i in range(period, n):
-        if atr[i] > 0:
-            di_plus[i] = 100 * plus_dm_smooth[i] / atr[i]
-            di_minus[i] = 100 * minus_dm_smooth[i] / atr[i]
-            
-            di_sum = di_plus[i] + di_minus[i]
-            if di_sum > 0:
-                dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / di_sum
-    
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return adx
-
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -91,145 +29,135 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
+    # === Load HTF weekly ONCE before loop ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # === 1d HTF: Simple SMA for trend direction ===
-    sma_50_1d = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
-    price_1d = df_1d['close'].values
+    # Weekly EMA for trend direction
+    ema_fast_w = pd.Series(df_1w['close'].values).ewm(span=8, min_periods=8, adjust=False).mean()
+    ema_slow_w = pd.Series(df_1w['close'].values).ewm(span=21, min_periods=21, adjust=False).mean()
+    htf_bull = ema_fast_w > ema_slow_w
+    htf_bear = ema_fast_w < ema_slow_w
     
-    # HTF bull: price above SMA50
-    htf_bullish = price_1d > sma_50_1d
+    # Align HTF to LTF with proper shift(1) to avoid look-ahead
+    htf_bull_aligned = align_htf_to_ltf(prices, df_1w, htf_bull.astype(float))
+    htf_bear_aligned = align_htf_to_ltf(prices, df_1w, htf_bear.astype(float))
     
-    # Align to 4h (shift by 1 to avoid look-ahead)
-    htf_bullish_aligned = align_htf_to_ltf(prices, df_1d, htf_bullish.astype(float))
+    # === Local 1d indicators ===
     
-    # === Local 4h indicators ===
-    atr_14 = calculate_atr(high, low, close, period=14)
-    adx = calculate_adx(high, low, close, period=14)
+    # Williams %R (14) - more selective with cross detection
+    period_wr = 14
+    willr = np.full(n, np.nan)
+    for i in range(period_wr, n):
+        hh = np.max(high[i-period_wr+1:i+1])
+        ll = np.min(low[i-period_wr+1:i+1])
+        if hh != ll:
+            willr[i] = -100 * (hh - close[i]) / (hh - ll)
     
-    # Donchian channels (20 periods = 80 hours = 5 trading days)
-    donchian_period = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # ATR (14) for stoploss
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # Volume ratio (current volume vs 20-bar average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # SMA 50 for directional filter
+    sma50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    
+    # Volume ratio (1.5x minimum)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # Signals
+    # === Signal generation ===
     signals = np.zeros(n)
-    SIZE = 0.28  # 28% position size
+    SIZE = 0.30
     
     # Position tracking
-    in_position = False
-    position_side = 0
+    in_pos = False
+    pos_side = 0
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
-    trailing_high = 0.0
-    trailing_low = 0.0
+    cooldown = 0
     
-    warmup = 60  # Donchian needs 20, ADX needs 14, volume needs 20
+    warmup = 100
     
     for i in range(warmup, n):
-        # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        # Validate indicators
+        if np.isnan(willr[i]) or np.isnan(sma50[i]) or np.isnan(atr[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx[i]):
+        if np.isnan(htf_bull_aligned[i]) or np.isnan(htf_bear_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
-            signals[i] = 0.0
-            continue
+        # === Williams %R Cross detection ===
+        # %R crossing ABOVE -80 = leaving oversold = potential long
+        # %R crossing BELOW -20 = entering overbought = potential short
+        willr_long_cross = willr[i] > -80 and willr[i-1] <= -80
+        willr_short_cross = willr[i] < -20 and willr[i-1] >= -20
         
-        # === DONCHIAN BREAKOUT SIGNALS ===
-        # Price breaks above 20-bar high (bullish breakout)
-        bull_breakout = close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1]
-        # Price breaks below 20-bar low (bearish breakout)
-        bear_breakout = close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1]
+        # === Price vs SMA50 ===
+        price_above_sma = close[i] > sma50[i]
+        price_below_sma = close[i] < sma50[i]
         
-        # === REGIME FILTER (ADX) ===
-        # ADX > 22 = trending, ADX < 18 = choppy (hysteresis)
-        strong_trend = adx[i] > 22
-        weak_trend = adx[i] < 18
+        # === HTF alignment (requires trend confirmation) ===
+        htf_bull_ok = htf_bull_aligned[i] > 0.5
+        htf_bear_ok = htf_bear_aligned[i] > 0.5
         
-        # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.5
+        # === Volume confirmation ===
+        vol_ok = vol_ratio[i] > 1.5
         
-        # === HTF TREND ===
-        htf_bull = htf_bullish_aligned[i] > 0.5 if not np.isnan(htf_bullish_aligned[i]) else False
-        
-        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        if not in_position:
-            # LONG: Bullish Donchian breakout + volume + strong trend + HTF bull
-            if bull_breakout and vol_spike and strong_trend and htf_bull:
+        # === Entry logic ===
+        if not in_pos and cooldown <= 0:
+            # LONG: %R crosses above -80 + price above SMA50 + weekly bull + vol
+            if willr_long_cross and price_above_sma and htf_bull_ok and vol_ok:
                 desired_signal = SIZE
             
-            # SHORT: Bearish Donchian breakout + volume + strong trend
-            # In bear mode, we can short even without HTF confirmation
-            if bear_breakout and vol_spike and strong_trend:
-                # If HTF is also bearish, more conviction
-                if not htf_bull:
-                    desired_signal = -SIZE
+            # SHORT: %R crosses below -20 + price below SMA50 + weekly bear + vol
+            elif willr_short_cross and price_below_sma and htf_bear_ok and vol_ok:
+                desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR trailing stop) ===
-        if in_position:
-            if position_side > 0:
-                # Update trailing high
-                if i == entry_bar or high[i] > trailing_high:
-                    trailing_high = high[i]
-                
-                # Trailing stop
-                stop_price = trailing_high - 2.5 * entry_atr
+        # === Exit logic ===
+        if in_pos:
+            if pos_side > 0:
+                # Long: 2.5 ATR stop
+                stop_price = entry_price - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
-                
-                # Exit if trend weakens
-                if weak_trend:
-                    desired_signal = 0.0
-                
-                # Exit if HTF turns bearish
-                if not htf_bull and not weak_trend:
-                    desired_signal = 0.0
-            
-            elif position_side < 0:
-                # Update trailing low
-                if i == entry_bar or low[i] < trailing_low:
-                    trailing_low = low[i]
-                
-                # Trailing stop
-                stop_price = trailing_low + 2.5 * entry_atr
+                else:
+                    desired_signal = SIZE
+                    
+            elif pos_side < 0:
+                # Short: 2.5 ATR stop
+                stop_price = entry_price + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
-                
-                # Exit if trend weakens
-                if weak_trend:
-                    desired_signal = 0.0
+                else:
+                    desired_signal = -SIZE
         
-        # === MINIMUM HOLD: 4 bars to avoid fee churn ===
-        if in_position and (i - entry_bar) < 4:
-            desired_signal = position_side * SIZE
+        # === Minimum hold: 3 bars to reduce fee churn ===
+        if in_pos and (i - entry_bar) < 3:
+            desired_signal = pos_side * SIZE
         
-        # === UPDATE POSITION ===
+        # === Update position ===
         if desired_signal != 0.0:
-            if not in_position or np.sign(desired_signal) != position_side:
-                in_position = True
-                position_side = int(np.sign(desired_signal))
+            if not in_pos or np.sign(desired_signal) != pos_side:
+                in_pos = True
+                pos_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr[i]
                 entry_bar = i
-                trailing_high = high[i]
-                trailing_low = low[i]
         else:
-            if in_position:
-                in_position = False
-                position_side = 0
+            if in_pos:
+                in_pos = False
+                pos_side = 0
+                cooldown = 3  # 3-bar cooldown after exit
+        
+        if cooldown > 0:
+            cooldown -= 1
         
         signals[i] = desired_signal
     
