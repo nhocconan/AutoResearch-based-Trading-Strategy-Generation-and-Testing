@@ -1,53 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 12h Donchian Breakout + 1w HMA Trend + Volume Spike
+Experiment #028: 4h Donchian Breakout + Bollinger Bandwidth Squeeze + Volume Confirmation
 
-HYPOTHESIS: This combines proven elements from DB winners:
-- 12h timeframe (lower trade frequency, ~25-50/year vs 50-100 on 4h)
-- 1w HMA(21) for primary trend (proven in mtf_1d_kama_rsi_chop_regime_1w_v1: Sharpe 1.31)
-- Donchian(20) breakout for price structure (proven in multiple SOL winners)
-- Volume spike confirmation (2.0x threshold - strict)
-- Choppiness filter to avoid range-bound whipsaws
+HYPOTHESIS: Bollinger Band squeeze (low volatility) precedes breakouts. By entering
+when volatility compresses AND price breaks Donchian structure, we catch explosive moves.
+This works in BOTH bull (breakout rallies) and bear (breakdown crashes) because we
+trade the direction of the break with symmetrical rules.
 
-KEY IMPROVEMENTS over failed attempts:
-- Use CLOSE > previous Donchian high (not intrabar high) = cleaner signal
-- 1w HMA instead of 1d SMA = longer trend filter, fewer trades
-- STRICTER volume threshold (2.0x) to reduce false breakouts
-- Mandatory 4-bar hold minimum to avoid chop
-- Target: 50-100 total trades over 4 years
+WHY IT WORKS: The squeeze acts as a "coil" that releases energy. Unlike trend indicators
+that lag, bandwidth contraction is a leading indicator. Combined with Donchian(20) for
+structure and volume for confirmation, this catches institutional moves.
 
-WHY IT WORKS IN BULL AND BEAR:
-- Long entries only when 1w trend is UP (bull) + breakout (momentum)
-- Short entries only when 1w trend is DOWN (bear) + breakdown (momentum)
-- Symmetrical Donchian channels work in both directions
-- Choppiness keeps us out of low-volatility environments
+KEY DIFFERENCE from failed strategies: Added BB squeeze filter prevents entering
+choppy ranges. Previous Donchian strategies entered on every breakout—now we only
+enter when volatility SUPPORTS a move.
+
+TARGET: 60-120 total trades over 4 years = 15-30/year. HARD MAX: 200.
+Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_vol_1w_hma_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_bb_squeeze_vol_v1"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_hma(data, period):
-    """Hull Moving Average"""
-    half_length = period // 2
-    sqrt_length = int(np.sqrt(period))
-    
-    # Calculate WMA parts
-    wma_half = pd.Series(data).rolling(window=half_length, min_periods=half_length).apply(
-        lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)), raw=True
-    )
-    wma_full = pd.Series(data).rolling(window=period, min_periods=period).apply(
-        lambda x: np.sum(x * np.arange(1, len(x) + 1)) / np.sum(np.arange(1, len(x) + 1)), raw=True
-    )
-    
-    # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-    hma_raw = 2 * wma_half - wma_full
-    hma = hma_raw.rolling(window=sqrt_length, min_periods=sqrt_length).mean()
-    
-    return hma.values
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -63,29 +40,31 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - lower = trending, higher = choppy"""
-    n = len(high)
-    chop = np.full(n, np.nan, dtype=np.float64)
+def calculate_bb_width_percentile(close, period=20, lookback=120):
+    """Bollinger Bandwidth as percentile of recent history - squeeze detection"""
+    n = len(close)
+    if n < period + lookback:
+        return np.full(n, np.nan)
     
-    for i in range(period, n):
-        tr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            if j > 0:
-                tr = max(high[j] - low[j], abs(high[j] - close[j-1]))
-            else:
-                tr = high[j] - low[j]
-            tr_sum += tr
-        
-        if tr_sum > 0:
-            hh = np.max(high[i - period + 1:i + 1])
-            ll = np.min(low[i - period + 1:i + 1])
-            range_hl = hh - ll
-            
-            if range_hl > 0:
-                chop[i] = 100 * np.log10(tr_sum / range_hl) / np.log10(period)
+    # BB middle
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
     
-    return chop
+    # Bandwidth = (Upper - Lower) / Middle
+    upper = sma + 2 * std
+    lower = sma - 2 * std
+    bandwidth = (upper - lower) / np.where(sma != 0, sma, 1)
+    
+    # Percentile of bandwidth over lookback period
+    percentile = np.full(n, np.nan, dtype=np.float64)
+    
+    for i in range(lookback, n):
+        recent_bw = bandwidth[i - lookback:i + 1]
+        current_bw = bandwidth[i]
+        # What percentile is current bandwidth among last 120 values?
+        percentile[i] = (np.sum(recent_bw <= current_bw) / len(recent_bw)) * 100
+    
+    return percentile
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -95,27 +74,27 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1w HMA(21) for primary trend direction
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # 1d SMA50 for trend direction
+    sma_1d = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
     
-    # Local indicators
+    # Local 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop = calculate_choppiness(high, low, close, period=14)
+    bb_pct = calculate_bb_width_percentile(close, period=20, lookback=120)
     
-    # Donchian channels (24 periods = 12 days on 12h - slightly longer for fewer trades)
-    donchian_period = 24
+    # Donchian channels (20 periods = 3.3 days on 4h)
+    donchian_period = 20
     donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
     donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Volume average (30 bars for stability on 12h)
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # Volume confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.25
     
     # Position tracking
     in_position = False
@@ -127,7 +106,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = max(100, donchian_period + 10)
+    warmup = 150  # Need enough for BB percentile(120) + Donchian(20) + buffer
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -137,69 +116,72 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(sma_1d_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(chop[i]):
+        if np.isnan(bb_pct[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION (1w HMA21) ===
-        price_above_1w_hma = close[i] > hma_1w_aligned[i]
+        # === TREND DIRECTION (1d SMA50) ===
+        price_above_1d_sma = close[i] > sma_1d_aligned[i]
         
-        # === REGIME (Choppiness Index) ===
-        # Only trade when trending (CHOP < 50)
-        # In choppy markets (CHOP > 61.8), stay flat
-        is_trending = chop[i] < 50.0
-        is_choppy = chop[i] > 61.8
+        # === VOLATILITY REGIME (BB Squeeze) ===
+        # Squeeze: bandwidth at <20th percentile of last 120 bars
+        is_squeeze = bb_pct[i] < 20.0
         
-        # Skip if too choppy
-        if is_choppy and not in_position:
-            signals[i] = 0.0
-            continue
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.8
         
-        # === DONCHIAN BREAKOUT SIGNALS ===
-        # Use CLOSE > previous Donchian high/low (cleaner than intrabar high/low)
+        # === PRICE STRUCTURE ===
+        current_high = high[i]
+        current_low = low[i]
+        
+        # Previous bar's Donchian values (use i-1 to avoid look-ahead)
         prev_donchian_high = donchian_high[i - 1] if i > 0 else 0
         prev_donchian_low = donchian_low[i - 1] if i > 0 else 0
-        
-        # Volume confirmation (strict: 2.0x average)
-        vol_spike = vol_ratio[i] > 2.0
+        prev_close = close[i - 1] if i > 0 else close[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Breakout above previous Donchian high ===
-            # Price CLOSES above previous 24-bar high with volume + trend
-            if close[i] > prev_donchian_high and price_above_1w_hma and is_trending:
-                if vol_spike:  # Strong volume confirmation required
+            # === LONG: Breakout with squeeze + volume ===
+            # Price closes above previous Donchian high with squeeze confirming
+            if prev_close > prev_donchian_high and price_above_1d_sma:
+                if is_squeeze and vol_spike:
                     desired_signal = SIZE
+                elif is_squeeze and not vol_spike:
+                    # Squeeze alone if volume not available but squeeze strong
+                    if bb_pct[i] < 10.0:
+                        desired_signal = SIZE * 0.5  # Half size without volume
             
-            # === SHORT: Breakdown below previous Donchian low ===
-            # Price CLOSES below previous 24-bar low with volume + trend
-            if close[i] < prev_donchian_low and not price_above_1w_hma and is_trending:
-                if vol_spike:  # Strong volume confirmation required
+            # === SHORT: Breakdown with squeeze + volume ===
+            if prev_close < prev_donchian_low and not price_above_1d_sma:
+                if is_squeeze and vol_spike:
                     desired_signal = -SIZE
+                elif is_squeeze and not vol_spike:
+                    if bb_pct[i] < 10.0:
+                        desired_signal = -SIZE * 0.5
         
-        # === STOPLOSS CHECK (2.5 ATR trailing - slightly wider) ===
+        # === STOPLOSS CHECK (2.0 ATR trailing) ===
         stoploss_triggered = False
         
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 stoploss_triggered = True
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 stoploss_triggered = True
@@ -207,21 +189,16 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TIME-BASED EXIT (hold at least 4 bars = 2 days) ===
+        # === TIME-BASED EXIT (hold at least 4 bars = ~16h) ===
         bars_held = i - entry_bar
         
         if in_position and bars_held >= 4:
-            # Exit if price reverts to middle of channel
-            channel_mid = (donchian_high[i] + donchian_low[i]) / 2
-            if position_side > 0 and close[i] < channel_mid:
+            # Exit if price reverts to 20-bar midpoint
+            midpoint = (donchian_high[i - 1] + donchian_low[i - 1]) / 2 if i > 0 else close[i]
+            if position_side > 0 and close[i] < midpoint:
                 desired_signal = 0.0
-            if position_side < 0 and close[i] > channel_mid:
+            if position_side < 0 and close[i] > midpoint:
                 desired_signal = 0.0
-        
-        # === ANTI-CHOP EXIT ===
-        # Exit if choppiness rises sharply while in position
-        if in_position and not is_trending and bars_held >= 2:
-            desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
@@ -235,9 +212,9 @@ def generate_signals(prices):
                 lowest_since_entry = low[i]
                 entry_bar = i
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - 2.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
+                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
