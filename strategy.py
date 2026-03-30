@@ -1,59 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #007: 6h RSI Pullback + Weekly EMA200 Trend + Volume
+Experiment #008: 12h Donchian Breakout + Weekly EMA + Choppiness Regime
 
-HYPOTHESIS: In strong uptrends (price > weekly EMA200), RSI < 35 signals mean
-reversion pullback entries with excellent risk/reward because you're buying dips
-within confirmed uptrends. Same logic for shorts in downtrends.
+HYPOTHESIS: Price channel breakouts (Donchian) are the most reliable structural
+signals. Using 1w EMA for trend direction filters out false breakouts in choppy
+markets. Choppiness Index > 38.2 means trending (good for breakouts), < 38.2 means
+choppy (avoid signals).
 
-WHY NOVEL: Uses 1w EMA200 as regime filter + 6h RSI(14) for entry timing + 
-volume confirmation. Not a breakout - this is PULLBACK within trend.
+WHY 12h: Slow enough to capture multi-day swings with 30-50 trades/year.
+Weekly EMA aligns with institutional trend direction.
 
-WHY 6h: Slower than 4h = fewer signals = less fee drag. Pullback strategies
-need slower TF to avoid getting whipsawed by noise.
+WHY IT WORKS BOTH MARKETS:
+- Bull: Buy breakouts above weekly EMA (captures rallies)
+- Bear: Short breakouts below weekly EMA (captures breakdowns)
+- Range: Choppiness filter keeps us flat during chop
 
-TARGET: 75-150 total trades over 4 years = 19-37/year.
+TARGET: 75-200 total trades over 4 years. HARD MAX: 200.
 Signal size: 0.25.
-
-Entry: RSI < 35 + vol spike + price above weekly EMA200 = LONG pullback
-Entry: RSI > 65 + vol spike + price below weekly EMA200 = SHORT rally
-
-Exit: Trailing stop 2.5 ATR or RSI mean reversion (RSI > 55 for longs)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_rsi_pullback_wema200_vol_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_ema1w_chop_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_rsi(prices_arr, period=14):
-    """Calculate RSI using numpy"""
-    n = len(prices_arr)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    deltas = np.diff(prices_arr, prepend=prices_arr[0])
-    deltas[0] = 0
-    
-    gains = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    
-    avg_gain[period-1] = np.mean(gains[1:period])
-    avg_loss[period-1] = np.mean(losses[1:period])
-    
-    for i in range(period, n):
-        avg_gain[i] = (avg_gain[i-1] * (period - 1) + gains[i]) / period
-        avg_loss[i] = (avg_loss[i-1] * (period - 1) + losses[i]) / period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
-    rsi = 100 - (100 / (1 + rs))
-    
-    return rsi
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -69,6 +40,29 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP)
+    CHOP > 61.8 = very choppy (range-bound, mean reversion)
+    CHOP < 38.2 = trending (good for trend following)
+    Values between are neutral
+    """
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        
+        sum_tr = 0.0
+        for j in range(i - period + 1, i + 1):
+            sum_tr += max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
+        
+        if highest_high - lowest_low > 1e-10:
+            chop[i] = 100 * np.log10(sum_tr / (highest_high - lowest_low)) / np.log10(period)
+    
+    return chop
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -79,15 +73,20 @@ def generate_signals(prices):
     # === Load HTF data ONCE before loop ===
     df_1w = get_htf_data(prices, '1w')
     
-    # 1w EMA200 for trend direction (very slow, institutional)
-    ema_1w = pd.Series(df_1w['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    # Weekly EMA for trend direction
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # === Local 6h indicators ===
-    rsi_14 = calculate_rsi(close, period=14)
+    # === Local indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
+    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Volume ratio (confirms momentum)
+    # Donchian channels (20 bars = 10 days on 12h)
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    
+    # Volume ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -105,7 +104,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 500  # Need 200 for weekly EMA200 alignment
+    warmup = 100
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -115,45 +114,43 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # Skip if weekly EMA not aligned
-        if np.isnan(ema_1w_aligned[i]):
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
+        # === TREND DIRECTION (1w EMA21) ===
+        price_above_1w_ema = close[i] > ema_1w_aligned[i]
         
-        # === TREND DIRECTION (1w EMA200) ===
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # === REGIME FILTER (Choppiness) ===
+        # CHOP < 38.2 = trending, good for breakouts
+        is_trending = chop[i] > 38.2
         
         # Volume confirmation
         vol_spike = vol_ratio[i] > 1.5
         
-        # === RSI PULLBACK ENTRY CONDITIONS ===
-        # Long: RSI oversold (<35) in uptrend = buy the dip
-        # Short: RSI overbought (>65) in downtrend = fade the rally
-        rsi_oversold = rsi_14[i] < 35
-        rsi_overbought = rsi_14[i] > 65
+        # Donchian breakout from previous bar (no look-ahead)
+        prev_donchian_high = donchian_high[i - 1]
+        prev_donchian_low = donchian_low[i - 1]
+        
+        # Breakout detection: price closes above/below previous Donchian
+        bull_breakout = close[i] > prev_donchian_high
+        bear_breakout = close[i] < prev_donchian_low
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: RSI oversold + vol spike + uptrend ===
-            if uptrend and rsi_oversold and vol_spike:
+            # === LONG: Bull breakout + above weekly EMA + trending + volume ===
+            if bull_breakout and price_above_1w_ema and is_trending and vol_spike:
                 desired_signal = SIZE
             
-            # === SHORT: RSI overbought + vol spike + downtrend ===
-            if downtrend and rsi_overbought and vol_spike:
+            # === SHORT: Bear breakout + below weekly EMA + trending + volume ===
+            if bear_breakout and not price_above_1w_ema and is_trending and vol_spike:
                 desired_signal = -SIZE
         
-        # === TRAILING STOPLOSS (2.5 ATR) ===
+        # === STOPLOSS (2.5 ATR trailing) ===
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
             trailing_stop = highest_since_entry - 2.5 * entry_atr
@@ -168,33 +165,19 @@ def generate_signals(prices):
             if high[i] > stop_price:
                 desired_signal = 0.0
         
-        # === RSI MEAN REVERSION EXIT ===
-        # Exit longs when RSI normalizes (>55)
-        # Exit shorts when RSI normalizes (<45)
-        if in_position and position_side > 0:
-            if rsi_14[i] > 55:
-                desired_signal = 0.0
-        
-        if in_position and position_side < 0:
-            if rsi_14[i] < 45:
-                desired_signal = 0.0
-        
-        # === MINIMUM HOLDING PERIOD (6 bars = 1.5 days) ===
-        # Prevents being stopped out by noise
+        # === MINIMUM HOLD (3 bars = 1.5 days to avoid chop) ===
         bars_held = i - entry_bar
-        if in_position and bars_held < 6:
-            # Don't exit early due to RSI normalization
-            if position_side > 0 and rsi_14[i] > 55:
-                if desired_signal == 0.0:
-                    desired_signal = SIZE  # Keep holding
-            if position_side < 0 and rsi_14[i] < 45:
-                if desired_signal == 0.0:
-                    desired_signal = -SIZE  # Keep holding
         
-        # === MAX HOLDING PERIOD (24 bars = 6 days) ===
-        # Force exit to avoid holding through range
-        if in_position and bars_held >= 24:
-            desired_signal = 0.0
+        # === TAKE PROFIT (1.5R) ===
+        if in_position and bars_held >= 3:
+            if position_side > 0:
+                profit_target = entry_price + 1.5 * entry_atr
+                if high[i] >= profit_target:
+                    desired_signal = SIZE / 2  # Half position
+            elif position_side < 0:
+                profit_target = entry_price - 1.5 * entry_atr
+                if low[i] <= profit_target:
+                    desired_signal = -SIZE / 2  # Half position
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
