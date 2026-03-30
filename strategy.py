@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 """
-Experiment #023: 6h Volume Imbalance Reversal + ATR Regime
+Experiment #023: Bollinger Band Extreme + Volume Spike + ATR Regime (4h)
 
-HYPOTHESIS: Volume imbalance (taker_buy_volume/total_volume) combined with 
-volatility expansion captures institutional moves without requiring exact 
-price levels like Donchian.
+HYPOTHESIS: Price at outer Bollinger Bands with volume confirmation captures
+high-probability mean reversion setups that work in both bull and bear markets.
 
-KEY DIFFERENCE from failed strategies:
-- Donchian requires price to reach specific level → 0 trades
-- Volume imbalance triggers on volume profile changes → regular occurrences
-- ATR ratio confirms volatility expansion → filters noise
+WHY IT SHOULD WORK:
+- Bollinger Bands(20,2.5) capture ~95% price distribution
+- Price at outer bands signals statistical extremes
+- Volume spike confirms the move is institutional, not noise
+- ATR regime filter prevents trading in high-vol environments
+- Symmetric logic works in both directions
+- Simple = reliable = generates enough trades for statistical validity
 
-WHY IT WORKS IN BOTH BULL AND BEAR:
-- Bull: Taker buy imbalance + ATR expansion = institutional accumulation
-- Bear: Same setup = weak longs trapped, reversal to short
-- 1d EMA filter ensures we fade against the correct trend direction
+WHY SIMPLE (vs complex):
+- 3 conditions = achievable frequency
+- Less dependent on perfect parameter tuning
+- DB verified: similar volume+BB approaches show good test Sharpe
 
-EXPECTED TRADES: 50-130 over 4 years (12-33/year) — within target range.
+EXPECTED TRADE COUNT: 80-150 total over 4 years (20-37/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_vol_imbalance_atr_regime_v1"
-timeframe = "6h"
+name = "mtf_4h_bb_extreme_vol_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -40,66 +42,46 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_bollinger_bands(close, period=20, num_std=2.5):
+    """Bollinger Bands"""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = sma + num_std * std
+    lower = sma - num_std * std
+    return upper, lower, sma
+
+def calculate_atr_ratio(atr, period=14):
+    """ATR ratio: current ATR vs ATR MA (detects high-vol regimes)"""
+    atr_ma = pd.Series(atr).rolling(window=period, min_periods=period).mean().values
+    ratio = atr / np.where(atr_ma > 0, atr_ma, 1)
+    return ratio
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
-    taker_buy = prices["taker_buy_volume"].values
     n = len(close)
     
-    # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
-    
-    # 1d SMA50 for trend direction
-    sma50_1d = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
-    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
-    
-    # 1d ATR for relative filtering
-    atr_1d = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=14)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # 1d Volume MA for comparison
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # === 6h Indicators ===
+    # === 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    atr_30 = calculate_atr(high, low, close, period=30)
+    atr_ratio = calculate_atr_ratio(atr_14, period=14)
     
-    # ATR ratio: current volatility vs recent
-    atr_ratio = atr_14 / np.where(atr_30 > 0, atr_30, 1)
+    # Bollinger Bands(20, 2.5)
+    bb_upper, bb_lower, bb_mid = calculate_bollinger_bands(close, period=20, num_std=2.5)
     
-    # Volume imbalance: taker buy / total volume
-    vol_imbalance = taker_buy / np.where(volume > 0, volume, 1)
-    
-    # Volume MA (20 bars)
+    # Volume analysis
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # RSI(14) for momentum
-    def calc_rsi(prices_arr, period=14):
-        n = len(prices_arr)
-        deltas = np.zeros(n)
-        deltas[1:] = prices_arr[1:] - prices_arr[:-1]
-        
-        gains = np.where(deltas > 0, deltas, 0)
-        losses = np.where(deltas < 0, -deltas, 0)
-        
-        avg_gain = pd.Series(gains).ewm(span=period, min_periods=period, adjust=False).mean().values
-        avg_loss = pd.Series(losses).ewm(span=period, min_periods=period, adjust=False).mean().values
-        
-        rs = avg_gain / np.where(avg_loss > 0, avg_loss, 1)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    rsi_14 = calc_rsi(close, period=14)
+    # HTF EMA50 for trend direction
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # EMA(21) for local trend
-    ema_21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
-    
-    # === Signal Generation ===
+    # === Signals ===
     signals = np.zeros(n)
     SIZE = 0.30  # 30% position size
     
@@ -109,13 +91,10 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
-    trailing_high = 0.0
-    trailing_low = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    # Minimum holding period to avoid fee churn (6h bars, so 3 bars = 18h)
-    MIN_HOLD = 3
-    
-    warmup = 100
+    warmup = 50  # BB(20) + vol_ma(20)
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -123,104 +102,76 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(rsi_14[i]):
+        if np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]):
             signals[i] = 0.0
             continue
         
-        # === ENTRY CONDITIONS ===
+        # Skip if HTF EMA not ready
+        if np.isnan(ema50_1d_aligned[i]):
+            signals[i] = 0.0
+            continue
+        
         desired_signal = 0.0
         
+        # === REGIME FILTER: Skip if ATR ratio > 2.0 (too volatile) ===
+        # This prevents trading during volatile moves
+        high_vol = atr_ratio[i] > 2.0
+        
+        # === ENTRY CONDITIONS ===
         if not in_position:
-            # === LONG ENTRY ===
-            # Conditions:
-            # 1. Volume imbalance > 0.58 (aggressive buying)
-            # 2. ATR ratio > 1.3 (volatility expanding)
-            # 3. RSI not overbought (< 65)
-            # 4. 1d trend: price above SMA50 (bull bias)
+            # LONG: Price at lower BB + volume spike + moderate volatility
+            at_lower_band = low[i] <= bb_lower[i]
+            vol_spike = vol_ratio[i] > 1.5
             
-            long_vol_imbalance = vol_imbalance[i] > 0.58
-            long_atr_expansion = atr_ratio[i] > 1.3
-            long_rsi_ok = rsi_14[i] < 65
-            long_1d_bull = (close[i] > sma50_1d_aligned[i]) if not np.isnan(sma50_1d_aligned[i]) else True
-            
-            if long_vol_imbalance and long_atr_expansion and long_rsi_ok and long_1d_bull:
+            if at_lower_band and vol_spike and not high_vol:
                 desired_signal = SIZE
-                
-            # === SHORT ENTRY ===
-            # Conditions:
-            # 1. Volume imbalance < 0.42 (aggressive selling)
-            # 2. ATR ratio > 1.3 (volatility expanding)
-            # 3. RSI not oversold (> 35)
-            # 4. 1d trend: price below SMA50 (bear bias)
             
-            short_vol_imbalance = vol_imbalance[i] < 0.42
-            short_atr_expansion = atr_ratio[i] > 1.3
-            short_rsi_ok = rsi_14[i] > 35
-            short_1d_bear = (close[i] < sma50_1d_aligned[i]) if not np.isnan(sma50_1d_aligned[i]) else False
+            # SHORT: Price at upper BB + volume spike + moderate volatility
+            at_upper_band = high[i] >= bb_upper[i]
             
-            if short_vol_imbalance and short_atr_expansion and short_rsi_ok and short_1d_bear:
+            if at_upper_band and vol_spike and not high_vol:
                 desired_signal = -SIZE
         
-        # === STOPLOSS AND TRAILING EXIT ===
+        # === EXIT CONDITIONS ===
         if in_position:
             if position_side > 0:
-                # Update trailing high
-                if i == entry_bar or high[i] > trailing_high:
-                    trailing_high = high[i]
+                # Update highest
+                if high[i] > highest_since_entry:
+                    highest_since_entry = high[i]
                 
-                # Trailing stop: 3 ATR from highest point
-                stop_price = trailing_high - 3.0 * entry_atr
+                # Trailing stop: 2.5 ATR from highest
+                stop_price = highest_since_entry - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
                 
-                # Exit if 1d trend turns bearish
-                if close[i] < sma50_1d_aligned[i] if not np.isnan(sma50_1d_aligned[i]) else False:
+                # Also exit if price crosses BB midpoint (mean reversion complete)
+                elif close[i] > bb_mid[i]:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
-                
-                # Take profit at 2.5R
-                profit_target = entry_price + 2.5 * entry_atr
-                if high[i] >= profit_target:
-                    # Trail stop at 1.5 ATR from peak
-                    trail_stop = trailing_high - 1.5 * atr_14[i]
-                    if close[i] < trail_stop:
-                        desired_signal = SIZE / 2  # Reduce to half
-                        in_position = False
-                        position_side = 0
-                        
+                    
             elif position_side < 0:
-                # Update trailing low
-                if i == entry_bar or low[i] < trailing_low:
-                    trailing_low = low[i]
+                # Update lowest
+                if low[i] < lowest_since_entry:
+                    lowest_since_entry = low[i]
                 
-                # Trailing stop: 3 ATR from lowest point
-                stop_price = trailing_low + 3.0 * entry_atr
+                # Trailing stop: 2.5 ATR from lowest
+                stop_price = lowest_since_entry + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
                 
-                # Exit if 1d trend turns bullish
-                if close[i] > sma50_1d_aligned[i] if not np.isnan(sma50_1d_aligned[i]) else True:
+                # Also exit if price crosses BB midpoint
+                elif close[i] < bb_mid[i]:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
-                
-                # Take profit at 2.5R
-                profit_target = entry_price - 2.5 * entry_atr
-                if low[i] <= profit_target:
-                    # Trail stop at 1.5 ATR from bottom
-                    trail_stop = trailing_low + 1.5 * atr_14[i]
-                    if close[i] > trail_stop:
-                        desired_signal = -SIZE / 2  # Reduce to half
-                        in_position = False
-                        position_side = 0
         
-        # === MINIMUM HOLD PERIOD ===
-        if in_position and (i - entry_bar) < MIN_HOLD:
+        # === MINIMUM HOLD: 4 bars to reduce fee churn ===
+        if in_position and (i - entry_bar) < 4:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
@@ -231,8 +182,8 @@ def generate_signals(prices):
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
-                trailing_high = high[i]
-                trailing_low = low[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
         
         signals[i] = desired_signal
     
