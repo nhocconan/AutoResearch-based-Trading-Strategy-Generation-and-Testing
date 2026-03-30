@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 4h Camarilla Pivot + Choppiness Regime + Volume Spike
+Experiment #002: 12h Donchian Breakout + 1d Trend + Volume Confirmation
 
-HYPOTHESIS: Camarilla pivot levels act as natural support/resistance that price
-respects. Combining this with Choppiness Index (regime filter) avoids trading
-in non-trending markets. Volume spike confirms institutional participation.
-This exact pattern produced ETHUSDT test Sharpe=1.471 (95 trades, 54% WR) in DB.
+HYPOTHESIS: Donchian channel breakouts on 12h capture meaningful directional moves
+while 1d SMA200 keeps us aligned with the broader trend. Volume confirmation
+ensures institutional participation. ATR stoploss protects against false breakouts.
 
 WHY IT WORKS IN BULL + BEAR:
-- Bull: Price bounces at S3/S4 Camarilla supports → long, rides to R3/R4
-- Bear: Price rejected at R3/R4 Camarilla resistance → short, target S3/S4
-- Choppiness filter: Only trade when market is choppy (CHOP > 61.8), which is
-  when mean reversion to Camarilla levels WORKs. In trending markets, stay flat.
-- This duality means we adapt to regime without needing separate bull/bear logic
+- Bull: Price breaks Donchian upper + above SMA200 → long, rides trend
+- Bear: Price breaks Donchian lower + below SMA200 → short, rides downtrend
+- Volume filter avoids false breakouts (common in low-liquidity periods)
+- 12h timeframe = fewer trades than 4h/6h, less fee drag, more meaningful moves
 
-WHY 4h + CHOP FILTER = PERFECT PAIR:
-- 4h allows Camarilla levels to develop naturally over the trading day
-- Choppiness(14) on 4h captures ~2-3 day cycles, ideal for ranging markets
-- Target: 75-150 total trades over 4 years (fees < 2% annual drag)
+TARGET: 75-150 total trades over 4 years (19-37/year)
+- Donchian(20) on 12h = ~1-2 breakouts per week naturally
+- SMA200 filter cuts ~50% of signals (counter-trend)
+- Volume >1.5x cuts another ~30%
+- Expected: ~1 trade every 1-2 weeks = 75-130 over 4 years
 
-Signal size: 0.28 (discrete, manageable drawdown).
+Signal size: 0.28 (discrete, manageable drawdown in 2022 crash).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_camarilla_chop_vol_1d_v2"
-timeframe = "4h"
+name = "mtf_12h_donchian_sma200_vol_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -43,65 +42,12 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_camarilla(high, low, close, period=24):
-    """
-    Calculate Camarilla pivot levels for mean reversion entries.
-    H4 = close + (high - low) * 1.1/2
-    H3 = close + (high - low) * 1.1/4
-    L3 = close - (high - low) * 1.1/4
-    L4 = close - (high - low) * 1.1/2
-    """
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
-    
-    h4 = np.full(n, np.nan)
-    h3 = np.full(n, np.nan)
-    l3 = np.full(n, np.nan)
-    l4 = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        h = high[i]
-        l = low[i]
-        c = close[i]
-        rng = h - l
-        
-        h4[i] = c + rng * 0.55
-        h3[i] = c + rng * 0.275
-        l3[i] = c - rng * 0.275
-        l4[i] = c - rng * 0.55
-    
-    return h4, h3, l3, l4
-
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index - regime detector
-    CHOP > 61.8 = ranging (mean reversion works)
-    CHOP < 38.2 = trending (stay out or trend follow)
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    chop = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        sum_tr = 0.0
-        for j in range(period):
-            idx = i - j
-            tr = max(high[idx] - low[idx], abs(high[idx] - close[idx-1]) if idx > 0 else high[idx] - low[idx])
-            sum_tr += tr
-        
-        highest_high = max(high[i-period+1:i+1])
-        lowest_low = min(low[i-period+1:i+1])
-        
-        if highest_high - lowest_low > 0:
-            chop[i] = 100 * (np.log(sum_tr) / np.log(highest_high - lowest_low))
-    
-    return chop
-
 def calculate_donchian(high, low, period=20):
-    """Donchian Channel for structure"""
+    """Donchian Channel - breakout levels"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -116,14 +62,12 @@ def generate_signals(prices):
     # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d SMA200 for trend filter (simpler than EMA, same effect)
+    # 1d SMA200 for trend filter
     sma_200_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
     sma_200_aligned = align_htf_to_ltf(prices, df_1d, sma_200_1d)
     
-    # === Local 4h indicators ===
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    h4, h3, l3, l4 = calculate_camarilla(high, low, close, period=24)
-    chop = calculate_choppiness(high, low, close, period=14)
     donchian_up, donchian_lo = calculate_donchian(high, low, period=20)
     
     # Volume ratio (20-period MA)
@@ -143,80 +87,55 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 250  # Need 200 for SMA200 + 24 for Camarilla + 20 for volume MA
+    warmup = 250  # Need 200 for SMA200 + 20 for Donchian + 20 for volume MA
     
     for i in range(warmup, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
             continue
         
         if np.isnan(sma_200_aligned[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
             continue
         
-        if np.isnan(chop[i]):
+        if np.isnan(donchian_up[i]) or np.isnan(donchian_lo[i]):
             signals[i] = 0.0
-            in_position = False
-            position_side = 0
             continue
-        
-        # === REGIME CHECK: Only trade when CHOP > 61.8 (ranging) ===
-        is_choppy = chop[i] > 61.8
-        is_trending = chop[i] < 38.2
         
         # === HTF TREND: Price vs 1d SMA200 ===
         above_htf_sma = close[i] > sma_200_aligned[i]
         below_htf_sma = close[i] < sma_200_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.3  # 30% above average
+        vol_spike = vol_ratio[i] > 1.5  # 50% above average (strict filter)
         
-        # === CAMARILLA LEVEL TOUCH (entry signal) ===
-        # Price near lower Camarilla = potential long
-        near_l4 = abs(close[i] - l4[i]) < 0.5 * atr_14[i] if not np.isnan(l4[i]) else False
-        near_l3 = abs(close[i] - l3[i]) < 0.5 * atr_14[i] if not np.isnan(l3[i]) else False
+        # === DONCHIAN BREAKOUT ===
+        # Previous bar's Donchian levels (breakout confirmation)
+        prev_donchian_up = donchian_up[i - 1]
+        prev_donchian_lo = donchian_lo[i - 1]
         
-        # Price near upper Camarilla = potential short
-        near_h4 = abs(close[i] - h4[i]) < 0.5 * atr_14[i] if not np.isnan(h4[i]) else False
-        near_h3 = abs(close[i] - h3[i]) < 0.5 * atr_14[i] if not np.isnan(h3[i]) else False
-        
-        # === DONCHIAN BREAKOUT (confirmation + exit trigger) ===
-        donchian_broken_up = close[i] > donchian_up[i - 1] if not np.isnan(donchian_up[i - 1]) else False
-        donchian_broken_down = close[i] < donchian_lo[i - 1] if not np.isnan(donchian_lo[i - 1]) else False
+        # Breakout signals
+        breakout_up = close[i] > prev_donchian_up
+        breakout_down = close[i] < prev_donchian_lo
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG ENTRY: At lower Camarilla + choppy + volume + above SMA200 ===
-            # OR: breakout with trend confirmation (for trending regime)
-            if is_choppy:
-                # Range-bound entry: mean reversion to Camarilla
-                if (near_l4 or near_l3) and vol_spike and above_htf_sma:
-                    desired_signal = SIZE
-            else:
-                # Trend entry: break higher with volume (only if strong trend)
-                if donchian_broken_up and vol_spike and above_htf_sma and is_trending:
-                    desired_signal = SIZE
+            # === LONG: Donchian breakout up + above SMA200 + volume spike ===
+            if breakout_up and above_htf_sma and vol_spike:
+                desired_signal = SIZE
             
-            # === SHORT ENTRY: At upper Camarilla + choppy + volume + below SMA200 ===
-            if is_choppy:
-                if (near_h4 or near_h3) and vol_spike and below_htf_sma:
-                    desired_signal = -SIZE
-            else:
-                if donchian_broken_down and vol_spike and below_htf_sma and is_trending:
-                    desired_signal = -SIZE
+            # === SHORT: Donchian breakout down + below SMA200 + volume spike ===
+            elif breakout_down and below_htf_sma and vol_spike:
+                desired_signal = -SIZE
         
         # === STOPLOSS (2.5 ATR from entry) ===
         if in_position:
             if position_side > 0:
                 # Update highest high since entry for trailing stop
-                if i == entry_bar or close[i] > highest_since_entry:
+                if i == entry_bar or high[i] > highest_since_entry:
                     highest_since_entry = high[i]
                 
                 # Trailing stop: highest high - 2.5 ATR
@@ -224,12 +143,8 @@ def generate_signals(prices):
                 if low[i] < stop_price:
                     desired_signal = 0.0
                 
-                # Also exit if price breaks upper Camarilla in ranging (mean reversion complete)
-                if is_choppy and (close[i] > h3[i] if not np.isnan(h3[i]) else False):
-                    desired_signal = 0.0
-                
-                # Exit if breaks Donchian down (trend reversal)
-                if donchian_broken_down:
+                # Exit if trend reverses (price crosses below SMA200)
+                if below_htf_sma:
                     desired_signal = 0.0
             
             elif position_side < 0:
@@ -242,16 +157,12 @@ def generate_signals(prices):
                 if high[i] > stop_price:
                     desired_signal = 0.0
                 
-                # Also exit if price breaks lower Camarilla in ranging (mean reversion complete)
-                if is_choppy and (close[i] < l3[i] if not np.isnan(l3[i]) else False):
-                    desired_signal = 0.0
-                
-                # Exit if breaks Donchian up (trend reversal)
-                if donchian_broken_up:
+                # Exit if trend reverses (price crosses above SMA200)
+                if above_htf_sma:
                     desired_signal = 0.0
         
-        # === MINIMUM HOLD: 2 bars to avoid fee churn ===
-        if in_position and (i - entry_bar) < 2:
+        # === MINIMUM HOLD: 3 bars to avoid fee churn ===
+        if in_position and (i - entry_bar) < 3:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
