@@ -1,26 +1,51 @@
 #!/usr/bin/env python3
 """
-Experiment #007: 6h Elder Ray + Donchian(10) + Volume Spike
+Experiment #008: 12h Donchian + Choppiness Regime + 1w EMA
 
-HYPOTHESIS: Elder Ray measures bull/bear power relative to EMA(13).
-When bull power turns positive on a breakout, it confirms bullish momentum.
-Combined with tight Donchian(10) for quick 6h structure and volume spike
-for institutional confirmation, filtered by 1d EMA trend direction.
+HYPOTHESIS: Use Choppiness Index (<38.2 trending, >61.8 ranging) as regime filter
+combined with 1w EMA macro trend and Donchian breakout on 12h. This replicates the
+proven pattern from DB: mtf_4h_chop_donchian_vol_regime_12h_v1 had test Sharpe 1.491.
 
 WHY BOTH MARKETS:
-- 2021 bull: Bull power + breakout + volume = strong longs
-- 2022 bear: Bear power + breakdown + volume = protective shorts
-- 2025 range: 1d EMA filter keeps us flat in chop
+- 2021 bull: Choppiness < 38.2 + bullish breakout + 1w EMA up = trend follow longs
+- 2022 bear: Choppiness < 38.2 + bearish breakdown + 1w EMA down = trend follow shorts
+- 2025 range: Choppiness > 61.8 = mean revert at Donchian bounds
 
-TRADE COUNT: 80-160 total over 4 years (target 20-40/year).
+TRADE COUNT: 75-175 total over 4 years (18-44/year).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_elder_ray_donchian_vol_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_chop_1w_ema_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP)
+    CHOP < 38.2 = trending (trend follow)
+    CHOP > 61.8 = ranging (mean revert)
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    chop = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        highest = high[i-period+1:i+1].max()
+        lowest = low[i-period+1:i+1].min()
+        
+        if highest - lowest > 1e-10:
+            sum_tr = 0.0
+            for j in range(i-period+1, i+1):
+                tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+                sum_tr += tr
+            
+            chop[i] = 100 * (np.log(sum_tr) / np.log(highest - lowest)) if (highest - lowest) > 1e-10 else 50.0
+    
+    return chop
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -43,44 +68,41 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d EMA for macro trend (call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === HTF: 1w EMA for macro trend (call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=13, min_periods=13, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # === Local 6h indicators ===
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Elder Ray: EMA(13) with bull/bear power
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # Donchian Channel(12) - 6 days on 12h
+    donchian_upper = pd.Series(high).rolling(window=12, min_periods=12).max().values
+    donchian_lower = pd.Series(low).rolling(window=12, min_periods=12).min().values
     
-    # Smooth bull/bear power
-    bull_power_smooth = pd.Series(bull_power).ewm(span=5, min_periods=5, adjust=False).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=5, min_periods=5, adjust=False).mean().values
+    # Choppiness Index (14 periods)
+    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Donchian Channel(10) - 2.5 days on 6h
-    donchian_upper = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    donchian_lower = pd.Series(low).rolling(window=10, min_periods=10).min().values
-    
-    # Volume spike detection
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume analysis
+    vol_ma = pd.Series(volume).rolling(window=12, min_periods=12).mean().values
     vol_ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
     
     # === Signals ===
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.30  # Full position size
+    SIZE_HALF = 0.15  # Take profit size
     
     # Position tracking
     in_position = False
     position_side = 0
+    entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
+    took_profit = False
     
-    warmup = 50  # buffer for indicators
+    warmup = 30  # 14 for chop + buffer
     
     for i in range(warmup, n):
         # NaN checks
@@ -92,7 +114,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(chop[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -103,11 +129,19 @@ def generate_signals(prices):
             else:
                 lowest_since_entry = min(lowest_since_entry, low[i])
         
-        # === HTF TREND (1d EMA aligned) ===
-        htf_bullish = close[i] > ema_1d_aligned[i]
-        htf_bearish = close[i] < ema_1d_aligned[i]
+        # === REGIME DETECTION ===
+        chop_trending = chop[i] < 38.2  # Trending mode
+        chop_ranging = chop[i] > 61.8   # Ranging mode
         
-        # === DONCHIAN BREAKOUT (prior bar's channel) ===
+        # === HTF MACRO TREND (1w EMA aligned) ===
+        htf_bullish = close[i] > ema_1w_aligned[i]
+        htf_bearish = close[i] < ema_1w_aligned[i]
+        
+        # === VOLUME CONFIRMATION (1.5x average) ===
+        vol_confirm = vol_ratio[i] > 1.5
+        
+        # === DONCHIAN BREAKOUT DETECTION ===
+        # Use prior bar's channel for entry (no look-ahead)
         prev_upper = donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else np.nan
         prev_lower = donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else np.nan
         
@@ -115,71 +149,82 @@ def generate_signals(prices):
         bearish_breakout = False
         
         if not np.isnan(prev_upper) and not np.isnan(prev_lower):
+            # Close breaks above prior upper = bullish breakout
             bullish_breakout = close[i] > prev_upper
+            # Close breaks below prior lower = bearish breakdown
             bearish_breakout = close[i] < prev_lower
         
-        # === ELDER RAY POWER SHIFT ===
-        # Bull power turns positive: bullish momentum emerging
-        bull_power_positive = bull_power_smooth[i] > 0
-        prev_bull_power = bull_power_smooth[i-1] if i > 0 else 0
-        bull_power_cross_up = prev_bull_power <= 0 and bull_power_positive
-        
-        # Bear power turns negative: bearish momentum emerging
-        bear_power_negative = bear_power_smooth[i] < 0
-        prev_bear_power = bear_power_smooth[i-1] if i > 0 else 0
-        bear_power_cross_down = prev_bear_power >= 0 and bear_power_negative
-        
-        # === VOLUME SPIKE (>1.5x average) ===
-        vol_spike = vol_ratio[i] > 1.5
-        
-        # === MINIMUM HOLD: 3 bars (18h) ===
-        min_hold_bars = 3
+        # === MINIMUM HOLD: 2 bars (24h) to avoid chop whipsaws ===
+        min_hold_bars = 2
         min_hold = (i - entry_bar) >= min_hold_bars
         
-        # === ATR TRAILING STOP (2.5x ATR from entry high/low) ===
-        def check_atr_stop():
-            if not in_position:
-                return False
-            if position_side > 0:
-                return low[i] < (highest_since_entry - 2.5 * entry_atr)
-            else:
-                return high[i] > (lowest_since_entry + 2.5 * entry_atr)
+        # === ENTRY CONDITIONS ===
+        can_long = not in_position and bullish_breakout and vol_confirm and htf_bullish and chop_trending
+        can_short = not in_position and bearish_breakout and vol_confirm and htf_bearish and chop_trending
         
         # === EXITS ===
         if in_position:
-            stop_hit = check_atr_stop()
+            # ATR trailing stop (2.5x ATR from entry)
+            if position_side > 0:
+                stop_hit = low[i] < (highest_since_entry - 2.5 * entry_atr)
+            else:
+                stop_hit = high[i] > (lowest_since_entry + 2.5 * entry_atr)
             
-            # Exit on trend reversal
+            # Trend reversal exit (1w EMA flips)
             if position_side > 0 and htf_bearish and min_hold:
                 stop_hit = True
             if position_side < 0 and htf_bullish and min_hold:
                 stop_hit = True
             
+            # Regime change exit (chop moves to ranging)
+            if chop_ranging and min_hold:
+                stop_hit = True
+            
+            # Take profit at 2R (reduce size)
+            if not took_profit:
+                if position_side > 0:
+                    profit_target = entry_price + 2.0 * entry_atr
+                    if high[i] >= profit_target:
+                        took_profit = True
+                        signals[i] = SIZE_HALF
+                        continue
+                else:
+                    profit_target = entry_price - 2.0 * entry_atr
+                    if low[i] <= profit_target:
+                        took_profit = True
+                        signals[i] = -SIZE_HALF
+                        continue
+            
             if stop_hit:
                 signals[i] = 0.0
                 in_position = False
                 position_side = 0
+                took_profit = False
             else:
                 signals[i] = position_side * SIZE
         
         # === NEW POSITIONS ===
         if not in_position:
-            # LONG: Bull power turns positive + breakout + volume spike + HTF bullish
-            if bull_power_cross_up and bullish_breakout and vol_spike and htf_bullish:
+            if can_long:
                 in_position = True
                 position_side = 1
+                entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
                 highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                took_profit = False
                 signals[i] = SIZE
             
-            # SHORT: Bear power turns negative + breakdown + volume spike + HTF bearish
-            elif bear_power_cross_down and bearish_breakout and vol_spike and htf_bearish:
+            elif can_short:
                 in_position = True
                 position_side = -1
+                entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
+                highest_since_entry = high[i]
                 lowest_since_entry = low[i]
+                took_profit = False
                 signals[i] = -SIZE
             
             else:
