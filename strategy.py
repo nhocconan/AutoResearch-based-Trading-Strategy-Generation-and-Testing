@@ -1,37 +1,54 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 4h TRIX Momentum + HTF Trend + Volume + Choppiness Filter
+Experiment #022: 1d TRIX Momentum + Weekly Trend + Volume Spike
 
-HYPOTHESIS: Momentum reversal entries with regime filtering
-- TRIX crossing zero = momentum shift signal (proven edge from DB)
-- 12h EMA for trend direction (filters counter-trend trades)
-- CHOP > 61.8 = SKIP (avoid ranging markets - key killer of returns)
-- Volume spike = institutional confirmation
-- 2.5 ATR stoploss for risk management
+HYPOTHESIS: TRIX is a momentum oscillator that generates fewer but higher-quality
+signals than EMA crosses. Combined with weekly trend filter, this creates:
+1. Weekly EMA(21) as trend direction filter - only trade with weekly trend
+2. Daily TRIX(14) crossover for momentum entry
+3. Volume spike confirmation (2.0x 20d MA) - avoid fake breakouts
+4. Choppiness < 55 as regime filter - only enter trending markets
 
 WHY IT WORKS IN BULL + BEAR + RANGE:
-- Bull: TRIX crosses up + HTF up = momentum longs (catches rallies)
-- Bear: TRIX crosses down + HTF down = momentum shorts (catches dumps)
-- Range: CHOP > 61.8 = SKIP (avoids whipsaws in chop)
-- ATR stoploss adapts to volatility (handles 2022 crash)
+- Bull: Weekly up + TRIX bullish cross + volume = strong entry
+- Bear: Weekly down + TRIX bearish cross + volume = strong short
+- Range: CHOP > 55 = skip entirely (avoids whipsaws)
+- ATR stoploss scales to volatility, handles 2022 crash
 
-KEY IMPROVEMENT OVER #020:
-- #020: TRIX + Donchian + CHOP combined = 160 trades, Sharpe 0.362
-- #021: TRIX + HTF trend + volume confirm (fewer, higher quality)
-- TARGET: 100-180 total trades over 4 years (25-45/year)
-
-Entry logic:
-- Long: TRIX crosses above 0 + HTF trend up + volume spike
-- Short: TRIX crosses below 0 + HTF trend down + volume spike
-- Exit: stoploss at 2.5 ATR, or opposite TRIX cross, or CHOP > 61.8
+TARGET: 60-120 total trades over 4 years (15-30/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_trix_htf_trend_vol_chop_v1"
-timeframe = "4h"
+name = "mtf_1d_trix_weekly_vol_chop_1w_v1"
+timeframe = "1d"
 leverage = 1.0
+
+def calculate_trix(close, period=14):
+    """TRIX: Triple smoothed EMA rate of change"""
+    n = len(close)
+    if n < period * 3:
+        return np.full(n, np.nan)
+    
+    # Triple EMA
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    ema2 = pd.Series(ema1).ewm(span=period, min_periods=period, adjust=False).mean().values
+    ema3 = pd.Series(ema2).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Rate of change of triple EMA
+    trix = np.full(n, np.nan)
+    for i in range(period * 3, n):
+        if ema3[i - period] != 0 and not np.isnan(ema3[i - period]):
+            trix[i] = 100 * (ema3[i] - ema3[i - period]) / ema3[i - period]
+    
+    return trix
+
+def calculate_trix_signal(trix, period=9):
+    """TRIX signal line (EMA of TRIX)"""
+    n = len(trix)
+    signal = pd.Series(trix).ewm(span=period, min_periods=period, adjust=False).mean().values
+    return signal
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -47,36 +64,8 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_trix(close, period=9):
-    """
-    TRIX - Triple EMA Oscillator
-    - TRIX > 0 = bullish momentum
-    - TRIX < 0 = bearish momentum
-    - TRIX crossing zero line = momentum shift (our entry signal)
-    """
-    n = len(close)
-    if n < period * 3 + 1:
-        return np.full(n, np.nan)
-    
-    # Triple EMA
-    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean()
-    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
-    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
-    
-    # TRIX = rate of change of triple EMA
-    trix = np.full(n, np.nan)
-    for i in range(1, n):
-        if not np.isnan(ema3.iloc[i]) and not np.isnan(ema3.iloc[i-1]) and ema3.iloc[i-1] != 0:
-            trix[i] = ((ema3.iloc[i] / ema3.iloc[i-1]) - 1) * 100
-    
-    return trix
-
 def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP)
-    CHOP > 61.8 = ranging - DON'T enter (avoid whipsaws)
-    CHOP < 50 = trending - GOOD environment
-    """
+    """Choppiness Index: <45 trending, >61.8 ranging"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -106,20 +95,25 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_12h = get_htf_data(prices, '12h')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 12h EMA(21) for trend direction
-    ema_21_12h = pd.Series(df_12h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
+    # Weekly EMA(21) for trend direction
+    ema_21_1w = pd.Series(df_1w['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
     
-    # === Local 4h indicators ===
+    # === Daily indicators ===
+    trix = calculate_trix(close, period=14)
+    trix_signal = calculate_trix_signal(trix, period=9)
     atr_14 = calculate_atr(high, low, close, period=14)
-    trix = calculate_trix(close, period=9)
     chop = calculate_choppiness(high, low, close, period=14)
     
     # Volume ratio (20-period MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    
+    # Donchian channel (20-period) for structure
+    channel_up = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    channel_lo = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Signals
     signals = np.zeros(n)
@@ -131,16 +125,17 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
+    entry_trix = 0.0
     
-    warmup = 200  # TRIX needs ~30 bars + 20 vol MA + buffer
+    warmup = 100  # TRIX needs ~42 bars, add buffer
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(trix[i]) or np.isnan(trix_signal[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(trix[i]) or np.isnan(trix[i-1]):
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
@@ -152,44 +147,72 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        if np.isnan(channel_up[i]) or np.isnan(channel_lo[i]):
+            signals[i] = 0.0
+            continue
+        
+        # === WEEKLY TREND FILTER ===
+        weekly_trend_up = close[i] > ema_aligned[i]
+        weekly_trend_down = close[i] < ema_aligned[i]
+        
         # === CHOPPINESS REGIME FILTER ===
+        is_trending = chop[i] < 55
         is_choppy = chop[i] > 61.8
         
-        # === TRIX CROSSOVER DETECTION ===
-        # TRIX crossing above zero = bullish momentum shift
-        # TRIX crossing below zero = bearish momentum shift
-        trix_bullish_cross = trix[i] > 0 and trix[i-1] <= 0
-        trix_bearish_cross = trix[i] < 0 and trix[i-1] >= 0
+        # === TRIX CROSSOVER SIGNALS ===
+        # Bullish: TRIX crosses above signal
+        trix_bullish_cross = trix[i] > trix_signal[i] and trix[i-1] <= trix_signal[i-1]
+        # Bearish: TRIX crosses below signal
+        trix_bearish_cross = trix[i] < trix_signal[i] and trix[i-1] >= trix_signal[i-1]
         
-        # === HTF TREND: 12h EMA(21) direction ===
-        htf_trend_up = close[i] > ema_aligned[i]
-        htf_trend_down = close[i] < ema_aligned[i]
+        # Strong momentum: TRIX far from signal line (confirming trend strength)
+        trix_bullish_strong = trix[i] > 0.5 and trix_signal[i] > 0
+        trix_bearish_strong = trix[i] < -0.5 and trix_signal[i] < 0
         
-        # === VOLUME CONFIRMATION (1.5x threshold) ===
-        vol_spike = vol_ratio[i] > 1.5
+        # === VOLUME CONFIRMATION (2.0x) ===
+        vol_spike = vol_ratio[i] > 2.0
+        
+        # === PRICE STRUCTURE (near channel boundary) ===
+        range_size = channel_up[i] - channel_lo[i]
+        price_near_high = close[i] > channel_up[i] - range_size * 0.2  # within 20% of high
+        price_near_low = close[i] < channel_lo[i] + range_size * 0.2    # within 20% of low
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: TRIX bullish cross + HTF trend up + volume spike ===
-            if trix_bullish_cross and htf_trend_up and vol_spike:
+            # === LONG: Weekly up + TRIX bullish cross + volume + trending + price near high ===
+            long_conditions = (
+                weekly_trend_up and
+                (trix_bullish_cross or trix_bullish_strong) and
+                vol_spike and
+                is_trending and
+                price_near_high
+            )
+            if long_conditions:
                 desired_signal = SIZE
             
-            # === SHORT: TRIX bearish cross + HTF trend down + volume spike ===
-            elif trix_bearish_cross and htf_trend_down and vol_spike:
+            # === SHORT: Weekly down + TRIX bearish cross + volume + trending + price near low ===
+            short_conditions = (
+                weekly_trend_down and
+                (trix_bearish_cross or trix_bearish_strong) and
+                vol_spike and
+                is_trending and
+                price_near_low
+            )
+            if short_conditions:
                 desired_signal = -SIZE
         
         # === STOPLOSS (2.5 ATR) ===
         if in_position:
             if position_side > 0:
-                # Long: exit if price falls 2.5 ATR from entry
+                # Long: stop if price falls 2.5 ATR from entry
                 stop_price = entry_price - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
                 
-                # Exit if HTF trend flips to down
-                if htf_trend_down:
+                # Exit if weekly trend flips
+                if weekly_trend_down:
                     desired_signal = 0.0
                 
                 # Exit if market becomes choppy
@@ -197,21 +220,21 @@ def generate_signals(prices):
                     desired_signal = 0.0
             
             elif position_side < 0:
-                # Short: exit if price rises 2.5 ATR from entry
+                # Short: stop if price rises 2.5 ATR from entry
                 stop_price = entry_price + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
                 
-                # Exit if HTF trend flips to up
-                if htf_trend_up:
+                # Exit if weekly trend flips
+                if weekly_trend_up:
                     desired_signal = 0.0
                 
                 # Exit if market becomes choppy
                 if is_choppy:
                     desired_signal = 0.0
         
-        # === MINIMUM HOLD: 4 bars to avoid fee churn ===
-        if in_position and (i - entry_bar) < 4:
+        # === MINIMUM HOLD: 3 bars to avoid fee churn ===
+        if in_position and (i - entry_bar) < 3:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
@@ -223,6 +246,7 @@ def generate_signals(prices):
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
+                entry_trix = trix[i]
         else:
             if in_position:
                 in_position = False
