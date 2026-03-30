@@ -1,72 +1,56 @@
 #!/usr/bin/env python3
 """
-Experiment #023: 4h EMA Crossover + Daily Trend Filter + Volume + CHOP
+Experiment #023: 4h Donchian + 1d EMA Trend + 12h ATR Regime Filter
 
-HYPOTHESIS: Multi-timeframe EMA crossover with HTF trend alignment will reduce
-whipsaw trades compared to simple price channel breakouts.
+HYPOTHESIS: Combining 1d EMA for trend direction AND 12h ATR ratio for regime
+filter should outperform single-filter approaches:
+1. 1d EMA21: overall direction (bull/bear)
+2. 12h ATR ratio: confirms trending vs ranging (more responsive than CHOP)
+3. 4h Donchian(20): structural breakout entry
+4. Volume spike: institutional confirmation
 
 WHY IT SHOULD WORK IN BOTH MARKETS:
-1. 4h EMA(21/63) crossover captures medium-term trend shifts
-2. 21-bar EMA on 4h = ~3.5 day smooth trend, filters noise
-3. Daily trend filter (from 4h data) aligns entries with HTF direction
-4. CHOP < 50 avoids ranging periods where EMAs oscillate
-5. Volume spike confirms institutional participation
+- 2021 bull: 1d EMA up + ATR trending → trend-following long entries
+- 2022 bear: 1d EMA down + ATR trending → trend-following short entries  
+- 2022 crash: 1d EMA down + ATR choppy → no entries (avoids whipsaw)
+- 2023-2024 range: 1d EMA flat + ATR choppy → no entries
 
 ENTRY CONDITIONS (4-way confluence):
-- Daily trend aligned (close > 21-bar EMA for longs, < for shorts)
-- 4h EMA fast(21) crosses above slow(63) for longs, opposite for shorts
-- Volume > 1.5x 20-bar MA (institutional confirmation)
-- CHOP < 50 (not choppy, trending environment)
+1. 1d EMA21 rising (bull) or falling (bear) → direction
+2. 12h ATR ratio > 1.3 (trending, not ranging) → regime confirm
+3. 4h Donchian(20) breakout → precise entry
+4. Volume > 1.5x 20-bar MA → institutional confirm
 
-EXIT: 2.5 ATR stoploss, opposite EMA crossover, min 2 bars
+Trade Count Estimate:
+- 4h bars/4yr ≈ 8760
+- Donchian(20) breakout: ~1 per 40-50 bars = ~175-220 raw
+- 1d EMA direction: ~70% qualify = ~122-154
+- 12h ATR ratio > 1.3: ~50% qualify = ~61-77
+- Volume > 1.5x: ~40% pass = ~24-31 trades/symbol
 
-TRADE COUNT ESTIMATE:
-- 4h bars/4yr ≈ 8760 per symbol
-- EMA(21/63) crossover: ~1 per 2-3 weeks = ~26-39 raw signals/year
-- Daily trend filter: ~50% pass = ~13-20/year
-- Volume + CHOP filter: ~50% pass = ~7-10/year per symbol
-- TARGET: 75-120 total over 4 years (19-30/year)
-- In acceptable range, conservative but high-quality signals
+SAFE RANGE: 24-35 trades over 4 years (on lower end but with higher edge)
 """
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_ema_cross_daily_trend_chop_v1"
+name = "mtf_4h_donchian_1d_ema_12h_atr_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range - vectorized after TR calculation"""
+    """Average True Range"""
     n = len(close)
+    if n < 2:
+        return np.full(n, np.nan)
+    
     tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_chop(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP) - regime filter
-    CHOP > 61.8 = choppy/range (avoid entries)
-    CHOP < 50 = trending (allow entries)
-    """
-    n = len(close)
-    chop = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        period_high = high[i-period+1:i+1].max()
-        period_low = low[i-period+1:i+1].min()
-        
-        if period_high > period_low:
-            sum_tr = 0.0
-            for j in range(i-period+1, i+1):
-                tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
-                sum_tr += tr
-            if period_high != period_low:
-                chop[i] = 100 * np.log10(sum_tr / (period_high - period_low)) / np.log10(period)
-    
-    return chop
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
@@ -75,18 +59,32 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === 4h Indicators ===
+    # === 12h HTF for regime filter ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values.astype(np.float64)
+    high_12h = df_12h['high'].values.astype(np.float64)
+    low_12h = df_12h['low'].values.astype(np.float64)
+    
+    # ATR ratio on 12h (short-term vs long-term for regime)
+    atr_12h_7 = calculate_atr(high_12h, low_12h, close_12h, period=7)
+    atr_12h_30 = calculate_atr(high_12h, low_12h, close_12h, period=30)
+    atr_ratio_12h = atr_12h_7 / np.where(atr_12h_30 > 1e-10, atr_12h_30, 1.0)
+    atr_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio_12h)
+    
+    # === 1d HTF for trend direction ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values.astype(np.float64)
+    ema_1d = pd.Series(close_1d).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop = calculate_chop(high, low, close, period=14)
     
-    # EMA(21) fast and EMA(63) slow for crossover signal
-    ema_fast = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_slow = pd.Series(close).ewm(span=63, min_periods=63, adjust=False).mean().values
+    # Donchian Channel(20)
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Daily trend filter: 21-bar EMA from 4h data (~3.5 day trend)
-    ema_daily_trend = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
-    
-    # Volume average for spike detection
+    # Volume average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
     
@@ -101,7 +99,7 @@ def generate_signals(prices):
     entry_atr = 0.0
     entry_bar = 0
     
-    warmup = 65  # max(63 for EMA63, 20 for vol, 14 for ATR)
+    warmup = 100  # Need enough for Donchian20, ATR14, 1d EMA21, 12h ATR ratio
     
     for i in range(warmup, n):
         # NaN checks
@@ -109,49 +107,52 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(chop[i]):
+        if np.isnan(atr_ratio_12h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # === REGIME FILTER: CHOP < 50 (trending, not choppy) ===
-        chop_ok = chop[i] < 50.0
+        # === 12h REGIME FILTER: ATR ratio > 1.3 (trending) ===
+        # High ratio = volatility expanding = trending
+        atr_regime_trending = atr_ratio_12h_aligned[i] > 1.3
+        
+        # === 1d TREND DIRECTION: EMA21 slope ===
+        ema_curr = ema_1d_aligned[i]
+        ema_prev = ema_1d_aligned[i-1] if i > 0 and not np.isnan(ema_1d_aligned[i-1]) else ema_curr
+        htf_bull = ema_curr > ema_prev
+        htf_bear = ema_curr < ema_prev
         
         # === VOLUME CONFIRMATION ===
-        vol_ok = vol_ratio[i] > 1.5
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === EMA CROSSOVER on 4h ===
-        bullish_cross = ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]
-        bearish_cross = ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]
+        # === DONCHIAN BREAKOUT ===
+        prev_upper = donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else np.nan
+        prev_lower = donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else np.nan
         
-        # === DAILY TREND FILTER (from 4h EMA - ~3.5 day trend) ===
-        daily_bull = close[i] > ema_daily_trend[i]
-        daily_bear = close[i] < ema_daily_trend[i]
+        bullish_breakout = (not np.isnan(prev_upper) and close[i] > prev_upper)
+        bearish_breakout = (not np.isnan(prev_lower) and close[i] < prev_lower)
         
         # === MINIMUM HOLD: 2 bars ===
         min_hold = (i - entry_bar) >= 2
         
         # === EXITS ===
         if in_position:
-            # Stop-loss: 2.5 ATR from entry
             if position_side > 0:
                 stop_hit = low[i] < (entry_price - 2.5 * entry_atr)
             else:
                 stop_hit = high[i] > (entry_price + 2.5 * entry_atr)
             
-            # Trend reversal - opposite EMA crossover
-            reversal_exit = (position_side > 0 and min_hold and bearish_cross) or \
-                           (position_side < 0 and min_hold and bullish_cross)
+            reversal_exit = (position_side > 0 and bearish_breakout) or \
+                           (position_side < 0 and bullish_breakout)
             
             if stop_hit:
                 signals[i] = 0.0
                 in_position = False
                 position_side = 0
-            elif reversal_exit:
-                # Exit and potentially reverse
+            elif min_hold and reversal_exit:
                 signals[i] = 0.0
                 in_position = False
                 position_side = 0
@@ -160,13 +161,13 @@ def generate_signals(prices):
         
         # === NEW POSITIONS ===
         if not in_position:
-            # Skip if choppy market
-            if not chop_ok:
+            # Skip if not trending (range-bound)
+            if not atr_regime_trending:
                 signals[i] = 0.0
                 continue
             
-            # LONG: EMA bullish cross + daily trend aligned + volume spike
-            if bullish_cross and daily_bull and vol_ok:
+            # LONG: HTF bull + breakout + volume
+            if htf_bull and bullish_breakout and vol_spike:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
@@ -174,8 +175,8 @@ def generate_signals(prices):
                 entry_bar = i
                 signals[i] = SIZE
             
-            # SHORT: EMA bearish cross + daily trend aligned + volume spike
-            elif bearish_cross and daily_bear and vol_ok:
+            # SHORT: HTF bear + breakout + volume
+            elif htf_bear and bearish_breakout and vol_spike:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
