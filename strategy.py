@@ -1,47 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 12h Aroon + Bollinger Band Position + 1d SMA200 Trend
+Experiment #021: 4h Camarilla S4/R4 + Volume Spike + Choppiness Regime
 
-HYPOTHESIS: Aroon crossover (period=25) gives clean, reliable trend shifts 
-without the noise of RSI or stochastic. Combined with 1d SMA200 trend alignment 
-and Bollinger Band position for entry timing, this catches major trend changes.
+HYPOTHESIS: Camarilla S4 and R4 are deep support/resistance levels where institutions
+accumulate/distribute. By combining with:
+1. 1d EMA50 for trend direction (bull vs bear)
+2. Volume spike > 2x average (institutional confirmation)
+3. Choppiness Index < 61.8 (trending environment only)
 
-WHY IT WORKS IN BULL AND BEAR: Aroon measures time since highs/lows.
-Bull: Aroon Up stays elevated. Bear: Aroon Down stays elevated.
-Crossover signals regime change - symmetric in both directions.
+This catches major reversals at key levels while avoiding ranging chop.
 
-WHY 12h: Slow enough for meaningful Aroon signals (25-period = 12.5 days).
-Faster than 12h = too many false crossovers. 12h = 2-3 major signals/month.
+WHY IT WORKS IN BOTH BULL AND BEAR MARKETS:
+- Bull: Buy S4 touches when price > 1d EMA50 (accumulation zones)
+- Bear: Short R4 touches when price < 1d EMA50 (distribution zones)
+- Symmetrical approach adapts to any market regime
 
-TARGET: 40-100 total trades over 4 years = 10-25/year.
+TARGET: 75-150 total trades over 4 years. HARD MAX: 200.
 Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_aroon_bb_sma200_1d_v1"
-timeframe = "12h"
+name = "mtf_4h_camarilla_s4r4_vol_chop_1d_v1"
+timeframe = "4h"
 leverage = 1.0
-
-def calculate_aroon(high, low, period=25):
-    """Aroon indicator - returns Aroon Up and Aroon Down"""
-    n = len(high)
-    aroon_up = np.zeros(n, dtype=np.float64)
-    aroon_down = np.zeros(n, dtype=np.float64)
-    
-    for i in range(period, n):
-        # Count bars since highest high in period
-        max_idx = np.argmax(high[i-period:i+1])
-        bars_since_high = period - max_idx
-        aroon_up[i] = (period - bars_since_high) / period * 100
-        
-        # Count bars since lowest low in period
-        min_idx = np.argmin(low[i-period:i+1])
-        bars_since_low = period - min_idx
-        aroon_down[i] = (period - bars_since_low) / period * 100
-    
-    return aroon_up, aroon_down
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -57,6 +40,34 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP)
+    CHOP > 61.8 = ranging (use mean reversion)
+    CHOP < 38.2 = trending (use trend following)
+    Values outside 38.2-61.8 = transition zone
+    
+    Formula: 100 * LOG10(SUM(ATR(1),period) / (HHV(period) - LLV(period))) / LOG10(period)
+    """
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        atr_sum = 0.0
+        for j in range(period):
+            tr = max(high[i - j] - low[i - j], 
+                     abs(high[i - j] - close[i - j - 1]) if i - j - 1 >= 0 else high[i - j] - low[i - j],
+                     abs(low[i - j] - close[i - j - 1]) if i - j - 1 >= 0 else high[i - j] - low[i - j])
+            atr_sum += tr
+        
+        hh = max(high[i - period + 1:i + 1])
+        ll = min(low[i - period + 1:i + 1])
+        
+        if hh > ll and atr_sum > 0:
+            chop[i] = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(period)
+    
+    return chop
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -67,24 +78,15 @@ def generate_signals(prices):
     # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d SMA200 for trend direction (used as filter, not entry)
-    sma_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    # 1d EMA50 for trend direction
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === Local 12h indicators ===
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
+    chop_14 = calculate_choppiness(high, low, close, period=14)
     
-    # Aroon (25-period = 12.5 days on 12h)
-    aroon_up, aroon_down = calculate_aroon(high, low, period=25)
-    
-    # Bollinger Bands (20, 2.0) for entry timing
-    bb_sma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
-    bb_upper = bb_sma + 2.0 * bb_std
-    bb_lower = bb_sma - 2.0 * bb_std
-    bb_width = (bb_upper - bb_lower) / bb_sma
-    
-    # Volume ratio (20-bar MA)
+    # Volume ratio (20-bar average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -95,68 +97,64 @@ def generate_signals(prices):
     # Position tracking
     in_position = False
     position_side = 0
+    entry_price = 0.0
     entry_atr = 0.0
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     entry_bar = 0
-    aroon_flipped = False  # Track if we need new Aroon crossover
     
-    warmup = 300  # Need 200 for SMA200 alignment buffer + 25 for Aroon
+    warmup = 100  # Need enough for indicators + alignment buffer
     
     for i in range(warmup, n):
-        # Skip if ATR not ready
+        # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # Skip if SMA200 not aligned
-        if np.isnan(sma_1d_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(chop_14[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION (1d SMA200) ===
-        price_above_1d_sma = close[i] > sma_1d_aligned[i]
+        # === REGIME FILTER: Choppiness < 61.8 (trending environment) ===
+        is_trending = chop_14[i] < 61.8
         
-        # === AROON CROSSOVER (trend shift signal) ===
-        aroon_cross_up = aroon_up[i] > aroon_down[i] and aroon_up[i-1] <= aroon_down[i-1]
-        aroon_cross_down = aroon_down[i] > aroon_up[i] and aroon_down[i-1] <= aroon_up[i-1]
+        # === TREND DIRECTION (1d EMA50) ===
+        price_above_1d_ema = close[i] > ema_1d_aligned[i]
         
-        # Bollinger Band position (0=lower, 50=middle, 100=upper)
-        if bb_std[i] > 0:
-            bb_pos = (close[i] - bb_lower[i]) / (bb_upper[i] - bb_lower[i]) * 100
-        else:
-            bb_pos = 50
+        # === VOLUME CONFIRMATION (2x average = strong institutional interest) ===
+        vol_spike = vol_ratio[i] > 2.0
         
-        # Volume confirmation
-        vol_spike = vol_ratio[i] > 1.3
+        # === CAMARILLA LEVELS from previous CLOSED bar (no look-ahead) ===
+        prev_high = high[i - 1]
+        prev_low = low[i - 1]
+        prev_close = close[i - 1]
+        prev_range = prev_high - prev_low
+        
+        # Classic Camarilla S4 and R4 levels
+        r4 = prev_close + prev_range * 0.18333
+        s4 = prev_close - prev_range * 0.18333
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # Reset flip flag when flat
-            aroon_flipped = False
-            
-            # === LONG: Aroon bullish crossover + price above 1d SMA200 + BB near lower ===
-            if price_above_1d_sma and aroon_cross_up:
-                # BB position < 40 means price is near lower band (good entry)
-                if bb_pos < 45:
+            # === LONG: Price touches S4 with volume + trend + regime alignment ===
+            # Only in trending markets (CHOP < 61.8)
+            if is_trending and price_above_1d_ema and vol_spike:
+                if low[i] <= s4:
                     desired_signal = SIZE
-                    aroon_flipped = True
             
-            # === SHORT: Aroon bearish crossover + price below 1d SMA200 + BB near upper ===
-            if not price_above_1d_sma and aroon_cross_down:
-                # BB position > 60 means price is near upper band (good entry)
-                if bb_pos > 55:
+            # === SHORT: Price touches R4 with volume + trend + regime alignment ===
+            if is_trending and not price_above_1d_ema and vol_spike:
+                if high[i] >= r4:
                     desired_signal = -SIZE
-                    aroon_flipped = True
         
-        # === STOPLOSS (2.5 ATR trailing) ===
+        # === STOPLOSS (2.5 ATR trailing - slightly wider for 4h) ===
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
             trailing_stop = highest_since_entry - 2.5 * entry_atr
@@ -171,17 +169,19 @@ def generate_signals(prices):
             if high[i] > stop_price:
                 desired_signal = 0.0
         
-        # === TAKE PROFIT (3:1 ratio or reverse Aroon signal) ===
-        if in_position and position_side > 0:
-            profit_target = entry_atr * 3.0
-            if close[i] >= close[i-1] + profit_target:
-                # 3:1 achieved, take profit
-                desired_signal = 0.0
+        # === MINIMUM HOLDING PERIOD (3 bars = 12h to avoid chop churn) ===
+        bars_held = i - entry_bar
         
-        if in_position and position_side < 0:
-            profit_target = entry_atr * 3.0
-            if close[i] <= close[i-1] - profit_target:
-                desired_signal = 0.0
+        if in_position and bars_held >= 3:
+            # Take profit if price moves 3x ATR in our favor
+            if position_side > 0:
+                profit_target = entry_price + 3.0 * entry_atr
+                if close[i] >= profit_target:
+                    desired_signal = 0.0  # Exit with profit
+            if position_side < 0:
+                profit_target = entry_price - 3.0 * entry_atr
+                if close[i] <= profit_target:
+                    desired_signal = 0.0  # Exit with profit
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
@@ -189,14 +189,15 @@ def generate_signals(prices):
                 # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
+                entry_price = close[i]
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 entry_bar = i
                 if position_side > 0:
-                    stop_price = close[i] - 2.5 * entry_atr
+                    stop_price = entry_price - 2.5 * entry_atr
                 else:
-                    stop_price = close[i] + 2.5 * entry_atr
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
