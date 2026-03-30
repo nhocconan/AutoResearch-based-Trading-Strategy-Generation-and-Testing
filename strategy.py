@@ -1,33 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 12h Donchian + Williams Alligator + 1d EMA (Tighter Filters)
+Experiment: 4h ATR Volatility Breakout + Donchian + 1d HMA
 
-HYPOTHESIS: Previous Camarilla strategy (275 trades) overtraded due to multiple
-Camarilla levels triggering. Replace with:
-- Donchian(24) for structure (less noise than Camarilla multi-levels)
-- Williams Alligator for momentum confirmation (more selective than volume alone)
-- 1d EMA for trend alignment
-- Choppiness filter to skip range-bound periods
+HYPOTHESIS: Markets move in cycles of contraction (low ATR) → expansion (high ATR).
+By detecting the START of volatility expansion (ATR ratio > 1.5) with price breaking
+out of 4h Donchian channel AND 1d HMA trend alignment, we catch moves at their infancy.
 
-WHY IT WORKS: Donchian breakout captures institutional moves, Alligator alignment
-ensures momentum is confirmed, 1d filter avoids countertrend trades.
+WHY IT WORKS: ATR ratio breakout is a momentum/volatility combo signal.
+Unlike price-only breakouts, this confirms institutional participation (vol spike).
+1d HMA(21) is slow enough to avoid whipsaws, fast enough to catch 2-4 week moves.
 
-TARGET: 100-150 total trades over 4 years. Previous had 275 - this version
-tightens with Alligator alignment requirement (both lips>teeth AND teeth>jaw).
-
-12h timeframe = ~2922 bars/year, target ~25-35 trades/year.
+TARGET: 75-150 total trades over 4 years (19-37/year).
+Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_alligator_ema50_1d_v1"
-timeframe = "12h"
+name = "mtf_4h_atr_donchian_vol_hma21_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
-
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Average True Range with EWM smoothing"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -40,53 +35,13 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - lower = trending, higher = ranging"""
-    n = len(close)
-    chop = np.full(n, 61.8)
-    
-    for i in range(period, n):
-        sum_tr = 0.0
-        for j in range(period):
-            idx = i - j
-            tr = max(high[idx] - low[idx], abs(high[idx] - close[idx-1]), abs(low[idx] - close[idx-1]))
-            sum_tr += tr
-        
-        highest_high = max(high[i-period+1:i+1])
-        lowest_low = min(low[i-period+1:i+1])
-        range_hl = highest_high - lowest_low
-        
-        if range_hl > 1e-10:
-            chop[i] = 100 * np.log(sum_tr / range_hl) / np.log(period)
-    
-    return chop
-
-
-def calculate_alligator(high, low, close):
-    """Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3)"""
-    n = len(close)
-    median = (high + low) / 2.0
-    
-    # Calculate SMAs
-    sma13 = pd.Series(median).rolling(window=13, min_periods=13).mean().values
-    sma8 = pd.Series(median).rolling(window=8, min_periods=8).mean().values
-    sma5 = pd.Series(median).rolling(window=5, min_periods=5).mean().values
-    
-    # Apply Alligator offsets (shift forward = values appear "later")
-    jaw = np.full(n, np.nan)   # SMA13 shifted 8 bars forward
-    teeth = np.full(n, np.nan)  # SMA8 shifted 5 bars forward
-    lips = np.full(n, np.nan)   # SMA5 shifted 3 bars forward
-    
-    for i in range(8, n):
-        jaw[i] = sma13[i - 8] if (i - 8) >= 0 else np.nan
-    for i in range(5, n):
-        teeth[i] = sma8[i - 5] if (i - 5) >= 0 else np.nan
-    for i in range(3, n):
-        lips[i] = sma5[i - 3] if (i - 3) >= 0 else np.nan
-    
-    return jaw, teeth, lips
-
+def calculate_hma(data, period):
+    """Hull Moving Average"""
+    half = pd.Series(data).rolling(window=period // 2, min_periods=period // 2).mean()
+    full = pd.Series(data).rolling(window=period, min_periods=period).mean()
+    hma = (2 * half - full)
+    hma = hma.rolling(window=int(np.sqrt(period)), min_periods=int(np.sqrt(period))).mean()
+    return hma.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -97,23 +52,27 @@ def generate_signals(prices):
     
     # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
-    ema_1d_raw = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_raw)
     
-    # === Local 12h indicators ===
+    # 1d HMA(21) for trend
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop = calculate_choppiness(high, low, close, period=14)
-    jaw, teeth, lips = calculate_alligator(high, low, close)
     
-    # Volume ratio (20-bar SMA)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    # ATR ratio: current ATR vs 30-bar ATR MA (detects vol expansion)
+    atr_ma30 = pd.Series(atr_14).rolling(window=30, min_periods=30).mean().values
+    atr_ratio = atr_14 / np.where((atr_ma30 > 0) & ~np.isnan(atr_ma30), atr_ma30, 1)
     
-    # Donchian channels (24-bar = 12 days)
-    donchian_period = 24
+    # 4h Donchian channel (20 periods = 5 days)
+    donchian_period = 20
     donchian_upper = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_middle = (donchian_upper + pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values) / 2.0
     donchian_lower = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    donchian_mid = (donchian_upper + donchian_lower) / 2
+    
+    # Volume ratio
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, 1)
     
     # Signals
     signals = np.zeros(n)
@@ -125,10 +84,11 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     stop_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     entry_bar = 0
     
-    # Warmup: 150 bars to cover Alligator offset (21) + EMA alignment buffer
-    warmup = 150
+    warmup = 100  # Buffer for alignment
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -138,84 +98,74 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # Choppiness filter (skip if choppy/ranging)
-        if chop[i] > 61.8:
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
+        # === ENTRY CONDITIONS ===
+        price_above_hma = close[i] > hma_1d_aligned[i]
+        price_below_hma = close[i] < hma_1d_aligned[i]
         
-        # === TREND DIRECTION (1d EMA50) ===
-        price_above_1d_ema = close[i] > ema_1d_aligned[i]
-        
-        # === ALLIGATOR ALIGNMENT ===
-        # Long: lips > teeth > jaw (bullish stack)
-        # Short: lips < teeth < jaw (bearish stack)
-        alligator_bull = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
-        alligator_bear = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
-        
-        # Alligator "mouth open" = lines separated (not tangled)
-        alligator_spread = abs(jaw[i] - lips[i]) if not np.isnan(jaw[i]) and not np.isnan(lips[i]) else 0
-        jaw_range = jaw[i] * 0.01 if not np.isnan(jaw[i]) else 1
-        alligator_active = alligator_spread > jaw_range
+        # Volatility expansion (>1.5x normal)
+        vol_expansion = atr_ratio[i] > 1.5
         
         # Volume confirmation
-        vol_spike = vol_ratio[i] > 1.8
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === DONCHIAN BREAKOUT ===
-        prev_donchian_upper = donchian_upper[i - 1] if i > 0 else high[i]
-        prev_donchian_lower = donchian_lower[i - 1] if i > 0 else low[i]
-        
-        # Price breaks above previous Donchian high
-        donchian_breakout_up = close[i] > prev_donchian_upper
-        # Price breaks below previous Donchian low
-        donchian_breakout_down = close[i] < prev_donchian_lower
+        # Donchian breakout (close above/below channel)
+        donch_breakout_up = close[i] > donchian_upper[i]
+        donch_breakout_down = close[i] < donchian_lower[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Donchian breakout + Alligator bullish + volume + 1d trend ===
-            if (donchian_breakout_up and alligator_bull and alligator_active and 
-                vol_spike and price_above_1d_ema):
-                desired_signal = SIZE
+            # === LONG: Volatility expansion + Donchian breakout + HMA trend ===
+            if price_above_hma and vol_expansion and vol_spike:
+                if donch_breakout_up:
+                    desired_signal = SIZE
             
-            # === SHORT: Donchian breakdown + Alligator bearish + volume + 1d trend ===
-            if (donchian_breakout_down and alligator_bear and alligator_active and 
-                vol_spike and not price_above_1d_ema):
-                desired_signal = -SIZE
+            # === SHORT: Volatility expansion + Donchian breakout + HMA trend ===
+            if price_below_hma and vol_expansion and vol_spike:
+                if donch_breakout_down:
+                    desired_signal = -SIZE
         
-        # === STOPLOSS (2.0 ATR) ===
-        if in_position:
-            if position_side > 0:
-                if low[i] < stop_price:
-                    desired_signal = 0.0
-            else:
-                if high[i] > stop_price:
-                    desired_signal = 0.0
+        # === TRAILING STOP (2 ATR) ===
+        if in_position and position_side > 0:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
+            if low[i] < stop_price:
+                desired_signal = 0.0
         
-        # === MINIMUM HOLD (6 bars = 3 days to reduce churn) ===
+        if in_position and position_side < 0:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
+            if high[i] > stop_price:
+                desired_signal = 0.0
+        
+        # === MINIMUM HOLD: 3 bars (12h) to avoid fee churn ===
         bars_held = i - entry_bar
-        if in_position and bars_held >= 6:
-            # Exit if Alligator flips against position
-            if position_side > 0 and alligator_bear:
-                desired_signal = 0.0
-            if position_side < 0 and alligator_bull:
-                desired_signal = 0.0
+        if in_position and bars_held < 3:
+            # Only allow exit via stoploss, not take profit
+            if desired_signal == 0.0 and position_side > 0 and low[i] >= stop_price:
+                desired_signal = position_side * SIZE
+            if desired_signal == 0.0 and position_side < 0 and high[i] <= stop_price:
+                desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
+                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 entry_bar = i
                 if position_side > 0:
                     stop_price = entry_price - 2.0 * entry_atr
