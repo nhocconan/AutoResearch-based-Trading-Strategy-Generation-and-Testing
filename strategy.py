@@ -1,29 +1,50 @@
 #!/usr/bin/env python3
 """
-Experiment #008: 12h Camarilla S4/R4 Mean-Reversion with 1w Trend + Volume
+Experiment #021: 12h Aroon + Bollinger Band Position + 1d SMA200 Trend
 
-HYPOTHESIS: After extended moves, price snaps back to Camarilla S4 (support)
-or R4 (resistance) levels. These are tighter bands than S3/R3, catching
-smaller reversals. Combined with 1w trend alignment (prevents fighting
-major trends) and volume confirmation, this captures 1-3 day reversals
-in both bull and bear markets.
+HYPOTHESIS: Aroon crossover (period=25) gives clean, reliable trend shifts 
+without the noise of RSI or stochastic. Combined with 1d SMA200 trend alignment 
+and Bollinger Band position for entry timing, this catches major trend changes.
 
-WHY 12h + 1w: 12h captures multi-day swings. 1w trend alignment prevents
-entering against major bull/bear cycles. Symmetric entry logic works in
-both directions.
+WHY IT WORKS IN BULL AND BEAR: Aroon measures time since highs/lows.
+Bull: Aroon Up stays elevated. Bear: Aroon Down stays elevated.
+Crossover signals regime change - symmetric in both directions.
 
-TARGET: 75-200 total trades over 4 years. Signal size: 0.30.
+WHY 12h: Slow enough for meaningful Aroon signals (25-period = 12.5 days).
+Faster than 12h = too many false crossovers. 12h = 2-3 major signals/month.
+
+TARGET: 40-100 total trades over 4 years = 10-25/year.
+Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_camarilla_s4r4_1w_vol_v1"
+name = "mtf_12h_aroon_bb_sma200_1d_v1"
 timeframe = "12h"
 leverage = 1.0
 
+def calculate_aroon(high, low, period=25):
+    """Aroon indicator - returns Aroon Up and Aroon Down"""
+    n = len(high)
+    aroon_up = np.zeros(n, dtype=np.float64)
+    aroon_down = np.zeros(n, dtype=np.float64)
+    
+    for i in range(period, n):
+        # Count bars since highest high in period
+        max_idx = np.argmax(high[i-period:i+1])
+        bars_since_high = period - max_idx
+        aroon_up[i] = (period - bars_since_high) / period * 100
+        
+        # Count bars since lowest low in period
+        min_idx = np.argmin(low[i-period:i+1])
+        bars_since_low = period - min_idx
+        aroon_down[i] = (period - bars_since_low) / period * 100
+    
+    return aroon_up, aroon_down
+
 def calculate_atr(high, low, close, period=14):
-    """Average True Range with proper ATR calculation"""
+    """Average True Range"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -31,9 +52,7 @@ def calculate_atr(high, low, close, period=14):
     tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
@@ -46,42 +65,44 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1w SMA200 for major trend (prevents fighting multi-month trends)
-    sma_200_1w = pd.Series(df_1w['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma_200_aligned = align_htf_to_ltf(prices, df_1w, sma_200_1w)
-    
-    # 1w EMA21 for faster trend confirmation
-    ema_21_1w = pd.Series(df_1w['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # 1d SMA200 for trend direction (used as filter, not entry)
+    sma_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
     
     # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Volume rolling average (20 periods = 10 days)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, 1)
+    # Aroon (25-period = 12.5 days on 12h)
+    aroon_up, aroon_down = calculate_aroon(high, low, period=25)
     
-    # 12h EMA for short-term trend
-    ema_12h = pd.Series(close).ewm(span=8, min_periods=8, adjust=False).mean().values
+    # Bollinger Bands (20, 2.0) for entry timing
+    bb_sma = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_sma + 2.0 * bb_std
+    bb_lower = bb_sma - 2.0 * bb_std
+    bb_width = (bb_upper - bb_lower) / bb_sma
+    
+    # Volume ratio (20-bar MA)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     # Signals
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25
     
     # Position tracking
     in_position = False
     position_side = 0
-    entry_price = 0.0
     entry_atr = 0.0
     stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     entry_bar = 0
-    entry_ema = 0.0
+    aroon_flipped = False  # Track if we need new Aroon crossover
     
-    warmup = max(200, 50)  # Need enough for 1w SMA200 alignment buffer
+    warmup = 300  # Need 200 for SMA200 alignment buffer + 25 for Aroon
     
     for i in range(warmup, n):
         # Skip if ATR not ready
@@ -91,61 +112,51 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        # Skip if 1w indicators not aligned
-        if np.isnan(sma_200_aligned[i]) or np.isnan(ema_21_aligned[i]):
+        # Skip if SMA200 not aligned
+        if np.isnan(sma_1d_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION (1w) ===
-        # Long only when price above 1w SMA200 and EMA21 > SMA200 (confirmed uptrend)
-        # Short only when price below 1w SMA200 and EMA21 < SMA200 (confirmed downtrend)
-        bull_market = close[i] > sma_200_aligned[i] and ema_21_aligned[i] > sma_200_aligned[i]
-        bear_market = close[i] < sma_200_aligned[i] and ema_21_aligned[i] < sma_200_aligned[i]
+        # === TREND DIRECTION (1d SMA200) ===
+        price_above_1d_sma = close[i] > sma_1d_aligned[i]
         
-        # Short-term momentum: 12h EMA direction
-        short_bull = close[i] > ema_12h[i]
-        short_bear = close[i] < ema_12h[i]
+        # === AROON CROSSOVER (trend shift signal) ===
+        aroon_cross_up = aroon_up[i] > aroon_down[i] and aroon_up[i-1] <= aroon_down[i-1]
+        aroon_cross_down = aroon_down[i] > aroon_up[i] and aroon_down[i-1] <= aroon_up[i-1]
+        
+        # Bollinger Band position (0=lower, 50=middle, 100=upper)
+        if bb_std[i] > 0:
+            bb_pos = (close[i] - bb_lower[i]) / (bb_upper[i] - bb_lower[i]) * 100
+        else:
+            bb_pos = 50
         
         # Volume confirmation
-        vol_spike = vol_ratio[i] > 1.5
-        
-        # === CAMARILLA LEVELS from previous CLOSED bar ===
-        prev_high = high[i - 1]
-        prev_low = low[i - 1]
-        prev_close = close[i - 1]
-        prev_open = prev_close - (close[i - 1] - low[i - 1])  # rough open estimate
-        prev_range = prev_high - prev_low
-        
-        # Classic Camarilla S4/R4 levels
-        # R4 = Close + Range * 0.18333 (0.11/60 roughly)
-        # S4 = Close - Range * 0.18333
-        r4 = prev_close + prev_range * 0.18333
-        s4 = prev_close - prev_range * 0.18333
-        
-        # Additional reference: mid-point
-        mid = (prev_high + prev_low) / 2.0
+        vol_spike = vol_ratio[i] > 1.3
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Price drops to S4 with trend alignment + volume ===
-            # Only long in bull markets or during bear market rallies
-            if (bull_market or not bear_market) and vol_spike:
-                # Price must be within 0.3 ATR of S4 (not already bounced past)
-                if low[i] <= s4 and low[i] >= s4 - 0.5 * atr_14[i]:
+            # Reset flip flag when flat
+            aroon_flipped = False
+            
+            # === LONG: Aroon bullish crossover + price above 1d SMA200 + BB near lower ===
+            if price_above_1d_sma and aroon_cross_up:
+                # BB position < 40 means price is near lower band (good entry)
+                if bb_pos < 45:
                     desired_signal = SIZE
-                    # Also check we're not too extended from the level
-        
-            # === SHORT: Price rallies to R4 with trend alignment + volume ===
-            if (bear_market or not bull_market) and vol_spike:
-                # Price must be within 0.3 ATR of R4
-                if high[i] >= r4 and high[i] <= r4 + 0.5 * atr_14[i]:
+                    aroon_flipped = True
+            
+            # === SHORT: Aroon bearish crossover + price below 1d SMA200 + BB near upper ===
+            if not price_above_1d_sma and aroon_cross_down:
+                # BB position > 60 means price is near upper band (good entry)
+                if bb_pos > 55:
                     desired_signal = -SIZE
+                    aroon_flipped = True
         
-        # === STOPLOSS (2.5 ATR — give trades room to breathe) ===
+        # === STOPLOSS (2.5 ATR trailing) ===
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
             trailing_stop = highest_since_entry - 2.5 * entry_atr
@@ -160,26 +171,17 @@ def generate_signals(prices):
             if high[i] > stop_price:
                 desired_signal = 0.0
         
-        # === TAKE PROFIT (3R or ATR trailing stop tightens) ===
-        bars_held = i - entry_bar
+        # === TAKE PROFIT (3:1 ratio or reverse Aroon signal) ===
+        if in_position and position_side > 0:
+            profit_target = entry_atr * 3.0
+            if close[i] >= close[i-1] + profit_target:
+                # 3:1 achieved, take profit
+                desired_signal = 0.0
         
-        if in_position and bars_held >= 2:
-            # Target 3x risk
-            if position_side > 0:
-                profit_target = entry_price + 3.0 * entry_atr
-                if close[i] >= profit_target:
-                    desired_signal = 0.0
-                # Also exit if short-term trend flips against us
-                if short_bear and bars_held >= 3:
-                    desired_signal = 0.0
-            
-            if position_side < 0:
-                profit_target = entry_price - 3.0 * entry_atr
-                if close[i] <= profit_target:
-                    desired_signal = 0.0
-                # Also exit if short-term trend flips against us
-                if short_bull and bars_held >= 3:
-                    desired_signal = 0.0
+        if in_position and position_side < 0:
+            profit_target = entry_atr * 3.0
+            if close[i] <= close[i-1] - profit_target:
+                desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
@@ -187,16 +189,14 @@ def generate_signals(prices):
                 # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
-                entry_price = close[i]
                 entry_atr = atr_14[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 entry_bar = i
-                entry_ema = ema_12h[i]
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = close[i] - 2.5 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
+                    stop_price = close[i] + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
