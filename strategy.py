@@ -1,87 +1,48 @@
 #!/usr/bin/env python3
 """
-Experiment #006: 1d KAMA Trend + ATR Volatility Regime + Donchian Breakout
+Experiment #005: 12h Donchian Breakout + Volume + 1d EMA21
 
-HYPOTHESIS: Combining KAMA (adaptive trend) with ATR regime filtering and 
-Donchian breakout captures sustained trends while avoiding whipsaws in 
-high volatility periods. Works in BOTH bull and bear markets because 
-KAMA adapts to direction automatically.
+HYPOTHESIS: Donchian(20) breakout on 12h captures medium-term momentum shifts.
+With volume confirmation AND 1d EMA21 trend alignment, this strategy catches
+the start of multi-day moves in the direction of the higher timeframe trend.
 
-WHY 1d: Slowest timeframe = fewest trades = lowest fee drag = best generalization.
-- Target: 50-150 total trades over 4 years (12-37/year)
-- At 1d, even 50 trades can capture major market moves
+WHY 12h: Slower than 4h = fewer trades = less fee drag.
+Donchian(20) on 12h = 10-day breakout channel.
+Expected: 50-100 total trades over 4 years (12-25/year).
 
-WHY IT WORKS: 
-- KAMA filters noise with adaptive smoothing
-- ATR regime avoids entering during extreme volatility (volatility clustering)
-- Donchian breakout confirms momentum with clear structure
-- Simple 3 conditions = disciplined entries
-
-PATTERN: KAMA bull → Donchian high breakout + vol regime → LONG
-         KAMA bear → Donchian low breakout + vol regime → SHORT
+WHY IT WORKS IN BULL AND BEAR: Trend-following works bidirectionally.
+Long breakouts in uptrends, short breakouts in downtrends. The 1d EMA21
+provides regime awareness to avoid counter-trend entries.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_kama_donchian_atrregime_v1"
-timeframe = "1d"
+name = "mtf_12h_donchian_vol_ema21_1d_v1"
+timeframe = "12h"
 leverage = 1.0
+
+def calculate_donchian(high, low, period=20):
+    """Donchian channel upper/lower bands"""
+    n = len(high)
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    for i in range(period - 1, n):
+        upper[i] = np.max(high[i - period + 1:i + 1])
+        lower[i] = np.min(low[i - period + 1:i + 1])
+    return upper, lower
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
-    
     tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_kama(prices, period=21, fast_ema=2, slow_ema=30):
-    """Kaufman Adaptive Moving Average"""
-    n = len(prices)
-    if n < slow_ema + 1:
-        return np.full(n, np.nan)
-    
-    # Price changes
-    price_change = np.abs(np.diff(prices, prepend=prices[0]))
-    
-    # Volatility (sum of price changes over period)
-    volatility = np.zeros(n)
-    for i in range(period, n):
-        volatility[i] = np.sum(price_change[i-period+1:i+1])
-    
-    # Efficiency ratio (ER)
-    er = np.zeros(n)
-    mask = volatility > 1e-10
-    er[mask] = price_change[mask] / volatility[mask]
-    
-    # Smoothing constant
-    fast_const = 2 / (fast_ema + 1)
-    slow_const = 2 / (slow_ema + 1)
-    sc = (er * (fast_const - slow_const) + slow_const) ** 2
-    
-    # KAMA calculation
-    kama = np.zeros(n)
-    kama[period] = prices[period]
-    
-    for i in range(period + 1, n):
-        kama[i] = kama[i-1] + sc[i] * (prices[i] - kama[i-1])
-    
-    return kama
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - returns upper, middle, lower arrays"""
-    n = len(high)
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    middle = (upper + pd.Series(low).rolling(window=period, min_periods=period).min().values) / 2
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, middle, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -91,40 +52,34 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    # No HTF needed for this strategy (using 1d as primary)
-    # All calculations on 1d data
+    df_1d = get_htf_data(prices, '1d')
     
-    # === LOCAL 1d indicators ===
+    # 1d EMA21 for trend direction
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # === Local 12h indicators ===
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     atr_14 = calculate_atr(high, low, close, period=14)
-    atr_30 = calculate_atr(high, low, close, period=30)
     
-    # ATR volatility regime: ratio of short to long ATR
-    # High ratio (>1.5) = high volatility = avoid entries
-    atr_ratio = atr_14 / np.where(atr_30 > 0, atr_30, 1)
-    
-    # KAMA for trend
-    kama_21 = calculate_kama(close, period=21, fast_ema=2, slow_ema=30)
-    
-    # Donchian channels
-    donch_upper_20, donch_mid_20, donch_lower_20 = calculate_donchian(high, low, period=20)
-    donch_upper_55, donch_mid_55, donch_lower_55 = calculate_donchian(high, low, period=55)
-    
-    # Volume ratio (20-bar MA)
+    # Volume ratio (pre-computed)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # === SIGNALS ===
+    # Signals
     signals = np.zeros(n)
-    SIZE = 0.25  # Discrete position size
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = float('inf')
     entry_bar = 0
     
-    warmup = 100  # Need enough for KAMA, Donchian alignment
+    warmup = 100
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -134,98 +89,71 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(kama_21[i]) or np.isnan(donch_upper_20[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === REGIME CHECK: Skip high volatility periods ===
-        # ATR ratio > 1.5 means volatility expanding = higher whipsaw risk
-        in_high_vol = atr_ratio[i] > 1.5
+        if np.isnan(ema_1d_aligned[i]):
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
         
-        # === TREND DIRECTION (KAMA) ===
-        kama_bull = close[i] > kama_21[i]
-        kama_bear = close[i] < kama_21[i]
+        # === TREND DIRECTION (1d EMA21) ===
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # === CONFIRMATION: Price above/below Donchian mid ===
-        above_mid = close[i] > donch_mid_20[i]
-        below_mid = close[i] < donch_mid_20[i]
-        
-        # === BREAKOUT: Close above 20-bar high (for longs) or below 20-bar low (for shorts) ===
-        bull_breakout = close[i] > donch_upper_20[i]
-        bear_breakout = close[i] < donch_lower_20[i]
-        
-        # === VOLUME CONFIRMATION ===
-        vol_confirm = vol_ratio[i] > 1.3
-        
-        # === STOPLOSS: 2.5 ATR from entry ===
-        # Trailing stop: maintain 2.5*ATR from highest/lowest since entry
-        highest_since_entry = high[i]
-        lowest_since_entry = low[i]
+        # Volume confirmation
+        vol_spike = vol_ratio[i] > 1.5
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG ENTRY ===
-            # Conditions: KAMA bull + close above Donchian mid + breakout + vol confirm + NOT high vol
-            if kama_bull and above_mid and bull_breakout and vol_confirm and not in_high_vol:
+            # LONG: Price breaks above 12h Donchian upper in uptrend with volume
+            if uptrend and vol_spike and close[i] > donchian_upper[i]:
                 desired_signal = SIZE
             
-            # === SHORT ENTRY ===
-            # Conditions: KAMA bear + close below Donchian mid + breakout + vol confirm + NOT high vol
-            if kama_bear and below_mid and bear_breakout and vol_confirm and not in_high_vol:
+            # SHORT: Price breaks below 12h Donchian lower in downtrend with volume
+            elif downtrend and vol_spike and close[i] < donchian_lower[i]:
                 desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR) ===
-        if in_position:
-            if position_side > 0:
-                stop_long = entry_price - 2.5 * entry_atr
-                if low[i] < stop_long:
-                    desired_signal = 0.0
-            elif position_side < 0:
-                stop_short = entry_price + 2.5 * entry_atr
-                if high[i] > stop_short:
-                    desired_signal = 0.0
+        # === STOPLOSS (2.0 ATR trailing) ===
+        if in_position and position_side > 0:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            if low[i] < trailing_stop:
+                desired_signal = 0.0
         
-        # === MINIMUM HOLD: 3 bars (3 days) to avoid fee churn ===
+        if in_position and position_side < 0:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            if high[i] > trailing_stop:
+                desired_signal = 0.0
+        
+        # === MINIMUM HOLD (2 bars to avoid churn) ===
         bars_held = i - entry_bar
-        if in_position and bars_held >= 3:
-            # Exit if KAMA flips
-            if position_side > 0 and not kama_bull:
-                desired_signal = 0.0
-            if position_side < 0 and not kama_bear:
-                desired_signal = 0.0
-        
-        # === TAKE PROFIT: Trail stop when 2R achieved ===
-        if in_position and bars_held >= 3:
-            if position_side > 0:
-                profit = close[i] - entry_price
-                if profit > 2.0 * entry_atr:
-                    # Trail: exit if price drops 1 ATR from highest
-                    if low[i] < high[i] - 1.0 * atr_14[i]:
-                        desired_signal = 0.0
-            elif position_side < 0:
-                profit = entry_price - close[i]
-                if profit > 2.0 * entry_atr:
-                    if high[i] > low[i] + 1.0 * atr_14[i]:
-                        desired_signal = 0.0
+        if in_position and bars_held < 2:
+            desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
+                # New position or direction flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 entry_bar = i
         else:
             if in_position:
                 in_position = False
                 position_side = 0
         
-        signals[i] = desired_signal
+        signals[i] = desired_signal if in_position else 0.0
     
     return signals
