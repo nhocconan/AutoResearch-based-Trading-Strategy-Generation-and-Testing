@@ -1,36 +1,50 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 12h Donchian(16) + 1w EMA Trend + Volume Spike + ATR Stoploss
+Experiment #022: 4h Williams Alligator + Volume Spike + 1d SMA Filter
 
-HYPOTHESIS: 12h timeframe with weekly HTF filter should work because:
-- Weekly EMA gives strong macro trend signal (not whipsawed by daily noise)
-- 12h Donchian(16) = 8-day channel - captures medium-term swings
-- Volume spike confirms institutional participation
-- ATR stoploss protects during 2022-type crashes
-- 12h timeframe naturally limits trade frequency to target 12-37/year
+HYPOTHESIS: Williams Alligator is a multi-SMA trend detection system that
+captures market structure without repainting. The Lips crossing above/below
+the Jaw provides clean trend signals. Combined with volume confirmation and
+1d SMA(50) for macro trend filter, this should:
+- Work in 2021 bull:捕捉動能突破
+- Work in 2022 bear: 空頭排列時做空
+- Work in 2025 range: Macro filter keeps flat in chop
 
-WHY BOTH MARKETS:
-- 2021 bull: Breakout above 8-day high + weekly trend up = ride rallies
-- 2022 bear: Weekly trend down = only short breakdowns (no longs)
-- 2025 range: Weekly EMA filter keeps flat in chop
+KEY INSIGHT FROM DB: Winning strategies use ONE strong signal (price channel 
+or momentum oscillator) + volume confirmation + regime filter. Alligator 
+provides BOTH trend direction AND regime (awake/sleeping) information.
 
-ENTRY LOGIC (simple = fewer trades = less fee drag):
-- LONG: Close > Donchian_upper[15] + volume > 1.8x avg + weekly trend UP
-- SHORT: Close < Donchian_lower[15] + volume > 1.8x avg + weekly trend DOWN
-
-EXIT LOGIC:
-- ATR trailing stop (2.5x ATR from entry high/low)
-- Trend reversal (weekly EMA flip)
-
-TARGET: 50-120 total trades over 4 years (12-30/year on 12h).
+TRADE COUNT: 75-200 total over 4 years (target 20-50/year).
+Size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_021_12h_donchian_1w_ema_vol_v1"
-timeframe = "12h"
+name = "mtf_4h_alligator_vol_1d_sma_v1"
+timeframe = "4h"
 leverage = 1.0
+
+def calculate_alligator(high, low, close, period=13):
+    """
+    Williams Alligator indicator.
+    Jaw = SMA(median, 13) smoothed by SMA(8)
+    Teeth = SMA(median, 8) smoothed by SMA(5)
+    Lips = SMA(median, 5) smoothed by SMA(3)
+    """
+    median = (high + low + close) / 3.0
+    
+    # Base SMAs
+    jaw_base = pd.Series(median).rolling(window=13, min_periods=13).mean().values
+    teeth_base = pd.Series(median).rolling(window=8, min_periods=8).mean().values
+    lips_base = pd.Series(median).rolling(window=5, min_periods=5).mean().values
+    
+    # Smoothed values (SMMA-like using ewm for efficiency)
+    jaw = pd.Series(jaw_base).ewm(span=8, min_periods=8, adjust=False).mean().values
+    teeth = pd.Series(teeth_base).ewm(span=5, min_periods=5, adjust=False).mean().values
+    lips = pd.Series(lips_base).ewm(span=3, min_periods=3, adjust=False).mean().values
+    
+    return jaw, teeth, lips
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -53,26 +67,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w EMA for macro trend (call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    ema_1w = pd.Series(df_1w['close'].values).ewm(span=13, min_periods=13, adjust=False).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # === HTF: 1d SMA for macro trend (call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    sma_1d_50 = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_50)
     
-    # === Local 12h indicators ===
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Donchian Channel(16) - 8 days on 12h
-    donchian_upper = pd.Series(high).rolling(window=16, min_periods=16).max().values
-    donchian_lower = pd.Series(low).rolling(window=16, min_periods=16).min().values
-    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    # Williams Alligator
+    jaw, teeth, lips = calculate_alligator(high, low, close, period=13)
     
-    # Volume spike detection (20-bar avg on 12h = ~10 days)
+    # Volume spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
     
     # === Signals ===
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25
     
     # Position tracking
     in_position = False
@@ -83,7 +95,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 50  # 16 for Donchian + buffer
+    warmup = 60  # Alligator needs time to stabilize
     
     for i in range(warmup, n):
         # NaN check
@@ -91,11 +103,11 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(ema_1w_aligned[i]):
+        if np.isnan(sma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -106,28 +118,25 @@ def generate_signals(prices):
             else:
                 lowest_since_entry = min(lowest_since_entry, low[i])
         
-        # === WEEKLY HTF TREND ===
-        weekly_bullish = close[i] > ema_1w_aligned[i]
-        weekly_bearish = close[i] < ema_1w_aligned[i]
+        # === ALLIGATOR SIGNALS ===
+        # Lips crosses above Teeth crosses above Jaw = bullish (alligator eating)
+        alligator_bullish = lips[i] > teeth[i] > jaw[i]
+        # Lips crosses below Teeth crosses below Jaw = bearish (alligator eating)
+        alligator_bearish = lips[i] < teeth[i] < jaw[i]
         
-        # === VOLUME SPIKE (>1.8x average) ===
-        vol_spike = vol_ratio[i] > 1.8
+        # Alligator awake (spread between lines > threshold = trending)
+        alligator_spread = abs(lips[i] - jaw[i]) / jaw[i] if jaw[i] != 0 else 0
+        alligator_awake = alligator_spread > 0.005  # 0.5% minimum spread
         
-        # === DONCHIAN BREAKOUT (use prior bar's channel for no look-ahead) ===
-        prev_upper = donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else np.nan
-        prev_lower = donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else np.nan
+        # === HTF MACRO FILTER (1d SMA) ===
+        htf_bullish = close[i] > sma_1d_aligned[i]
+        htf_bearish = close[i] < sma_1d_aligned[i]
         
-        bullish_breakout = False
-        bearish_breakout = False
+        # === VOLUME CONFIRMATION (>1.5x average) ===
+        vol_spike = vol_ratio[i] > 1.5
         
-        if not np.isnan(prev_upper) and not np.isnan(prev_lower):
-            # Close breaks above prior upper = bullish breakout
-            bullish_breakout = close[i] > prev_upper
-            # Close breaks below prior lower = bearish breakout
-            bearish_breakout = close[i] < prev_lower
-        
-        # === MINIMUM HOLD: 2 bars (24h) to avoid immediate reversals ===
-        min_hold_bars = 2
+        # === MINIMUM HOLD: 3 bars (12h) to avoid immediate reversals ===
+        min_hold_bars = 3
         min_hold = (i - entry_bar) >= min_hold_bars
         
         # === ATR TRAILING STOP (2.5x ATR from entry high/low) ===
@@ -143,10 +152,10 @@ def generate_signals(prices):
         if in_position:
             stop_hit = check_atr_stop()
             
-            # Also exit on trend reversal (weekly EMA flip)
-            if position_side > 0 and weekly_bearish and min_hold:
+            # Exit on trend reversal with min hold
+            if position_side > 0 and alligator_bearish and min_hold:
                 stop_hit = True
-            if position_side < 0 and weekly_bullish and min_hold:
+            if position_side < 0 and alligator_bullish and min_hold:
                 stop_hit = True
             
             if stop_hit:
@@ -158,8 +167,8 @@ def generate_signals(prices):
         
         # === NEW POSITIONS ===
         if not in_position:
-            # LONG: Bullish breakout + volume spike + weekly bullish
-            if bullish_breakout and vol_spike and weekly_bullish:
+            # LONG: Alligator bullish + volume spike + HTF bullish + trending
+            if alligator_bullish and vol_spike and htf_bullish and alligator_awake:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
@@ -168,8 +177,8 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 signals[i] = SIZE
             
-            # SHORT: Bearish breakdown + volume spike + weekly bearish
-            elif bearish_breakout and vol_spike and weekly_bearish:
+            # SHORT: Alligator bearish + volume spike + HTF bearish + trending
+            elif alligator_bearish and vol_spike and htf_bearish and alligator_awake:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
