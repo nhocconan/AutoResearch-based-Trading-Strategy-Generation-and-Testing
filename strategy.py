@@ -1,24 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 12h Donchian Breakout + 1d EMA21 Trend + Choppiness Regime
+Experiment #028: 4h Donchian Breakout + Williams %R Extreme + 1d SMA50 Trend
 
-HYPOTHESIS: 12h Donchian(20) breakout is a proven price channel structure.
-Combined with 1d EMA21 for faster trend direction (vs slow SMA200 that caused 0 trades),
-and Choppiness Index to filter range-bound markets.
+HYPOTHESIS: Williams %R at extremes (<-80 or >-20) identifies exhaustion points
+where institutional reversals occur. Combining with Donchian breakout adds 
+structural confirmation. 1d SMA50 filters for trend direction.
 
-WHY 12h: Natural trade limiter (50-100/year) vs 6h which overtraded (459 trades).
-WHY 1d EMA21: Faster than SMA200 (adjusts to trend faster = more signals).
-EMA21 1d = ~3 week trend, fast enough for signals but stable.
+WHY IT WORKS IN BULL AND BEAR:
+- Bull: %R oversold + Donchian breakout + price>1d SMA50 = strong long
+- Bear: %R overbought + Donchian breakdown + price<1d SMA50 = strong short
+- Symmetric structure works in both directions
 
-TARGET: 50-150 total over 4 years (12-37/year). HARD MAX: 200.
-Works in BOTH bull (long breakouts) and bear (short breakdowns).
+TARGET: 75-150 total trades over 4 years (19-37/year). HARD MAX: 200.
+Signal size: 0.25. Entry needs 3+ confluence for strictness.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_1d_ema21_chop_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_williams_r_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -35,29 +36,19 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - lower = trending, higher = choppy"""
+def calculate_williams_r(high, low, close, period=14):
+    """Williams %R - momentum oscillator"""
     n = len(high)
-    chop = np.full(n, np.nan, dtype=np.float64)
+    williams_r = np.full(n, np.nan, dtype=np.float64)
     
     for i in range(period, n):
-        tr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            if j > 0:
-                tr = max(high[j] - low[j], abs(high[j] - close[j-1]))
-            else:
-                tr = high[j] - low[j]
-            tr_sum += tr
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
         
-        if tr_sum > 0:
-            hh = np.max(high[i - period + 1:i + 1])
-            ll = np.min(low[i - period + 1:i + 1])
-            range_hl = hh - ll
-            
-            if range_hl > 0:
-                chop[i] = 100 * np.log10(tr_sum / range_hl) / np.log10(period)
+        if highest_high - lowest_low > 0:
+            williams_r[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
     
-    return chop
+    return williams_r
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -66,23 +57,24 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load 1d HTF data ONCE ===
+    # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA21 for trend direction (faster than SMA200)
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # 1d SMA50 for trend direction
+    sma_50_1d = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
     
-    # Local 12h indicators
+    # Local 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop = calculate_choppiness(high, low, close, period=14)
+    williams_r = calculate_williams_r(high, low, close, period=14)
     
-    # Donchian channels (20 periods on 12h = 10 days)
+    # Donchian channels (20 periods = 3.3 days on 4h)
     donchian_period = 20
     donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
     donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Volume average
+    # Volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -99,7 +91,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 80  # Need enough for Donchian(20) + indicators
+    warmup = 100
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -109,54 +101,61 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(sma_50_1d_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(chop[i]):
+        if np.isnan(williams_r[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION (1d EMA21) ===
-        price_above_1d_ema = close[i] > ema_1d_aligned[i]
-        
-        # === REGIME (Choppiness Index) ===
-        # Skip if too choppy (CHOP > 61.8) — only take new trades in trending markets
-        is_choppy = chop[i] > 61.8
-        
-        if is_choppy and not in_position:
-            signals[i] = 0.0
-            continue
-        
-        # === DONCHIAN BREAKOUT SIGNALS ===
-        current_high = high[i]
-        current_low = low[i]
-        
-        # Previous bar's Donchian values (use i-1 to avoid look-ahead)
+        # Previous bar values for breakout detection
         prev_donchian_high = donchian_high[i - 1] if i > 0 else 0
         prev_donchian_low = donchian_low[i - 1] if i > 0 else 0
+        prev_williams_r = williams_r[i - 1] if i > 0 else -50
         
-        # Volume confirmation (optional but helps)
-        vol_spike = vol_ratio[i] > 1.5
+        # Trend direction
+        price_above_1d_sma = close[i] > sma_50_1d_aligned[i]
+        
+        # Williams %R extremes
+        # %R < -80 = oversold (potential reversal up)
+        # %R > -20 = overbought (potential reversal down)
+        williams_oversold = williams_r[i] < -80
+        williams_overbought = williams_r[i] > -20
+        
+        # Volume confirmation (stricter: 1.8x)
+        vol_spike = vol_ratio[i] > 1.8
+        
+        # Current bar extremes
+        current_high = high[i]
+        current_low = low[i]
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Breakout above Donchian high + uptrend ===
-            # Price closes above previous 20-bar high with volume
-            if current_high > prev_donchian_high and price_above_1d_ema:
-                # Optional volume filter — only require volume if choppy
-                if vol_spike or chop[i] < 61.8:
+            # === LONG: Donchian breakout + Williams oversold + price above trend ===
+            # Price breaks above previous 20-bar high
+            # Williams %R was oversold (exhaustion)
+            # Price in uptrend
+            breakout_long = current_high > prev_donchian_high
+            was_oversold = prev_williams_r < -70  # Check if it WAS oversold before bounce
+            if breakout_long and was_oversold and price_above_1d_sma:
+                if vol_spike:  # Volume confirmation required
                     desired_signal = SIZE
             
-            # === SHORT: Breakdown below Donchian low + downtrend ===
-            if current_low < prev_donchian_low and not price_above_1d_ema:
-                if vol_spike or chop[i] < 61.8:
+            # === SHORT: Donchian breakdown + Williams overbought + price below trend ===
+            # Price breaks below previous 20-bar low
+            # Williams %R was overbought (exhaustion)
+            # Price in downtrend
+            breakout_short = current_low < prev_donchian_low
+            was_overbought = prev_williams_r > -30  # Check if it WAS overbought before drop
+            if breakout_short and was_overbought and not price_above_1d_sma:
+                if vol_spike:  # Volume confirmation required
                     desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.5 ATR trailing) ===
@@ -179,15 +178,26 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TIME-BASED EXIT (hold at least 4 bars = 2 days) ===
+        # === HOLDING PERIOD EXIT (min 8 bars = 1.3 days on 4h) ===
         bars_held = i - entry_bar
         
-        if in_position and bars_held >= 4:
-            # Exit if price crosses Donchian mid-point
-            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2
-            if position_side > 0 and close[i] < donchian_mid:
+        if in_position and bars_held >= 8:
+            # Exit if price reverts to middle of channel
+            if position_side > 0 and close[i] < donchian_mid[i]:
                 desired_signal = 0.0
-            if position_side < 0 and close[i] > donchian_mid:
+            if position_side < 0 and close[i] > donchian_mid[i]:
+                desired_signal = 0.0
+        
+        # === WILLIAMS %R REVERSAL EXIT ===
+        # If %R reaches opposite extreme, close position
+        if in_position and position_side > 0:
+            # Was long, now overbought = exit
+            if williams_r[i] > -20:
+                desired_signal = 0.0
+        
+        if in_position and position_side < 0:
+            # Was short, now oversold = exit
+            if williams_r[i] < -80:
                 desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
