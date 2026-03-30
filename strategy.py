@@ -1,34 +1,90 @@
 #!/usr/bin/env python3
 """
-Experiment #023: 12h Donchian(12) + 1d SMA50 Trend + Volume Spike
+Experiment #023: 4h Donchian + ADX Trend Strength + 12h EMA Direction + Volume
 
-HYPOTHESIS: Multi-timeframe trend following with structural breakout.
-- 1d SMA50: proven trend filter (filters bear traps in 2022)
-- 12h Donchian(12): ~36 raw breakouts/yr after 12h filter
-- Volume spike: institutional confirmation
-- CHOP regime: avoid range-bound choppy periods
+HYPOTHESIS: Combine proven DB winner elements with ADX for better trend strength
+quantification vs CHOP alone.
+
+CORE ELEMENTS (from DB winners):
+1. Donchian(20) breakout - proven structural break detection
+2. ADX > 20 - quantifies trend strength (vs CHOP which only detects range)
+3. 12h EMA direction - HTF trend filter prevents countertrend trades
+4. Volume spike - institutional confirmation
 
 WHY IT SHOULD WORK IN BOTH MARKETS:
-- Bull market: price > SMA50 + breakout = follow the trend
-- Bear market (2022): price < SMA50 = no longs, short breakouts only
-- Range (2025): CHOP filter avoids false breakouts
+- ADX>20 confirms directional momentum exists (not just CHOP<50)
+- 12h EMA filter ensures we're trading WITH HTF trend, not against it
+- 2022 crash was choppy with ADX spikes - this catches those directional moves
+- 2025 bear is range-bound with occasional breaks - ADX filters false breakouts
 
 TRADE COUNT ESTIMATE:
-- 12h bars/4yr ≈ 8760/2 = 2920 bars
-- Donchian(12) breakout: ~1 per 40 bars = ~73 raw signals
-- SMA50 trend filter: ~50% pass = ~36 signals
-- Volume spike: ~60% pass = ~22 trades/symbol (LOW!)
-- CHOP < 60 filter adds: ~70% pass = ~25-30 trades
+- ADX>20: ~40-50% of bars
+- 12h EMA aligned: ~60% of ADX signals = ~24-30 signals
+- Donchian breakout: ~60-70% pass rate = ~15-20 signals
+- Volume spike: ~70% pass rate = ~10-15 trades/symbol/year
+- 4yr total: ~40-60 trades - slightly low but CHOP<50 optional relax
 
-NEED TO LOOSEN: Use Donchian(8) to get more breakouts
+Adding CHOP<50 as secondary filter to get into 60-80 range.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_1d_sma50_vol_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_adx_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
+
+def calculate_adx(high, low, close, period=14):
+    """
+    ADX (Average Directional Index) - vectorized approximation
+    Measures trend strength, NOT direction.
+    ADX > 25 = trending, ADX < 20 = ranging
+    """
+    n = len(close)
+    
+    # Calculate True Range and Directional Movement
+    tr = np.zeros(n, dtype=np.float64)
+    plus_dm = np.zeros(n, dtype=np.float64)
+    minus_dm = np.zeros(n, dtype=np.float64)
+    
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], 
+                    abs(high[i] - close[i-1]), 
+                    abs(low[i] - close[i-1]))
+        
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+    
+    # Smooth with Wilder's method (EWM with alpha=1/period)
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # Calculate DI+ and DI-
+    plus_di = np.zeros(n, dtype=np.float64)
+    minus_di = np.zeros(n, dtype=np.float64)
+    
+    for i in range(n):
+        if atr[i] > 1e-10:
+            plus_di[i] = 100 * plus_dm_smooth[i] / atr[i]
+            minus_di[i] = 100 * minus_dm_smooth[i] / atr[i]
+    
+    # Calculate DX
+    dx = np.zeros(n, dtype=np.float64)
+    for i in range(n):
+        di_sum = plus_di[i] + minus_di[i]
+        if di_sum > 1e-10:
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
+    
+    # Calculate ADX as smoothed DX
+    adx = pd.Series(dx).ewm(span=period, min_periods=period * 2, adjust=False).mean().values
+    
+    return adx, plus_di, minus_di
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -46,7 +102,8 @@ def calculate_atr(high, low, close, period=14):
 
 def calculate_chop(high, low, close, period=14):
     """
-    Choppiness Index (CHOP) - vectorized
+    Choppiness Index (CHOP) - secondary regime filter
+    CHOP > 61.8 = choppy, CHOP < 50 = trending
     """
     n = len(close)
     chop = np.full(n, np.nan)
@@ -73,20 +130,19 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d SMA50 for trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values.astype(np.float64)
-    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    # Align to 12h (shift by 1 to avoid look-ahead)
-    sma50_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
+    # === HTF: 12h EMA for trend direction (call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # === Local 12h indicators ===
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop = calculate_chop(high, low, close, period=14)
+    adx_14, plus_di, minus_di = calculate_adx(high, low, close, period=14)
+    chop_14 = calculate_chop(high, low, close, period=14)
     
-    # Donchian Channel(8) - price structure for 12h
-    donchian_upper = pd.Series(high).rolling(window=8, min_periods=8).max().values
-    donchian_lower = pd.Series(low).rolling(window=8, min_periods=8).min().values
+    # Donchian Channel(20) for breakout structure
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume average for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -103,7 +159,7 @@ def generate_signals(prices):
     entry_atr = 0.0
     entry_bar = 0
     
-    warmup = 60  # Enough for Donchian(8), ATR14, CHOP14, 1d SMA50
+    warmup = 60  # Need enough for ADX, EMA12h alignment
     
     for i in range(warmup, n):
         # NaN checks
@@ -111,7 +167,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(chop[i]):
+        if np.isnan(adx_14[i]):
             signals[i] = 0.0
             continue
         
@@ -119,23 +175,25 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma50_aligned[i]):
+        if np.isnan(ema_12h_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # === REGIME FILTER: CHOP < 58 (not extremely choppy) ===
-        choppy_market = chop[i] > 58.0
+        # === REGIME FILTERS ===
+        # ADX > 20: trend has strength
+        trend_strong = adx_14[i] > 20.0
         
-        # === TREND FILTER: 1d SMA50 ===
-        # Bull trend: price > SMA50
-        bull_trend = close[i] > sma50_aligned[i]
-        # Bear trend: price < SMA50
-        bear_trend = close[i] < sma50_aligned[i]
+        # CHOP < 55: not choppy (relaxed from 50 to allow more trades)
+        not_choppy = chop_14[i] < 55.0 if not np.isnan(chop_14[i]) else True
+        
+        # === HTF TREND DIRECTION (12h EMA aligned) ===
+        htf_bullish = close[i] > ema_12h_aligned[i]
+        htf_bearish = close[i] < ema_12h_aligned[i]
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.4
         
-        # === DONCHIAN(8) BREAKOUT (prior bar's range) ===
+        # === DONCHIAN BREAKOUT (prior bar's range) ===
         prev_upper = donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else np.nan
         prev_lower = donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else np.nan
         
@@ -145,7 +203,7 @@ def generate_signals(prices):
         # Bearish breakout: close below prior bar's lower channel
         bearish_breakout = (not np.isnan(prev_lower) and close[i] < prev_lower)
         
-        # === MINIMUM HOLD: 3 bars (~1.5 days) ===
+        # === MINIMUM HOLD: 3 bars ===
         min_hold = (i - entry_bar) >= 3
         
         # === EXITS ===
@@ -173,13 +231,13 @@ def generate_signals(prices):
         
         # === NEW POSITIONS ===
         if not in_position:
-            # Skip if choppy market
-            if choppy_market:
+            # Need regime + HTF alignment + breakout + volume
+            if not (trend_strong and not_choppy):
                 signals[i] = 0.0
                 continue
             
-            # LONG: Bull trend + Bullish breakout + volume spike
-            if bullish_breakout and vol_spike and bull_trend:
+            # LONG: HTF bullish + bullish breakout + volume spike
+            if htf_bullish and bullish_breakout and vol_spike:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
@@ -187,8 +245,8 @@ def generate_signals(prices):
                 entry_bar = i
                 signals[i] = SIZE
             
-            # SHORT: Bear trend + Bearish breakout + volume spike
-            elif bearish_breakout and vol_spike and bear_trend:
+            # SHORT: HTF bearish + bearish breakout + volume spike
+            elif htf_bearish and bearish_breakout and vol_spike:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
