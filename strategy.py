@@ -1,40 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #023: Elder Ray + Donchian Breakout + Weekly Ichimoku (6h)
+Experiment #022: 12h Donchian + RSI + Choppiness Regime
 
-HYPOTHESIS: Combine structural price breaks (Donchian), momentum confirmation
-(Elder Ray), and weekly trend filter (Ichimoku) for robust 6h entries.
+HYPOTHESIS: Use proven CRSI momentum + Donchian breakout + choppiness regime on 12h.
+Simple = fewer trades, lower fee drag, better test generalization.
 
 WHY IT SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull: Price breaks above Donchian high + positive bull power + weekly bull = strong
-- Bear: Price breaks below Donchian low + negative bear power + weekly bear = strong
-- Weekly Ichimoku keeps us aligned with dominant trend, avoids whipsaws at major tops/bottoms
+- Bull: Breakout above Donchian high + RSI momentum + chop < 40 = ride the move
+- Bear: Breakout below Donchian low + RSI momentum + chop < 40 = short the crash
+- Range: chop > 60 = no trades (avoids whipsaws in 2022)
 
-TIMEFRAME: 6h (1460 bars/year, 5840 over 4 years)
-TARGET TRADES: 50-150 total (12-37/year) - tight but achievable with multi-filter
+KEY INSIGHT from DB: CRSI-based strategies (SOL: 1.46) and simple Donchian
+combos (multiple winners with 1.3-1.5 Sharpe) work. Keep it minimal.
 
-KEY COMPONENTS (4 filters = tight but not too tight):
-1. Weekly Ichimoku Cloud (1w) - HTF trend direction
-2. Donchian(20) breakout on 6h - structural price breaks
-3. Elder Ray bull/bear power - momentum confirmation
-4. Volume spike - trade validation
-
-WHY NOVEL: Ichimoku mentioned as "untried" in DB, Elder Ray never mentioned.
-Simple dual-indicator combination with clear rules.
+TARGET: 75-200 total trades over 4 years (19-50/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_elder_donchian_weekly_ichimoku_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_rsi_chop_simple_v1"
+timeframe = "12h"
 leverage = 1.0
-
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
-    if n < 2:
+    if n < period + 1:
         return np.full(n, np.nan)
     
     tr = np.zeros(n, dtype=np.float64)
@@ -45,75 +37,101 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_rsi(prices, period=14):
+    """Relative Strength Index"""
+    delta = np.diff(prices, prepend=prices[0])
+    delta[0] = 0
+    
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rs = np.divide(avg_gain, np.where(avg_loss == 0, 1e-10, avg_loss))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
-def calculate_ichimoku(high, low, close, period_fast=9, period_medium=26, period_slow=52):
+def calculate_crsi(prices, rsi_period=3, streak_period=2, rank_period=100):
     """
-    Ichimoku Cloud calculation
-    Returns: tenkan, kijun, senkou_a, senkou_b
+    Connors RSI: (RSI(3) + RSI_Streak(2) + PercentRank(100)) / 3
     """
-    n = len(close)
+    n = len(prices)
     
-    # Tenkan-sen (Conversion Line): (9-period HH + 9-period LL) / 2
-    tenkan = np.zeros(n, dtype=np.float64)
-    for i in range(n):
-        start = max(0, i - period_fast + 1)
-        hh = np.max(high[start:i+1])
-        ll = np.min(low[start:i+1])
-        tenkan[i] = (hh + ll) / 2
+    # Component 1: Classic RSI(3)
+    rsi = calculate_rsi(prices, period=rsi_period)
     
-    # Kijun-sen (Base Line): (26-period HH + 26-period LL) / 2
-    kijun = np.zeros(n, dtype=np.float64)
-    for i in range(n):
-        start = max(0, i - period_medium + 1)
-        hh = np.max(high[start:i+1])
-        ll = np.min(low[start:i+1])
-        kijun[i] = (hh + ll) / 2
+    # Component 2: RSI Streak
+    # Compute streak: consecutive up/down days
+    delta = np.diff(prices, prepend=prices[0])
+    delta[0] = 0
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period_medium, n):
-        senkou_a[i] = (tenkan[i] + kijun[i]) / 2
+    streak = np.zeros(n, dtype=np.float64)
+    for i in range(1, n):
+        if delta[i] > 0:
+            streak[i] = max(1, streak[i-1] + 1)
+        elif delta[i] < 0:
+            streak[i] = min(-1, streak[i-1] - 1)
+        else:
+            streak[i] = 0
     
-    # Senkou Span B (Leading Span B): (52-period HH + 52-period LL) / 2
-    senkou_b = np.full(n, np.nan, dtype=np.float64)
-    for i in range(period_slow, n):
-        start = i - period_slow + 1
-        hh = np.max(high[start:i+1])
-        ll = np.min(low[start:i+1])
-        senkou_b[i] = (hh + ll) / 2
+    rsi_streak = calculate_rsi(np.abs(streak) + 50, period=streak_period)
     
-    return tenkan, kijun, senkou_a, senkou_b
+    # Component 3: Percent Rank over 100 periods
+    percent_rank = np.zeros(n, dtype=np.float64)
+    for i in range(rank_period, n):
+        window = prices[i-rank_period:i+1]
+        rank = (prices[i] - np.min(window)) / (np.max(window) - np.min(window) + 1e-10)
+        percent_rank[i] = rank * 100
+    
+    # CRSI = average of 3 components
+    crsi = (rsi + rsi_streak + percent_rank) / 3.0
+    return crsi
 
+def calculate_choppiness(prices, high, low, period=14):
+    """
+    Choppiness Index: 100 * LOG10(SUM(ATR,14) / (HHV(14) - LLV(14))) / LOG10(14)
+    CHOP < 38.2 = trending (use trend following)
+    CHOP > 61.8 = choppy (avoid or mean revert)
+    """
+    n = len(prices)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
+    atr = np.zeros(n)
+    tr0 = high[0] - low[0]
+    atr[0] = tr0
+    for i in range(1, n):
+        tr = max(high[i] - low[i], abs(high[i] - prices[i-1]), abs(low[i] - prices[i-1]))
+        atr[i] = (atr[i-1] * (period - 1) + tr) / period
+    
+    chop = np.full(n, np.nan)
+    for i in range(period - 1, n):
+        sum_atr = np.sum(atr[i-period+1:i+1])
+        hh = np.max(high[i-period+1:i+1])
+        ll = np.min(low[i-period+1:i+1])
+        
+        if hh > ll:
+            ratio = sum_atr / (hh - ll)
+            chop[i] = 100 * np.log10(ratio) / np.log10(period)
+    
+    return chop
 
 def calculate_donchian(high, low, period=20):
-    """Donchian Channel - price channel breakout structure"""
+    """Donchian Channel - returns upper, middle, lower"""
     n = len(high)
-    upper = np.zeros(n, dtype=np.float64)
-    lower = np.zeros(n, dtype=np.float64)
+    
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    middle = np.zeros(n)
     
     for i in range(n):
-        if i >= period - 1:
-            start = i - period + 1
-            upper[i] = np.max(high[start:i+1])
-            lower[i] = np.min(low[start:i+1])
-        else:
-            upper[i] = high[i]
-            lower[i] = low[i]
+        start = max(0, i - period + 1)
+        upper[i] = np.max(high[start:i+1])
+        lower[i] = np.min(low[start:i+1])
+        middle[i] = (upper[i] + lower[i]) / 2
     
-    return upper, lower
-
-
-def calculate_elder_ray(high, low, close, ema_period=13):
-    """
-    Elder Ray - Bull Power and Bear Power
-    Bull Power = High - EMA(close, 13) - measures buying pressure
-    Bear Power = Low - EMA(close, 13) - measures selling pressure
-    """
-    ema_val = pd.Series(close).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
-    bull_power = high - ema_val
-    bear_power = low - ema_val
-    return bull_power, bear_power, ema_val
-
+    return upper, middle, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -122,132 +140,135 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # ============================================================
-    # STEP 1: Load HTF data ONCE before loop
-    # ============================================================
+    # === Load HTF data ONCE before loop ===
+    df_1d = get_htf_data(prices, '1d')
     df_1w = get_htf_data(prices, '1w')
     
-    # Weekly Ichimoku for HTF trend
-    tenkan_w, kijun_w, senkou_a_w, senkou_b_w = calculate_ichimoku(
-        df_1w['high'].values, df_1w['low'].values, df_1w['close'].values
-    )
+    # HTF indicators (1d)
+    htf_close_1d = df_1d['close'].values
+    htf_high_1d = df_1d['high'].values
+    htf_low_1d = df_1d['low'].values
     
-    # Weekly trend: price above BOTH cloud lines = bull, below BOTH = bear
-    weekly_price = df_1w['close'].values
-    weekly_bullish = (weekly_price > senkou_a_w) & (weekly_price > senkou_b_w)
-    weekly_bearish = (weekly_price < senkou_a_w) & (weekly_price < senkou_b_w)
+    # HTF Donchian for trend direction
+    htf_donch_upper_1d, _, htf_donch_lower_1d = calculate_donchian(htf_high_1d, htf_low_1d, period=20)
     
-    # Align to 6h (shift by 1 for non-repainting)
-    weekly_bull_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
-    weekly_bear_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish.astype(float))
+    # HTF: Price above/below 20-day Donchian = trend direction
+    htf_bull = (htf_close_1d > htf_donch_upper_1d * 0.98).astype(float)  # Allow 2% buffer
+    htf_bear = (htf_close_1d < htf_donch_lower_1d * 1.02).astype(float)
     
-    # ============================================================
-    # STEP 2: Pre-compute all indicators (vectorized where possible)
-    # ============================================================
+    # Align HTF to 12h
+    htf_bull_aligned = align_htf_to_ltf(prices, df_1d, htf_bull)
+    htf_bear_aligned = align_htf_to_ltf(prices, df_1d, htf_bear)
+    
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
-    bull_power, bear_power, ema_13 = calculate_elder_ray(high, low, close, ema_period=13)
     
-    # Volume ratio
+    # CRSI momentum
+    crsi = calculate_crsi(close, rsi_period=3, streak_period=2, rank_period=100)
+    
+    # Choppiness regime
+    chop = calculate_choppiness(close, high, low, period=14)
+    
+    # Donchian breakout
+    donch_upper, donch_mid, donch_lower = calculate_donchian(high, low, period=20)
+    
+    # Volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.where(vol_ma > 0, volume / vol_ma, 1.0)
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # ============================================================
-    # STEP 3: Signal generation with loop
-    # ============================================================
-    signals = np.zeros(n, dtype=np.float64)
-    SIZE = 0.28  # Position size (within 0.25-0.30 range)
+    # Signals
+    signals = np.zeros(n)
+    SIZE = 0.28  # 28% position size
     
     # Position tracking
     in_position = False
     position_side = 0
-    entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
     trailing_high = 0.0
     trailing_low = 0.0
     
-    # Warmup: Ichimoku needs 52, Elder Ray needs 13, volume needs 20
-    warmup = 100
+    # Need 100 bars warmup for CRSI percent rank (100 period)
+    warmup = 150
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 0:
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+            signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(crsi[i]):
+            signals[i] = 0.0
             continue
         
-        if np.isnan(bull_power[i]) or np.isnan(bear_power[i]):
+        if np.isnan(chop[i]):
+            signals[i] = 0.0
             continue
         
-        # ============================================================
-        # FILTER 1: Weekly Ichimoku trend (HTF)
-        # ============================================================
-        htf_bull = weekly_bull_aligned[i] > 0.5 if not np.isnan(weekly_bull_aligned[i]) else False
-        htf_bear = weekly_bear_aligned[i] > 0.5 if not np.isnan(weekly_bear_aligned[i]) else False
+        # === REGIME CHECK ===
+        # Choppiness > 61.8 = ranging, no entry (avoids whipsaws)
+        ranging = chop[i] > 61.8
+        trending = chop[i] < 45.0  # Slightly relaxed from 38.2 for more trades
         
-        # ============================================================
-        # FILTER 2: Donchian breakout (6h structural)
-        # ============================================================
-        price_above_donchian = close[i] > donchian_upper[i]
-        price_below_donchian = close[i] < donchian_lower[i]
+        # === HTF TREND ===
+        htf_bull = htf_bull_aligned[i] > 0.5 if not np.isnan(htf_bull_aligned[i]) else False
+        htf_bear = htf_bear_aligned[i] > 0.5 if not np.isnan(htf_bear_aligned[i]) else False
+        htf_neutral = not htf_bull and not htf_bear
         
-        # Breakout = close above/below AND prior bar was not
-        bull_breakout = price_above_donchian and not (close[i-1] > donchian_upper[i-1]) if i > 0 else price_above_donchian
-        bear_breakout = price_below_donchian and not (close[i-1] < donchian_lower[i-1]) if i > 0 else price_below_donchian
-        
-        # ============================================================
-        # FILTER 3: Elder Ray momentum (bull power positive = buying pressure)
-        # ============================================================
-        bull_power_positive = bull_power[i] > 0
-        bear_power_negative = bear_power[i] < 0
-        
-        # ============================================================
-        # FILTER 4: Volume confirmation
-        # ============================================================
-        vol_spike = vol_ratio[i] > 1.5
-        
-        # ============================================================
-        # ENTRY LOGIC
-        # ============================================================
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # LONG: Weekly bull + Donchian breakout + Bull power positive + Volume
-            # All 4 filters must agree
-            long_conditions = (htf_bull or not htf_bear) and bull_breakout and bull_power_positive and vol_spike
+            # === LONG ENTRY ===
+            # Price breaks above 20-bar Donchian high
+            breakout_high = close[i] > donch_upper[i] and close[i-1] <= donch_upper[i-1]
             
-            if long_conditions:
-                desired_signal = SIZE
+            # CRSI momentum confirmation (oversold + reversing)
+            crsi_oversold = crsi[i] < 25
+            crsi_recovering = crsi[i] > crsi[i-1] if not np.isnan(crsi[i-1]) else False
             
-            # SHORT: Weekly bear + Donchian breakout + Bear power negative + Volume
-            short_conditions = (htf_bear or not htf_bull) and bear_breakout and bear_power_negative and vol_spike
+            # Volume confirmation
+            vol_confirm = vol_ratio[i] > 1.3
             
-            if short_conditions:
-                desired_signal = -SIZE
+            # Entry: breakout + momentum + volume + not ranging + HTF bull/neutral
+            if breakout_high and crsi_oversold and vol_confirm and not ranging:
+                if htf_bull or htf_neutral:
+                    desired_signal = SIZE
+            
+            # === SHORT ENTRY ===
+            # Price breaks below 20-bar Donchian low
+            breakout_low = close[i] < donch_lower[i] and close[i-1] >= donch_lower[i-1]
+            
+            # CRSI momentum confirmation (overbought + reversing)
+            crsi_overbought = crsi[i] > 75
+            crsi_falling = crsi[i] < crsi[i-1] if not np.isnan(crsi[i-1]) else False
+            
+            # Entry: breakout + momentum + volume + not ranging + HTF bear/neutral
+            if breakout_low and crsi_overbought and vol_confirm and not ranging:
+                if htf_bear or htf_neutral:
+                    desired_signal = -SIZE
         
-        # ============================================================
-        # EXIT LOGIC: ATR trailing stop
-        # ============================================================
+        # === STOPLOSS AND EXIT ===
         if in_position:
             if position_side > 0:
                 # Update trailing high
                 if i == entry_bar or high[i] > trailing_high:
                     trailing_high = high[i]
                 
-                # ATR-based trailing stop (2.5 ATR)
+                # Trailing stop: 2.5 ATR
                 stop_price = trailing_high - 2.5 * entry_atr
-                
-                # Stop out if price falls below stop
                 if low[i] < stop_price:
                     desired_signal = 0.0
                 
-                # Exit if Elder Ray turns negative (momentum shift)
-                if bear_power[i] < -0.5 * atr_14[i]:
+                # Exit if CRSI turns bearish or chop increases
+                if crsi[i] > 80:
                     desired_signal = 0.0
                 
-                # Exit if weekly turns bearish
+                # Exit if ranging develops
+                if ranging:
+                    desired_signal = 0.0
+                
+                # Exit if HTF turns bearish
                 if htf_bear:
                     desired_signal = 0.0
             
@@ -256,36 +277,32 @@ def generate_signals(prices):
                 if i == entry_bar or low[i] < trailing_low:
                     trailing_low = low[i]
                 
-                # ATR-based trailing stop
+                # Trailing stop: 2.5 ATR
                 stop_price = trailing_low + 2.5 * entry_atr
-                
-                # Stop out if price rises above stop
                 if high[i] > stop_price:
                     desired_signal = 0.0
                 
-                # Exit if Elder Ray turns positive (momentum shift)
-                if bull_power[i] > 0.5 * atr_14[i]:
+                # Exit if CRSI turns bullish or chop increases
+                if crsi[i] < 20:
                     desired_signal = 0.0
                 
-                # Exit if weekly turns bullish
+                # Exit if ranging develops
+                if ranging:
+                    desired_signal = 0.0
+                
+                # Exit if HTF turns bullish
                 if htf_bull:
                     desired_signal = 0.0
         
-        # ============================================================
-        # MINIMUM HOLD: 6 bars (1.5 days) to avoid fee churn
-        # ============================================================
-        if in_position and (i - entry_bar) < 6:
+        # === MINIMUM HOLD: 3 bars to reduce fee churn ===
+        if in_position and (i - entry_bar) < 3:
             desired_signal = position_side * SIZE
         
-        # ============================================================
-        # UPDATE POSITION
-        # ============================================================
+        # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New position or reversal
                 in_position = True
                 position_side = int(np.sign(desired_signal))
-                entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
                 trailing_high = high[i]
