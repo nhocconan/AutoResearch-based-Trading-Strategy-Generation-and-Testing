@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 12h Donchian Choppiness Regime
+Experiment #024: 4h Williams Alligator + 1d SMA Trend + Donchian Breakout + Volume
 
-HYPOTHESIS: Donchian(20) breakout on 12h provides clean price structure
-signals. Combined with:
-- 1d SMA for macro trend (prevents counter-trend trades)
-- Choppiness Index for regime detection (only trade when CHOP < 50)
-- Volume confirmation (filters false breakouts)
-- ATR stoploss (2.5x) for risk management
+HYPOTHESIS: Williams Alligator (EMA 5/8/13) provides smooth trend detection.
+Combined with 1d SMA macro trend filter and 4h Donchian(20) breakout confirmation,
+this captures the middle of trends without chasing false breakouts.
+Volume spike confirms institutional participation.
 
-This is the proven pattern from DB: test Sharpe 1.49, 107 trades on SOL.
+WHY IT SHOULD WORK:
+- 2021 bull: Alligator spread + Donchian breakout in uptrend = strong longs
+- 2022 bear: Alligator convergence + Donchian breakdown in downtrend = strong shorts  
+- 2025 range: Alligator coiled = no trades (avoid whipsaws)
 
-Expected: 60-120 total trades over 4 years (15-30/year). Size: 0.30.
+EXPECTED TRADES: 100-200 total over 4 years (25-50/year)
+Size: 0.30
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_chop_vol_v2"
-timeframe = "12h"
+name = "mtf_4h_alligator_donchian_vol_1d_v1"
+timeframe = "4h"
 leverage = 1.0
+
+def calculate_ema(data, period):
+    """Exponential Moving Average"""
+    return pd.Series(data).ewm(span=period, min_periods=period, adjust=False).mean().values
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -35,41 +41,11 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness_index(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP)
-    CHOP > 61.8 = ranging market (no trend)
-    CHOP < 38.2 = trending market (follow trend)
-    Formula: 100 * log10(sum(ATR,14) / (max(high,14) - min(low,14))) / log10(14)
-    """
-    n = len(close)
-    chop = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        # Sum of ATR over period
-        tr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else 0)
-            tr_sum += tr
-        
-        # Highest high over period
-        high_max = max(high[i - period + 1:i + 1])
-        
-        # Lowest low over period
-        low_min = min(low[i - period + 1:i + 1])
-        
-        range_hl = high_max - low_min
-        
-        if range_hl > 1e-10:
-            chop[i] = 100 * np.log10(tr_sum / range_hl) / np.log10(period)
-    
-    return chop
-
 def calculate_donchian(high, low, period=20):
-    """Donchian channel - upper = highest high, lower = lowest low"""
+    """Donchian channel"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    middle = (upper + pd.Series(low).rolling(window=period, min_periods=period).min().values) / 2
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    middle = (upper + lower) / 2.0
     return upper, middle, lower
 
 def generate_signals(prices):
@@ -79,79 +55,78 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === Load HTF data ONCE before loop ===
+    # === HTF: 1d SMA for macro trend (call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    
-    # 1d SMA 50 for macro trend
-    sma_1d_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    sma_1d_50 = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
     sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_50)
     
-    # === 12h indicators ===
-    atr_14 = calculate_atr(high, low, close, period=14)
-    chop_14 = calculate_choppiness_index(high, low, close, period=14)
+    # === Williams Alligator (EMA 5/8/13) ===
+    jaw = calculate_ema(close, 13)    # Blue line
+    teeth = calculate_ema(close, 8)  # Red line  
+    lips = calculate_ema(close, 5)   # Green line
     
-    # Donchian(20) - price structure
-    dc_upper_20, dc_middle_20, dc_lower_20 = calculate_donchian(high, low, period=20)
+    # === Donchian 20 for breakout confirmation ===
+    dc_upper, dc_middle, dc_lower = calculate_donchian(high, low, period=20)
     
-    # Donchian(10) - faster breakout for confirmation
-    dc_upper_10, _, dc_lower_10 = calculate_donchian(high, low, period=10)
-    
-    # Volume: 20-bar moving average
+    # === Volume ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
     
-    # === Signal array ===
-    signals = np.zeros(n, dtype=np.float64)
+    # === ATR for stoploss ===
+    atr_14 = calculate_atr(high, low, close, period=14)
+    
+    # === Signals ===
+    signals = np.zeros(n)
     SIZE = 0.30
     
-    # Position state
+    # Position tracking
     in_position = False
     position_side = 0
-    entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 80  # Need at least 80 bars for 20-bar Donchian + 50 SMA
+    warmup = 50
     
     for i in range(warmup, n):
-        # NaN checks
+        # NaN check
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
-        if np.isnan(chop_14[i]) or np.isnan(sma_1d_aligned[i]):
+        
+        if np.isnan(sma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # === Update trailing stop tracking ===
+        # Update highest/lowest for trailing stop
         if in_position:
             if position_side > 0:
                 highest_since_entry = max(highest_since_entry, high[i])
             else:
                 lowest_since_entry = min(lowest_since_entry, low[i])
         
-        # === Regime filter: CHOP < 50 = trending, ok to trade ===
-        is_trending = chop_14[i] < 50.0
+        # === ALLIGATOR TREND ===
+        # Bullish: Lips > Teeth > Jaw (alligator mouth open up)
+        alligator_bullish = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
+        # Bearish: Lips < Teeth < Jaw (alligator mouth open down)
+        alligator_bearish = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
         
-        # === Macro trend from 1d SMA ===
+        # === 1D SMA TREND ===
         htf_bullish = close[i] > sma_1d_aligned[i]
         htf_bearish = close[i] < sma_1d_aligned[i]
         
-        # === Volume confirmation: 1.3x average ===
-        vol_confirm = vol_ratio[i] >= 1.3
+        # === DONCHIAN BREAKOUT ===
+        donchian_broken_up = close[i] > dc_upper[i] if not np.isnan(dc_upper[i]) else False
+        donchian_broken_down = close[i] < dc_lower[i] if not np.isnan(dc_lower[i]) else False
         
-        # === Check for new 12h breakout ===
-        # Upper breakout: price crosses above 20-bar high
-        upper_breakout = close[i] > dc_upper_20[i] if not np.isnan(dc_upper_20[i]) else False
-        # Lower breakout: price crosses below 20-bar low
-        lower_breakout = close[i] < dc_lower_20[i] if not np.isnan(dc_lower_20[i]) else False
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.5
         
-        # Confirm with faster Donchian
-        upper_confirm = close[i] > dc_upper_10[i] if not np.isnan(dc_upper_10[i]) else False
-        lower_confirm = close[i] < dc_lower_10[i] if not np.isnan(dc_lower_10[i]) else False
+        # === MINIMUM HOLD: 2 bars (8h) ===
+        min_hold = (i - entry_bar) >= 2
         
-        # === ATR stoploss check ===
+        # === ATR TRAILING STOP (2.5x ATR) ===
         def check_atr_stop():
             if not in_position:
                 return False
@@ -160,17 +135,14 @@ def generate_signals(prices):
             else:
                 return high[i] > (lowest_since_entry + 2.5 * entry_atr)
         
-        # === MIN HOLD: 2 bars (24h) to avoid whipsaws ===
-        min_hold = (i - entry_bar) >= 2
-        
         # === EXITS ===
         if in_position:
             stop_hit = check_atr_stop()
             
-            # Trend reversal exits
-            if position_side > 0 and htf_bearish and min_hold:
+            # Opposite trend exit
+            if position_side > 0 and (htf_bearish or not alligator_bullish) and min_hold:
                 stop_hit = True
-            if position_side < 0 and htf_bullish and min_hold:
+            if position_side < 0 and (htf_bullish or not alligator_bearish) and min_hold:
                 stop_hit = True
             
             if stop_hit:
@@ -178,32 +150,28 @@ def generate_signals(prices):
                 in_position = False
                 position_side = 0
             else:
-                # Maintain position
                 signals[i] = position_side * SIZE
         
-        # === NEW ENTRIES ===
+        # === NEW POSITIONS ===
         if not in_position:
-            # LONG: Upper breakout + trending + volume + 1d uptrend
-            if upper_breakout and upper_confirm and is_trending and vol_confirm and htf_bullish:
+            # LONG: All bullish + 1d uptrend + Donchian breakout + volume
+            if alligator_bullish and htf_bullish and donchian_broken_up and vol_spike:
                 in_position = True
                 position_side = 1
-                entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
                 highest_since_entry = high[i]
                 signals[i] = SIZE
             
-            # SHORT: Lower breakout + trending + volume + 1d downtrend
-            elif lower_breakout and lower_confirm and is_trending and vol_confirm and htf_bearish:
+            # SHORT: All bearish + 1d downtrend + Donchian breakdown + volume
+            elif alligator_bearish and htf_bearish and donchian_broken_down and vol_spike:
                 in_position = True
                 position_side = -1
-                entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
                 lowest_since_entry = low[i]
                 signals[i] = -SIZE
             
-            # No signal
             else:
                 signals[i] = 0.0
     
