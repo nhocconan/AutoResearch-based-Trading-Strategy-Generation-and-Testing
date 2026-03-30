@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #024: Dual-Mode Camarilla + Choppiness Regime (4h)
+Experiment #023: 6h Volume Imbalance Reversal + ATR Regime
 
-HYPOTHESIS: Markets switch between TRENDING and CHOPPING regimes.
-- CHOPPING (CHOP > 61.8): Mean-revert to Camarilla S3/R3 bounds
-- TRENDING (CHOP < 38.2): Breakout trades with volume confirmation
-- This dual-mode approach adapts to both bull (2021) and bear (2022) markets
+HYPOTHESIS: Volume imbalance (taker_buy_volume/total_volume) combined with 
+volatility expansion captures institutional moves without requiring exact 
+price levels like Donchian.
 
-WHY IT SHOULD WORK:
-- Camarilla pivot levels are mathematically derived support/resistance
-- Choppiness Index is a proven regime detector (DB winner: test_sharpe=1.471)
-- Volume spike confirms momentum validity
-- Simple 2-3 conditions = achievable trade frequency
-- ATR-based stoploss manages risk in volatile markets
+KEY DIFFERENCE from failed strategies:
+- Donchian requires price to reach specific level → 0 trades
+- Volume imbalance triggers on volume profile changes → regular occurrences
+- ATR ratio confirms volatility expansion → filters noise
 
-EXPECTED TRADE COUNT: 100-200 total over 4 years (25-50/year)
+WHY IT WORKS IN BOTH BULL AND BEAR:
+- Bull: Taker buy imbalance + ATR expansion = institutional accumulation
+- Bear: Same setup = weak longs trapped, reversal to short
+- 1d EMA filter ensures we fade against the correct trend direction
+
+EXPECTED TRADES: 50-130 over 4 years (12-33/year) — within target range.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_camarilla_chop_regime_v1"
-timeframe = "4h"
+name = "mtf_6h_vol_imbalance_atr_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -38,102 +40,68 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_camarilla_pivots(high, low, close, open_price=None):
-    """
-    Camarilla Pivot Levels (classic 8 levels)
-    R4 = close + (high - low) * 1.1/2
-    R3 = close + (high - low) * 1.1/4
-    R2 = close + (high - low) * 1.1/6
-    R1 = close + (high - low) * 1.1/12
-    S1 = close - (high - low) * 1.1/12
-    S2 = close - (high - low) * 1.1/6
-    S3 = close - (high - low) * 1.1/4
-    S4 = close - (high - low) * 1.1/2
-    """
-    n = len(close)
-    pivot_range = high - low
-    
-    r4 = close + pivot_range * 0.55
-    r3 = close + pivot_range * 0.275
-    r2 = close + pivot_range * 0.183
-    r1 = close + pivot_range * 0.092
-    s1 = close - pivot_range * 0.092
-    s2 = close - pivot_range * 0.183
-    s3 = close - pivot_range * 0.275
-    s4 = close - pivot_range * 0.55
-    
-    return r4, r3, r2, r1, s1, s2, s3, s4
-
-def calculate_choppiness_index(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP)
-    CHOP = 100 * (log10(sum(ATR(1), period)) / log10(period * (high_rolling - low_rolling)))
-    CHOP > 61.8 = choppy/range market
-    CHOP < 38.2 = trending market
-    """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    atr = np.zeros(n)
-    atr[0] = high[0] - low[0]
-    for i in range(1, n):
-        atr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    chop = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        atr_sum = np.sum(atr[i-period+1:i+1])
-        high_max = np.max(high[i-period+1:i+1])
-        low_min = np.min(low[i-period+1:i+1])
-        range_val = high_max - low_min
-        
-        if range_val > 1e-10 and atr_sum > 1e-10:
-            chop[i] = 100 * (np.log10(atr_sum) / np.log10(range_val * period))
-    
-    return chop
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
-    open_arr = prices["open"].values
+    taker_buy = prices["taker_buy_volume"].values
     n = len(close)
     
-    # Load HTF data ONCE before loop
+    # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # === HTF indicators (1d) ===
-    # HTF Camarilla pivots for structure
-    r4_1d, r3_1d, r2_1d, r1_1d, s1_1d, s2_1d, s3_1d, s4_1d = calculate_camarilla_pivots(
-        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
-    )
+    # 1d SMA50 for trend direction
+    sma50_1d = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
     
-    # Align HTF pivots to 4h
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    # 1d ATR for relative filtering
+    atr_1d = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=14)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
-    # === Local 4h indicators ===
+    # 1d Volume MA for comparison
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # === 6h Indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
+    atr_30 = calculate_atr(high, low, close, period=30)
     
-    # Choppiness Index on 4h
-    chop_14 = calculate_choppiness_index(high, low, close, period=14)
+    # ATR ratio: current volatility vs recent
+    atr_ratio = atr_14 / np.where(atr_30 > 0, atr_30, 1)
     
-    # Volume average
+    # Volume imbalance: taker buy / total volume
+    vol_imbalance = taker_buy / np.where(volume > 0, volume, 1)
+    
+    # Volume MA (20 bars)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # Local EMA for short-term trend
-    ema_8 = pd.Series(close).ewm(span=8, min_periods=8, adjust=False).mean().values
+    # RSI(14) for momentum
+    def calc_rsi(prices_arr, period=14):
+        n = len(prices_arr)
+        deltas = np.zeros(n)
+        deltas[1:] = prices_arr[1:] - prices_arr[:-1]
+        
+        gains = np.where(deltas > 0, deltas, 0)
+        losses = np.where(deltas < 0, -deltas, 0)
+        
+        avg_gain = pd.Series(gains).ewm(span=period, min_periods=period, adjust=False).mean().values
+        avg_loss = pd.Series(losses).ewm(span=period, min_periods=period, adjust=False).mean().values
+        
+        rs = avg_gain / np.where(avg_loss > 0, avg_loss, 1)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
     
-    # === Signals ===
+    rsi_14 = calc_rsi(close, period=14)
+    
+    # EMA(21) for local trend
+    ema_21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
+    
+    # === Signal Generation ===
     signals = np.zeros(n)
     SIZE = 0.30  # 30% position size
-    CHOP_CHOPPY = 61.8
-    CHOP_TRENDING = 38.2
     
     # Position tracking
     in_position = False
@@ -144,7 +112,10 @@ def generate_signals(prices):
     trailing_high = 0.0
     trailing_low = 0.0
     
-    warmup = 50  # Enough for choppiness and volume
+    # Minimum holding period to avoid fee churn (6h bars, so 3 bars = 18h)
+    MIN_HOLD = 3
+    
+    warmup = 100
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -152,45 +123,45 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(chop_14[i]):
+        if np.isnan(rsi_14[i]):
             signals[i] = 0.0
             continue
-        
-        # === REGIME DETECTION ===
-        is_choppy = chop_14[i] > CHOP_CHOPPY
-        is_trending = chop_14[i] < CHOP_TRENDING
-        is_neutral = not is_choppy and not is_trending
-        
-        # Volume spike
-        vol_spike = vol_ratio[i] > 1.5
         
         # === ENTRY CONDITIONS ===
         desired_signal = 0.0
         
         if not in_position:
-            if is_choppy:
-                # CHOPPY REGIME: Mean-reversion to Camarilla bounds
-                # Long when price approaches S3 from above
-                if close[i] <= s3_1d_aligned[i] * 1.005 and close[i] >= s3_1d_aligned[i] * 0.98:
-                    desired_signal = SIZE
-                # Short when price approaches R3 from below
-                elif close[i] >= r3_1d_aligned[i] * 0.995 and close[i] <= r3_1d_aligned[i] * 1.02:
-                    desired_signal = -SIZE
-                    
-            elif is_trending:
-                # TRENDING REGIME: Momentum breakout
-                # Long on bullish breakout with volume
-                if close[i] > r2_1d_aligned[i] and vol_spike:
-                    desired_signal = SIZE
-                # Short on bearish breakdown with volume
-                elif close[i] < s2_1d_aligned[i] and vol_spike:
-                    desired_signal = -SIZE
-                    
-            else:
-                # NEUTRAL REGIME: Tight ranges, skip
-                pass
+            # === LONG ENTRY ===
+            # Conditions:
+            # 1. Volume imbalance > 0.58 (aggressive buying)
+            # 2. ATR ratio > 1.3 (volatility expanding)
+            # 3. RSI not overbought (< 65)
+            # 4. 1d trend: price above SMA50 (bull bias)
+            
+            long_vol_imbalance = vol_imbalance[i] > 0.58
+            long_atr_expansion = atr_ratio[i] > 1.3
+            long_rsi_ok = rsi_14[i] < 65
+            long_1d_bull = (close[i] > sma50_1d_aligned[i]) if not np.isnan(sma50_1d_aligned[i]) else True
+            
+            if long_vol_imbalance and long_atr_expansion and long_rsi_ok and long_1d_bull:
+                desired_signal = SIZE
+                
+            # === SHORT ENTRY ===
+            # Conditions:
+            # 1. Volume imbalance < 0.42 (aggressive selling)
+            # 2. ATR ratio > 1.3 (volatility expanding)
+            # 3. RSI not oversold (> 35)
+            # 4. 1d trend: price below SMA50 (bear bias)
+            
+            short_vol_imbalance = vol_imbalance[i] < 0.42
+            short_atr_expansion = atr_ratio[i] > 1.3
+            short_rsi_ok = rsi_14[i] > 35
+            short_1d_bear = (close[i] < sma50_1d_aligned[i]) if not np.isnan(sma50_1d_aligned[i]) else False
+            
+            if short_vol_imbalance and short_atr_expansion and short_rsi_ok and short_1d_bear:
+                desired_signal = -SIZE
         
-        # === STOPLOSS AND EXIT ===
+        # === STOPLOSS AND TRAILING EXIT ===
         if in_position:
             if position_side > 0:
                 # Update trailing high
@@ -204,12 +175,22 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                 
-                # Exit if price hits R3 in choppy (mean-revert target)
-                if is_choppy and close[i] >= r3_1d_aligned[i]:
+                # Exit if 1d trend turns bearish
+                if close[i] < sma50_1d_aligned[i] if not np.isnan(sma50_1d_aligned[i]) else False:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
-                    
+                
+                # Take profit at 2.5R
+                profit_target = entry_price + 2.5 * entry_atr
+                if high[i] >= profit_target:
+                    # Trail stop at 1.5 ATR from peak
+                    trail_stop = trailing_high - 1.5 * atr_14[i]
+                    if close[i] < trail_stop:
+                        desired_signal = SIZE / 2  # Reduce to half
+                        in_position = False
+                        position_side = 0
+                        
             elif position_side < 0:
                 # Update trailing low
                 if i == entry_bar or low[i] < trailing_low:
@@ -222,14 +203,24 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                 
-                # Exit if price hits S3 in choppy (mean-revert target)
-                if is_choppy and close[i] <= s3_1d_aligned[i]:
+                # Exit if 1d trend turns bullish
+                if close[i] > sma50_1d_aligned[i] if not np.isnan(sma50_1d_aligned[i]) else True:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
+                
+                # Take profit at 2.5R
+                profit_target = entry_price - 2.5 * entry_atr
+                if low[i] <= profit_target:
+                    # Trail stop at 1.5 ATR from bottom
+                    trail_stop = trailing_low + 1.5 * atr_14[i]
+                    if close[i] > trail_stop:
+                        desired_signal = -SIZE / 2  # Reduce to half
+                        in_position = False
+                        position_side = 0
         
-        # === MINIMUM HOLD: 2 bars to avoid fee churn ===
-        if in_position and (i - entry_bar) < 2:
+        # === MINIMUM HOLD PERIOD ===
+        if in_position and (i - entry_bar) < MIN_HOLD:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
