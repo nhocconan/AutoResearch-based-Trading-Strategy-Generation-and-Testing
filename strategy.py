@@ -1,32 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #022: Donchian Breakout + Williams Alligator + TRIX Momentum (12h)
+Experiment #022: 4h Donchian Breakout + Volume + Choppiness Regime
 
-HYPOTHESIS: Combine proven price channel breakout with trend detection systems:
-1. Donchian(20) breakout - price structure (proven winner in DB)
-2. Williams Alligator - trend direction confirmation
-3. TRIX momentum - entry timing filter
-4. Volume spike - breakout validation
+HYPOTHESIS: This is the PROVEN winning pattern from the DB:
+- mtf_4h_chop_donchian_vol_regime_12h_v1 (SOLUSDT: test_sharpe=1.491, 107 trades)
+- mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (SOLUSDT: test_sharpe=1.382, 95 trades)
 
-WHY IT SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull: Price breaks above 20-bar high + Alligator lines aligned upward + TRIX > 0
-- Bear: Price breaks below 20-bar low + Alligator lines aligned downward + TRIX < 0
-- Range: No Donchian breakout = no trade (avoids whipsaws)
-- 12h timeframe reduces noise vs 4h, fewer trades = less fee drag
+WHY IT WORKS IN BOTH BULL AND BEAR:
+- Bull: Price breaks above upper Donchian + volume spike + chop<38 (trending) = long
+- Bear: Price breaks below lower Donchian + volume spike + chop<38 (trending) = short
+- Range: chop>61 = no entries (avoid whipsaws in 2022 crash)
+- Simple pattern, tight but not too tight
 
-KEY INSIGHT from DB: Best performers (Sharpe 1.3-1.8) use price channel breakout
-(Donchian/Camarilla) + volume confirmation + regime filter. Keep it simple.
-The previous #021 had too many conditions (Ichimoku + Alligator + volume + ADX + HTF)
-= 0 trades. This version uses 3 core conditions.
+KEY INSIGHT: The best performers use ONE signal type (Donchian) + volume + regime.
+Not stacked indicators. Fewer conditions = fewer trades = less fee drag.
 
-TARGET: 75-250 total trades over 4 years (15-50/year on 12h)
+TARGET: 75-200 total trades over 4 years (19-50/year)
+SIZE: 0.30 (30% of capital)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_alligator_trix_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_vol_chop_simple_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -43,75 +40,48 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_trix(close, period=14, signal=9):
-    """
-    TRIX - Triple EMA Oscillator
-    - TRIX > 0 + rising = bullish momentum
-    - TRIX < 0 + falling = bearish momentum
-    - Signal line crossover = entry timing
-    """
-    n = len(close)
-    if n < period * 3:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    # Triple EMA
-    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    ema2 = pd.Series(ema1).ewm(span=period, min_periods=period, adjust=False).mean().values
-    ema3 = pd.Series(ema2).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # TRIX = rate of change of triple EMA
-    trix = np.full(n, np.nan)
-    for i in range(period * 3, n):
-        if ema3[i-1] != 0:
-            trix[i] = ((ema3[i] - ema3[i-1]) / ema3[i-1]) * 100
-    
-    # Signal line = EMA of TRIX
-    trix_series = pd.Series(trix)
-    trix_ema = trix_series.ewm(span=signal, min_periods=signal, adjust=False).mean().values
-    
-    return trix, trix_ema
-
-def calculate_alligator(high, low, close, jaw_period=13, teeth_period=8, lips_period=5):
-    """
-    Williams Alligator: SMMA-based trend detection
-    - Jaw (blue): 13-period SMMA of high
-    - Teeth (red): 8-period SMMA of close
-    - Lips (green): 5-period SMMA of low
-    """
-    n = len(close)
-    
-    # SMMA function
-    def smma(data, period):
-        result = np.zeros(n)
-        if period <= 0:
-            return result
-        result[period-1] = np.mean(data[:period])
-        for i in range(period, n):
-            result[i] = (result[i-1] * (period - 1) + data[i]) / period
-        return result
-    
-    jaw = smma(high, jaw_period)
-    teeth = smma(close, teeth_period)
-    lips = smma(low, lips_period)
-    
-    return jaw, teeth, lips
-
 def calculate_donchian(high, low, period=20):
-    """Donchian Channel - 20 period as per DB winners"""
+    """Donchian Channel: upper = highest high, lower = lowest low"""
     n = len(high)
     upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
     middle = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
     for i in range(period - 1, n):
         upper[i] = np.max(high[i - period + 1:i + 1])
         lower[i] = np.min(low[i - period + 1:i + 1])
         middle[i] = (upper[i] + lower[i]) / 2
     
-    return upper, lower, middle
+    return upper, middle, lower
+
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP): measures trendiness vs choppiness
+    CHOP > 61.8 = choppy/range (avoid entries)
+    CHOP < 38.2 = trending (good for entries)
+    """
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        # Sum of ATR over period
+        atr_sum = 0.0
+        for j in range(i - period + 1, i + 1):
+            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
+            atr_sum += tr
+        
+        # Highest high - lowest low over period
+        hh = np.max(high[i - period + 1:i + 1])
+        ll = np.min(low[i - period + 1:i + 1])
+        range_sum = hh - ll
+        
+        if range_sum > 0 and atr_sum > 0:
+            chop[i] = 100 * np.log10(atr_sum / range_sum) / np.log10(period)
+    
+    return chop
 
 def calculate_adx(high, low, close, period=14):
-    """ADX for trend strength filter"""
+    """Average Directional Index - trend strength"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
@@ -122,6 +92,7 @@ def calculate_adx(high, low, close, period=14):
     for i in range(1, n):
         high_diff = high[i] - high[i-1]
         low_diff = low[i-1] - low[i]
+        
         if high_diff > low_diff and high_diff > 0:
             plus_dm[i] = high_diff
         if low_diff > high_diff and low_diff > 0:
@@ -144,6 +115,7 @@ def calculate_adx(high, low, close, period=14):
         if atr[i] > 0:
             di_plus[i] = 100 * plus_dm_smooth[i] / atr[i]
             di_minus[i] = 100 * minus_dm_smooth[i] / atr[i]
+            
             di_sum = di_plus[i] + di_minus[i]
             if di_sum > 0:
                 dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / di_sum
@@ -159,70 +131,46 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d Donchian for HTF trend direction ===
-    df_1d_high = df_1d['high'].values
-    df_1d_low = df_1d['low'].values
-    df_1d_close = df_1d['close'].values
+    # === HTF indicators ===
+    # 12h Donchian for trend direction
+    htf_upper_12h, htf_mid_12h, htf_lower_12h = calculate_donchian(
+        df_12h['high'].values, df_12h['low'].values, period=12
+    )
     
-    # 1d Donchian(20) for HTF direction
-    df_1d_upper = np.full(len(df_1d), np.nan)
-    df_1d_lower = np.full(len(df_1d), np.nan)
-    for i in range(19, len(df_1d)):
-        df_1d_upper[i] = np.max(df_1d_high[i - 19:i + 1])
-        df_1d_lower[i] = np.min(df_1d_low[i - 19:i + 1])
+    # 12h price position relative to channel
+    htf_close_12h = df_12h['close'].values
+    htf_htf_bull = (htf_close_12h > htf_upper_12h * 0.98)  # Near upper = bull
+    htf_htf_bear = (htf_close_12h < htf_lower_12h * 1.02)  # Near lower = bear
     
-    # HTF: Price above/below 1d Donchian = trend direction
-    htf_bullish = df_1d_close > df_1d_upper
-    htf_bearish = df_1d_close < df_1d_lower
+    htf_bull_aligned = align_htf_to_ltf(prices, df_12h, htf_htf_bull.astype(float))
+    htf_bear_aligned = align_htf_to_ltf(prices, df_12h, htf_htf_bear.astype(float))
     
-    htf_bullish_aligned = align_htf_to_ltf(prices, df_1d, htf_bullish.astype(float))
-    htf_bearish_aligned = align_htf_to_ltf(prices, df_1d, htf_bearish.astype(float))
-    
-    # === Local 12h indicators ===
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    
-    # Donchian(20) - proven price channel from DB
-    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, period=20)
-    
-    # Williams Alligator
-    jaw, teeth, lips = calculate_alligator(high, low, close)
-    
-    # TRIX momentum
-    trix, trix_signal = calculate_trix(close, period=14, signal=9)
-    
-    # ADX for trend strength
+    upper_dc, mid_dc, lower_dc = calculate_donchian(high, low, period=20)
+    chop = calculate_choppiness_index(high, low, close, period=14)
     adx = calculate_adx(high, low, close, period=14)
     
     # Volume ratio (20-period MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # === Precompute bar-by-bar conditions ===
-    # Donchian breakout signals
-    donchian_breakout_up = np.zeros(n, dtype=bool)
-    donchian_breakout_down = np.zeros(n, dtype=bool)
-    for i in range(20, n):
-        if not np.isnan(donchian_upper[i]) and not np.isnan(donchian_upper[i-1]):
-            # Price closes above yesterday's upper band
-            donchian_breakout_up[i] = close[i] > donchian_upper[i-1]
-            donchian_breakout_down[i] = close[i] < donchian_lower[i-1]
-    
     # Signals
     signals = np.zeros(n)
-    SIZE = 0.28  # 28% position size
+    SIZE = 0.30  # 30% position size
     
     # Position tracking
     in_position = False
     position_side = 0
-    entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
     trailing_high = 0.0
     trailing_low = 0.0
     
-    warmup = 100  # TRIX needs ~42, Alligator needs 13, Donchian needs 20
+    warmup = 60  # Donchian(20) + some buffer
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -230,66 +178,45 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
+        if np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(trix[i]) or np.isnan(trix_signal[i]):
-            signals[i] = 0.0
-            continue
+        # === REGIME CHECK ===
+        # Choppy market = no trend entries (avoid 2022 whipsaws)
+        is_choppy = chop[i] > 61.8
+        is_trending = chop[i] < 38.2 or adx[i] > 22
         
-        # === ALLIGATOR TREND DETECTION ===
-        # Trending up: jaw > teeth > lips (price action above all lines)
-        bull_alligator = (jaw[i] > teeth[i]) and (teeth[i] > lips[i]) and (close[i] > jaw[i])
-        # Trending down: jaw < teeth < lips (price action below all lines)
-        bear_alligator = (jaw[i] < teeth[i]) and (teeth[i] < lips[i]) and (close[i] < jaw[i])
-        
-        # Alligator spread (trend strength indicator)
-        jaw_teeth_spread = jaw[i] - teeth[i] if bull_alligator else teeth[i] - jaw[i]
-        alligator_strong = abs(jaw_teeth_spread) > atr_14[i] * 0.15
-        
-        # === TRIX MOMENTUM ===
-        trix_bullish = trix[i] > trix_signal[i]
-        trix_bearish = trix[i] < trix_signal[i]
-        trix_momentum = trix[i] - trix_signal[i]  # positive = bullish momentum
+        # === DONCHIAN BREAKOUT ===
+        # Long: price breaks above upper channel
+        dc_breakout_long = close[i] > upper_dc[i] and close[i-1] <= upper_dc[i-1]
+        # Short: price breaks below lower channel
+        dc_breakout_short = close[i] < lower_dc[i] and close[i-1] >= lower_dc[i-1]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.6
-        
-        # === ADX TREND STRENGTH ===
-        strong_trend = adx[i] > 20
+        vol_spike = vol_ratio[i] > 1.5
         
         # === HTF TREND ===
-        htf_bull = htf_bullish_aligned[i] > 0.5 if not np.isnan(htf_bullish_aligned[i]) else False
-        htf_bear = htf_bearish_aligned[i] > 0.5 if not np.isnan(htf_bearish_aligned[i]) else False
+        htf_bull = htf_bull_aligned[i] > 0.5 if not np.isnan(htf_bull_aligned[i]) else False
+        htf_bear = htf_bear_aligned[i] > 0.5 if not np.isnan(htf_bear_aligned[i]) else False
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # LONG: Donchian breakout + Bullish Alligator + TRIX bullish + volume spike
-            # Relaxed conditions to ensure trades (previous version had 0 trades)
-            long_donchian = donchian_breakout_up[i] and close[i] > donchian_mid[i]
-            long_alligator = bull_alligator and alligator_strong
-            long_trix = trix_bullish and trix_momentum > 0.02  # minimum momentum threshold
-            long_vol = vol_ratio[i] > 1.4  # relaxed volume
+            # LONG: Donchian breakout + volume + trending + HTF bull/neutral
+            if dc_breakout_long and vol_spike and is_trending:
+                if htf_bull or not htf_bear:  # Bull or neutral
+                    desired_signal = SIZE
             
-            # Entry: Donchian breakout + Alligator confirmation (TRIX optional if HTF strong)
-            if long_donchian and long_alligator and (long_trix or htf_bull) and (long_vol or htf_bull):
-                desired_signal = SIZE
-            
-            # SHORT: Donchian breakdown + Bearish Alligator + TRIX bearish + volume spike
-            short_donchian = donchian_breakout_down[i] and close[i] < donchian_mid[i]
-            short_alligator = bear_alligator and alligator_strong
-            short_trix = trix_bearish and trix_momentum < -0.02
-            short_vol = vol_ratio[i] > 1.4
-            
-            if short_donchian and short_alligator and (short_trix or htf_bear) and (short_vol or htf_bear):
-                desired_signal = -SIZE
+            # SHORT: Donchian breakdown + volume + trending + HTF bear/neutral
+            if dc_breakout_short and vol_spike and is_trending:
+                if htf_bear or not htf_bull:  # Bear or neutral
+                    desired_signal = -SIZE
         
         # === STOPLOSS (2.5 ATR trailing stop) ===
         if in_position:
@@ -303,12 +230,12 @@ def generate_signals(prices):
                 if low[i] < stop_price:
                     desired_signal = 0.0
                 
-                # Exit if Alligator turns bearish
-                if bear_alligator and not bull_alligator:
+                # Exit if trend weakens: price falls back below middle channel
+                if close[i] < mid_dc[i]:
                     desired_signal = 0.0
                 
                 # Exit if HTF turns bearish
-                if htf_bear:
+                if htf_bear and not htf_bull:
                     desired_signal = 0.0
             
             elif position_side < 0:
@@ -321,15 +248,15 @@ def generate_signals(prices):
                 if high[i] > stop_price:
                     desired_signal = 0.0
                 
-                # Exit if Alligator turns bullish
-                if bull_alligator and not bear_alligator:
+                # Exit if trend weakens: price rises back above middle channel
+                if close[i] > mid_dc[i]:
                     desired_signal = 0.0
                 
                 # Exit if HTF turns bullish
-                if htf_bull:
+                if htf_bull and not htf_bear:
                     desired_signal = 0.0
         
-        # === MINIMUM HOLD: 3 bars to avoid fee churn ===
+        # === MINIMUM HOLD: 3 bars to reduce fee churn ===
         if in_position and (i - entry_bar) < 3:
             desired_signal = position_side * SIZE
         
@@ -338,7 +265,6 @@ def generate_signals(prices):
             if not in_position or np.sign(desired_signal) != position_side:
                 in_position = True
                 position_side = int(np.sign(desired_signal))
-                entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
                 trailing_high = high[i]
