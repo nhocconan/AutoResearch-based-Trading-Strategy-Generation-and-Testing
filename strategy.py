@@ -1,48 +1,51 @@
 #!/usr/bin/env python3
 """
-Experiment #023: Donchian Breakout + HMA + Volume + Choppiness Regime (4h)
+Experiment #024: 1d RSI Extreme + 1w Trend + Volume + Choppiness Regime
 
-HYPOTHESIS: Use faster trend indicators (HMA16 instead of EMA200) to avoid
-the "price never crosses EMA200" problem. Choppiness regime filters range markets.
-HTF 12h EMA21 provides direction without being too restrictive.
+HYPOTHESIS: 1d RSI(14) extremes (<25 for long, >75 for short) provide
+reliable mean-reversion signals. Combined with:
+- 1w EMA21 for trend direction (filters counter-trend trades)
+- Volume confirmation (1.3x 20d avg)
+- Choppiness filter (skip when CHOP > 60)
 
 WHY IT SHOULD WORK IN BOTH MARKETS:
-- Bull: Price breaks Donchian high + volume spike + above HMA16 = strong momentum
-- Bear: Price breaks Donchian low + volume spike + below HMA16 = strong short
-- Range (CHOP > 61.8): Skip entries, avoid whipsaws
-- Trending (CHOP < 38.2): Allow entries in trend direction
+- Bull: RSI < 25 (oversold) + price > 1w EMA21 + volume spike = buy the dip
+- Bear: RSI > 75 (overbought) + price < 1w EMA21 + volume spike = short the rally
+- Range (CHOP > 60): Skip entries entirely, avoid whipsaws
+- Trending (CHOP < 50): Allow mean-reversion entries aligned with trend
 
-EXPECTED TRADES: 100-200 total over 4 years (25-50/year)
-- Donchian breaks every ~20-40 bars → ~219-438 potential/year
-- Volume spike (1.5x) → reduces by ~40%
-- HMA16 trend filter → reduces by ~30%
-- Choppiness regime → reduces by ~20%
-- Final: ~75-150 trades = statistical validity
+EXPECTED TRADES: 30-60 total over 4 years (7-15/year)
+- RSI extremes: ~40-80 triggers/year (30-60 per direction)
+- Volume filter (1.3x): ~50% pass
+- Choppiness filter (CHOP < 60): ~40% pass
+- 1w EMA21 trend: ~50% pass
+- Final: ~8-15/year = 32-60 total over 4 years → statistical validity
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_hma_vol_chop_v1"
-timeframe = "4h"
+name = "mtf_1d_rsi_extreme_1w_trend_vol_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
-def calculate_hma(data, period):
-    """Hull Moving Average"""
-    n = len(data)
-    half_length = period // 2
-    full_length = period
+def calculate_rsi(prices, period=14):
+    """Relative Strength Index"""
+    close = prices["close"].values if isinstance(prices, pd.DataFrame) else prices
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
     
-    wma_half = pd.Series(data).rolling(window=half_length, min_periods=half_length).apply(
-        lambda x: np.sum(x * np.arange(1, len(x)+1)) / np.sum(np.arange(1, len(x)+1)), raw=True
-    ).values
-    wma_full = pd.Series(data).rolling(window=full_length, min_periods=full_length).apply(
-        lambda x: np.sum(x * np.arange(1, len(x)+1)) / np.sum(np.arange(1, len(x)+1)), raw=True
-    ).values
+    deltas = np.diff(close, prepend=close[0])
+    gains = np.where(deltas > 0, deltas, 0)
+    losses = np.where(deltas < 0, -deltas, 0)
     
-    hma = 2 * wma_half - wma_full
-    hma = pd.Series(hma).rolling(window=int(np.sqrt(period)), min_periods=1).mean().values
-    return hma
+    avg_gains = pd.Series(gains).ewm(span=period, min_periods=period, adjust=False).mean().values
+    avg_losses = pd.Series(losses).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    rs = np.where(avg_losses != 0, avg_gains / avg_losses, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -87,27 +90,23 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_12h = get_htf_data(prices, '12h')
+    df_1w = get_htf_data(prices, '1w')
     
-    # HTF EMA21 (faster, less restrictive than EMA200)
-    ema21_12h = pd.Series(df_12h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
+    # 1w EMA21 for trend direction
+    ema21_1w = pd.Series(df_1w['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema21_1w)
     
-    # === Local 4h indicators ===
+    # === Local 1d indicators ===
+    # RSI(14)
+    rsi_14 = calculate_rsi(prices, period=14)
+    
     # ATR for stoploss
     atr_14 = calculate_atr(high, low, close, period=14)
-    
-    # Donchian Channel(20)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # HMA16 for local trend (faster than EMA200)
-    hma16 = calculate_hma(close, 16)
     
     # Choppiness Index
     chop = calculate_choppiness(high, low, close, period=14)
     
-    # Volume average (20 bars)
+    # Volume average (20 bars = ~20 trading days)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -121,108 +120,80 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
-    trailing_high = 0.0
-    trailing_low = 0.0
     
-    warmup = 50  # Enough for HMA16, ATR14, Donchian20
+    warmup = 60  # Enough for all indicators
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(rsi_14[i]) or np.isnan(atr_14[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(hma16[i]):
-            signals[i] = 0.0
-            continue
-        
-        if np.isnan(chop[i]):
+        if atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
         # === Regime check ===
-        is_trending = chop[i] < 50.0  # Below 50 = trending (less strict than 38.2)
+        is_not_choppy = chop[i] < 60.0  # Below 60 = not choppy enough to skip
+        
+        # === 1w trend direction ===
+        # Need at least 2 valid values for trend direction
+        if np.isnan(ema21_1w_aligned[i]) or np.isnan(ema21_1w_aligned[i-1]):
+            htf_bull = close[i] > close[i-1]  # Fallback to local trend
+            htf_bear = close[i] < close[i-1]
+        else:
+            htf_bull = ema21_1w_aligned[i] > ema21_1w_aligned[i-1]
+            htf_bear = ema21_1w_aligned[i] < ema21_1w_aligned[i-1]
         
         # === ENTRY CONDITIONS ===
         desired_signal = 0.0
         
         # Volume spike confirmation
-        vol_spike = vol_ratio[i] > 1.5
+        vol_spike = vol_ratio[i] > 1.3
         
-        # Local trend (HMA16)
-        local_bull = close[i] > hma16[i]
-        local_bear = close[i] < hma16[i]
+        # RSI extremes
+        rsi_oversold = rsi_14[i] < 25.0
+        rsi_overbought = rsi_14[i] > 75.0
         
-        # HTF trend (12h EMA21)
-        htf_bull = ema21_12h_aligned[i] > ema21_12h_aligned[i-1] if not np.isnan(ema21_12h_aligned[i-1]) else False
-        htf_bear = ema21_12h_aligned[i] < ema21_12h_aligned[i-1] if not np.isnan(ema21_12h_aligned[i-1]) else False
-        
-        # === LONG ENTRY: Price breaks above Donchian high + volume spike ===
+        # === LONG ENTRY: RSI oversold + 1w trend up + volume spike ===
         if not in_position:
-            # Check for bullish breakout
-            prev_donchian = donchian_upper[i-1] if i > 0 else np.nan
-            bullish_breakout = high[i] > prev_donchian if not np.isnan(prev_donchian) else False
-            
-            # All conditions for long
-            long_conditions = bullish_breakout and vol_spike and local_bull and is_trending
-            
-            if long_conditions:
+            if rsi_oversold and htf_bull and vol_spike and is_not_choppy:
                 desired_signal = SIZE
                 
-            # === SHORT ENTRY: Price breaks below Donchian low + volume spike ===
-            prev_donchian_low = donchian_lower[i-1] if i > 0 else np.nan
-            bearish_breakout = low[i] < prev_donchian_low if not np.isnan(prev_donchian_low) else False
-            
-            # All conditions for short
-            short_conditions = bearish_breakout and vol_spike and local_bear and is_trending
-            
-            if short_conditions:
+            # === SHORT ENTRY: RSI overbought + 1w trend down + volume spike ===
+            elif rsi_overbought and htf_bear and vol_spike and is_not_choppy:
                 desired_signal = -SIZE
         
         # === STOPLOSS AND EXIT ===
         if in_position:
             if position_side > 0:
-                # Update trailing high
-                if i == entry_bar or high[i] > trailing_high:
-                    trailing_high = high[i]
-                
-                # Trailing stop: 2.5 ATR from highest point
-                stop_price = trailing_high - 2.5 * entry_atr
-                if low[i] < stop_price:
+                # Long: stop if price drops 2.5 ATR from entry
+                stop_distance = entry_price - 2.5 * entry_atr
+                if low[i] < stop_distance:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
-                
-                # Exit if price falls below HMA16 (trend reversal)
-                if close[i] < hma16[i]:
+                # Exit if RSI returns to neutral (>55, not overbought)
+                elif rsi_14[i] > 55:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
                     
             elif position_side < 0:
-                # Update trailing low
-                if i == entry_bar or low[i] < trailing_low:
-                    trailing_low = low[i]
-                
-                # Trailing stop: 2.5 ATR from lowest point
-                stop_price = trailing_low + 2.5 * entry_atr
-                if high[i] > stop_price:
+                # Short: stop if price rises 2.5 ATR from entry
+                stop_distance = entry_price + 2.5 * entry_atr
+                if high[i] > stop_distance:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
-                
-                # Exit if price rises above HMA16 (trend reversal)
-                if close[i] > hma16[i]:
+                # Exit if RSI returns to neutral (<45, not oversold)
+                elif rsi_14[i] < 45:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
         
-        # === MINIMUM HOLD: 4 bars to avoid fee churn ===
-        if in_position and (i - entry_bar) < 4:
+        # === MINIMUM HOLD: 3 days to avoid fee churn ===
+        if in_position and (i - entry_bar) < 3:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
@@ -233,8 +204,6 @@ def generate_signals(prices):
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
-                trailing_high = high[i]
-                trailing_low = low[i]
         
         signals[i] = desired_signal
     
