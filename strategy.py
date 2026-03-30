@@ -1,49 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 12h TRIX Trend + Camarilla Zone + Volume Spike
+Experiment #025: 1d Donchian Breakout + Weekly Trend + Volume
 
-HYPOTHESIS: 12h timeframe captures significant institutional moves while
-minimizing noise. TRIX(15) provides smooth trend confirmation without lag.
-Camarilla S3/R3 levels are proven institutional support/resistance zones.
-Volume spike confirms smart money participation. Choppiness filter avoids
-whipsaws in ranging markets.
-
-WHY 12h: Trade frequency target is 50-150 total (12-37/year). 4h strategies
-overtraded (915 trades in current). 12h naturally limits trade count while
-capturing multi-day moves. DONCHIAN(20) on 12h = 10-day breakout window.
+HYPOTHESIS: Simple Donchian(20) breakout on 1d with weekly EMA50 trend filter
+and volume confirmation. This matches proven DB pattern (mtf_4h_donchian_volume_ema
+simplified: Sharpe=0.092). Weekly trend filter aligns entries with higher timeframe
+direction, reducing whipsaws. Volume spike confirms institutional participation.
+1d timeframe naturally limits trades to 50-100 total over 4 years (12-25/year).
 
 WHY IT WORKS IN BULL + BEAR:
-- Bull: TRIX>0 + price above Camarilla S3 + volume = trend continuation
-- Bear: TRIX<0 + price below Camarilla R3 + volume = short rallies
-- Range: Choppiness>61.8 → no trades (avoids whipsaws)
+- Bull: Breakout above 20d high + price>1w EMA50 + volume = strong continuation
+- Bear: Breakdown below 20d low + price<1w EMA50 + volume = short momentum
+- Range: Choppiness>61.8 filters out sideways markets
 
-TARGET: 75-150 total trades over 4 years.
+TARGET: 50-100 total trades over 4 years.
 Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_trix_camarilla_vol_1d_v1"
-timeframe = "12h"
+name = "mtf_1d_donchian_weekly_trend_v1"
+timeframe = "1d"
 leverage = 1.0
-
-def calculate_trix(close, period=15):
-    """TRIX: triple smoothed EMA rate of change"""
-    n = len(close)
-    if n < period * 3:
-        return np.full(n, np.nan)
-    
-    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    ema2 = pd.Series(ema1).ewm(span=period, min_periods=period, adjust=False).mean().values
-    ema3 = pd.Series(ema2).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    trix = np.full(n, 0.0)
-    for i in range(period * 3, n):
-        if ema3[i - 1] != 0:
-            trix[i] = 100 * (ema3[i] - ema3[i - 1]) / ema3[i - 1]
-    
-    return trix
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -58,6 +37,12 @@ def calculate_atr(high, low, close, period=14):
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_choppiness(high, low, close, period=14):
     """Choppiness Index - values > 61.8 = choppy/range, < 38.2 = trending"""
@@ -79,12 +64,6 @@ def calculate_choppiness(high, low, close, period=14):
     
     return chop
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -93,14 +72,13 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d EMA200 for multi-timeframe trend
-    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    # Weekly EMA50 for trend direction
+    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
-    # === Local 12h indicators ===
-    trix_15 = calculate_trix(close, period=15)
+    # === Local 1d indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     chop_14 = calculate_choppiness(high, low, close, period=14)
     donchian_up, donchian_lo = calculate_donchian(high, low, period=20)
@@ -120,104 +98,78 @@ def generate_signals(prices):
     entry_atr = 0.0
     entry_bar = 0
     
-    warmup = 200  # Need 200 for TRIX triple smoothing + EMA200
+    warmup = 50  # Donchian(20) needs 20, chop needs 14, weekly EMA50 needs 50
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(trix_15[i]) or np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(ema_200_aligned[i]):
+        if np.isnan(ema_50_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND: TRIX direction ===
-        trix_bullish = trix_15[i] > 0
-        trix_bearish = trix_15[i] < 0
-        
-        # === HTF TREND: Price vs 1d EMA200 ===
-        above_htf_ema = close[i] > ema_200_aligned[i]
-        below_htf_ema = close[i] < ema_200_aligned[i]
+        # === HTF TREND: Weekly EMA50 ===
+        above_weekly_ema = close[i] > ema_50_aligned[i]
+        below_weekly_ema = close[i] < ema_50_aligned[i]
         
         # === CHOPPINESS REGIME FILTER ===
         chop = chop_14[i]
-        in_chop = chop > 61.8 if not np.isnan(chop) else False
-        in_trend_regime = chop < 50 if not np.isnan(chop) else True
+        is_choppy = chop > 61.8 if not np.isnan(chop) else False
+        is_trending = chop < 50 if not np.isnan(chop) else True
         
-        # === CAMARILLA LEVELS (previous bar) ===
-        prev_close = close[i - 1]
-        prev_high = high[i - 1]
-        prev_low = low[i - 1]
-        prev_range = prev_high - prev_low
+        # Skip in choppy markets
+        if is_choppy:
+            if in_position:
+                signals[i] = 0.0
+                in_position = False
+                position_side = 0
+            else:
+                signals[i] = 0.0
+            continue
         
-        r1 = prev_close + prev_range * 0.09167
-        r2 = prev_close + prev_range * 0.18333
-        r3 = prev_close + prev_range * 0.275
-        s1 = prev_close - prev_range * 0.09167
-        s2 = prev_close - prev_range * 0.18333
-        s3 = prev_close - prev_range * 0.275
+        # === DONCHIAN BREAKOUT (use shift(1) to avoid look-ahead) ===
+        if i >= 21:
+            donchian_broken_up = close[i] > donchian_up[i - 1]
+            donchian_broken_down = close[i] < donchian_lo[i - 1]
+        else:
+            donchian_broken_up = False
+            donchian_broken_down = False
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.4
-        
-        # === DONCHIAN BREAKOUT ===
-        # Use shift(1) to avoid look-ahead
-        donchian_broken_up = close[i] > donchian_up[i - 1]
-        donchian_broken_down = close[i] < donchian_lo[i - 1]
+        vol_spike = vol_ratio[i] > 1.5
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG ENTRY ===
-            # Primary: TRIX bullish + above HTF EMA + Donchian breakout + volume
-            # Secondary: TRIX bullish + touching S3 level + volume
-            if trix_bullish and above_htf_ema:
-                # Donchian breakout confirmation
-                if donchian_broken_up and vol_spike:
-                    desired_signal = SIZE
-                # Camarilla S3 bounce
-                elif vol_spike and low[i] <= s3:
-                    desired_signal = SIZE
+            # === LONG: Weekly trend up + Donchian breakout + volume ===
+            if above_weekly_ema and donchian_broken_up and vol_spike:
+                desired_signal = SIZE
             
-            # === SHORT ENTRY ===
-            # Primary: TRIX bearish + below HTF EMA + Donchian breakdown + volume
-            # Secondary: TRIX bearish + touching R3 level + volume
-            if trix_bearish and below_htf_ema:
-                # Donchian breakdown confirmation
-                if donchian_broken_down and vol_spike:
-                    desired_signal = -SIZE
-                # Camarilla R3 rejection
-                elif vol_spike and high[i] >= r3:
-                    desired_signal = -SIZE
+            # === SHORT: Weekly trend down + Donchian breakdown + volume ===
+            elif below_weekly_ema and donchian_broken_down and vol_spike:
+                desired_signal = -SIZE
         
         # === STOPLOSS (2.5 ATR trailing) ===
         if in_position:
-            bars_held = i - entry_bar
-            
             if position_side > 0:
-                # Long stop: lowest low since entry - 1 ATR buffer
-                lowest_10 = np.min(low[entry_bar:i+1]) if i > entry_bar else low[entry_bar]
-                stop_price = lowest_10 - 0.5 * entry_atr
+                # Long: trail stop at lowest low - 0.5 ATR buffer
+                lowest_since_entry = np.min(low[entry_bar:i+1])
+                stop_price = lowest_since_entry - 0.5 * entry_atr
                 if low[i] < stop_price:
-                    desired_signal = 0.0
-                # Also exit if TRIX flips bearish
-                if trix_bearish and bars_held >= 3:
                     desired_signal = 0.0
             
             elif position_side < 0:
-                # Short stop: highest high since entry + 1 ATR buffer
-                highest_10 = np.max(high[entry_bar:i+1]) if i > entry_bar else high[entry_bar]
-                stop_price = highest_10 + 0.5 * entry_atr
+                # Short: trail stop at highest high + 0.5 ATR buffer
+                highest_since_entry = np.max(high[entry_bar:i+1])
+                stop_price = highest_since_entry + 0.5 * entry_atr
                 if high[i] > stop_price:
-                    desired_signal = 0.0
-                # Also exit if TRIX flips bullish
-                if trix_bullish and bars_held >= 3:
                     desired_signal = 0.0
         
         # === MINIMUM HOLD: 2 bars to avoid fee churn ===
