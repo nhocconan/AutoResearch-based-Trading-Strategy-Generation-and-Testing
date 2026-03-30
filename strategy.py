@@ -1,36 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 4h Funding Rate Mean-Reversion + Volume + Trend Filter
+Experiment #021: 12h Donchian Breakout + 1d HMA Trend + Volume + Chop Filter
 
-HYPOTHESIS: Funding rate is a proven edge for BTC/ETH (from 16K+ experiments).
-- High funding (>Z+2) = speculative excess = short opportunity (mean reversion)
-- Low funding (<Z-2) = fear/panic = long opportunity (mean reversion)
-- Combine with 1d HMA trend filter + volume confirmation + ATR stoploss
+HYPOTHESIS: 12h primary timeframe with 1d HTF should achieve:
+1. Proven Donchian(20) breakout structure (DB winners)
+2. 1d HMA(21) for cleaner macro trend (vs 12h HMA)
+3. Volume confirmation 1.5x (slightly relaxed for 12h)
+4. CHOP < 55 regime filter (relaxed from <50 to get enough trades)
+5. 2.5x ATR trailing stop
 
-WHY IT WORKS IN BOTH BULL AND BEAR:
-- Bull: Low funding = fear = accumulation zone. Price bounces back.
-- Bear: High funding = too many longs = flush out weak hands. Short the top.
-- Mean-reversion is regime-agnostic (unlike trend following which fails in 2022)
+WHY 12h PRIMARY:
+- 12h strategies have 54% keep rate (best in DB)
+- 4h version got Sharpe=0.513 with 210 trades - proven framework
+- 12h = half the bars of 4h → naturally fewer trades (100-180 range)
+- Reduces fee drag while maintaining directional quality
 
-WHY THIS IS NOVEL:
-- All 13 recent failures used ONLY price/volume indicators
-- Funding rate is a completely different data source with proven edge
-- Not attempted in this session (DB shows 0.8-1.5 Sharpe on BTC/ETH)
+WHY IT SHOULD WORK IN BULL AND BEAR:
+- Bull: Long breakouts when 1d trend up, exit when trend flips
+- Bear: Short breakouts when 1d trend down, exit when trend flips  
+- Range: CHOP > 61.8 prevents choppy entries
+- ATR stop limits drawdown in both directions
 
-KEY DIFFERENCES FROM PREVIOUS ATTEMPTS:
-- Uses funding_rate.parquet data (not just price/volume)
-- Mean-reversion logic (not breakout or trend following)
-- Works through the 2022 crash (funding spiked before crash)
-
-TARGET: 75-200 total trades over 4 years (19-50/year)
+TARGET: 100-180 total trades over 4 years (25-45/year)
 """
 import numpy as np
 import pandas as pd
-import os
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_funding_mean_reversion_vol_trend"
-timeframe = "4h"
+name = "mtf_12h_donchian_1d_hma_vol_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -61,86 +59,42 @@ def calculate_hma(close, period=21):
     hma = pd.Series(hull).ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean().values
     return hma
 
-def load_funding_data(symbol, prices_df):
+def calculate_choppiness(high, low, close, period=14):
     """
-    Load funding rate data from parquet file and align to prices index.
-    Returns array of funding rates aligned to prices timestamps.
+    Choppiness Index (CHOP)
+    CHOP > 61.8 = ranging - DON'T enter
+    CHOP < 55 = trending - GOOD to enter
     """
-    # Find the base directory for processed data
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    
-    # Try different paths for funding data
-    possible_paths = [
-        os.path.join(base_dir, 'data', 'processed', 'funding', f'{symbol}.parquet'),
-        os.path.join(base_dir, 'processed', 'funding', f'{symbol}.parquet'),
-        os.path.join(base_dir, '..', 'data', 'processed', 'funding', f'{symbol}.parquet'),
-    ]
-    
-    funding_path = None
-    for path in possible_paths:
-        if os.path.exists(path):
-            funding_path = path
-            break
-    
-    if funding_path is None:
-        # Funding data not available, return zeros (no signal)
-        return np.zeros(len(prices_df))
-    
-    # Load funding data
-    funding_df = pd.read_parquet(funding_path)
-    
-    # Get prices timestamps
-    if 'open_time' in prices_df.columns:
-        price_times = pd.to_datetime(prices_df['open_time'])
-    else:
-        price_times = prices_df.index
-    
-    # Funding timestamps - align
-    if 'open_time' in funding_df.columns:
-        funding_times = pd.to_datetime(funding_df['open_time'])
-    elif funding_df.index.name == 'open_time':
-        funding_times = pd.to_datetime(funding_df.index)
-    else:
-        funding_times = pd.to_datetime(funding_df.index)
-    
-    # Create funding rate series aligned to prices
-    funding_rates = np.zeros(len(prices_df))
-    
-    # Merge on nearest 8h timestamp (funding every 8 hours)
-    # For each price bar, find the most recent funding rate
-    for i in range(len(prices_df)):
-        price_time = price_times.iloc[i] if hasattr(price_times, 'iloc') else price_times[i]
-        
-        # Find the most recent funding timestamp <= current price time
-        mask = funding_times <= price_time
-        if mask.any():
-            funding_rates[i] = funding_df.loc[mask, 'funding_rate'].iloc[-1]
-    
-    return funding_rates
-
-def calculate_funding_zscore(funding_rates, period=30):
-    """
-    Calculate rolling Z-score of funding rate.
-    Z > +2.0 = funding too high = short signal
-    Z < -2.0 = funding too low = long signal
-    """
-    n = len(funding_rates)
-    if n < period:
+    n = len(close)
+    if n < period + 1:
         return np.full(n, np.nan)
     
-    funding_series = pd.Series(funding_rates)
-    rolling_mean = funding_series.rolling(window=period, min_periods=period).mean().values
-    rolling_std = funding_series.rolling(window=period, min_periods=period).std().values
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Z-score: (current - mean) / std
-    zscore = np.zeros(n)
-    for i in range(n):
-        if rolling_std[i] > 1e-10:
-            zscore[i] = (funding_rates[i] - rolling_mean[i]) / rolling_std[i]
-        else:
-            zscore[i] = 0.0
+    chop = np.full(n, np.nan)
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i - period + 1:i + 1])
+        highest = np.max(high[i - period + 1:i + 1])
+        lowest = np.min(low[i - period + 1:i + 1])
+        
+        if highest > lowest and atr_sum > 0:
+            range_hl = highest - lowest
+            chop[i] = 100 * np.log10(atr_sum / range_hl) / np.log10(period)
     
-    return zscore
+    return chop
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - highest high and lowest low over period"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -149,24 +103,19 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load HTF data ONCE before loop ===
+    # === Load 1d HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d HMA(21) for trend direction
+    # 1d HMA(21) for macro trend direction
     hma_21_1d = calculate_hma(df_1d['close'].values, period=21)
     hma_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
     
-    # === Load funding data ===
-    symbol = prices.get('symbol', ['BTCUSDT'])[0] if isinstance(prices.get('symbol'), pd.Series) else 'BTCUSDT'
-    funding_rates = load_funding_data(symbol, prices)
-    
-    # === Calculate funding Z-score ===
-    funding_zscore = calculate_funding_zscore(funding_rates, period=30)
-    
-    # === Local 4h indicators ===
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
+    donchian_up, donchian_lo = calculate_donchian(high, low, period=20)
+    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Volume ratio (20-period MA)
+    # Volume ratio (20-period MA) - 1.5x threshold for 12h
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -180,8 +129,10 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
+    trailing_high = 0.0
+    trailing_low = 0.0
     
-    warmup = 100  # Min periods for funding Z-score
+    warmup = 250  # donchian + indicators + HTF alignment
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -189,79 +140,89 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        if np.isnan(chop[i]):
+            signals[i] = 0.0
+            continue
+        
         if np.isnan(hma_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # === FUNDING RATE SIGNALS ===
-        funding_z = funding_zscore[i]
-        
-        # Skip if no valid funding data (z-score is 0 when funding unavailable)
-        if np.isnan(funding_z) or funding_z == 0:
+        if np.isnan(donchian_up[i]) or np.isnan(donchian_lo[i]):
             signals[i] = 0.0
             continue
         
-        # === HTF TREND: 1d HMA(21) direction ===
+        # === CHOPPINESS REGIME FILTER ===
+        chop_value = chop[i]
+        is_choppy = chop_value > 61.8
+        is_trending = chop_value < 55  # Relaxed from 50 for 12h
+        
+        # === 1d HTF TREND: HMA(21) direction ===
         htf_trend_up = close[i] > hma_aligned[i]
         htf_trend_down = close[i] < hma_aligned[i]
         
-        # === VOLUME CONFIRMATION ===
+        # === VOLUME CONFIRMATION (1.5x for 12h) ===
         vol_spike = vol_ratio[i] > 1.5
+        
+        # === DONCHIAN BREAKOUT (previous bar close vs channel) ===
+        prev_donchian_up = donchian_up[i - 1]
+        prev_donchian_lo = donchian_lo[i - 1]
+        
+        breakout_up = close[i] > prev_donchian_up
+        breakout_down = close[i] < prev_donchian_lo
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === SHORT: Funding too high (Z > +2) = speculative excess = mean revert down ===
-            if funding_z > 2.0 and htf_trend_down and vol_spike:
-                desired_signal = -SIZE
-            
-            # === LONG: Funding too low (Z < -2) = fear/panic = mean revert up ===
-            if funding_z < -2.0 and htf_trend_up and vol_spike:
+            # === LONG: Trending + breakout up + HTF trend up + volume spike ===
+            if breakout_up and htf_trend_up and vol_spike and is_trending:
                 desired_signal = SIZE
+            
+            # === SHORT: Trending + breakout down + HTF trend down + volume spike ===
+            if breakout_down and htf_trend_down and vol_spike and is_trending:
+                desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR) ===
+        # === STOPLOSS / EXIT CONDITIONS ===
         if in_position:
             if position_side > 0:
-                # Long position: stop if price falls 2.5 ATR from entry
-                stop_price = entry_price - 2.5 * entry_atr
+                # Update trailing high
+                if i == entry_bar or high[i] > trailing_high:
+                    trailing_high = high[i]
+                
+                # Trailing stop: exit if price falls 2.5 ATR from recent high
+                stop_price = trailing_high - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
                 
-                # Exit if HTF trend flips to down
+                # Exit if 1d HTF trend flips
                 if htf_trend_down:
                     desired_signal = 0.0
                 
-                # Take profit at 2R
-                profit_target = entry_price + 2.0 * entry_atr
-                if close[i] >= profit_target:
-                    desired_signal = SIZE / 2  # Half position
-                
-                # Exit if funding mean-reverts (Z moves toward 0)
-                if funding_z > 0.5:  # Funding recovering = signal fading
+                # Exit if market becomes choppy
+                if is_choppy:
                     desired_signal = 0.0
             
             elif position_side < 0:
-                # Short position: stop if price rises 2.5 ATR from entry
-                stop_price = entry_price + 2.5 * entry_atr
+                # Update trailing low
+                if i == entry_bar or low[i] < trailing_low:
+                    trailing_low = low[i]
+                
+                # Trailing stop: exit if price rises 2.5 ATR from recent low
+                stop_price = trailing_low + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
                 
-                # Exit if HTF trend flips to up
+                # Exit if 1d HTF trend flips
                 if htf_trend_up:
                     desired_signal = 0.0
                 
-                # Take profit at 2R
-                profit_target = entry_price - 2.0 * entry_atr
-                if close[i] <= profit_target:
-                    desired_signal = -SIZE / 2  # Half position
-                
-                # Exit if funding mean-reverts (Z moves toward 0)
-                if funding_z < -0.5:  # Funding recovering = signal fading
+                # Exit if market becomes choppy
+                if is_choppy:
                     desired_signal = 0.0
         
-        # === MINIMUM HOLD: 4 bars to avoid fee churn ===
-        if in_position and (i - entry_bar) < 4:
+        # === MINIMUM HOLD: 2 bars (12h * 2 = 24h minimum) to avoid fee churn ===
+        if in_position and (i - entry_bar) < 2:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
@@ -273,6 +234,8 @@ def generate_signals(prices):
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
+                trailing_high = high[i]
+                trailing_low = low[i]
         else:
             if in_position:
                 in_position = False
