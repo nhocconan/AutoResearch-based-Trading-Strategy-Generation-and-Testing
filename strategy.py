@@ -1,32 +1,65 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 12h Donchian Breakout + 1d HMA Trend + Volume Confirmation
+Experiment #022: 4h Donchian + HMA + Volume Confirmation + HTF Trend
 
-HYPOTHESIS: 12h is the sweet spot between 4h (too many trades) and 1d (too few).
-Combining:
-1. 12h Donchian(20) breakout - proven price channel structure from DB winners
-2. 1d HMA(21) trend filter - removes entries against primary trend
-3. Volume spike confirmation - validates breakout strength
-4. ATR stoploss - 2.5x ATR risk management
+HYPOTHESIS: Follow the proven winning pattern from DB:
+- 4h Donchian(20) breakout detection
+- 12h HMA for trend direction (both must agree)
+- Volume spike confirmation (>1.5x 20-bar avg)
+- ATR-based stoploss
 
-WHY IT SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull: Price breaks 12h high + above 1d HMA = continuation long, volume confirms
-- Bear: Price breaks 12h low + below 1d HMA = continuation short, volume confirms
-- Range: No breakout = no trade (avoids whipsaws at tops/bottoms)
-- 12h gives enough bars for meaningful breakouts without overtrading
+WHY IT WORKS IN BULL AND BEAR:
+- Bull: Price breaks above Donchian high + HMA rising + volume confirm = long
+- Bear: Price breaks below Donchian low + HMA falling + volume confirm = short
+- Range: Donchian squeeze + flat HMA = no trade (avoided whipsaws)
 
-TARGET: 100-200 total trades over 4 years (25-50/year on 12h = achievable)
-LEARNED FROM FAILURES:
-- Ichimoku/Alligator too complex → 175 trades, barely broke even
-- Simple Donchian + HMA + volume is the proven winning formula
+KEY INSIGHT: Single strong signal (breakout) > multiple weak signals.
+Keep conditions tight: 100-200 total trades over 4 years.
+
+DB EVIDENCE:
+- mtf_4h_hma_donchian_volume_rsi_12h_atr_v1: test Sharpe 1.38, 95 trades
+- mtf_4h_hma_volume_donchian_adx_12h_atr_v1: test Sharpe 1.32, 94 trades
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_1d_hma_vol_v3"
-timeframe = "12h"
+name = "mtf_4h_donchian_hma_volume_12h_v2"
+timeframe = "4h"
 leverage = 1.0
+
+
+def calculate_hma(data, period):
+    """Hull Moving Average - faster response than EMA"""
+    n = len(data)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    # Calculate WMA with period
+    wma_half = pd.Series(data).rolling(window=period // 2, min_periods=period // 2).mean().values
+    wma_full = pd.Series(data).rolling(window=period, min_periods=period).mean().values
+    
+    # HMA = 2*WMA(period/2) - WMA(period)
+    hma = 2 * wma_half - wma_full
+    
+    # Apply WMA smoothing to HMA
+    hma_final = np.zeros(n)
+    for i in range(n):
+        if i < period - 1 or np.isnan(wma_full[i]):
+            hma_final[i] = np.nan
+        else:
+            # WMA of HMA with sqrt(period)
+            sqrt_p = int(np.sqrt(period))
+            start = max(period - 1, i - sqrt_p + 1)
+            window = hma[start:i + 1]
+            valid = window[~np.isnan(window)]
+            if len(valid) > 0:
+                hma_final[i] = np.mean(valid)  # Simplified WMA
+            else:
+                hma_final[i] = np.nan
+    
+    return hma
+
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -34,37 +67,36 @@ def calculate_atr(high, low, close, period=14):
     if n < period + 1:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
+    tr = np.maximum(high[1:] - low[1:], 
+                    np.maximum(np.abs(high[1:] - close[:-1]), 
+                              np.abs(low[1:] - close[:-1])))
+    tr = np.concatenate([[high[0] - low[0]], tr])
     
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    atr = np.zeros(n)
+    if n >= period:
+        atr[period - 1] = np.mean(tr[:period])
+        for i in range(period, n):
+            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+    
     return atr
 
-def calculate_hma(data, period):
-    """Hull Moving Average"""
-    half = int(period / 2)
-    sqrt_period = int(np.sqrt(period))
-    
-    wma_half = pd.Series(data).rolling(window=half, min_periods=half).apply(
-        lambda x: np.sum(x * np.arange(1, len(x)+1)) / np.sum(np.arange(1, len(x)+1)), raw=True
-    ).values
-    wma_full = pd.Series(data).rolling(window=period, min_periods=period).apply(
-        lambda x: np.sum(x * np.arange(1, len(x)+1)) / np.sum(np.arange(1, len(x)+1)), raw=True
-    ).values
-    
-    hma = 2 * wma_half - wma_full
-    return hma
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - rolling high/low"""
+def donchian_channel(high, low, period):
+    """Donchian Channel - highest high and lowest low over period"""
     n = len(high)
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    upper = np.zeros(n)
+    lower = np.zeros(n)
+    
+    for i in range(n):
+        if i < period - 1:
+            upper[i] = np.max(high[:i + 1])
+            lower[i] = np.min(low[:i + 1])
+        else:
+            upper[i] = np.max(high[i - period + 1:i + 1])
+            lower[i] = np.min(low[i - period + 1:i + 1])
+    
     return upper, lower
+
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -74,23 +106,41 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # === 1d HMA for trend direction ===
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # === 12h HMA for trend direction ===
+    hma_12h = calculate_hma(df_12h['close'].values, 21)
     
-    # === Local 12h indicators ===
+    # HTF: HMA rising = bull, falling = bear
+    htf_trend = np.zeros(len(df_12h))
+    for i in range(1, len(df_12h)):
+        if not np.isnan(hma_12h[i]) and not np.isnan(hma_12h[i - 1]):
+            if hma_12h[i] > hma_12h[i - 1]:
+                htf_trend[i] = 1.0   # bull
+            elif hma_12h[i] < hma_12h[i - 1]:
+                htf_trend[i] = -1.0  # bear
+            else:
+                htf_trend[i] = htf_trend[i - 1]
+    
+    htf_trend_aligned = align_htf_to_ltf(prices, df_12h, htf_trend)
+    
+    # === Local 4h indicators ===
+    # Donchian(20)
+    dc_upper, dc_lower = donchian_channel(high, low, period=20)
+    
+    # ATR for stoploss
     atr_14 = calculate_atr(high, low, close, period=14)
-    donchian_high, donchian_low = calculate_donchian(high, low, period=20)
     
-    # Volume ratio (20-period MA)
+    # Volume MA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
+    # Local HMA for confirmation
+    hma_local = calculate_hma(close, 16)
+    
     # Signals
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.28  # position size
     
     # Position tracking
     in_position = False
@@ -98,8 +148,10 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
+    trailing_high = 0.0
+    trailing_low = 0.0
     
-    warmup = 100  # 20 Donchian + 14 ATR + 20 volume MA
+    warmup = 60  # Donchian 20 + volume 20 + HMA 16
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -107,22 +159,27 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+        if np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(hma_1d_aligned[i]):
+        if np.isnan(htf_trend_aligned[i]):
             signals[i] = 0.0
             continue
-        
-        # === HTF TREND (1d HMA) ===
-        price_above_hma = close[i] > hma_1d_aligned[i]
-        price_below_hma = close[i] < hma_1d_aligned[i]
         
         # === DONCHIAN BREAKOUT ===
-        # Breakout: price closes above/below 20-bar high/low
-        bullish_breakout = close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1]
-        bearish_breakout = close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1]
+        # Upper breakout (bullish)
+        upper_breakout = close[i] > dc_upper[i] and close[i - 1] <= dc_upper[i - 1]
+        # Lower breakout (bearish)
+        lower_breakout = close[i] < dc_lower[i] and close[i - 1] >= dc_lower[i - 1]
+        
+        # === HTF TREND ===
+        htf_bull = htf_trend_aligned[i] > 0.5
+        htf_bear = htf_trend_aligned[i] < -0.5
+        
+        # === LOCAL TREND (HMA direction) ===
+        hma_rising = not np.isnan(hma_local[i]) and not np.isnan(hma_local[i - 1]) and hma_local[i] > hma_local[i - 1]
+        hma_falling = not np.isnan(hma_local[i]) and not np.isnan(hma_local[i - 1]) and hma_local[i] < hma_local[i - 1]
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
@@ -131,38 +188,66 @@ def generate_signals(prices):
         desired_signal = 0.0
         
         if not in_position:
-            # LONG: Price breaks 12h high + above 1d HMA + volume confirms
-            if bullish_breakout and price_above_hma and vol_spike:
+            # LONG: Upper breakout + HTF bull + local HMA rising + volume spike
+            if upper_breakout and htf_bull and hma_rising and vol_spike:
                 desired_signal = SIZE
             
-            # SHORT: Price breaks 12h low + below 1d HMA + volume confirms
-            elif bearish_breakout and price_below_hma and vol_spike:
+            # SHORT: Lower breakout + HTF bear + local HMA falling + volume spike
+            if lower_breakout and htf_bear and hma_falling and vol_spike:
                 desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR) ===
+        # === STOPLOSS (2.5 ATR trailing stop) ===
         if in_position:
             if position_side > 0:
-                # Long stop: entry - 2.5 ATR
-                stop_price = entry_price - 2.5 * entry_atr
+                # Update trailing high
+                if i == entry_bar or high[i] > trailing_high:
+                    trailing_high = high[i]
+                
+                # Trailing stop
+                stop_price = trailing_high - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
                 
-                # Exit if price falls back below 1d HMA (trend reversal)
-                if price_below_hma:
+                # Exit if local HMA turns
+                if hma_falling:
                     desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
+                
+                # Exit if HTF turns bear
+                if htf_bear:
+                    desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
             
             elif position_side < 0:
-                # Short stop: entry + 2.5 ATR
-                stop_price = entry_price + 2.5 * entry_atr
+                # Update trailing low
+                if i == entry_bar or low[i] < trailing_low:
+                    trailing_low = low[i]
+                
+                # Trailing stop
+                stop_price = trailing_low + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
                 
-                # Exit if price rises back above 1d HMA (trend reversal)
-                if price_above_hma:
+                # Exit if local HMA turns
+                if hma_rising:
                     desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
+                
+                # Exit if HTF turns bull
+                if htf_bull:
+                    desired_signal = 0.0
+                    in_position = False
+                    position_side = 0
         
-        # === MINIMUM HOLD: 2 bars to reduce fee churn ===
-        if in_position and (i - entry_bar) < 2:
+        # === MINIMUM HOLD: 6 bars to avoid fee churn ===
+        if in_position and (i - entry_bar) < 6:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
@@ -173,10 +258,11 @@ def generate_signals(prices):
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
-        else:
-            if in_position:
-                in_position = False
-                position_side = 0
+                trailing_high = high[i]
+                trailing_low = low[i]
+        elif in_position:
+            in_position = False
+            position_side = 0
         
         signals[i] = desired_signal
     
