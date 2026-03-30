@@ -1,33 +1,29 @@
-Looking at the experiment history, I see the critical pattern: strategies with >300 trades fail due to fee drag, and those with <50 trades are statistically unreliable. The winning formula needs TIGHT entry conditions + regime filtering.
-
-My hypothesis: A 12h Donchian(40) breakout (10+ day channel) with a stricter 1d EMA21 trend filter + volume confirmation should generate 50-120 trades over 4 years. The longer Donchian period reduces false breakouts, and the EMA21 filter ensures we only trade with the higher timeframe trend.
-
-Key improvements over the current approach:
-1. Increase Donchian period from 20 to 40 (reduces trade frequency by ~50%)
-2. Use EMA21 instead of SMA50 (faster, more responsive)
-3. Add 1d HTF ATR for stoploss scaling
-4. Require stronger volume confirmation (1.8x)
-5. Use 1d Donchian for structure confirmation (parallel HTF analysis)
 #!/usr/bin/env python3
 """
-Experiment #028: 12h Donchian(40) Breakout + 1d EMA21 Trend + Volume Spike + ATR Stoploss
+Experiment #028: 4h Donchian + HMA + Volume with 12h Trend Filter
 
-HYPOTHESIS: Longer Donchian period (40 = 20-day channel) captures major institutional
-breakouts rather than noise. 1d EMA21 provides trend direction. Volume spike confirms
-institutional participation. Choppiness filter keeps us out of range-bound markets.
+HYPOTHESIS: Based on DB winners mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (95tr, Sharpe 1.38)
+and mtf_4h_hma_volume_donchian_adx_12h_v1 (94tr, Sharpe 1.32). This uses the proven combination:
+- 12h HMA for trend direction (captures medium-term swings)
+- 4h Donchian(20) for breakout structure
+- Volume spike for institutional confirmation
+- ATR-based stoploss for risk management
 
-WHY 12h: Slower than 6h/4h, so fewer but higher-quality signals. 50-120 trades over
-4 years = manageable fee drag. Works in both bull (long breakouts) and bear (short breakdowns).
+WHY IT SHOULD WORK IN BULL AND BEAR:
+- Symmetrical Donchian channels catch both breakouts AND breakdowns
+- HMA adapts to volatility, works in trending and ranging markets
+- Short entries trigger on breakdowns below HMA in bear markets
+- Volume confirms institutional participation (filters false breakouts)
 
-TARGET: 50-120 total trades over 4 years. HARD MAX: 200.
-Signal size: 0.25 (conservative).
+TARGET: 75-200 total trades over 4 years (19-50/year). HARD MAX: 400.
+Simplified entry: 3 conditions max (trend, breakout, volume).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian40_ema21_vol_1d_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_hma_vol_12h_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -44,29 +40,18 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - lower = trending, higher = choppy"""
-    n = len(high)
-    chop = np.full(n, np.nan, dtype=np.float64)
+def calculate_hma(data, period):
+    """Hull Moving Average"""
+    half = int(period / 2)
+    sqrt_n = int(np.sqrt(period))
     
-    for i in range(period, n):
-        tr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            if j > 0:
-                tr = max(high[j] - low[j], abs(high[j] - close[j-1]))
-            else:
-                tr = high[j] - low[j]
-            tr_sum += tr
-        
-        if tr_sum > 0:
-            hh = np.max(high[i - period + 1:i + 1])
-            ll = np.min(low[i - period + 1:i + 1])
-            range_hl = hh - ll
-            
-            if range_hl > 0:
-                chop[i] = 100 * np.log10(tr_sum / range_hl) / np.log10(period)
+    wma_half = pd.Series(data).rolling(window=half, min_periods=half).mean()
+    wma_full = pd.Series(data).rolling(window=period, min_periods=period).mean()
     
-    return chop
+    raw_hma = 2 * wma_half - wma_full
+    hma = raw_hma.rolling(window=sqrt_n, min_periods=sqrt_n).mean()
+    
+    return hma.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -76,35 +61,29 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d EMA21 for trend direction
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # 12h HMA48 for trend direction
+    hma_12h = calculate_hma(df_12h['close'].values, 48)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # 1d ATR for stoploss scaling
-    htf_high = df_1d['high'].values
-    htf_low = df_1d['low'].values
-    htf_close = df_1d['close'].values
-    htf_atr = calculate_atr(htf_high, htf_low, htf_close, period=14)
-    htf_atr_aligned = align_htf_to_ltf(prices, df_1d, htf_atr)
-    
-    # Local 12h indicators
+    # Local 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Donchian channels (40 periods = 20 days on 12h)
-    donchian_period = 40
+    # 4h HMA21 for local momentum
+    hma_4h = calculate_hma(close, 21)
+    
+    # Donchian channels (20 periods = 3.3 days on 4h)
+    donchian_period = 20
     donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
     donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Volume
+    # Volume average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -115,9 +94,8 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     entry_bar = 0
-    entry_idx = 0
     
-    warmup = 150  # Need enough for Donchian(40) + buffer
+    warmup = 100  # Need enough for all indicators
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -127,57 +105,54 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(hma_12h_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(chop[i]):
+        if np.isnan(hma_4h[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION (1d EMA21) ===
-        price_above_1d_ema = close[i] > ema_1d_aligned[i]
-        bull_trend = price_above_1d_ema
-        bear_trend = not price_above_1d_ema
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
+            continue
         
-        # === REGIME (Choppiness Index) ===
-        # Skip if too choppy when not in position
-        is_choppy = chop[i] > 61.8
-        is_trending = chop[i] < 50.0
+        # === TREND DIRECTION (12h HMA) ===
+        price_above_12h_hma = close[i] > hma_12h_aligned[i]
+        hma_4h_above_12h = hma_4h[i] > hma_12h_aligned[i]
         
         # === DONCHIAN BREAKOUT SIGNALS ===
-        current_high = high[i]
-        current_low = low[i]
-        
-        # Previous bar's Donchian values
         prev_donchian_high = donchian_high[i - 1] if i > 0 else 0
         prev_donchian_low = donchian_low[i - 1] if i > 0 else 0
+        prev_close = close[i - 1] if i > 0 else close[i]
         
-        # Volume confirmation (stronger = 1.8x)
-        vol_spike = vol_ratio[i] > 1.8
+        # Volume confirmation
+        vol_spike = vol_ratio[i] > 1.3
         
-        # === ENTRY LOGIC ===
+        # === ENTRY LOGIC (3 conditions) ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Breakout above Donchian high + bull trend + volume ===
-            # Price closes above previous 40-bar high with volume spike in bull trend
-            if current_high > prev_donchian_high:
-                if bull_trend and vol_spike:
-                    desired_signal = SIZE
-                # Also allow if strongly trending (CHOP < 45)
-                elif is_trending and vol_spike:
+            # === LONG: Breakout above Donchian high + trending up ===
+            # Condition 1: 12h trend up (price > 12h HMA)
+            # Condition 2: 4h momentum confirms (4h HMA > 12h HMA)  
+            # Condition 3: Price breaks above previous Donchian high
+            if price_above_12h_hma and hma_4h_above_12h:
+                if high[i] > prev_donchian_high:
                     desired_signal = SIZE
             
-            # === SHORT: Breakdown below Donchian low + bear trend + volume ===
-            if current_low < prev_donchian_low:
-                if bear_trend and vol_spike:
-                    desired_signal = -SIZE
-                elif is_trending and vol_spike:
+            # === SHORT: Breakdown below Donchian low + trending down ===
+            # Condition 1: 12h trend down (price < 12h HMA)
+            # Condition 2: 4h momentum confirms (4h HMA < 12h HMA)
+            # Condition 3: Price breaks below previous Donchian low
+            if not price_above_12h_hma and not hma_4h_above_12h:
+                if low[i] < prev_donchian_low:
                     desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.0 ATR trailing) ===
@@ -200,37 +175,15 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === TAKE PROFIT at 2R ===
-        if in_position and not stoploss_triggered:
-            if position_side > 0:
-                profit_target = entry_price + 2.0 * entry_atr
-                if close[i] >= profit_target:
-                    # Take partial profit, trail remaining
-                    desired_signal = SIZE / 2  # Half position
-                    # Update stop to breakeven
-                    stop_price = max(stop_price, entry_price)
-            elif position_side < 0:
-                profit_target = entry_price - 2.0 * entry_atr
-                if close[i] <= profit_target:
-                    # Take partial profit, trail remaining
-                    desired_signal = -SIZE / 2  # Half position
-                    # Update stop to breakeven
-                    stop_price = min(stop_price, entry_price)
-        
-        # === TIME-BASED EXIT ===
-        # Hold at least 8 bars (4 days on 12h) before mid-channel exit
+        # === TIME-BASED EXIT (hold at least 4 bars = 16h) ===
         bars_held = i - entry_bar
         
-        if in_position and bars_held >= 8:
-            # Exit if price reverts to middle of channel
-            if position_side > 0 and close[i] < donchian_mid[i]:
+        if in_position and bars_held >= 4:
+            # Exit if trend reverses (4h HMA crosses 12h HMA)
+            if position_side > 0 and not hma_4h_above_12h:
                 desired_signal = 0.0
-            if position_side < 0 and close[i] > donchian_mid[i]:
+            if position_side < 0 and hma_4h_above_12h:
                 desired_signal = 0.0
-        
-        # === MAX HOLD (prevent endless holds) ===
-        if in_position and bars_held >= 30:  # ~15 days max
-            desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
