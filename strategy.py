@@ -1,73 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #009: 4h Donchian(10) + 1d ADX + Vol Spike
+Experiment #021: 12h Camarilla S4/R4 + 1d Donchian + 1d EMA50 Trend
 
-HYPOTHESIS: 4h Donchian(10) captures medium-term momentum swings. 
-1d ADX > 25 ensures trending conditions (no range-bound whipsaws).
-Volume spike confirms institutional entry. ATR stoploss manages risk.
-1d SMA confirms trend direction.
+HYPOTHESIS: Buy S4 touches (deep support) when 1d trend is bullish AND 1d
+Donchian(20) confirms uptrend. Short R4 touches when 1d trend is bearish AND
+Donchian confirms downtrend. This triple confirmation (Camarilla + EMA + Donchian)
+should capture reversals at key institutional levels with minimal false signals.
 
-WHY IT WORKS IN BULL AND BEAR: Breakouts occur in both directions.
-Long breakouts in uptrends, shorts in downtrends. ADX filter removes
-range-bound chop that destroys trend followers in bear markets.
+WHY 12h: ~3x fewer bars than 4h = 3x fewer potential trades = less fee drag.
+12h Camarilla captures multi-day swing reversals.
 
-TARGET: 40-80 total trades over 4 years (10-20/year).
+WHY IT WORKS IN BULL AND BEAR: S4 in uptrend = buy the dip (bull).
+R4 in downtrend = short the rally (bear). Symmetrical edge.
+
+TARGET: 75-150 total trades over 4 years. HARD MAX: 200.
+Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_adx_vol_1d_v1"
-timeframe = "4h"
+name = "mtf_12h_camarilla_s4r4_donchian_1d_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_adx(high, low, close, period=14):
-    """ADX indicator"""
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    # True Range
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    # Directional Movement
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
-    
-    for i in range(1, n):
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-    
-    # Smooth with EMA
-    atr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # DX
-    plus_di = np.zeros(n, dtype=np.float64)
-    minus_di = np.zeros(n, dtype=np.float64)
-    dx = np.zeros(n, dtype=np.float64)
-    
-    for i in range(n):
-        if atr_smooth[i] > 1e-10:
-            plus_di[i] = 100 * plus_dm_smooth[i] / atr_smooth[i]
-            minus_di[i] = 100 * minus_dm_smooth[i] / atr_smooth[i]
-            di_sum = plus_di[i] + minus_di[i]
-            if di_sum > 1e-10:
-                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
-    
-    # ADX = EMA of DX
-    adx = pd.Series(dx).ewm(span=period, min_periods=2*period, adjust=False).mean().values
-    
-    return adx
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -83,6 +38,12 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - upper = highest high, lower = lowest low"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -90,28 +51,39 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load 1d HTF data ONCE before loop ===
+    # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d ADX for regime detection (trend vs chop)
-    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # 1d EMA50 for trend direction
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 1d SMA50 for trend direction
-    sma_1d = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    # 1d Donchian(20) for trend confirmation
+    donchian_1d_upper = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
+    donchian_1d_lower = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
+    donchian_1d_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_1d_upper)
+    donchian_1d_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_1d_lower)
     
-    # === Local 4h indicators ===
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Donchian channels (10 periods = 40 hours = ~1.7 days)
-    donchian_period = 10
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().shift(1).values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().shift(1).values
-    
-    # Volume ratio (20-bar MA)
+    # Volume ratio (20-period MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    
+    # Choppiness Index for regime filtering
+    # CI = 100 * log10(sum(ATR14) / (max(H-L) over period)) / log10(period)
+    # < 38.2 = trending, > 61.8 = ranging
+    chop_period = 14
+    chop_values = np.full(n, np.nan)
+    for i in range(chop_period, n):
+        tr_sum = 0.0
+        for j in range(chop_period):
+            tr = max(high[i-j] - low[i-j], abs(high[i-j] - close[i-j-1]) if i-j > 0 else high[i-j] - low[i-j])
+            tr_sum += tr
+        hL = max(high[i-chop_period+1:i+1]) - min(low[i-chop_period+1:i+1])
+        if hL > 0 and tr_sum > 0:
+            chop_values[i] = 100 * np.log10(tr_sum / hL) / np.log10(chop_period)
     
     # Signals
     signals = np.zeros(n)
@@ -126,83 +98,98 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     entry_bar = 0
+    min_hold_bars = 2  # Minimum 2 bars (1 day) before considering exit
     
-    warmup = 100  # Need enough for indicators
+    warmup = 100  # Need enough for all indicators
     
     for i in range(warmup, n):
-        # Skip if indicators not ready
+        # Skip if ATR not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(adx_1d_aligned[i]) or np.isnan(sma_1d_aligned[i]):
+        # Skip if HTF indicators not aligned
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_1d_upper_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === REGIME FILTER: ADX > 25 = trending, ADX < 20 = choppy ===
-        adx_trending = adx_1d_aligned[i] > 25
-        adx_chop = adx_1d_aligned[i] < 20
+        # === TREND CONFIRMATION (1d EMA50 + Donchian) ===
+        price_above_1d_ema = close[i] > ema_1d_aligned[i]
+        price_below_1d_ema = close[i] < ema_1d_aligned[i]
         
-        # === TREND DIRECTION: price vs 1d SMA50 ===
-        price_above_1d_sma = close[i] > sma_1d_aligned[i]
+        # 1d Donchian: confirm trend by checking if price is in upper/lower third
+        donchian_mid = (donchian_1d_upper_aligned[i] + donchian_1d_lower_aligned[i]) / 2
+        donchian_range = donchian_1d_upper_aligned[i] - donchian_1d_lower_aligned[i]
+        price_near_donchian_top = close[i] > donchian_mid + donchian_range * 0.25  # upper quartile
+        price_near_donchian_bot = close[i] < donchian_mid - donchian_range * 0.25  # lower quartile
         
-        # Volume confirmation (1.5x average)
-        vol_spike = vol_ratio[i] > 1.5
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] >= 2.0  # Stronger volume filter
         
-        # Donchian breakout signals
-        upper_break = close[i] > donchian_high[i] if not np.isnan(donchian_high[i]) else False
-        lower_break = close[i] < donchian_low[i] if not np.isnan(donchian_low[i]) else False
+        # === CHOPPINESS FILTER ===
+        chop = chop_values[i]
+        is_trending = not np.isnan(chop) and chop < 55.0
+        
+        # === CAMARILLA LEVELS from previous CLOSED bar (no look-ahead) ===
+        prev_high = high[i - 1]
+        prev_low = low[i - 1]
+        prev_close = close[i - 1]
+        prev_range = prev_high - prev_low
+        
+        # Classic Camarilla levels (factor 1.1/12 = 0.09167, 2.2/12 = 0.18333)
+        r4 = prev_close + prev_range * 0.18333
+        s4 = prev_close - prev_range * 0.18333
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Upper Donchian breakout + trend up + volume + trending regime ===
-            if upper_break and price_above_1d_sma and vol_spike and adx_trending:
-                desired_signal = SIZE
+            # === LONG: Price touches S4 with TRIPLE confirmation ===
+            # 1. Price above 1d EMA50 (trend up)
+            # 2. Price in upper quartile of 1d Donchian (confirmed uptrend)
+            # 3. Volume spike (> 2x average)
+            # 4. S4 touch (deep support pullback)
+            if price_above_1d_ema and price_near_donchian_top and vol_spike:
+                if low[i] <= s4:
+                    desired_signal = SIZE
             
-            # === SHORT: Lower Donchian breakout + trend down + volume + trending regime ===
-            if lower_break and not price_above_1d_sma and vol_spike and adx_trending:
-                desired_signal = -SIZE
+            # === SHORT: Price touches R4 with TRIPLE confirmation ===
+            # 1. Price below 1d EMA50 (trend down)
+            # 2. Price in lower quartile of 1d Donchian (confirmed downtrend)
+            # 3. Volume spike
+            # 4. R4 touch (deep resistance rally)
+            if price_below_1d_ema and price_near_donchian_bot and vol_spike:
+                if high[i] >= r4:
+                    desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR trailing) ===
+        # === STOPLOSS (2.0 ATR trailing) ===
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 desired_signal = 0.0
         
-        # === MINIMUM HOLD (6 bars = 1 day to reduce churn) ===
+        # === HOLD PERIOD + TAKE PROFIT ===
         bars_held = i - entry_bar
-        if in_position and bars_held < 6:
-            # Don't exit early due to opposite signal
-            if position_side > 0 and desired_signal < 0:
-                desired_signal = SIZE  # Keep long
-            if position_side < 0 and desired_signal > 0:
-                desired_signal = -SIZE  # Keep short
         
-        # === TAKE PROFIT (3:1 R:R when ADX drops = trend weakening) ===
-        if in_position and bars_held >= 6:
-            if position_side > 0:
-                profit_pct = (close[i] - entry_price) / entry_price
-                if profit_pct > 0.05 and adx_chop:  # >5% gain and ADX drops = exit
-                    desired_signal = 0.0
-            if position_side < 0:
-                profit_pct = (entry_price - close[i]) / entry_price
-                if profit_pct > 0.05 and adx_chop:
-                    desired_signal = 0.0
+        if in_position and bars_held >= min_hold_bars:
+            # Exit when price reverts to previous close ( Camarilla mid)
+            if position_side > 0 and close[i] >= prev_close:
+                desired_signal = 0.0
+            if position_side < 0 and close[i] <= prev_close:
+                desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
@@ -216,9 +203,9 @@ def generate_signals(prices):
                 lowest_since_entry = low[i]
                 entry_bar = i
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - 2.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
+                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
