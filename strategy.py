@@ -1,56 +1,51 @@
 #!/usr/bin/env python3
 """
-Experiment #007: 6h ATR Band Breakout + 1d ADX Trend + Volume
+Experiment #021: 4h Donchian Breakout + 1d HMA + ADX Regime + Simple Volume
 
-HYPOTHESIS: ATR bands adapt to volatility regime better than fixed-price channels.
-Band width automatically adjusts to current market conditions.
+HYPOTHESIS: Simplify the current best strategy (#015, Sharpe=0.513, 210 trades)
+by replacing Choppiness with ADX regime filter. ADX is simpler to calculate
+and more intuitive: ADX > 20 = trending (enter), ADX < 15 = ranging (avoid).
 
-WHY 6h:
-- 12h has 54% keep rate but few total strategies tested
-- 6h is challenging (23% keep) but offers different signal profile
-- ATR bands on 6h capture multi-day volatility cycles
+RATIONALE:
+- Current #015 uses CHOP<50 (complex, logs/log calculations)
+- ADX is simpler: just directional movement + smoothed average
+- ADX > 20 reliably identifies trending markets for breakouts
+- Keep everything else that works: 12h HMA trend + 4h Donchian + volume
 
-KEY MECHANISM:
-- ATR(14) band around EMA(21) centerline
-- 2.5x multiplier for band width (adjusts dynamically to volatility)
-- Entry when price closes beyond band + 1d ADX trend confirmation + volume spike
-- This should generate 20-35 trades/year with quality filtering
+TARGET: 120-180 trades over 4 years (30-45/year)
+- Donchian(20) on 4h: ~6 breakouts per month per direction
+- With HTF filter + volume: expect ~50% to qualify
+- With ADX regime: expect ~60% to qualify
+- Net: ~30-45 qualified entries/year = 120-180 over 4 years (in range)
 
-TARGET: 80-140 total trades over 4 years (20-35/year)
+TIMEFRAME: 4h primary
+MTF: 12h HMA(21) for trend direction
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_atr_band_adx_vol_1d_v1"
-timeframe = "6h"
+name = "mtf_4h_donchian_hma_adx_vol_12h_v3"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+def calculate_adx(high, low, close, period=14):
+    """
+    Average Directional Index (ADX)
+    ADX > 20 = trending market (good for breakouts)
+    ADX < 15 = ranging market (avoid)
+    """
     n = len(close)
     if n < period + 1:
-        return np.full(n, np.nan)
+        return np.full(n, np.nan), np.full(n, np.nan)
     
+    # True Range
     tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
-
-def calculate_adx(high, low, close, period=14):
-    """Directional Movement Index - measures trend strength, not direction"""
-    n = len(close)
-    if n < period * 2 + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
+    # Directional Movement
     plus_dm = np.zeros(n, dtype=np.float64)
     minus_dm = np.zeros(n, dtype=np.float64)
     
@@ -63,22 +58,53 @@ def calculate_adx(high, low, close, period=14):
         if low_diff > high_diff and low_diff > 0:
             minus_dm[i] = low_diff
     
-    # Smooth using EMA
-    atr_smooth = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values
+    # Smoothed values using Wilder's smoothing
+    atr_smooth = pd.Series(tr).ewm(alpha=1/period, min_periods=period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/period, min_periods=period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/period, min_periods=period, adjust=False).mean().values
     
-    # Calculate DI values
-    plus_di = np.where(atr_smooth > 0, 100 * plus_dm_smooth / atr_smooth, 0)
-    minus_di = np.where(atr_smooth > 0, 100 * minus_dm_smooth / atr_smooth, 0)
+    # DX calculation
+    plus_di = np.zeros(n, dtype=np.float64)
+    minus_di = np.zeros(n, dtype=np.float64)
+    dx = np.zeros(n, dtype=np.float64)
     
-    # DX
-    dx = np.where((plus_di + minus_di) > 0, 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    for i in range(n):
+        if atr_smooth[i] > 0:
+            plus_di[i] = 100 * plus_dm_smooth[i] / atr_smooth[i]
+            minus_di[i] = 100 * minus_dm_smooth[i] / atr_smooth[i]
+            
+            di_sum = plus_di[i] + minus_di[i]
+            if di_sum > 0:
+                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum
     
-    # ADX = EMA of DX
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    # ADX = smoothed DX
+    adx = pd.Series(dx).ewm(alpha=1/period, min_periods=period, adjust=False).mean().values
     
-    return adx
+    return adx, plus_di
+
+def calculate_hma(close, period=21):
+    """Hull Moving Average"""
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    close_s = pd.Series(close)
+    wma_half = close_s.ewm(span=period//2, min_periods=period//2, adjust=False).mean().values
+    wma_full = close_s.ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    hull = 2 * wma_half - wma_full
+    hma = pd.Series(hull).ewm(span=int(np.sqrt(period)), min_periods=int(np.sqrt(period)), adjust=False).mean().values
+    return hma
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel"""
+    n = len(high)
+    if n < period:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -87,31 +113,24 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load 1d data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
+    # === Load HTF data ONCE before loop ===
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d ADX for structural trend strength
-    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, period=20)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # 12h HMA(21) for trend direction
+    hma_21_12h = calculate_hma(df_12h['close'].values, period=21)
+    hma_aligned = align_htf_to_ltf(prices, df_12h, hma_21_12h)
     
-    # === Local 6h indicators ===
-    atr_14 = calculate_atr(high, low, close, period=14)
+    # === Local 4h indicators ===
+    donchian_up, donchian_lo = calculate_donchian(high, low, period=20)
+    adx, plus_di = calculate_adx(high, low, close, period=14)
     
-    # EMA centerline for ATR bands
-    ema_21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
-    
-    # ATR band upper/lower around EMA
-    atr_multiplier = 2.5
-    upper_band = ema_21 + atr_multiplier * atr_14
-    lower_band = ema_21 - atr_multiplier * atr_14
-    
-    # Volume ratio
+    # Volume ratio (20-period MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # === Generate signals ===
+    # Signals
     signals = np.zeros(n)
-    SIZE = 0.28  # 28% position size
+    SIZE = 0.28
     
     # Position tracking
     in_position = False
@@ -122,61 +141,78 @@ def generate_signals(prices):
     trailing_high = 0.0
     trailing_low = 0.0
     
-    warmup = 250  # 21 EMA + 14 ATR + 20 vol MA + 1d alignment
+    warmup = 100  # 20 for donchian + 14 for ADX + 20 for vol MA + HTF alignment buffer
     
     for i in range(warmup, n):
-        # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        # Check indicator readiness
+        if np.isnan(adx[i]) or np.isnan(hma_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(adx_aligned[i]):
+        if np.isnan(donchian_up[i]) or np.isnan(donchian_lo[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(ema_21[i]):
-            signals[i] = 0.0
-            continue
+        # === ADX REGIME FILTER ===
+        # ADX > 20 = trending (good for breakouts)
+        # ADX < 15 = ranging (avoid entries)
+        adx_value = adx[i]
+        is_trending = adx_value > 20
+        is_ranging = adx_value < 15
         
-        # === CONDITIONS ===
-        # 1d ADX > 25 = trending (filter out range markets)
-        adx_trending = adx_aligned[i] > 25
+        # === HTF TREND: 12h HMA(21) direction ===
+        htf_trend_up = close[i] > hma_aligned[i]
+        htf_trend_down = close[i] < hma_aligned[i]
         
-        # Volume spike confirmation (1.8x average)
-        vol_spike = vol_ratio[i] > 1.8
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.5
         
-        # ATR band breakout
-        # Long: price breaks above upper band
-        # Short: price breaks below lower band
-        breakout_up = close[i] > upper_band[i]
-        breakout_down = close[i] < lower_band[i]
+        # === DONCHIAN BREAKOUT ===
+        # Long: price breaks ABOVE previous channel high
+        # Short: price breaks BELOW previous channel low
+        prev_donchian_up = donchian_up[i - 1]
+        prev_donchian_lo = donchian_lo[i - 1]
+        
+        breakout_up = close[i] > prev_donchian_up
+        breakout_down = close[i] < prev_donchian_lo
+        
+        # === ATR for stoploss calculation ===
+        # Simple ATR calculation for trailing stop
+        tr1 = high[i] - low[i]
+        tr2 = abs(high[i] - close[i-1]) if i > 0 else 0
+        tr3 = abs(low[i] - close[i-1]) if i > 0 else 0
+        atr_current = max(tr1, tr2, tr3)
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # LONG: Breakout above upper band + trending + volume spike
-            if breakout_up and adx_trending and vol_spike:
+            # === LONG: Trending + breakout up + HTF trend up + volume spike ===
+            if breakout_up and htf_trend_up and vol_spike and is_trending:
                 desired_signal = SIZE
             
-            # SHORT: Breakout below lower band + trending + volume spike
-            if breakout_down and adx_trending and vol_spike:
+            # === SHORT: Trending + breakout down + HTF trend down + volume spike ===
+            if breakout_down and htf_trend_down and vol_spike and is_trending:
                 desired_signal = -SIZE
         
-        # === STOPLOSS (trailing ATR stop) ===
+        # === STOPLOSS (2.5 ATR trailing stop) ===
         if in_position:
             if position_side > 0:
                 # Update trailing high
                 if i == entry_bar or high[i] > trailing_high:
                     trailing_high = high[i]
                 
-                # Trailing stop: exit if price falls 2.5 ATR from recent high
+                # Trailing stop
                 stop_price = trailing_high - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
                 
-                # Exit if ADX drops below 20 (trend weakening)
-                if adx_aligned[i] < 20:
+                # Exit if HTF trend flips
+                if htf_trend_down:
+                    desired_signal = 0.0
+                
+                # Exit if ranging market
+                if is_ranging:
                     desired_signal = 0.0
             
             elif position_side < 0:
@@ -184,13 +220,17 @@ def generate_signals(prices):
                 if i == entry_bar or low[i] < trailing_low:
                     trailing_low = low[i]
                 
-                # Trailing stop: exit if price rises 2.5 ATR from recent low
+                # Trailing stop
                 stop_price = trailing_low + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
                 
-                # Exit if ADX drops below 20 (trend weakening)
-                if adx_aligned[i] < 20:
+                # Exit if HTF trend flips
+                if htf_trend_up:
+                    desired_signal = 0.0
+                
+                # Exit if ranging market
+                if is_ranging:
                     desired_signal = 0.0
         
         # === MINIMUM HOLD: 4 bars to avoid fee churn ===
@@ -200,11 +240,10 @@ def generate_signals(prices):
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr_current if atr_current > 0 else 1.0
                 entry_bar = i
                 trailing_high = high[i]
                 trailing_low = low[i]
