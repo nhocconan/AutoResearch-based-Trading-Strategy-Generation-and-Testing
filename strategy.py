@@ -1,33 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #025: 6h Volatility Compression Breakout + Daily ATR Regime
+Experiment #025: 4h TRIX Momentum + Volume Spike + Weekly ATR Regime (4h)
 
-HYPOTHESIS: Markets alternate between volatility compression (consolidation) and expansion.
-When BB Width contracts to 30d low AND price breaks compression with volume, 
-explosive moves follow. Daily ATR regime filter prevents trading during 
-high-volatility panic (2022 crash, black swan events).
+HYPOTHESIS: TRIX(28) for trend momentum, volume spike confirmation,
+weekly ATR regime filter to avoid low-vol whipsaws.
 
-WHY IT WORKS IN BOTH MARKETS:
-- Bull: Compression under BB + breakout up + ATR regime neutral → ride momentum
-- Bear: Same signal but ATR regime filters out crash periods (random direction)
-- Range expansion follows compression (physics of markets)
+WHY IT SHOULD WORK IN BOTH MARKETS:
+- Bull: TRIX crosses above 0 + volume spike + rising ATR = momentum entry
+- Bear: TRIX crosses below 0 + volume spike + rising ATR = bearish entry
+- Weekly ATR filter: only enter when volatility is expanding (not during chop)
 
-EXPECTED TRADES: 75-150 total over 4 years (19-37/year)
-- BB Width at 30d low ≈ 5-10% of bars
-- Volume confirmation reduces by ~40%
-- Daily ATR filter reduces by ~30%
-- Final: ~75-120 trades per symbol
-
-DIFFERENT FROM DONCHIAN: Uses BB Width %B for compression detection, 
-not just price channel breakouts. Captures "coil" before explosive move.
+EXPECTED TRADES: 100-180 total over 4 years (25-45/year per symbol)
+- TRIX crossover on 4h = signal every ~30-50 bars
+- Volume spike 1.8x → reduces by ~40%
+- Weekly ATR rising filter → reduces by ~30%
+- Final: ~100-180 trades = statistical validity without overtrading
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_vol_compression_breakout_v1"
-timeframe = "6h"
+name = "mtf_4h_trix_vol_atr_regime_v1"
+timeframe = "4h"
 leverage = 1.0
+
+def calculate_trix(close, period=28):
+    """Triple EMA - TRIX momentum indicator"""
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
+    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
+    trix = ema3.pct_change() * 100
+    return trix.values
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -43,22 +46,21 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_bb_width(high, low, close, period=20):
-    """Bollinger Band Width as % of price"""
-    mid = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+def calculate_weekly_atr(df_1w):
+    """Weekly ATR for regime filter"""
+    high = df_1w['high'].values
+    low = df_1w['low'].values
+    close = df_1w['close'].values
+    n = len(close)
     
-    upper = mid + 2 * std
-    lower = mid - 2 * std
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    width = (upper - lower) / mid
-    return width
-
-def calculate_atr_ratio(atr, period=14):
-    """ATR ratio: current ATR / 30-bar ATR MA. >1.5 = high volatility regime."""
-    atr_ma = pd.Series(atr).rolling(window=30, min_periods=30).mean().values
-    ratio = atr / np.where(atr_ma > 0, atr_ma, 1)
-    return ratio
+    # Weekly ATR(14) = 14-week EMA of TR
+    atr_weekly = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    return atr_weekly
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -68,41 +70,24 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
+    weekly_atr = calculate_weekly_atr(df_1w)
+    weekly_atr_aligned = align_htf_to_ltf(prices, df_1w, weekly_atr)
     
-    # Daily ATR for regime
-    daily_atr = calculate_atr(
-        df_1d['high'].values,
-        df_1d['low'].values,
-        df_1d['close'].values,
-        period=14
-    )
-    daily_atr_aligned = align_htf_to_ltf(prices, df_1d, daily_atr)
+    # Weekly EMA for trend direction
+    weekly_ema = pd.Series(df_1w['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
     
-    # Daily EMA(20) for trend
-    daily_ema = pd.Series(df_1d['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
-    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
-    
-    # === Local 6h indicators ===
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    atr_ratio = calculate_atr_ratio(atr_14)
+    trix = calculate_trix(close, period=28)
     
-    # BB Width for compression detection
-    bb_width = calculate_bb_width(high, low, close, period=20)
+    # Local ATR for comparison
+    local_atr = calculate_atr(high, low, close, period=14)
     
-    # Rolling min/max of BB Width (30 bars) for compression detection
-    bb_width_min = pd.Series(bb_width).rolling(window=30, min_periods=30).min().values
-    bb_width_max = pd.Series(bb_width).rolling(window=30, min_periods=30).max().values
-    
-    # BB for price reference
-    bb_mid = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    
-    # Volume average
+    # Volume average (20 bars)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
-    
-    # Price momentum (5 bars)
-    roc = pd.Series(close).pct_change(5).values
     
     # === Signals ===
     signals = np.zeros(n)
@@ -117,65 +102,51 @@ def generate_signals(prices):
     trailing_high = 0.0
     trailing_low = 0.0
     
-    warmup = 60  # Enough for BB20, ATR14, 30-bar lookback
+    warmup = 80  # Enough for TRIX(28), ATR(14), volume(20), weekly alignment
     
     for i in range(warmup, n):
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
-        if np.isnan(bb_width[i]) or np.isnan(bb_width_min[i]):
+        if np.isnan(trix[i]) or np.isnan(weekly_atr_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(daily_atr_aligned[i]) or np.isnan(daily_ema_aligned[i]):
-            signals[i] = 0.0
-            continue
-        
-        # === REGIME FILTER: Daily ATR ratio ===
-        # Skip if daily ATR ratio > 1.8 (high volatility regime = choppy)
-        daily_atr_ratio = calculate_atr_ratio(daily_atr_aligned)
-        if not np.isnan(daily_atr_ratio[i]) and daily_atr_ratio[i] > 1.8:
-            # High volatility - stay flat
-            if not in_position:
-                signals[i] = 0.0
-                continue
-        
-        # === COMPRESSION DETECTION ===
-        # BB Width at 30d low = volatility compression
-        width_range = bb_width_max[i] - bb_width_min[i]
-        if width_range > 1e-10:
-            width_percentile = (bb_width[i] - bb_width_min[i]) / width_range
-        else:
-            width_percentile = 1.0
-        
-        is_compressed = width_percentile < 0.15  # Bottom 15% of 30d range
-        
-        # === BREAKOUT DETECTION ===
-        # Price breaks above BB mid with momentum after compression
-        bull_breakout = (close[i] > bb_mid[i] and roc[i] > 0.01)
-        bear_breakout = (close[i] < bb_mid[i] and roc[i] < -0.01)
+        # === WEEKLY TREND FILTER ===
+        weekly_trend_up = close[i] > weekly_ema_aligned[i]
+        weekly_trend_down = close[i] < weekly_ema_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.5
+        vol_spike = vol_ratio[i] > 1.8
         
-        # === TREND: Daily EMA alignment ===
-        bull_trend = close[i] > daily_ema_aligned[i]
-        bear_trend = close[i] < daily_ema_aligned[i]
+        # === WEEKLY ATR REGIME: only trade when volatility is rising ===
+        # Compare current 4h ATR to aligned weekly ATR (scaled down)
+        atr_ratio = local_atr[i] / (weekly_atr_aligned[i] / 24)  # Scale weekly to 4h equivalent
+        vol_expanding = atr_ratio > 0.7  # Vol is expanding or at least not compressed
+        
+        # === TRIX CROSSOVER SIGNALS ===
+        trix_curr = trix[i]
+        trix_prev = trix[i-1] if i > 0 and not np.isnan(trix[i-1]) else 0.0
+        
+        # Bullish crossover: TRIX crosses above 0
+        bullish_cross = (trix_prev <= 0) and (trix_curr > 0)
+        # Bearish crossover: TRIX crosses below 0
+        bearish_cross = (trix_prev >= 0) and (trix_curr < 0)
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # LONG: Compression + breakout + volume + bull trend
-            if is_compressed and bull_breakout and vol_spike and bull_trend:
+            # LONG: TRIX bullish cross + volume spike + vol expanding + weekly uptrend
+            if bullish_cross and vol_spike and vol_expanding and weekly_trend_up:
                 desired_signal = SIZE
             
-            # SHORT: Compression + breakdown + volume + bear trend
-            elif is_compressed and bear_breakout and vol_spike and bear_trend:
+            # SHORT: TRIX bearish cross + volume spike + vol expanding + weekly downtrend
+            elif bearish_cross and vol_spike and vol_expanding and weekly_trend_down:
                 desired_signal = -SIZE
         
-        # === EXIT LOGIC ===
+        # === EXIT LOGICS ===
         if in_position:
             if position_side > 0:
                 # Trailing high
@@ -189,8 +160,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                 
-                # Exit if daily trend flips
-                elif close[i] < daily_ema_aligned[i] * 0.995:
+                # Exit on TRIX reversal or trend flip
+                elif trix_curr < 0 or close[i] < weekly_ema_aligned[i]:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
@@ -207,14 +178,14 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                 
-                # Exit if daily trend flips
-                elif close[i] > daily_ema_aligned[i] * 1.005:
+                # Exit on TRIX reversal or trend flip
+                elif trix_curr > 0 or close[i] > weekly_ema_aligned[i]:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
         
-        # === MINIMUM HOLD: 4 bars to reduce fee churn ===
-        if in_position and (i - entry_bar) < 4:
+        # === MINIMUM HOLD: 6 bars to reduce fee churn ===
+        if in_position and (i - entry_bar) < 6:
             desired_signal = position_side * SIZE
         
         # === EXECUTE NEW POSITION ===
