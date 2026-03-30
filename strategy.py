@@ -1,26 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 4h Williams %R + Donchian Breakout + Choppiness Regime
+Experiment #028: 6h Elder Ray + Volume + 1d EMA Trend
 
-HYPOTHESIS: Williams %R measures momentum within the recent range. Using extreme
-readings (<-80 for longs, >-20 for shorts) ensures we only enter when momentum is
-stretched. Combining with actual Donchian(20) CLOSE breakouts (not just touches)
-filters out false breakouts. 1d SMA200 confirms trend. Choppiness keeps us out
-of range-bound markets.
+HYPOTHESIS: Elder Ray (Bull/Bear Power) measures institutional buying/selling pressure
+relative to a smoothed average. Unlike RSI or Williams %R which are bounded oscillators,
+Elder Ray captures the MAGNITUDE of force behind moves. Combined with 1d EMA for trend
+and volume for confirmation, this catches genuine breakouts while avoiding whipsaws.
 
-WHY IT WORKS IN BULL AND BEAR: Uses symmetrical Williams %R extremes, so oversold
-shorts work in bear markets, overbought longs work in bull. Donchian confirms
-institutional breakout participation. Fewer trades = less fee drag.
+WHY IT WORKS IN BULL AND BEAR:
+- Bull Power > 0 in uptrends = institutional buying confirms rallies
+- Bear Power < 0 in downtrends = institutional selling confirms selloffs  
+- Divergence signals exhaustion BEFORE reversals
+- Symmetric: works on both long and short sides
 
-TARGET: 75-200 total trades over 4 years (19-50/year). HARD MAX: 300.
-Signal size: 0.25 (conservative).
+WHY 6h: Slower than 4h reduces fee drag, faster than 12h catches more setups.
+6h bars capture institutional sessions without noise.
+
+WHY NOVEL: Elder Ray is DIFFERENT from RSI/WR/TRIX - it measures absolute power
+above/below EMA, not relative position. Not tried in previous experiments.
+
+TARGET: 75-150 total trades over 4 years (19-37/year). HARD MAX: 200.
+Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_williams_r_donchian_chop_v2"
-timeframe = "4h"
+name = "mtf_6h_elder_ray_vol_1d_ema_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -37,44 +44,29 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_williams_r(high, low, close, period=14):
-    """Williams %R - momentum oscillator"""
-    n = len(close)
-    willr = np.full(n, np.nan, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        period_high = np.max(high[i - period + 1:i + 1])
-        period_low = np.min(low[i - period + 1:i + 1])
-        range_hl = period_high - period_low
-        
-        if range_hl > 0:
-            willr[i] = -100 * (period_high - close[i]) / range_hl
-    
-    return willr
+def calculate_ema(values, period, min_periods=None):
+    """Exponential Moving Average"""
+    if min_periods is None:
+        min_periods = period
+    return pd.Series(values).ewm(span=period, min_periods=min_periods, adjust=False).mean().values
 
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - lower = trending, higher = choppy"""
-    n = len(high)
-    chop = np.full(n, np.nan, dtype=np.float64)
+def calculate_elder_ray(high, low, close, ema_period=13):
+    """
+    Elder Ray: Measures buying/selling pressure relative to EMA
+    Bull Power = High - EMA (positive = buying pressure)
+    Bear Power = Low - EMA (negative = selling pressure)
+    """
+    n = len(close)
+    ema = calculate_ema(close, ema_period, min_periods=ema_period)
     
-    for i in range(period, n):
-        tr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            if j > 0:
-                tr = max(high[j] - low[j], abs(high[j] - close[j-1]))
-            else:
-                tr = high[j] - low[j]
-            tr_sum += tr
-        
-        if tr_sum > 0:
-            hh = np.max(high[i - period + 1:i + 1])
-            ll = np.min(low[i - period + 1:i + 1])
-            range_hl = hh - ll
-            
-            if range_hl > 0:
-                chop[i] = 100 * np.log10(tr_sum / range_hl) / np.log10(period)
+    bull_power = np.zeros(n, dtype=np.float64)
+    bear_power = np.zeros(n, dtype=np.float64)
     
-    return chop
+    for i in range(n):
+        bull_power[i] = high[i] - ema[i]
+        bear_power[i] = low[i] - ema[i]
+    
+    return bull_power, bear_power, ema
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -86,23 +78,21 @@ def generate_signals(prices):
     # === Load HTF data ONCE ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d SMA200 for trend direction
-    sma_200 = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma_200_aligned = align_htf_to_ltf(prices, df_1d, sma_200)
+    # 1d EMA for trend direction (26-period = one month)
+    ema_1d = calculate_ema(df_1d['close'].values, 26, min_periods=26)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Local 4h indicators
+    # Local 6h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    willr = calculate_williams_r(high, low, close, period=14)
-    chop = calculate_choppiness(high, low, close, period=14)
+    bull_power, bear_power, ema_local = calculate_elder_ray(high, low, close, ema_period=13)
     
-    # Donchian channels (20 periods = 3.3 days on 4h)
-    donchian_period = 20
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    
-    # Volume
+    # Volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    
+    # EMA of Elder Ray for smoothing (avoid noise)
+    bull_power_smooth = pd.Series(bull_power).ewm(span=3, min_periods=3, adjust=False).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=3, min_periods=3, adjust=False).mean().values
     
     signals = np.zeros(n)
     SIZE = 0.25
@@ -117,7 +107,7 @@ def generate_signals(prices):
     lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 220  # Need enough for SMA200(1d) + Donchian(20) + buffer
+    warmup = 100  # Need enough for all indicators
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -127,69 +117,43 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(sma_200_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(willr[i]):
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
+        # === TREND DIRECTION (1d EMA26) ===
+        price_above_1d_ema = close[i] > ema_1d_aligned[i]
+        price_below_1d_ema = close[i] < ema_1d_aligned[i]
         
-        if np.isnan(chop[i]):
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
+        # === ELDER RAY SIGNALS ===
+        bull = bull_power_smooth[i]
+        bear = bear_power_smooth[i]
         
-        # === TREND DIRECTION (1d SMA200) ===
-        price_above_1d_sma = close[i] > sma_200_aligned[i]
+        # Strong institutional buying: Bull Power breaks above threshold
+        strong_bull = bull > atr_14[i] * 0.3
         
-        # === REGIME (Choppiness Index) ===
-        # Only trade in trending or neutral markets
-        # CHOP > 61.8 = too choppy, skip
-        is_choppy = chop[i] > 61.8
-        
-        # Skip if too choppy (only when flat)
-        if is_choppy and not in_position:
-            signals[i] = 0.0
-            continue
-        
-        # === MOMENTUM (Williams %R) ===
-        # Oversold (<-80) = potential long setup
-        # Overbought (>-20) = potential short setup
-        willr_oversold = willr[i] < -80
-        willr_overbought = willr[i] > -20
-        
-        # === DONCHIAN BREAKOUT (require CLOSE to break, not just touch) ===
-        prev_donchian_high = donchian_high[i - 1] if i > 0 else 0
-        prev_donchian_low = donchian_low[i - 1] if i > 0 else 0
-        prev_close = close[i - 1] if i > 0 else close[i]
-        
-        # Breakout: previous bar closed below, this bar closes above (or vice versa)
-        broke_high = prev_close < prev_donchian_high and close[i] > prev_donchian_high
-        broke_low = prev_close > prev_donchian_low and close[i] < prev_donchian_low
+        # Strong institutional selling: Bear Power breaks below threshold
+        strong_bear = bear < -atr_14[i] * 0.3
         
         # Volume confirmation
-        vol_spike = vol_ratio[i] > 1.5
+        vol_confirm = vol_ratio[i] > 1.5
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Oversold + Breakout above ===
-            # Williams %R < -80 (oversold) + price closes above Donchian high
-            if broke_high and willr_oversold and price_above_1d_sma:
-                if vol_spike:  # Volume confirmation required
+            # === LONG: Strong bull power + uptrend + volume ===
+            # Institutional buying pressure pushing price above EMA
+            if strong_bull and price_above_1d_ema:
+                if vol_confirm:
                     desired_signal = SIZE
             
-            # === SHORT: Overbought + Breakdown below ===
-            # Williams %R > -20 (overbought) + price closes below Donchian low
-            if broke_low and willr_overbought and not price_above_1d_sma:
-                if vol_spike:  # Volume confirmation required
+            # === SHORT: Strong bear power + downtrend + volume ===
+            # Institutional selling pressure pushing price below EMA
+            if strong_bear and price_below_1d_ema:
+                if vol_confirm:
                     desired_signal = -SIZE
         
         # === STOPLOSS CHECK (2.5 ATR trailing) ===
@@ -212,14 +176,14 @@ def generate_signals(prices):
         if stoploss_triggered:
             desired_signal = 0.0
         
-        # === HOLDING PERIOD (minimum 8 bars = 2 days) ===
+        # === TIME-BASED EXIT (hold at least 8 bars = 2 days) ===
         bars_held = i - entry_bar
         
         if in_position and bars_held >= 8:
-            # Exit on Williams %R reversal
-            if position_side > 0 and willr[i] > -20:  # No longer oversold
+            # Exit if Elder Ray reverses
+            if position_side > 0 and bear < -atr_14[i] * 0.1:
                 desired_signal = 0.0
-            if position_side < 0 and willr[i] < -80:  # No longer overbought
+            if position_side < 0 and bull > atr_14[i] * 0.1:
                 desired_signal = 0.0
         
         # === UPDATE POSITION TRACKING ===
