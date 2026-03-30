@@ -1,41 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #023: 4h Donchian + 1d EMA Trend + 12h ATR Regime Filter
+Experiment #023: 12h Donchian(12) + 1d SMA50 Trend + Volume Spike
 
-HYPOTHESIS: Combining 1d EMA for trend direction AND 12h ATR ratio for regime
-filter should outperform single-filter approaches:
-1. 1d EMA21: overall direction (bull/bear)
-2. 12h ATR ratio: confirms trending vs ranging (more responsive than CHOP)
-3. 4h Donchian(20): structural breakout entry
-4. Volume spike: institutional confirmation
+HYPOTHESIS: Multi-timeframe trend following with structural breakout.
+- 1d SMA50: proven trend filter (filters bear traps in 2022)
+- 12h Donchian(12): ~36 raw breakouts/yr after 12h filter
+- Volume spike: institutional confirmation
+- CHOP regime: avoid range-bound choppy periods
 
 WHY IT SHOULD WORK IN BOTH MARKETS:
-- 2021 bull: 1d EMA up + ATR trending → trend-following long entries
-- 2022 bear: 1d EMA down + ATR trending → trend-following short entries  
-- 2022 crash: 1d EMA down + ATR choppy → no entries (avoids whipsaw)
-- 2023-2024 range: 1d EMA flat + ATR choppy → no entries
+- Bull market: price > SMA50 + breakout = follow the trend
+- Bear market (2022): price < SMA50 = no longs, short breakouts only
+- Range (2025): CHOP filter avoids false breakouts
 
-ENTRY CONDITIONS (4-way confluence):
-1. 1d EMA21 rising (bull) or falling (bear) → direction
-2. 12h ATR ratio > 1.3 (trending, not ranging) → regime confirm
-3. 4h Donchian(20) breakout → precise entry
-4. Volume > 1.5x 20-bar MA → institutional confirm
+TRADE COUNT ESTIMATE:
+- 12h bars/4yr ≈ 8760/2 = 2920 bars
+- Donchian(12) breakout: ~1 per 40 bars = ~73 raw signals
+- SMA50 trend filter: ~50% pass = ~36 signals
+- Volume spike: ~60% pass = ~22 trades/symbol (LOW!)
+- CHOP < 60 filter adds: ~70% pass = ~25-30 trades
 
-Trade Count Estimate:
-- 4h bars/4yr ≈ 8760
-- Donchian(20) breakout: ~1 per 40-50 bars = ~175-220 raw
-- 1d EMA direction: ~70% qualify = ~122-154
-- 12h ATR ratio > 1.3: ~50% qualify = ~61-77
-- Volume > 1.5x: ~40% pass = ~24-31 trades/symbol
-
-SAFE RANGE: 24-35 trades over 4 years (on lower end but with higher edge)
+NEED TO LOOSEN: Use Donchian(8) to get more breakouts
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_1d_ema_12h_atr_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian_1d_sma50_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -52,6 +44,28 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_chop(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP) - vectorized
+    """
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        period_high = high[i-period+1:i+1].max()
+        period_low = low[i-period+1:i+1].min()
+        
+        if period_high > period_low:
+            sum_tr = 0.0
+            for j in range(i-period+1, i+1):
+                tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
+                sum_tr += tr
+            
+            if period_high != period_low:
+                chop[i] = 100 * np.log10(sum_tr / (period_high - period_low)) / np.log10(period)
+    
+    return chop
+
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
@@ -59,32 +73,22 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === 12h HTF for regime filter ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values.astype(np.float64)
-    high_12h = df_12h['high'].values.astype(np.float64)
-    low_12h = df_12h['low'].values.astype(np.float64)
-    
-    # ATR ratio on 12h (short-term vs long-term for regime)
-    atr_12h_7 = calculate_atr(high_12h, low_12h, close_12h, period=7)
-    atr_12h_30 = calculate_atr(high_12h, low_12h, close_12h, period=30)
-    atr_ratio_12h = atr_12h_7 / np.where(atr_12h_30 > 1e-10, atr_12h_30, 1.0)
-    atr_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_ratio_12h)
-    
-    # === 1d HTF for trend direction ===
+    # === HTF: 1d SMA50 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values.astype(np.float64)
-    ema_1d = pd.Series(close_1d).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    sma50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    # Align to 12h (shift by 1 to avoid look-ahead)
+    sma50_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
     
-    # === Local 4h indicators ===
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
+    chop = calculate_chop(high, low, close, period=14)
     
-    # Donchian Channel(20)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian Channel(8) - price structure for 12h
+    donchian_upper = pd.Series(high).rolling(window=8, min_periods=8).max().values
+    donchian_lower = pd.Series(low).rolling(window=8, min_periods=8).min().values
     
-    # Volume average
+    # Volume average for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
     
@@ -99,7 +103,7 @@ def generate_signals(prices):
     entry_atr = 0.0
     entry_bar = 0
     
-    warmup = 100  # Need enough for Donchian20, ATR14, 1d EMA21, 12h ATR ratio
+    warmup = 60  # Enough for Donchian(8), ATR14, CHOP14, 1d SMA50
     
     for i in range(warmup, n):
         # NaN checks
@@ -107,44 +111,52 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
+        if np.isnan(chop[i]):
+            signals[i] = 0.0
+            continue
+        
         if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(atr_ratio_12h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+        if np.isnan(sma50_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # === 12h REGIME FILTER: ATR ratio > 1.3 (trending) ===
-        # High ratio = volatility expanding = trending
-        atr_regime_trending = atr_ratio_12h_aligned[i] > 1.3
+        # === REGIME FILTER: CHOP < 58 (not extremely choppy) ===
+        choppy_market = chop[i] > 58.0
         
-        # === 1d TREND DIRECTION: EMA21 slope ===
-        ema_curr = ema_1d_aligned[i]
-        ema_prev = ema_1d_aligned[i-1] if i > 0 and not np.isnan(ema_1d_aligned[i-1]) else ema_curr
-        htf_bull = ema_curr > ema_prev
-        htf_bear = ema_curr < ema_prev
+        # === TREND FILTER: 1d SMA50 ===
+        # Bull trend: price > SMA50
+        bull_trend = close[i] > sma50_aligned[i]
+        # Bear trend: price < SMA50
+        bear_trend = close[i] < sma50_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.5
+        vol_spike = vol_ratio[i] > 1.4
         
-        # === DONCHIAN BREAKOUT ===
+        # === DONCHIAN(8) BREAKOUT (prior bar's range) ===
         prev_upper = donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else np.nan
         prev_lower = donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else np.nan
         
+        # Bullish breakout: close above prior bar's upper channel
         bullish_breakout = (not np.isnan(prev_upper) and close[i] > prev_upper)
+        
+        # Bearish breakout: close below prior bar's lower channel
         bearish_breakout = (not np.isnan(prev_lower) and close[i] < prev_lower)
         
-        # === MINIMUM HOLD: 2 bars ===
-        min_hold = (i - entry_bar) >= 2
+        # === MINIMUM HOLD: 3 bars (~1.5 days) ===
+        min_hold = (i - entry_bar) >= 3
         
         # === EXITS ===
         if in_position:
+            # Stop-loss: 2.5 ATR from entry
             if position_side > 0:
                 stop_hit = low[i] < (entry_price - 2.5 * entry_atr)
             else:
                 stop_hit = high[i] > (entry_price + 2.5 * entry_atr)
             
+            # Exit on opposite breakout (trend reversal)
             reversal_exit = (position_side > 0 and bearish_breakout) or \
                            (position_side < 0 and bullish_breakout)
             
@@ -161,13 +173,13 @@ def generate_signals(prices):
         
         # === NEW POSITIONS ===
         if not in_position:
-            # Skip if not trending (range-bound)
-            if not atr_regime_trending:
+            # Skip if choppy market
+            if choppy_market:
                 signals[i] = 0.0
                 continue
             
-            # LONG: HTF bull + breakout + volume
-            if htf_bull and bullish_breakout and vol_spike:
+            # LONG: Bull trend + Bullish breakout + volume spike
+            if bullish_breakout and vol_spike and bull_trend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
@@ -175,8 +187,8 @@ def generate_signals(prices):
                 entry_bar = i
                 signals[i] = SIZE
             
-            # SHORT: HTF bear + breakout + volume
-            elif htf_bear and bearish_breakout and vol_spike:
+            # SHORT: Bear trend + Bearish breakout + volume spike
+            elif bearish_breakout and vol_spike and bear_trend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
