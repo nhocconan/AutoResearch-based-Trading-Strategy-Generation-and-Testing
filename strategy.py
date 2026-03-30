@@ -1,32 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #027: 12h Donchian(24) + Choppiness Regime + 1d SMA Trend + Volume
+Experiment #027: 4h TRIX Momentum + 1d EMA50 + Volume Spike + CHOP Regime
 
-HYPOTHESIS: 12h timeframe provides optimal balance between signal quality and trade frequency.
-Building on session best "mtf_12h_donchian_chop_1d_sma_v3" (Sharpe=0.308, 73tr).
-- 12h = ~730 bars/year = ~3000 bars in 4 years
-- Donchian(24) = 12-day lookback, fewer false breakouts than shorter windows
-- CHOP < 50 = trending regime filter (less strict than 40 to generate more trades)
-- 1d SMA(30) = HTF trend confirmation (simpler than 50)
-- Volume > 1.3x MA(20) = breakout confirmation
+HYPOTHESIS: TRIX(12) smooths noise better than RSI/MACD while catching real momentum shifts.
+Combined with 1d EMA50 for trend (proven in #003 with Sharpe 0.123), this should work
+in BOTH bull (2021, 2024-2025) and bear (2022):
+- Bull: TRIX crosses positive + price > 1d EMA50 = momentum continuation
+- Bear: TRIX crosses negative + price < 1d EMA50 = short rallies
+- Range: CHOP > 61 = stay out (avoid whipsaw in 2022)
 
-WHY IT SHOULD WORK IN BULL AND BEAR:
-- Bull (2020-2021, 2024-2025): CHOP<50 + Donchian breakout + HTF bullish = ride rallies
-- Bear (2022): CHOP>50 = stay out of chop, only trade clear 12h breakouts
-- Range: Higher CHOP threshold means fewer but higher-quality trades
-
-ENTRY: CHOP < 50 + Close > Donchian High(24) + Volume > 1.3x MA(20) + Price > 1d SMA(30)
-SHORT: CHOP < 50 + Close < Donchian Low(24) + Volume > 1.3x MA(20) + Price < 1d SMA(30)
-EXIT: ATR 2.5x trailing stop or opposite signal
-
-TARGET: 60-120 total over 4 years (15-30/year). Size: 0.30.
+ENTRY: TRIX turns positive + Close > EMA50 + Volume > 1.5x MA(20) + CHOP < 55
+EXIT: Opposite TRIX signal or ATR 2.5x stoploss
+TARGET: 80-150 total over 4 years (20-37/year). Size: 0.30.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian24_chop_1d_sma_v4"
-timeframe = "12h"
+name = "mtf_4h_trix_momentum_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -43,26 +35,42 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_trix(close, period=12):
+    """
+    TRIX(12) - Triple EMA momentum oscillator
+    TRIX > 0 = bullish momentum, TRIX < 0 = bearish momentum
+    """
+    n = len(close)
+    if n < period * 3:
+        return np.full(n, np.nan)
+    
+    # Triple EMA
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    ema2 = pd.Series(ema1).ewm(span=period, min_periods=period, adjust=False).mean().values
+    ema3 = pd.Series(ema2).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # TRIX = rate of change of triple EMA (momentum)
+    trix = np.full(n, np.nan)
+    for i in range(period * 3, n):
+        if ema3[i-1] != 0 and not np.isnan(ema3[i-1]):
+            trix[i] = ((ema3[i] - ema3[i-1]) / ema3[i-1]) * 100
+    
+    return trix
+
 def calculate_choppiness(high, low, close, period=14):
     """
     Choppiness Index (CHOP)
     CHOP > 61.8 = choppy/ranging market
     CHOP < 38.2 = trending market
-    Using 50 as threshold for slightly more trades
     """
     n = len(close)
     chop = np.full(n, np.nan)
     
     for i in range(period, n):
-        # Sum of true range over period
         tr_sum = 0.0
         for j in range(i - period + 1, i + 1):
-            if j > 0:
-                tr_sum += max(high[j] - low[j], abs(high[j] - close[j-1]))
-            else:
-                tr_sum += high[j] - low[j]
+            tr_sum += max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
         
-        # Highest high - lowest low over period
         highest_high = max(high[i - period + 1:i + 1])
         lowest_low = min(low[i - period + 1:i + 1])
         hl_range = highest_high - lowest_low
@@ -79,18 +87,17 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d SMA(30) for trend (call ONCE before loop) ===
+    # === HTF: 1d EMA50 for trend (call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    sma_1d = pd.Series(df_1d['close'].values).rolling(window=30, min_periods=30).mean().values
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === 12h Indicators ===
+    # === 4h Indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
+    trix_12 = calculate_trix(close, period=12)
+    trix_prev = np.roll(trix_12, 1)
+    trix_prev[0] = np.nan
     chop_14 = calculate_choppiness(high, low, close, period=14)
-    
-    # Donchian 24 (shift by 1 to avoid look-ahead)
-    dc_upper_24 = pd.Series(high).rolling(window=24, min_periods=24).max().shift(1).values
-    dc_lower_24 = pd.Series(low).rolling(window=24, min_periods=24).min().shift(1).values
     
     # Volume MA(20)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -106,7 +113,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 60  # Need enough bars for all indicators
+    warmup = 100  # Need enough for TRIX triple EMA (period * 3 = 36)
     
     for i in range(warmup, n):
         # NaN checks
@@ -114,23 +121,27 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(chop_14[i]) or np.isnan(sma_1d_aligned[i]):
+        if np.isnan(trix_12[i]) or np.isnan(chop_14[i]) or np.isnan(ema_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # === REGIME CHECK: CHOP < 50 for trending market ===
-        is_trending = chop_14[i] < 50.0
+        if np.isnan(trix_prev[i]):
+            signals[i] = 0.0
+            continue
         
-        # === HTF TREND DIRECTION FROM 1d SMA ===
-        htf_bullish = close[i] > sma_1d_aligned[i]
-        htf_bearish = close[i] < sma_1d_aligned[i]
+        # === REGIME CHECK: Avoid choppy markets ===
+        is_trending = chop_14[i] < 55.0  # Don't trade when CHOP > 55
         
-        # === DONCHIAN BREAKOUT (24-period) ===
-        bullish_breakout = (close[i] > dc_upper_24[i]) if not np.isnan(dc_upper_24[i]) else False
-        bearish_breakout = (close[i] < dc_lower_24[i]) if not np.isnan(dc_lower_24[i]) else False
+        # === TRIX MOMENTUM SHIFT ===
+        trix_turning_up = (trix_prev[i] < 0) and (trix_12[i] > 0)
+        trix_turning_down = (trix_prev[i] > 0) and (trix_12[i] < 0)
         
-        # === VOLUME CONFIRMATION (1.3x) ===
-        vol_ok = volume[i] > vol_ma_20[i] * 1.3 if vol_ma_20[i] > 1e-10 else False
+        # === TREND DIRECTION FROM 1d EMA ===
+        htf_bullish = close[i] > ema_1d_aligned[i]
+        htf_bearish = close[i] < ema_1d_aligned[i]
+        
+        # === VOLUME CONFIRMATION ===
+        vol_ok = volume[i] > vol_ma_20[i] * 1.5 if vol_ma_20[i] > 1e-10 else False
         
         # === TRAILING STOP UPDATE ===
         if in_position:
@@ -139,10 +150,10 @@ def generate_signals(prices):
             else:
                 lowest_since_entry = min(lowest_since_entry, low[i])
         
-        # === MIN HOLD: 2 bars (24h) to avoid immediate whipsaw ===
-        min_hold = (i - entry_bar) >= 2
+        # === MIN HOLD: 4 bars (16h) to avoid immediate whipsaw ===
+        min_hold = (i - entry_bar) >= 4
         
-        # === STOPLOSS CHECK (ATR 2.5x trailing) ===
+        # === STOPLOSS CHECK (ATR trailing) ===
         stop_hit = False
         if in_position:
             if position_side > 0:
@@ -150,11 +161,11 @@ def generate_signals(prices):
             else:
                 stop_hit = high[i] > (lowest_since_entry + 2.5 * atr_14[i])
             
-            # Exit on trend reversal (after min hold)
+            # Exit on TRIX reversal (after min hold) OR trend change
             if min_hold:
-                if position_side > 0 and htf_bearish:
+                if position_side > 0 and (trix_12[i] < 0 or htf_bearish):
                     stop_hit = True
-                if position_side < 0 and htf_bullish:
+                if position_side < 0 and (trix_12[i] > 0 or htf_bullish):
                     stop_hit = True
             
             if stop_hit:
@@ -165,17 +176,17 @@ def generate_signals(prices):
                 signals[i] = position_side * SIZE
             continue
         
-        # === NEW POSITIONS (only in trending regime) ===
-        # Long: Trending market + bullish breakout + volume confirm + HTF bullish
-        if is_trending and bullish_breakout and vol_ok and htf_bullish:
+        # === NEW POSITIONS ===
+        # Long: TRIX turns positive + above 1d EMA + volume spike + trending regime
+        if is_trending and trix_turning_up and htf_bullish and vol_ok:
             in_position = True
             position_side = 1
             entry_bar = i
             highest_since_entry = high[i]
             signals[i] = SIZE
         
-        # Short: Trending market + bearish breakdown + volume confirm + HTF bearish
-        elif is_trending and bearish_breakout and vol_ok and htf_bearish:
+        # Short: TRIX turns negative + below 1d EMA + volume spike + trending regime
+        elif is_trending and trix_turning_down and htf_bearish and vol_ok:
             in_position = True
             position_side = -1
             entry_bar = i
