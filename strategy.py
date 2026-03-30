@@ -1,66 +1,64 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 12h Williams %R + Volume + 1d EMA Cross Trend
+Experiment #006: 4h Donchian Breakout + Williams %R + 1d EMA200
 
-HYPOTHESIS: Williams %R captures overbought/oversold extremes at multi-day scale.
-By combining %R extremes (<-80 or >-20) with volume confirmation AND 1d EMA cross
-trend alignment, this catches reversals at key turning points while filtering
-false signals.
+HYPOTHESIS: Donchian(20) 4h breakout captures institutional momentum shifts.
+Williams %R confirms overbought/oversold extremes at the breakout point.
+1d EMA200 filters entries to align with higher timeframe trend.
+ATR-based stops provide disciplined risk management.
 
-WHY 12h: Slower than 4h = fewer trades = less fee drag. 12h %R captures
-4-8 bar swings which are more significant than hourly noise.
+WHY IT WORKS: Simple, robust structure. Breakouts occur in both bull and bear
+markets. The combination of price channel breakout + momentum confirmation
+reduces false signals. Works in both directions.
 
-WHY IT SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull: Buy when %R oversold (<-80) + price above 1d SMA21 (bull trend)
-- Bear: Short when %R overbought (>-20) + price below 1d SMA21 (bear trend)
-- Regime-aware: Only trade in direction of 1d trend
-
-KEY INSIGHT FROM DB: Simple indicators + volume + trend alignment > complex systems.
-Williams %R is cleaner than RSI for extremes (no averaging artifact).
-
-TARGET: 75-150 total trades over 4 years = 19-37/year. HARD MAX: 200.
+TARGET: 100-200 total trades over 4 years. HARD MAX: 300.
 Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_willr_vol_ema_cross_1d_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_willr_ema200_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
-def calculate_williams_r(high, low, close, period=14):
-    """Williams %R — overbought/oversold oscillator"""
-    n = len(close)
-    if n < period:
-        return np.full(n, -50.0)
-    
-    willr = np.full(n, -50.0, dtype=np.float64)
-    
-    for i in range(period - 1, n):
-        highest_high = high[i - period + 1:i + 1].max()
-        lowest_low = low[i - period + 1:i + 1].min()
-        
-        if highest_high != lowest_low:
-            willr[i] = -100.0 * (highest_high - close[i]) / (highest_high - lowest_low)
-        else:
-            willr[i] = -50.0
-    
-    return willr
-
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Average True Range using Wilder's smoothing"""
     n = len(close)
     if n < period + 1:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n, dtype=np.float64)
+    tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    atr = np.zeros(n)
+    atr[period - 1] = np.mean(tr[:period])
+    for i in range(period, n):
+        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+    
     return atr
+
+def calculate_willr(high, low, close, period=14):
+    """Williams %R - momentum oscillator"""
+    n = len(close)
+    if n < period:
+        return np.full(n, -50.0)
+    
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    willr = np.zeros(n)
+    for i in range(period - 1, n):
+        hh = highest_high[i]
+        ll = lowest_low[i]
+        if hh != ll:
+            willr[i] = -100 * (hh - close[i]) / (hh - ll)
+        else:
+            willr[i] = -50.0
+    
+    return willr
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -72,119 +70,112 @@ def generate_signals(prices):
     # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA21 for trend direction (faster than EMA50)
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # 1d EMA200 for trend direction
+    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema200_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # === Local 12h indicators ===
-    willr = calculate_williams_r(high, low, close, period=14)
-    atr_14 = calculate_atr(high, low, close, period=14)
+    # === Local 4h indicators ===
+    atr = calculate_atr(high, low, close, period=14)
+    willr = calculate_willr(high, low, close, period=14)
     
     # Volume ratio (20-bar MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # Signals
+    # Donchian channels (20 bars = 5 days)
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    
     signals = np.zeros(n)
     SIZE = 0.25
     
     # Position tracking
-    in_position = False
-    position_side = 0
+    position = 0
     entry_price = 0.0
     entry_atr = 0.0
-    stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     entry_bar = 0
     
-    warmup = 100  # Buffer for EMA alignment
+    warmup = max(200, donchian_period)  # Need enough for EMA200 and Donchian
     
     for i in range(warmup, n):
         # Skip if ATR not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
+        if np.isnan(atr[i]) or atr[i] <= 1e-10:
             continue
         
-        # Skip if 1d EMA not aligned
-        if np.isnan(ema_1d_aligned[i]):
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
+        # Skip if HTF EMA not aligned
+        if np.isnan(ema200_aligned[i]):
             continue
         
-        # === TREND DIRECTION (1d EMA21) ===
-        bull_trend = close[i] > ema_1d_aligned[i]
-        bear_trend = close[i] < ema_1d_aligned[i]
-        
-        # Williams %R extremes
-        oversold = willr[i] < -80  # Extreme oversold
-        overbought = willr[i] > -20  # Extreme overbought
+        # Trend direction from 1d EMA200
+        bull_trend = close[i] > ema200_aligned[i]
+        bear_trend = close[i] < ema200_aligned[i]
         
         # Volume confirmation
         vol_spike = vol_ratio[i] > 1.5
         
+        # Williams %R extremes
+        willr_oversold = willr[i] < -80   # Strong bullish momentum
+        willr_overbought = willr[i] > -20  # Strong bearish momentum
+        
+        # Donchian breakout: price closes beyond previous channel
+        donchian_upper = donchian_high[i - 1]  # Previous bar's 20-bar high
+        donchian_lower = donchian_low[i - 1]   # Previous bar's 20-bar low
+        
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        if not in_position:
-            # === LONG: %R oversold + bull trend + volume spike ===
-            if oversold and bull_trend and vol_spike:
-                desired_signal = SIZE
+        if position == 0:
+            # LONG: Break above Donchian high + volume + trend + %R confirm
+            if bull_trend and vol_spike and willr_oversold:
+                if close[i] > donchian_upper:
+                    desired_signal = SIZE
             
-            # === SHORT: %R overbought + bear trend + volume spike ===
-            if overbought and bear_trend and vol_spike:
-                desired_signal = -SIZE
+            # SHORT: Break below Donchian low + volume + trend + %R confirm
+            if bear_trend and vol_spike and willr_overbought:
+                if close[i] < donchian_lower:
+                    desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR — wider for 12h swings) ===
-        if in_position and position_side > 0:
+        # === STOPLOSS (2.5 ATR trailing) ===
+        if position > 0:
             highest_since_entry = max(highest_since_entry, high[i])
             trailing_stop = highest_since_entry - 2.5 * entry_atr
-            stop_price = max(stop_price, trailing_stop)
-            if low[i] < stop_price:
+            if low[i] < trailing_stop:
                 desired_signal = 0.0
         
-        if in_position and position_side < 0:
+        if position < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
             trailing_stop = lowest_since_entry + 2.5 * entry_atr
-            stop_price = min(stop_price, trailing_stop)
-            if high[i] > stop_price:
+            if high[i] > trailing_stop:
                 desired_signal = 0.0
         
-        # === HOLD PERIOD: minimum 3 bars (1.5 days) to avoid whipsaw ===
+        # === TAKE PROFIT: Williams %R reversal ===
         bars_held = i - entry_bar
-        
-        # === TAKE PROFIT: %R mean reversion ===
-        if in_position and bars_held >= 3:
-            # Long: %R crosses back above -50 (momentum shifted)
-            if position_side > 0 and willr[i] > -50:
+        if position > 0 and bars_held >= 3:
+            # Take profit if %R shows overbought reversal
+            if willr[i] > -20:
                 desired_signal = 0.0
-            # Short: %R crosses back below -50
-            if position_side < 0 and willr[i] < -50:
+        
+        if position < 0 and bars_held >= 3:
+            # Take profit if %R shows oversold reversal
+            if willr[i] < -80:
                 desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
-            if not in_position or np.sign(desired_signal) != position_side:
+            if position == 0 or np.sign(desired_signal) != position:
                 # New position or flip
-                in_position = True
-                position_side = int(np.sign(desired_signal))
+                position = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_14[i]
+                entry_atr = atr[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 entry_bar = i
-                if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
-                else:
-                    stop_price = entry_price + 2.5 * entry_atr
-        else:
-            if in_position:
-                in_position = False
-                position_side = 0
-                stop_price = 0.0
+        
+        if desired_signal == 0.0 and position != 0:
+            position = 0
         
         signals[i] = desired_signal
     
