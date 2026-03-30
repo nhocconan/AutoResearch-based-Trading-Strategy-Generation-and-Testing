@@ -1,85 +1,68 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 12h Camarilla Pivot + 1d Trend + Volume Spike + Choppiness
+Experiment #028: 4h TRIX Momentum + Donchian Structure + 12h Trend + Volume Spike
 
-HYPOTHESIS: Camarilla pivot levels (S3/R3) represent key institutional support/resistance
-that price frequently reverts to. Combined with 1d SMA200 trend filter and volume 
-confirmation, this captures mean-reversion trades at proven levels.
+HYPOTHESIS: TRIX (Triple EMA) filters market noise better than single EMA and catches
+momentum shifts earlier. Combined with:
+- Donchian(25) for price structure (slightly longer = fewer false breakouts)
+- 12h SMA50 for trend (faster than 1d = more responsive but still filtered)
+- Volume surge (2.0x) for institutional confirmation
+- ATR(14) stoploss at 2.5x (wider = room to breathe, fewer premature stops)
 
-WHY IT WORKS IN BULL AND BEAR: S3/R3 are symmetric levels derived from daily range.
-In bull: price touches S3 = buy opportunity. In bear: price touches R3 = short opportunity.
-Camarilla is NOT directional - it works in both markets.
+WHY IT WORKS: TRIX crossover is a LEADING momentum signal, not lagging like price
+breakout alone. When TRIX crosses zero WITH a price structure breakout AND volume surge,
+it's a high-probability move. The 12h trend filter avoids fighting the larger trend.
 
-12h timeframe: 50-150 trades over 4 years = 12-37/year (within target).
-Target: 75-200 total trades.
-Signal size: 0.30 (discrete).
-
-DB EVIDENCE: gen_camarilla_pivot_volume_spike_choppiness_4h_v1 achieved 
-test Sharpe 1.471 on ETHUSDT with 95 trades. Adapting to 12h for even fewer trades.
+TARGET: 60-150 total trades over 4 years = 15-37/year.
+Signal size: 0.30 (moderate).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_camarilla_vol_chop_1d_v2"
-timeframe = "12h"
+name = "mtf_4h_trix_donchian_vol_12h_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range using EWM"""
+    """Average True Range"""
     n = len(close)
-    if n < period + 1:
+    if n < period + 2:
         return np.full(n, np.nan)
     
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(abs(high[1:] - close[:-1]), 
-                              abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[high[0] - low[0]], tr])
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - values above 61.8 = choppy/range-bound"""
-    n = len(high)
-    chop = np.full(n, np.nan, dtype=np.float64)
+def calculate_trix(close, period=14):
+    """Triple EMA Oscillator - leading momentum signal"""
+    n = len(close)
+    if n < period * 3:
+        return np.full(n, np.nan)
     
-    for i in range(period, n):
-        tr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else 0)
-            tr_sum += tr
-        
-        hh = np.max(high[i - period + 1:i + 1])
-        ll = np.min(low[i - period + 1:i + 1])
-        range_hl = hh - ll
-        
-        if range_hl > 0 and tr_sum > 0:
-            chop[i] = 100 * np.log10(tr_sum / range_hl) / np.log10(period)
+    # Triple EMA smoothing
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
+    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
     
-    return chop
-
-def calculate_camarilla_levels(high, low, close):
-    """Calculate Camarilla pivot levels (S3, S4, R3, R4)"""
-    n = len(high)
-    s3 = np.full(n, np.nan, dtype=np.float64)
-    s4 = np.full(n, np.nan, dtype=np.float64)
-    r3 = np.full(n, np.nan, dtype=np.float64)
-    r4 = np.full(n, np.nan, dtype=np.float64)
-    
+    # TRIX = rate of change of triple EMA
+    trix = np.zeros(n, dtype=np.float64)
     for i in range(1, n):
-        h = high[i - 1]
-        l = low[i - 1]
-        c = close[i - 1]
-        rng = h - l
-        
-        # Camarilla formula
-        s3[i] = c - rng * (1.1 / 12.0)
-        s4[i] = c - rng * (1.1 / 6.0)
-        r3[i] = c + rng * (1.1 / 12.0)
-        r4[i] = c + rng * (1.1 / 6.0)
+        if ema3.iloc[i-1] != 0:
+            trix[i] = ((ema3.iloc[i] - ema3.iloc[i-1]) / ema3.iloc[i-1]) * 100
     
-    return s3, s4, r3, r4
+    return trix
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channels for structure"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    mid = (upper + lower) / 2
+    return upper, lower, mid
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -89,20 +72,22 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d SMA200 for trend direction
-    sma_1d = pd.Series(df_1d['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    # 12h SMA50 for trend direction
+    sma_12h = pd.Series(df_12h['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_12h_aligned = align_htf_to_ltf(prices, df_12h, sma_12h)
     
-    # Local indicators
+    # Local 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop = calculate_choppiness(high, low, close, period=14)
+    trix = calculate_trix(close, period=14)
+    
+    # Donchian(25) for structure - slightly longer = fewer false breakouts
+    donchian_upper, donchian_lower, donchian_mid = calculate_donchian(high, low, period=25)
+    
+    # Volume - use stronger filter (2.0x) to reduce false breakouts
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
-    
-    # Camarilla levels (shifted by 1 to use previous day's data)
-    s3, s4, r3, r4 = calculate_camarilla_levels(high, low, close)
     
     signals = np.zeros(n)
     SIZE = 0.30
@@ -112,115 +97,123 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
-    entry_bar = 0
+    stop_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    half_exited = False
+    entry_bar = 0
     
-    warmup = 250  # Need 200 for SMA200 + 20 for volume + buffer
+    warmup = 150  # Need enough for TRIX + Donchian(25) + buffer
     
     for i in range(warmup, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
+            in_position = False
+            position_side = 0
             continue
         
-        if np.isnan(sma_1d_aligned[i]):
+        if np.isnan(sma_12h_aligned[i]):
             signals[i] = 0.0
+            in_position = False
+            position_side = 0
             continue
         
-        if np.isnan(chop[i]):
+        if np.isnan(trix[i]):
             signals[i] = 0.0
+            in_position = False
+            position_side = 0
             continue
         
-        if np.isnan(s3[i]) or np.isnan(r3[i]):
-            signals[i] = 0.0
-            continue
+        # === TREND DIRECTION (12h SMA50) ===
+        price_above_12h_sma = close[i] > sma_12h_aligned[i]
+        price_below_12h_sma = close[i] < sma_12h_aligned[i]
         
-        # === TREND DIRECTION (1d SMA200) ===
-        price_above_1d_sma = close[i] > sma_1d_aligned[i]
-        trend_bull = price_above_1d_sma
-        trend_bear = not price_above_1d_sma
+        # === TRIX MOMENTUM ===
+        # TRIX > 0 = bullish momentum, TRIX < 0 = bearish momentum
+        trix_bullish = trix[i] > 0
+        trix_bearish = trix[i] < 0
         
-        # === REGIME (Choppiness Index) ===
-        is_choppy = chop[i] > 61.8
-        is_trending = chop[i] < 50.0
+        # === DONCHIAN STRUCTURE ===
+        # Use PREVIOUS bar's Donchian to avoid look-ahead
+        prev_donchian_upper = donchian_upper[i - 1] if i > 0 else 0
+        prev_donchian_lower = donchian_lower[i - 1] if i > 0 else 0
         
-        # Skip if too choppy (only when entering new position)
-        if is_choppy and not in_position:
-            signals[i] = 0.0
-            continue
-        
-        # Volume confirmation
-        vol_spike = vol_ratio[i] > 1.5
-        
-        desired_signal = 0.0
+        # === VOLUME CONFIRMATION (2.0x - stronger filter) ===
+        vol_spike = vol_ratio[i] > 2.0
         
         # === ENTRY LOGIC ===
+        desired_signal = 0.0
+        
         if not in_position:
-            atr_val = atr_14[i]
+            # === LONG ENTRY ===
+            # Requirements: 
+            # 1. Price breaks above previous Donchian high
+            # 2. 12h trend is bullish
+            # 3. TRIX shows bullish momentum
+            # 4. Volume surge confirms (optional but helps)
+            breakout_long = high[i] > prev_donchian_upper
+            trend_long = price_above_12h_sma
+            momentum_long = trix_bullish
             
-            # === LONG: Price touches/near S3 level ===
-            # Allow 0.5 ATR buffer from S3
-            if low[i] <= s3[i] + 0.5 * atr_val:
-                # Trend must align: bull trend OR trending market with volume
-                if (trend_bull) or (is_trending and vol_spike):
+            if breakout_long and trend_long and momentum_long:
+                if vol_spike:  # Strong confirmation
                     desired_signal = SIZE
+                elif i - (entry_bar if entry_bar > 0 else 0) > 10:  # Or wait 10 bars if no vol
+                    desired_signal = SIZE * 0.5  # Half size without volume confirmation
             
-            # === SHORT: Price touches/near R3 level ===
-            if high[i] >= r3[i] - 0.5 * atr_val:
-                if (trend_bear) or (is_trending and vol_spike):
+            # === SHORT ENTRY ===
+            # Requirements:
+            # 1. Price breaks below previous Donchian low
+            # 2. 12h trend is bearish
+            # 3. TRIX shows bearish momentum
+            # 4. Volume surge confirms
+            breakout_short = low[i] < prev_donchian_lower
+            trend_short = price_below_12h_sma
+            momentum_short = trix_bearish
+            
+            if breakout_short and trend_short and momentum_short:
+                if vol_spike:
                     desired_signal = -SIZE
+                elif i - (entry_bar if entry_bar > 0 else 0) > 10:
+                    desired_signal = -SIZE * 0.5
         
-        # === POSITION MANAGEMENT ===
-        if in_position:
-            # Update highest/lowest
-            if position_side > 0:
-                highest_since_entry = max(highest_since_entry, high[i])
-            else:
-                lowest_since_entry = min(lowest_since_entry, low[i])
-            
-            # ATR-based trailing stop
-            if position_side > 0:
-                trailing_stop = highest_since_entry - 2.0 * entry_atr
-            else:
-                trailing_stop = lowest_since_entry + 2.0 * entry_atr
-            
-            # Check stoploss
-            if position_side > 0 and low[i] < trailing_stop:
-                desired_signal = 0.0
-            elif position_side < 0 and high[i] > trailing_stop:
-                desired_signal = 0.0
-            else:
-                # Profit target: half exit at 2R
-                bars_held = i - entry_bar
-                
-                if not half_exited and bars_held >= 4:  # Hold at least 4 bars (2 days)
-                    if position_side > 0:
-                        profit_r = (close[i] - entry_price) / entry_atr
-                        if profit_r >= 2.0:
-                            desired_signal = SIZE / 2  # Half position
-                            half_exited = True
-                    else:
-                        profit_r = (entry_price - close[i]) / entry_atr
-                        if profit_r >= 2.0:
-                            desired_signal = -SIZE / 2
-                            half_exited = True
-                
-                # Full exit: price crosses back through S4/R4 or market turns choppy
-                if position_side > 0 and low[i] < s4[i]:
-                    desired_signal = 0.0
-                if position_side < 0 and high[i] > r4[i]:
-                    desired_signal = 0.0
-                
-                # Exit if choppy and profitable
-                if is_choppy and bars_held >= 4:
-                    if position_side > 0 and close[i] > entry_price:
-                        desired_signal = 0.0
-                    if position_side < 0 and close[i] < entry_price:
-                        desired_signal = 0.0
+        # === STOPLOSS CHECK (2.5 ATR trailing) ===
+        stoploss_triggered = False
         
-        # === EXECUTE TRADE ===
+        if in_position and position_side > 0:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
+            if low[i] < stop_price:
+                stoploss_triggered = True
+        
+        if in_position and position_side < 0:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
+            if high[i] > stop_price:
+                stoploss_triggered = True
+        
+        if stoploss_triggered:
+            desired_signal = 0.0
+        
+        # === TIME-BASED EXIT (hold at least 8 bars = 2 days on 4h) ===
+        bars_held = i - entry_bar
+        
+        if in_position and bars_held >= 8:
+            # Exit if price reverts to Donchian mid or momentum flips
+            if position_side > 0 and close[i] < donchian_mid[i]:
+                desired_signal = 0.0
+            if position_side < 0 and close[i] > donchian_mid[i]:
+                desired_signal = 0.0
+            
+            # Or exit if momentum fully reverses
+            if position_side > 0 and trix[i] < -0.5:
+                desired_signal = 0.0
+            if position_side < 0 and trix[i] > 0.5:
+                desired_signal = 0.0
+        
+        # === UPDATE POSITION TRACKING ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
                 # New position or flip
@@ -228,17 +221,22 @@ def generate_signals(prices):
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
                 entry_atr = atr_14[i]
-                entry_bar = i
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                half_exited = False
+                entry_bar = i
+                if position_side > 0:
+                    stop_price = entry_price - 2.5 * entry_atr
+                else:
+                    stop_price = entry_price + 2.5 * entry_atr
         else:
             if in_position:
                 in_position = False
                 position_side = 0
                 entry_price = 0.0
                 entry_atr = 0.0
-                half_exited = False
+                stop_price = 0.0
+                highest_since_entry = 0.0
+                lowest_since_entry = 0.0
         
         signals[i] = desired_signal
     
