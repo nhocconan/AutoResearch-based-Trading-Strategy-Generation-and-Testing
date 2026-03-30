@@ -1,36 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #024: Donchian Breakout + Volume + Choppiness + 1d SMA50 (4h)
+Experiment #024: 6h Donchian Breakout + Weekly VWAP Trend + Volume (6h)
 
-HYPOTHESIS: Tighten the winning formula from DB top performers:
-- Donchian(20) breakout for price structure
-- Volume spike (>1.3x) for confirmation
-- Choppiness <55 (less restrictive than 38.2 but still filters range)
-- 1d SMA50 for trend direction (simple, proven)
+HYPOTHESIS: 6h timeframe balances between too few trades (12h/1d) and overtrading (4h).
+Weekly VWAP provides structural trend direction without being too restrictive.
+Donchian(20) captures medium-term breakouts every 20-40 bars. Volume spike confirms.
 
-KEY FIX vs #023: Removed redundant HMA16 + HTF EMA21 (two trend filters that
-conflict). Use ONLY 1d SMA50 as single trend anchor.
+WHY IT SHOULD WORK IN BOTH MARKETS:
+- Bull: Breakout above 20-bar high + volume spike + above weekly VWAP = strong momentum
+- Bear: Breakdown below 20-bar low + volume spike + below weekly VWAP = strong short
+- Weekly VWAP acts as regime filter: prevents fighting major trend
 
-EXPECTED TRADES: 100-150/year per symbol = 400-600 total over 4 years.
-- Too high! Need to tighten.
-
-TIGHTER PARAMETERS:
-- Choppiness < 50 (more restrictive, removes more range markets)
-- Volume > 1.5x (stronger confirmation)
-- Combined: ~60-100 trades/year = 240-400 total (at the edge)
-
-WHY IT SHOULD WORK:
-- Bull: Breakout above Donchian high + vol spike + above SMA50 = momentum long
-- Bear: Breakout below Donchian low + vol spike + below SMA50 = momentum short
-- Range (CHOP > 55): Skip entries, reduces whipsaws
-- ATR stoploss: Controls risk on 77% BTC crashes
+EXPECTED TRADES: 75-150 total over 4 years (19-37/year per symbol)
+- Donchian(20) on 6h = break every ~20-40 bars = 219-438 potential/year
+- Volume spike (1.5x) → reduces by ~40%
+- Weekly VWAP trend filter → reduces by ~30%
+- Final: ~75-150 trades = statistical validity
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_vol_chop_1d_v1"
-timeframe = "4h"
+name = "mtf_6h_donchian_weekly_vwap_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -47,26 +39,13 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index: measures market choppiness vs trending
-    CHOP > 61.8 = choppy (range-bound), CHOP < 38.2 = trending
-    """
-    n = len(close)
-    chop = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        highest_high = np.max(high[i-period+1:i+1])
-        lowest_low = np.min(low[i-period+1:i+1])
-        
-        if highest_high > lowest_low:
-            atr_sum = np.sum([
-                max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-                for j in range(i-period+1, i+1)
-            ])
-            chop[i] = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
-    
-    return chop
+def calculate_vwap(high, low, close, volume):
+    """Weekly VWAP - anchored to week start"""
+    typical_price = (high + low + close) / 3.0
+    cumvol = pd.Series(volume).cumsum()
+    cumtpv = pd.Series(typical_price * volume).cumsum()
+    vwap = cumtpv / cumvol
+    return vwap.values
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -76,21 +55,27 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d SMA50 for trend direction
-    sma50_1d = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
-    sma50_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
+    # Weekly close for trend
+    weekly_close = df_1w['close'].values
+    weekly_vwap = calculate_vwap(
+        df_1w['high'].values,
+        df_1w['low'].values,
+        df_1w['close'].values,
+        df_1w['volume'].values
+    )
+    weekly_vwap_aligned = align_htf_to_ltf(prices, df_1w, weekly_vwap)
     
-    # === Local 4h indicators ===
+    # === Local 6h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
     # Donchian Channel(20)
     donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Choppiness Index
-    chop = calculate_choppiness(high, low, close, period=14)
+    # Local 6h VWAP for trend
+    local_vwap = calculate_vwap(high, low, close, volume)
     
     # Volume average (20 bars)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -98,20 +83,20 @@ def generate_signals(prices):
     
     # === Signals ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
     position_side = 0
+    entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
     trailing_high = 0.0
     trailing_low = 0.0
     
-    warmup = 60  # Enough for all indicators
+    warmup = 60  # Enough for Donchian20, ATR14, VWAP
     
     for i in range(warmup, n):
-        # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
@@ -120,87 +105,93 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(chop[i]):
+        if np.isnan(weekly_vwap_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # === Trend check (1d SMA50) ===
-        price_above_sma = close[i] > sma50_aligned[i] if not np.isnan(sma50_aligned[i]) else False
-        price_below_sma = close[i] < sma50_aligned[i] if not np.isnan(sma50_aligned[i]) else False
+        # === TREND DIRECTION: Weekly VWAP + local confirmation ===
+        prev_wvwap = weekly_vwap_aligned[i-1] if i > 0 and not np.isnan(weekly_vwap_aligned[i-1]) else weekly_vwap_aligned[i]
         
-        # === Regime check: trending when CHOP < 50 ===
-        is_trending = chop[i] < 50.0
+        above_weekly = close[i] > weekly_vwap_aligned[i]
+        above_local = close[i] > local_vwap[i]
+        bull_trend = above_weekly and above_local
         
-        # === Entry conditions ===
-        desired_signal = 0.0
+        below_weekly = close[i] < weekly_vwap_aligned[i]
+        below_local = close[i] < local_vwap[i]
+        bear_trend = below_weekly and below_local
         
-        # Volume spike confirmation
+        # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
+        # === DONCHIAN BREAKOUT ===
+        prev_donchian_high = donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else np.nan
+        prev_donchian_low = donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else np.nan
+        
+        bullish_breakout = (not np.isnan(prev_donchian_high) and 
+                           high[i] > prev_donchian_high)
+        bearish_breakout = (not np.isnan(prev_donchian_low) and 
+                           low[i] < prev_donchian_low)
+        
+        # === ENTRY LOGIC ===
+        desired_signal = 0.0
+        
         if not in_position:
-            # === LONG ENTRY: Price breaks above previous Donchian high ===
-            prev_donchian = donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else np.nan
-            bullish_breakout = high[i] > prev_donchian if not np.isnan(prev_donchian) else False
-            
-            # Long: breakout + vol spike + trending + above SMA50
-            if bullish_breakout and vol_spike and is_trending and price_above_sma:
+            # LONG: Bullish breakout + volume spike + bull trend
+            if bullish_breakout and vol_spike and bull_trend:
                 desired_signal = SIZE
-                
-            # === SHORT ENTRY: Price breaks below previous Donchian low ===
-            prev_donchian_low = donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else np.nan
-            bearish_breakout = low[i] < prev_donchian_low if not np.isnan(prev_donchian_low) else False
             
-            # Short: breakout + vol spike + trending + below SMA50
-            if bearish_breakout and vol_spike and is_trending and price_below_sma:
+            # SHORT: Bearish breakout + volume spike + bear trend
+            elif bearish_breakout and vol_spike and bear_trend:
                 desired_signal = -SIZE
         
-        # === STOPLOSS AND EXIT ===
+        # === EXIT LOGIC ===
         if in_position:
             if position_side > 0:
-                # Update trailing high
+                # Trailing high
                 if i == entry_bar or high[i] > trailing_high:
                     trailing_high = high[i]
                 
-                # Trailing stop: 2.5 ATR from highest point
+                # Stop: 2.5 ATR from highest
                 stop_price = trailing_high - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
                 
-                # Exit if price falls below SMA50 (trend reversal)
-                if close[i] < sma50_aligned[i] if not np.isnan(sma50_aligned[i]) else False:
+                # Exit if trend flips
+                elif close[i] < weekly_vwap_aligned[i] * 0.995:  # slight buffer
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
                     
             elif position_side < 0:
-                # Update trailing low
+                # Trailing low
                 if i == entry_bar or low[i] < trailing_low:
                     trailing_low = low[i]
                 
-                # Trailing stop: 2.5 ATR from lowest point
+                # Stop: 2.5 ATR from lowest
                 stop_price = trailing_low + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
                 
-                # Exit if price rises above SMA50 (trend reversal)
-                if close[i] > sma50_aligned[i] if not np.isnan(sma50_aligned[i]) else False:
+                # Exit if trend flips
+                elif close[i] > weekly_vwap_aligned[i] * 1.005:  # slight buffer
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
         
-        # === MINIMUM HOLD: 4 bars to avoid fee churn ===
-        if in_position and (i - entry_bar) < 4:
+        # === MINIMUM HOLD: 3 bars to reduce fee churn ===
+        if in_position and (i - entry_bar) < 3:
             desired_signal = position_side * SIZE
         
-        # === UPDATE POSITION ===
+        # === EXECUTE NEW POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
                 in_position = True
                 position_side = int(np.sign(desired_signal))
+                entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
                 trailing_high = high[i]
