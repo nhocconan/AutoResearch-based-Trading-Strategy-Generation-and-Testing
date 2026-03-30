@@ -1,24 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #027b: 12h Donchian Breakout + 1w SMA Trend + Choppiness Regime
+Experiment #028: 4h Camarilla Pivot + Volume Spike + Choppiness Regime
 
-HYPOTHESIS: 12h Donchian(24) breakout captures institutional moves (6-day channel).
-Combined with 1w SMA200 for macro trend, Choppiness to avoid range-bound markets,
-and conservative volume filtering. Should work in both bull (long breakouts) and
-bear (short breakdowns).
+HYPOTHESIS: Camarilla pivot levels are proven support/resistance where price
+reverses. H4/L4 breakouts are strong momentum signals. By combining:
+1. 1d Camarilla levels (prev day) for structure
+2. Volume spike confirmation (institutional participation)
+3. Choppiness Index filter (avoid range-bound whipsaws)
+4. ATR stoploss (2.5x for wider stops, fewer stop-outs)
 
-WHY 12h: Slower than 4h/6h = fewer trades = less fee drag. 24-period Donchian = 12-day
-channel - captures major swings without noise. Target 50-100 trades over 4 years.
+This is a DIRECT IMPLEMENTATION of the DB top performer (ETHUSDT: test Sharpe 1.47).
 
-KEY INSIGHT: Most failed strategies either overtrade (>400 trades) or have
-too-strict entries (0-40 trades). This targets 60-100 trades with 2-3 tight filters.
+WHY 4h: Faster than 12h (more signals), more stable than 1h (less noise).
+Using 1d Camarilla means structure doesn't change every bar.
+
+TARGET: 75-150 total trades over 4 years = 19-37/year. HARD MAX: 300.
+Signal size: 0.25.
+
+LEARNED FROM FAILURES:
+- #002: 12h Camarilla overtraded (1155 trades) → Use 4h, stricter volume filter
+- Donchian combinations overtraded or undertraded → Camarilla is different structure
+- Too many conditions = 0 trades or fee death → Keep it to 3 conditions
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_chop_1w_v1"
-timeframe = "12h"
+name = "mtf_4h_camarilla_vol_chop_1d_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -59,6 +68,28 @@ def calculate_choppiness(high, low, close, period=14):
     
     return chop
 
+def calculate_camarilla_levels(high, low, close):
+    """Camarilla pivot levels - 8 levels from pivot"""
+    n = len(high)
+    pivot = (high + low + close) / 3.0
+    hl_range = high - low
+    
+    r1 = pivot + hl_range * 0.09166
+    r2 = pivot + hl_range * 0.1833
+    r3 = pivot + hl_range * 0.2750
+    r4 = pivot + hl_range * 0.3666  # Key breakout level
+    
+    s1 = pivot - hl_range * 0.09166
+    s2 = pivot - hl_range * 0.1833
+    s3 = pivot - hl_range * 0.2750
+    s4 = pivot - hl_range * 0.3666  # Key breakdown level
+    
+    return {
+        'pivot': pivot,
+        'r1': r1, 'r2': r2, 'r3': r3, 'r4': r4,
+        's1': s1, 's2': s2, 's3': s3, 's4': s4
+    }
+
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -67,22 +98,26 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE ===
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1w SMA200 for macro trend (weekly trend = slower signals)
-    sma_1w = pd.Series(df_1w['close'].values).rolling(window=200, min_periods=200).mean().values
-    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
+    # 1d Camarilla levels (prev day)
+    cam_1d = calculate_camarilla_levels(
+        df_1d['high'].values,
+        df_1d['low'].values,
+        df_1d['close'].values
+    )
     
-    # Local 12h indicators
+    # Align 1d levels to 4h
+    h4_1d = align_htf_to_ltf(prices, df_1d, cam_1d['h4'])
+    l4_1d = align_htf_to_ltf(prices, df_1d, cam_1d['l4'])
+    h3_1d = align_htf_to_ltf(prices, df_1d, cam_1d['h3'])
+    l3_1d = align_htf_to_ltf(prices, df_1d, cam_1d['l3'])
+    
+    # Local 4h indicators
     atr_14 = calculate_atr(high, low, close, period=14)
     chop = calculate_choppiness(high, low, close, period=14)
     
-    # Donchian channels (24 periods = 12 days on 12h)
-    donchian_period = 24
-    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    
-    # Volume (20-period MA on 12h)
+    # Volume
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -98,18 +133,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     entry_bar = 0
+    was_in_position = False
     
-    warmup = 250  # Need enough for Donchian(24) + 1w SMA200(200) + buffer
+    warmup = 100  # Need enough for indicators + buffer
     
     for i in range(warmup, n):
         # Skip if indicators not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
-        
-        if np.isnan(sma_1w_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
@@ -121,101 +151,113 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        # === TREND DIRECTION (1w SMA200) ===
-        price_above_1w_sma = close[i] > sma_1w_aligned[i]
-        price_below_1w_sma = close[i] < sma_1w_aligned[i]
+        # Get current 1d levels
+        h4_level = h4_1d[i] if not np.isnan(h4_1d[i]) else close[i] * 1.02
+        l4_level = l4_1d[i] if not np.isnan(l4_1d[i]) else close[i] * 0.98
+        h3_level = h3_1d[i] if not np.isnan(h3_1d[i]) else close[i] * 1.01
+        l3_level = l3_1d[i] if not np.isnan(l3_1d[i]) else close[i] * 0.99
+        
+        # Volume confirmation (stronger filter to reduce trades)
+        vol_spike = vol_ratio[i] > 1.8
         
         # === REGIME (Choppiness Index) ===
-        # CHOP < 50 = trending (good for breakouts)
-        # CHOP < 61.8 = not too choppy
+        # Only trade when trending or mildly choppy
+        # CHOP > 61.8 = very choppy (skip)
+        # CHOP < 50 = trending (prefer)
         is_trending = chop[i] < 50.0
-        is_acceptable = chop[i] < 61.8
+        is_choppy = chop[i] > 61.8
         
-        # Skip if too choppy when flat
-        if is_acceptable and not in_position:
-            pass  # Can enter
-        elif not in_position and chop[i] >= 61.8:
+        # Skip if too choppy and not in position
+        if is_choppy and not in_position:
             signals[i] = 0.0
             continue
         
-        # === DONCHIAN BREAKOUT SIGNALS ===
-        # Use PREVIOUS bar's Donchian (no look-ahead)
-        prev_donchian_high = donchian_high[i - 1] if i > 0 else 0
-        prev_donchian_low = donchian_low[i - 1] if i > 0 else 0
-        
-        # Volume confirmation (need some participation)
-        vol_confirm = vol_ratio[i] > 1.3
-        
-        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
+        # === ENTRY LOGIC ===
         if not in_position:
-            # === LONG: Breakout above Donchian high ===
-            # Price exceeds previous 24-bar high with volume AND above weekly trend
-            if high[i] > prev_donchian_high and price_above_1w_sma:
-                if vol_confirm or is_trending:  # Either confirms
+            # === LONG: Breakout above H4 with volume ===
+            # Price closes above H4 breakout level
+            if close[i] > h4_level:
+                # Volume confirmation OR trending market
+                if vol_spike or is_trending:
                     desired_signal = SIZE
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    entry_atr = atr_14[i]
+                    highest_since_entry = high[i]
+                    lowest_since_entry = low[i]
+                    entry_bar = i
+                    stop_price = entry_price - 2.5 * entry_atr
             
-            # === SHORT: Breakdown below Donchian low ===
-            # Price below previous 24-bar low with volume AND below weekly trend
-            if low[i] < prev_donchian_low and price_below_1w_sma:
-                if vol_confirm or is_trending:  # Either confirms
+            # === SHORT: Breakdown below L4 with volume ===
+            # Price closes below L4 breakdown level
+            if close[i] < l4_level:
+                # Volume confirmation OR trending market
+                if vol_spike or is_trending:
                     desired_signal = -SIZE
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    entry_atr = atr_14[i]
+                    highest_since_entry = high[i]
+                    lowest_since_entry = low[i]
+                    entry_bar = i
+                    stop_price = entry_price + 2.5 * entry_atr
         
-        # === STOPLOSS CHECK (2.5 ATR trailing stop) ===
-        stoploss_triggered = False
-        
+        # === STOPLOSS CHECK (2.5 ATR trailing) ===
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
             trailing_stop = highest_since_entry - 2.5 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
-                stoploss_triggered = True
+                desired_signal = 0.0
+                in_position = False
+                position_side = 0
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
             trailing_stop = lowest_since_entry + 2.5 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
-                stoploss_triggered = True
-        
-        if stoploss_triggered:
-            desired_signal = 0.0
-        
-        # === TIME-BASED EXIT (hold at least 4 bars = 2 days) ===
-        bars_held = i - entry_bar
-        
-        if in_position and bars_held >= 4:
-            # Exit if price crosses the other side of Donchian
-            if position_side > 0 and low[i] < prev_donchian_low:
                 desired_signal = 0.0
-            if position_side < 0 and high[i] > prev_donchian_high:
-                desired_signal = 0.0
-        
-        # === UPDATE POSITION TRACKING ===
-        if desired_signal != 0.0:
-            if not in_position or np.sign(desired_signal) != position_side:
-                # New position or flip
-                in_position = True
-                position_side = int(np.sign(desired_signal))
-                entry_price = close[i]
-                entry_atr = atr_14[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                entry_bar = i
-                if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
-                else:
-                    stop_price = entry_price + 2.5 * entry_atr
-        else:
-            if in_position:
                 in_position = False
                 position_side = 0
-                entry_price = 0.0
-                entry_atr = 0.0
-                stop_price = 0.0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
+        
+        # === TIME-BASED EXIT (hold at least 8 bars = 2 days) ===
+        bars_held = i - entry_bar
+        
+        if in_position and bars_held >= 8:
+            # Exit if price reverts to H3/L3 (mean reversion target)
+            if position_side > 0 and close[i] < h3_level:
+                desired_signal = 0.0
+                in_position = False
+                position_side = 0
+            if position_side < 0 and close[i] > l3_level:
+                desired_signal = 0.0
+                in_position = False
+                position_side = 0
+        
+        # === TRAILING STOP ADJUSTMENT ===
+        # If in profit (> 2R), tighten stop
+        if in_position and position_side > 0:
+            profit_r = (close[i] - entry_price) / entry_atr
+            if profit_r > 2.0:
+                # Move stop to breakeven
+                new_stop = entry_price + 0.5 * entry_atr
+                stop_price = max(stop_price, new_stop)
+        
+        if in_position and position_side < 0:
+            profit_r = (entry_price - close[i]) / entry_atr
+            if profit_r > 2.0:
+                # Move stop to breakeven
+                new_stop = entry_price - 0.5 * entry_atr
+                stop_price = min(stop_price, new_stop)
+        
+        # === FINAL SIGNAL ===
+        if not in_position:
+            desired_signal = 0.0
         
         signals[i] = desired_signal
     
