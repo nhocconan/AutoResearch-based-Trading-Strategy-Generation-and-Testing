@@ -1,88 +1,109 @@
 #!/usr/bin/env python3
 """
-Experiment #006: 4h ATR Volatility Expansion + Choppiness + Trailing Channel
+Experiment #007: 6h TRIX(21) Momentum + KAMA(21) Trend + Volume + 1d Pivot
 
-HYPOTHESIS: Combine the BEST elements from DB winners:
-1. Choppiness regime filter (key meta-filter)
-2. ATR-based trailing stop (proven 4h winners use this)
-3. Trailing Donchian channel (not just breakout, but channel TRAILING)
-4. Stricter volume confirmation (2.0x vs 1.5x)
-5. Slightly tighter entry: CHOP < 45 (not < 50)
+HYPOTHESIS: Momentum-based strategy using TRIX on 6h, filtered by KAMA(21).
 
-WHY IT WORKS IN BULL + BEAR + RANGE:
-- Bull: CHOP < 45 + price above trailing channel + HTF up = strong longs
-- Bear: CHOP < 45 + price below trailing channel + HTF down = strong shorts
-- Range: CHOP > 61.8 = SKIP (avoids whipsaws, the #1 killer)
-- ATR trailing stop scales with volatility (handles 2022 crash)
+WHY IT SHOULD WORK IN BULL + BEAR + RANGE:
+- Bull: TRIX > 0 + price > KAMA + vol spike = strong momentum continuation
+- Bear: TRIX < 0 + price < KAMA + vol spike = strong momentum continuation
+- Range: TRIX crossing zero + KAMA filter = avoid whipsaws in choppy markets
 
-KEY DIFFERENCE FROM #003:
-- #003 had CHOP < 50 + 1.5x vol + basic Donchian = 306 trades
-- #006: CHOP < 45 + 2.0x vol + TRAILING channel = ~150-200 trades
-- Fewer, higher-quality signals = less fee drag = better Sharpe
+TRIX captures cyclical momentum at 6h (4x per day = ~4 TRIX cycles per day).
+KAMA(21) smooths noise better than SMA/EMA, adapts to volatility.
+1d pivot adds structural confirmation (support/resistance).
 
-TARGET: 100-200 total trades over 4 years (25-50/year)
+ENTRY RULES:
+- LONG: TRIX crosses above 0 + price > KAMA(21) + vol > 1.5x MA
+- SHORT: TRIX crosses below 0 + price < KAMA(21) + vol > 1.5x MA
+
+TARGET: 50-150 total trades over 4 years (12-37/year).
+SIZE: 0.28 (28% of capital).
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_trailing_channel_chop_vol_12h_v1"
-timeframe = "4h"
+name = "mtf_6h_trix_kama_vol_1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
-    n = len(close)
-    if n < period + 1:
+def calculate_trix(prices, period=21):
+    """
+    TRIX (Triple EMA) - momentum oscillator
+    TRIX = rate of change of triple EMA
+    Positive = bullish momentum, Negative = bearish momentum
+    Zero line crossover = momentum shift
+    """
+    n = len(prices)
+    if n < period * 3:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    # Triple EMA calculation
+    ema1 = pd.Series(prices).ewm(span=period, min_periods=period, adjust=False).mean().values
+    ema2 = pd.Series(ema1).ewm(span=period, min_periods=period, adjust=False).mean().values
+    ema3 = pd.Series(ema2).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
+    # TRIX = rate of change of triple EMA (100x for readability)
+    trix = np.full(n, np.nan)
+    for i in range(period * 3, n):
+        if ema3[i - 1] != 0:
+            trix[i] = 10000 * (ema3[i] - ema3[i - 1]) / ema3[i - 1]
+    
+    return trix
 
-def calculate_choppiness(high, low, close, period=14):
+def calculate_kama(prices, period=14, fast=2, slow=30):
     """
-    Choppiness Index (CHOP)
-    CHOP > 61.8 = ranging - DON'T enter
-    CHOP < 45 = trending - GOOD to enter (stricter than usual 50)
+    Kaufman Adaptive Moving Average
+    Adapts to market volatility - faster in trending, slower in choppy
     """
-    n = len(close)
-    if n < period + 1:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    chop = np.full(n, np.nan)
-    for i in range(period, n):
-        atr_sum = np.sum(tr[i - period + 1:i + 1])
-        highest = np.max(high[i - period + 1:i + 1])
-        lowest = np.min(low[i - period + 1:i + 1])
-        
-        if highest > lowest and atr_sum > 0:
-            range_hl = highest - lowest
-            chop[i] = 100 * np.log10(atr_sum / range_hl) / np.log10(period)
-    
-    return chop
-
-def calculate_trailing_channel(high, low, period=20):
-    """
-    Trailing Donchian Channel - tracks highest high and lowest low
-    Uses the channel BOTTOM for longs (support), TOP for shorts (resistance)
-    """
-    n = len(high)
+    n = len(prices)
     if n < period:
-        return np.full(n, np.nan), np.full(n, np.nan)
+        return np.full(n, np.nan)
     
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+    close = np.asarray(prices) if isinstance(prices, np.ndarray) else prices.values
+    
+    # Efficiency Ratio (ER)
+    direction = np.abs(close[period:] - close[:-period])
+    volatility = np.zeros(n)
+    for i in range(period, n):
+        volatility[i] = np.sum(np.abs(np.diff(close[i - period + 1:i + 1])))
+    
+    er = np.zeros(n)
+    valid_idx = volatility > 0
+    er[valid_idx] = direction[valid_idx - period] / volatility[valid_idx]
+    er[:period] = 0
+    
+    # Smoothing constant
+    sc = np.zeros(n)
+    fast_const = 2 / (fast + 1)
+    slow_const = 2 / (slow + 1)
+    for i in range(period, n):
+        sc[i] = (er[i] * (fast_const - slow_const) + slow_const) ** 2
+    
+    # KAMA calculation
+    kama = np.full(n, np.nan)
+    kama[period] = np.mean(close[:period])
+    
+    for i in range(period + 1, n):
+        kama[i] = kama[i - 1] + sc[i] * (close[i] - kama[i - 1])
+    
+    return kama
+
+def calculate_pivot_levels(high, low, close, period=1):
+    """
+    Standard pivot points (Daily/HTF pivots)
+    Pivot = (H + L + C) / 3
+    R1 = 2 * Pivot - L, S1 = 2 * Pivot - H
+    R2 = Pivot + (H - L), S2 = Pivot - (H - L)
+    """
+    n = len(close)
+    pivot = (high + low + close) / 3
+    r1 = 2 * pivot - low
+    r2 = pivot + (high - low)
+    s1 = 2 * pivot - high
+    s2 = pivot - (high - low)
+    return pivot, r1, r2, s1, s2
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -92,18 +113,25 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # 12h EMA(21) for trend direction
-    ema_21_12h = pd.Series(df_12h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_12h, ema_21_12h)
+    # 1d KAMA for trend direction
+    kama_1d = calculate_kama(df_1d['close'].values, period=21, fast=2, slow=30)
+    kama_1d_aligned = align_htf_to_ltf(prices, df_1d, kama_1d)
     
-    # === Local 4h indicators ===
-    atr_14 = calculate_atr(high, low, close, period=14)
-    channel_up, channel_lo = calculate_trailing_channel(high, low, period=20)
-    chop = calculate_choppiness(high, low, close, period=14)
+    # 1d pivot levels
+    pivot_1d, r1_1d, r2_1d, s1_1d, s2_1d = calculate_pivot_levels(
+        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
+    )
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
-    # Volume ratio (20-period MA) - stricter 2.0x threshold
+    # === Local 6h indicators ===
+    trix = calculate_trix(close, period=21)
+    kama_local = calculate_kama(close, period=14)
+    
+    # Volume ratio (20-period MA)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -115,104 +143,89 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    entry_atr = 0.0
     entry_bar = 0
-    trailing_high = 0.0
-    trailing_low = 0.0
     
-    warmup = 250  # 200 for channel + 14 for CHOP + 20 for vol MA
+    warmup = 250  # TRIX needs 3*21=63 + buffer, plus vol MA
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(trix[i]) or np.isnan(kama_local[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(chop[i]):
+        if np.isnan(kama_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(ema_aligned[i]):
+        if np.isnan(pivot_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(channel_up[i]) or np.isnan(channel_lo[i]):
-            signals[i] = 0.0
-            continue
+        # === TRIX MOMENTUM ===
+        trix_value = trix[i]
+        prev_trix = trix[i - 1]
         
-        # === CHOPPINESS REGIME FILTER (stricter: <45, not <50) ===
-        chop_value = chop[i]
-        is_choppy = chop_value > 61.8
-        is_trending = chop_value < 45  # Stricter than usual 50
+        # TRIX crossover detection
+        trix_cross_up = (prev_trix < 0) and (trix_value >= 0)
+        trix_cross_down = (prev_trix > 0) and (trix_value <= 0)
         
-        # === HTF TREND: 12h EMA(21) direction ===
-        htf_trend_up = close[i] > ema_aligned[i]
-        htf_trend_down = close[i] < ema_aligned[i]
+        # === HTF TREND (1d KAMA) ===
+        htf_trend_up = close[i] > kama_1d_aligned[i]
+        htf_trend_down = close[i] < kama_1d_aligned[i]
         
-        # === VOLUME CONFIRMATION (2.0x, stricter than 1.5x) ===
-        vol_spike = vol_ratio[i] > 2.0
+        # === LOCAL TREND (6h KAMA) ===
+        local_trend_up = close[i] > kama_local[i]
+        local_trend_down = close[i] < kama_local[i]
         
-        # === TRAILING CHANNEL BREAKOUT ===
-        # Long: price breaks ABOVE previous channel high
-        # Short: price breaks BELOW previous channel low
-        prev_channel_up = channel_up[i - 1]
-        prev_channel_lo = channel_lo[i - 1]
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.5
         
-        breakout_up = close[i] > prev_channel_up
-        breakout_down = close[i] < prev_channel_lo
+        # === 1d PIVOT PROXIMITY (within 0.5% of pivot = at decision point) ===
+        pivot_dist = abs(close[i] - pivot_aligned[i]) / pivot_aligned[i] if pivot_aligned[i] > 0 else 1.0
+        near_pivot = pivot_dist < 0.005
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Trending + breakout up + HTF trend up + volume spike ===
-            if breakout_up and htf_trend_up and vol_spike and is_trending:
+            # === LONG: TRIX crosses up + HTF trend up + local trend up + vol spike ===
+            if trix_cross_up and htf_trend_up and local_trend_up and vol_spike:
                 desired_signal = SIZE
             
-            # === SHORT: Trending + breakout down + HTF trend down + volume spike ===
-            if breakout_down and htf_trend_down and vol_spike and is_trending:
+            # === SHORT: TRIX crosses down + HTF trend down + local trend down + vol spike ===
+            if trix_cross_down and htf_trend_down and local_trend_down and vol_spike:
                 desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR trailing stop) ===
+        # === STOPLOSS: exit if momentum reverses ===
         if in_position:
             if position_side > 0:
-                # Update trailing high
-                if i == entry_bar or high[i] > trailing_high:
-                    trailing_high = high[i]
-                
-                # Trailing stop: exit if price falls 2.5 ATR from recent high
-                stop_price = trailing_high - 2.5 * entry_atr
-                if low[i] < stop_price:
+                # Exit if TRIX turns negative
+                if trix_value < 0:
                     desired_signal = 0.0
                 
                 # Exit if HTF trend flips
                 if htf_trend_down:
                     desired_signal = 0.0
                 
-                # Exit if market becomes choppy
-                if is_choppy:
+                # Exit if price breaks below S1 pivot
+                if s1_aligned[i] > 0 and low[i] < s1_aligned[i]:
                     desired_signal = 0.0
             
             elif position_side < 0:
-                # Update trailing low
-                if i == entry_bar or low[i] < trailing_low:
-                    trailing_low = low[i]
-                
-                # Trailing stop: exit if price rises 2.5 ATR from recent low
-                stop_price = trailing_low + 2.5 * entry_atr
-                if high[i] > stop_price:
+                # Exit if TRIX turns positive
+                if trix_value > 0:
                     desired_signal = 0.0
                 
                 # Exit if HTF trend flips
                 if htf_trend_up:
                     desired_signal = 0.0
                 
-                # Exit if market becomes choppy
-                if is_choppy:
+                # Exit if price breaks above R1 pivot
+                if r1_aligned[i] > 0 and high[i] > r1_aligned[i]:
                     desired_signal = 0.0
         
-        # === MINIMUM HOLD: 4 bars to avoid fee churn ===
-        if in_position and (i - entry_bar) < 4:
+        # === MINIMUM HOLD: 6 bars to avoid fee churn on 6h ===
+        if in_position and (i - entry_bar) < 6:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
@@ -222,10 +235,7 @@ def generate_signals(prices):
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr_14[i]
                 entry_bar = i
-                trailing_high = high[i]
-                trailing_low = low[i]
         else:
             if in_position:
                 in_position = False
