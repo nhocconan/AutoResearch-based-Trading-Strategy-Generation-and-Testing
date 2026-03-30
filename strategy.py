@@ -1,295 +1,199 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 4h Keltner Squeeze + Donchian Direction + Choppiness Regime
+Experiment #027: 4h TRIX Momentum + 1d EMA50 + Volume Spike + CHOP Regime
 
-HYPOTHESIS: Markets alternate between volatility contraction (squeeze) and 
-expansion. When Bollinger Bands contract inside Keltner Channel (squeeze), 
-volatility is compressed. A subsequent breakout through the contracted range 
-often leads to large moves. Combined with Donchian for structure, Choppiness 
-for regime filtering, and volume confirmation.
+HYPOTHESIS: TRIX(12) smooths noise better than RSI/MACD while catching real momentum shifts.
+Combined with 1d EMA50 for trend (proven in #003 with Sharpe 0.123), this should work
+in BOTH bull (2021, 2024-2025) and bear (2022):
+- Bull: TRIX crosses positive + price > 1d EMA50 = momentum continuation
+- Bear: TRIX crosses negative + price < 1d EMA50 = short rallies
+- Range: CHOP > 61 = stay out (avoid whipsaw in 2022)
 
-WHY 4h + 12h: 
-- 4h captures multi-day swings with reasonable fee impact
-- 12h confirms larger trend direction
-- Proven timeframe from DB (Camarilla, TRIX winners on 4h)
-
-KEY DIFFERENCE FROM DONCHIAN BREAKOUT: 
-- Requires VOLATILITY CONTRACTION first (squeeze) before breakout signal
-- This filters out breakouts in choppy markets
-- Mean reversion after squeeze is also a valid signal
-
-TARGET: 100-200 total trades over 4 years (25-50/year). HARD MAX: 300.
+ENTRY: TRIX turns positive + Close > EMA50 + Volume > 1.5x MA(20) + CHOP < 55
+EXIT: Opposite TRIX signal or ATR 2.5x stoploss
+TARGET: 80-150 total over 4 years (20-37/year). Size: 0.30.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_keltner_squeeze_donchian_chop_v1"
+name = "mtf_4h_trix_momentum_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
-    if n < period + 1:
+    if n < 2:
         return np.full(n, np.nan)
     
     tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                    abs(high[i] - close[i-1]), 
-                    abs(low[i] - close[i-1]))
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_keltner(high, low, close, ema_period=20, atr_period=10, multiplier=2.0):
+def calculate_trix(close, period=12):
     """
-    Keltner Channel
-    Middle = EMA(20)
-    Upper = EMA + multiplier * ATR(10)
-    Lower = EMA - multiplier * ATR(10)
+    TRIX(12) - Triple EMA momentum oscillator
+    TRIX > 0 = bullish momentum, TRIX < 0 = bearish momentum
     """
-    ema = pd.Series(close).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
-    atr = calculate_atr(high, low, close, atr_period)
+    n = len(close)
+    if n < period * 3:
+        return np.full(n, np.nan)
     
-    upper = ema + multiplier * atr
-    lower = ema - multiplier * atr
+    # Triple EMA
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    ema2 = pd.Series(ema1).ewm(span=period, min_periods=period, adjust=False).mean().values
+    ema3 = pd.Series(ema2).ewm(span=period, min_periods=period, adjust=False).mean().values
     
-    return upper, middle, lower, ema, atr
-
-def calculate_bollinger_bands(close, period=20, std_dev=2.0):
-    """Bollinger Bands"""
-    mid = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = mid + std_dev * std
-    lower = mid - std_dev * std
-    return upper, mid, lower
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - uses past period highs/lows"""
-    n = len(high)
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    mid = (upper + lower) / 2.0
-    return upper, mid, lower
+    # TRIX = rate of change of triple EMA (momentum)
+    trix = np.full(n, np.nan)
+    for i in range(period * 3, n):
+        if ema3[i-1] != 0 and not np.isnan(ema3[i-1]):
+            trix[i] = ((ema3[i] - ema3[i-1]) / ema3[i-1]) * 100
+    
+    return trix
 
 def calculate_choppiness(high, low, close, period=14):
     """
-    Choppiness Index
-    CHOP < 38.2 = trending (momentum works)
-    CHOP > 61.8 = choppy (mean reversion)
+    Choppiness Index (CHOP)
+    CHOP > 61.8 = choppy/ranging market
+    CHOP < 38.2 = trending market
     """
-    n = len(high)
-    chop = np.full(n, np.nan, dtype=np.float64)
+    n = len(close)
+    chop = np.full(n, np.nan)
     
     for i in range(period, n):
         tr_sum = 0.0
         for j in range(i - period + 1, i + 1):
-            tr = max(high[j] - low[j], 
-                     abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
-            tr_sum += tr
+            tr_sum += max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
         
-        if tr_sum > 0:
-            hh = np.max(high[i - period + 1:i + 1])
-            ll = np.min(low[i - period + 1:i + 1])
-            range_hl = hh - ll
-            
-            if range_hl > 0:
-                chop[i] = 100 * np.log10(tr_sum / range_hl) / np.log10(period)
+        highest_high = max(high[i - period + 1:i + 1])
+        lowest_low = min(low[i - period + 1:i + 1])
+        hl_range = highest_high - lowest_low
+        
+        if hl_range > 1e-10:
+            chop[i] = 100 * np.log10(tr_sum / hl_range) / np.log10(period)
     
     return chop
 
 def generate_signals(prices):
-    close = prices["close"].values
-    high = prices["high"].values
-    low = prices["low"].values
-    volume = prices["volume"].values
+    close = prices["close"].values.astype(np.float64)
+    high = prices["high"].values.astype(np.float64)
+    low = prices["low"].values.astype(np.float64)
+    volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === Load HTF data ONCE before loop ===
-    df_12h = get_htf_data(prices, '12h')
+    # === HTF: 1d EMA50 for trend (call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h EMA50 for trend direction
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # === 4h Indicators ===
+    atr_14 = calculate_atr(high, low, close, period=14)
+    trix_12 = calculate_trix(close, period=12)
+    trix_prev = np.roll(trix_12, 1)
+    trix_prev[0] = np.nan
+    chop_14 = calculate_choppiness(high, low, close, period=14)
     
-    # 12h ATR for stoploss
-    atr_12h_raw = calculate_atr(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, period=14)
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h_raw)
+    # Volume MA(20)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === Local 4h indicators ===
-    # Keltner Channel
-    kelt_upper, kelt_mid, kelt_lower, kelt_ema, kelt_atr = calculate_keltner(high, low, close, 
-                                                                              ema_period=20, 
-                                                                              atr_period=10, 
-                                                                              multiplier=2.0)
-    
-    # Bollinger Bands
-    bb_upper, bb_mid, bb_lower = calculate_bollinger_bands(close, period=20, std_dev=2.0)
-    
-    # Squeeze detection: BB inside Keltner
-    bb_width = (bb_upper - bb_lower) / (bb_mid + 1e-10)
-    kelt_width = (kelt_upper - kelt_lower) / (kelt_mid + 1e-10)
-    
-    # Squeeze when Bollinger bands are inside Keltner channels
-    squeeze = (bb_upper < kelt_upper) & (bb_lower > kelt_lower)
-    
-    # Donchian for breakout structure
-    donch_upper, donch_mid, donch_lower = calculate_donchian(high, low, period=20)
-    
-    # Choppiness for regime
-    chop = calculate_choppiness(high, low, close, period=14)
-    
-    # ATR for stoploss
-    atr_local = calculate_atr(high, low, close, period=14)
-    
-    # Volume
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
-    
+    # === Signals ===
     signals = np.zeros(n)
-    SIZE = 0.30  # Position size
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
     position_side = 0
-    entry_price = 0.0
-    entry_atr = 0.0
-    stop_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     entry_bar = 0
+    highest_since_entry = 0.0
+    lowest_since_entry = float('inf')
     
-    warmup = 100  # Enough for all indicators
+    warmup = 100  # Need enough for TRIX triple EMA (period * 3 = 36)
     
     for i in range(warmup, n):
-        # Skip if indicators not ready
-        if np.isnan(kelt_atr[i]) or np.isnan(bb_width[i]) or np.isnan(chop[i]):
+        # NaN checks
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
             continue
         
-        if np.isnan(ema_12h_aligned[i]):
+        if np.isnan(trix_12[i]) or np.isnan(chop_14[i]) or np.isnan(ema_1d_aligned[i]):
             signals[i] = 0.0
-            if in_position:
-                in_position = False
-                position_side = 0
             continue
         
-        # === REGIME FILTER ===
-        is_trending = chop[i] < 38.2
-        is_choppy = chop[i] > 61.8
+        if np.isnan(trix_prev[i]):
+            signals[i] = 0.0
+            continue
         
-        # === TREND DIRECTION (12h EMA) ===
-        price_above_12h_ema = close[i] > ema_12h_aligned[i]
+        # === REGIME CHECK: Avoid choppy markets ===
+        is_trending = chop_14[i] < 55.0  # Don't trade when CHOP > 55
+        
+        # === TRIX MOMENTUM SHIFT ===
+        trix_turning_up = (trix_prev[i] < 0) and (trix_12[i] > 0)
+        trix_turning_down = (trix_prev[i] > 0) and (trix_12[i] < 0)
+        
+        # === TREND DIRECTION FROM 1d EMA ===
+        htf_bullish = close[i] > ema_1d_aligned[i]
+        htf_bearish = close[i] < ema_1d_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_spike = vol_ratio[i] > 1.3
+        vol_ok = volume[i] > vol_ma_20[i] * 1.5 if vol_ma_20[i] > 1e-10 else False
         
-        # === DONCHIAN BREAKOUT SIGNAL ===
-        donch_breakout_up = close[i] > donch_upper[i]
-        donch_breakout_down = close[i] < donch_lower[i]
-        
-        # === SQUEEZE STATE ===
-        in_squeeze = squeeze[i]
-        squeeze_prev = squeeze[i-1] if i > warmup else False
-        squeeze_released = squeeze_prev and not in_squeeze  # Just released from squeeze
-        
-        # === ENTRY LOGIC ===
-        desired_signal = 0.0
-        
-        if not in_position:
-            # === ENTRY: Squeeze release + Donchian breakout + volume ===
-            # Trend following in trending markets
-            if is_trending and price_above_12h_ema:
-                if donch_breakout_up and vol_spike:
-                    desired_signal = SIZE
-            
-            if is_trending and not price_above_12h_ema:
-                if donch_breakout_down and vol_spike:
-                    desired_signal = -SIZE
-            
-            # === ENTRY: Squeeze release reversal in choppy markets ===
-            # Price mean-reverts after squeeze in range-bound markets
-            if is_choppy:
-                # Squeeze release is the signal for expansion
-                if squeeze_released:
-                    # Long: price near lower Keltner after squeeze release
-                    if close[i] < kelt_lower[i] + 0.5 * kelt_atr[i]:
-                        desired_signal = SIZE
-                    
-                    # Short: price near upper Keltner after squeeze release
-                    if close[i] > kelt_upper[i] - 0.5 * kelt_atr[i]:
-                        desired_signal = -SIZE
-        
-        # === STOPLOSS (2.0 ATR) ===
-        stoploss_triggered = False
-        
-        if in_position and position_side > 0:
-            highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
-            stop_price = max(stop_price, trailing_stop)
-            if low[i] < stop_price:
-                stoploss_triggered = True
-        
-        if in_position and position_side < 0:
-            lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
-            stop_price = min(stop_price, trailing_stop)
-            if high[i] > stop_price:
-                stoploss_triggered = True
-        
-        if stoploss_triggered:
-            desired_signal = 0.0
-        
-        # === TIME-BASED EXIT (hold at least 6 bars = 1 day) ===
-        bars_held = i - entry_bar
-        
-        if in_position and bars_held >= 6:
-            # Exit if trend flips
-            if position_side > 0 and not price_above_12h_ema:
-                desired_signal = 0.0
-            if position_side < 0 and price_above_12h_ema:
-                desired_signal = 0.0
-        
-        # === RSI EXIT FILTER ===
-        delta = pd.Series(close).diff()
-        gain = delta.where(delta > 0, 0.0)
-        loss = (-delta).where(delta < 0, 0.0)
-        avg_gain = gain.ewm(span=14, min_periods=14, adjust=False).mean()
-        avg_loss = loss.ewm(span=14, min_periods=14, adjust=False).mean()
-        rs = avg_gain / (avg_loss + 1e-10)
-        rsi = (100 - (100 / (1 + rs)))[i]
-        
+        # === TRAILING STOP UPDATE ===
         if in_position:
-            if position_side > 0 and rsi > 80:
-                desired_signal = 0.0
-            if position_side < 0 and rsi < 20:
-                desired_signal = 0.0
+            if position_side > 0:
+                highest_since_entry = max(highest_since_entry, high[i])
+            else:
+                lowest_since_entry = min(lowest_since_entry, low[i])
         
-        # === UPDATE POSITION ===
-        if desired_signal != 0.0:
-            if not in_position or np.sign(desired_signal) != position_side:
-                in_position = True
-                position_side = int(np.sign(desired_signal))
-                entry_price = close[i]
-                entry_atr = atr_local[i] if atr_local[i] > 0 else atr_12h_aligned[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                entry_bar = i
-                if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
-                else:
-                    stop_price = entry_price + 2.0 * entry_atr
-        else:
-            if in_position:
+        # === MIN HOLD: 4 bars (16h) to avoid immediate whipsaw ===
+        min_hold = (i - entry_bar) >= 4
+        
+        # === STOPLOSS CHECK (ATR trailing) ===
+        stop_hit = False
+        if in_position:
+            if position_side > 0:
+                stop_hit = low[i] < (highest_since_entry - 2.5 * atr_14[i])
+            else:
+                stop_hit = high[i] > (lowest_since_entry + 2.5 * atr_14[i])
+            
+            # Exit on TRIX reversal (after min hold) OR trend change
+            if min_hold:
+                if position_side > 0 and (trix_12[i] < 0 or htf_bearish):
+                    stop_hit = True
+                if position_side < 0 and (trix_12[i] > 0 or htf_bullish):
+                    stop_hit = True
+            
+            if stop_hit:
+                signals[i] = 0.0
                 in_position = False
                 position_side = 0
+            else:
+                signals[i] = position_side * SIZE
+            continue
         
-        signals[i] = desired_signal
+        # === NEW POSITIONS ===
+        # Long: TRIX turns positive + above 1d EMA + volume spike + trending regime
+        if is_trending and trix_turning_up and htf_bullish and vol_ok:
+            in_position = True
+            position_side = 1
+            entry_bar = i
+            highest_since_entry = high[i]
+            signals[i] = SIZE
+        
+        # Short: TRIX turns negative + below 1d EMA + volume spike + trending regime
+        elif is_trending and trix_turning_down and htf_bearish and vol_ok:
+            in_position = True
+            position_side = -1
+            entry_bar = i
+            lowest_since_entry = low[i]
+            signals[i] = -SIZE
+        
+        else:
+            signals[i] = 0.0
     
     return signals
