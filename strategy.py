@@ -1,28 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 4h Donchian Breakout + Volume + 1d EMA (Simplified)
+Experiment #024: 6h Weekly Pivot Breakout + 1w Trend + Donchian Confirmation
 
-HYPOTHESIS: Remove the Camarilla secondary entry that caused #003 to overtrade
-(915 trades). Keep only: Donchian(20) breakout + volume spike + 1d EMA trend.
-This should produce 100-200 total trades (vs 915 in #003) with better Sharpe.
+HYPOTHESIS: Weekly pivots (from 1w data) create stable institutional reference 
+levels. Price breaking a weekly pivot with Donchian(20) confirmation captures 
+significant multi-day moves. 1w EMA20 as trend filter ensures we only trade 
+with the higher timeframe direction.
 
-WHY IT SHOULD WORK IN BULL AND BEAR:
-- Bull: Donchian breakout upward catches momentum continuation
-- Bear: Donchian breakdown with trend filter catches short opportunities
-- 1d EMA ensures we only trade with the major trend
-- Volume confirms institutional participation
-- ATR trailing stop manages risk in both directions
+WHY 6h: Slower than 4h but faster than 12h. Weekly pivots on 6h = institutional
+timeframe. Trade frequency naturally limited by weekly pivot structure.
 
-TARGET: 100-200 total trades over 4 years (25-50/year)
-Signal size: 0.25
+WHY IT WORKS: Weekly pivots recalculate once per week, not daily. This creates
+stable zones. Donchian(20) confirms momentum. 1w trend filter prevents 
+counter-trend trades. 6h = ~120 bars/week vs 24 bars on 1d = better resolution.
+
+TARGET: 75-150 total trades over 4 years (19-37/year).
+Signal size: 0.30.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_volume_ema_simplified_v1"
-timeframe = "4h"
+name = "mtf_6h_weekly_pivot_donchian_1w_v1"
+timeframe = "6h"
 leverage = 1.0
+
+def calculate_pivot_levels(high, low, close):
+    """Classic pivot point calculation"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, s1, r2, s2, r3, s3
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -43,44 +55,45 @@ def generate_signals(prices):
     high = prices["high"].values
     low = prices["low"].values
     volume = prices["volume"].values
+    open_time = prices["open_time"].values
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d EMA50 for trend direction
+    # 1w EMA20 for trend
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # 1d EMA50 for shorter trend
     ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === Local 4h indicators ===
+    # Weekly pivot levels from 1w data
+    pivot_1w, r1_1w, s1_1w, r2_1w, s2_1w, r3_1w, s3_1w = calculate_pivot_levels(
+        df_1w['high'].values, df_1w['low'].values, df_1w['close'].values
+    )
+    # Align to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    
+    # === Local 6h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Donchian channels (20 periods = 5 days on 4h)
+    # Donchian channel (20 periods = 5 days on 6h)
     donchian_period = 20
     highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
     lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Volume ratio (20-period MA)
+    # Volume SMA
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # Choppiness Index (soft filter only)
-    chop = np.full(n, np.nan)
-    chop_period = 14
-    for i in range(chop_period, n):
-        atr_sum = 0.0
-        for j in range(i - chop_period + 1, i + 1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
-            atr_sum += tr
-        hh = max(high[i - chop_period + 1:i + 1])
-        ll = min(low[i - chop_period + 1:i + 1])
-        range_sum = hh - ll
-        if range_sum > 0:
-            chop[i] = 100 * (np.log10(atr_sum / range_sum) / np.log10(chop_period))
-    
     # Signals
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -91,88 +104,96 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     entry_bar = 0
-    profit_taken = False
     
-    warmup = max(100, donchian_period + 20)
+    warmup = 100
     
     for i in range(warmup, n):
-        # Skip if indicators not ready
+        # Skip if ATR not ready
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if HTF not aligned
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(ema_1d_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION (1d EMA50) ===
+        # === TREND DIRECTION (1w + 1d) ===
+        price_above_1w_ema = close[i] > ema_1w_aligned[i]
         price_above_1d_ema = close[i] > ema_1d_aligned[i]
-        price_below_1d_ema = close[i] < ema_1d_aligned[i]
+        bull_trend = price_above_1w_ema and price_above_1d_ema
+        bear_trend = not price_above_1w_ema and not price_above_1d_ema
         
-        # Volume confirmation (1.5x average)
+        # Volume confirmation
         vol_spike = vol_ratio[i] > 1.5
         
-        # Choppiness soft filter (not hard block)
-        in_chop = chop[i] > 61.8 if not np.isnan(chop[i]) else False
+        # Weekly pivot levels (use latest available)
+        pivot = pivot_aligned[i] if not np.isnan(pivot_aligned[i]) else 0.0
+        r1 = r1_aligned[i] if not np.isnan(r1_aligned[i]) else close[i] * 1.01
+        s1 = s1_aligned[i] if not np.isnan(s1_aligned[i]) else close[i] * 0.99
         
-        # === DONCHIAN BREAKOUT (shift by 1 to avoid look-ahead) ===
-        donchian_broken_up = close[i] > highest_high[i - 1]
-        donchian_broken_down = close[i] < lowest_low[i - 1]
+        # === DONCHIAN BREAKOUT ===
+        # Use shift(1) to avoid look-ahead
+        donchian_up_broken = close[i] > highest_high[i - 1]
+        donchian_down_broken = close[i] < lowest_low[i - 1]
         
-        # === ENTRY LOGIC (SIMPLIFIED - only Donchian breakout) ===
+        # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
             # === LONG ENTRY ===
-            # Donchian breakout UP + volume spike + in uptrend
-            if price_above_1d_ema and donchian_broken_up and vol_spike:
-                desired_signal = SIZE
-            # Alternative: in strong uptrend (no chop) + breakout even without vol spike
-            elif price_above_1d_ema and donchian_broken_up and not in_chop:
-                desired_signal = SIZE
+            # Bull trend + break above weekly R1 or Donchian high + volume
+            if bull_trend:
+                # Primary: Donchian breakout with volume
+                if donchian_up_broken and vol_spike:
+                    desired_signal = SIZE
+                # Secondary: Price reclaims weekly R1 after pullback with volume
+                elif close[i] > r1 and close[i - 1] < r1 and vol_spike:
+                    desired_signal = SIZE
             
             # === SHORT ENTRY ===
-            # Donchian breakdown DOWN + volume spike + in downtrend
-            if price_below_1d_ema and donchian_broken_down and vol_spike:
-                desired_signal = -SIZE
-            elif price_below_1d_ema and donchian_broken_down and not in_chop:
-                desired_signal = -SIZE
+            # Bear trend + break below weekly S1 or Donchian low + volume
+            if bear_trend:
+                # Primary: Donchian breakdown with volume
+                if donchian_down_broken and vol_spike:
+                    desired_signal = -SIZE
+                # Secondary: Price breaks below weekly S1 with volume
+                elif close[i] < s1 and close[i - 1] > s1 and vol_spike:
+                    desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR trailing) ===
+        # === STOPLOSS (3 ATR trailing for 6h) ===
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            trailing_stop = highest_since_entry - 3.0 * entry_atr
             stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            trailing_stop = lowest_since_entry + 3.0 * entry_atr
             stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
                 desired_signal = 0.0
         
-        # === TAKE PROFIT at 2R + half position ===
+        # === TAKE PROFIT at 2.5R + half position ===
         bars_held = i - entry_bar
-        if in_position and not profit_taken and bars_held >= 3:
+        if in_position and bars_held >= 3:
             if position_side > 0:
-                profit_2r = entry_price + 2.0 * entry_atr
-                if high[i] >= profit_2r:
-                    desired_signal = SIZE / 2  # Take half profit
-                    profit_taken = True
+                profit_2_5r = entry_price + 2.5 * entry_atr
+                if high[i] >= profit_2_5r:
+                    desired_signal = SIZE * 0.5  # Take half profit
             elif position_side < 0:
-                profit_2r = entry_price - 2.0 * entry_atr
-                if low[i] <= profit_2r:
-                    desired_signal = -SIZE / 2
-                    profit_taken = True
+                profit_2_5r = entry_price - 2.5 * entry_atr
+                if low[i] <= profit_2_5r:
+                    desired_signal = -SIZE * 0.5
         
-        # === HOLD MINIMUM 4 bars to reduce fee churn ===
-        if in_position and bars_held < 4:
+        # === HOLD MINIMUM 3 bars to avoid fee churn ===
+        if in_position and bars_held < 3:
             if position_side > 0:
                 desired_signal = SIZE
             elif position_side < 0:
@@ -189,16 +210,14 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 entry_bar = i
-                profit_taken = False
                 if position_side > 0:
-                    stop_price = entry_price - 2.5 * entry_atr
+                    stop_price = entry_price - 3.0 * entry_atr
                 else:
-                    stop_price = entry_price + 2.5 * entry_atr
+                    stop_price = entry_price + 3.0 * entry_atr
         else:
             if in_position:
                 in_position = False
                 position_side = 0
-                stop_price = 0.0
         
         signals[i] = desired_signal
     
