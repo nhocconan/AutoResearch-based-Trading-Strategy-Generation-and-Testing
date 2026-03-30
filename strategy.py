@@ -1,31 +1,48 @@
 #!/usr/bin/env python3
 """
-Experiment #009: 4h Donchian Breakout + Williams %R Regime + Volume Confirmation
+Experiment #021: 4h TRIX + Donchian Breakout + Volume + 1d EMA Trend
 
-HYPOTHESIS: Donchian channel breakouts capture momentum shifts. Using Williams %R
-as regime filter (oversold = bullish, overbought = bearish) avoids whipsaws in
-ranging markets. Volume confirmation filters false breakouts.
+HYPOTHESIS: TRIX momentum combined with Donchian(20) breakout catches
+momentum shifts at key structural levels. Volume confirms institutional
+activity. 1d EMA50 keeps us aligned with the broader trend.
 
-WHY 4h: Optimal trade frequency (20-50/year) with institutional-level structure.
-12h strategies in this session consistently underperformed.
+WHY 4h: Proven timeframe from DB (multiple Sharpe 1.3+ strategies).
+TRIX filters noise better than single/double EMA, catching genuine reversals.
+Donchian(20) = 5 days = captures multi-day swings without overtrading.
 
-WHY IT WORKS IN BULL AND BEAR:
-- Bull: Price breaks above Donchian high + Williams %R shows oversold pullback
-- Bear: Price breaks below Donchian low + Williams %R shows overbought bounce
-- Choppiness regime avoids entries in sideways markets
-
-TARGET: 75-200 total trades over 4 years (19-50/year). HARD MAX: 400.
-Signal size: 0.25.
-
-Based on DB winner: mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (test Sharpe 1.38)
+TARGET: 75-200 total trades over 4 years (proven range). Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_willr_vol_1d_v1"
+name = "mtf_4h_trix_donchian_vol_ema50_1d_v1"
 timeframe = "4h"
 leverage = 1.0
+
+def calculate_trix(close, period=9):
+    """Triple EMA momentum oscillator"""
+    n = len(close)
+    if n < period * 3:
+        return np.full(n, np.nan)
+    
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
+    ema2 = pd.Series(ema1).ewm(span=period, min_periods=period, adjust=False).mean().values
+    ema3 = pd.Series(ema2).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    # TRIX = rate of change of triple EMA
+    trix = np.zeros(n)
+    trix[period*3:] = (ema3[period*3:] - ema3[period*3 - period: -period]) / ema3[period*3 - period: -period] * 100
+    
+    return trix
+
+def calculate_donchian(high, low, period=20):
+    """Donchian Channel - returns upper, lower, mid"""
+    n = len(high)
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    mid = (upper + lower) / 2
+    return upper, lower, mid
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -33,33 +50,13 @@ def calculate_atr(high, low, close, period=14):
     if n < period + 1:
         return np.full(n, np.nan)
     
-    tr = np.zeros(n, dtype=np.float64)
+    tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
-
-def calculate_williams_r(high, low, close, period=14):
-    """Williams %R - momentum indicator"""
-    n = len(close)
-    willr = np.full(n, np.nan)
-    
-    for i in range(period - 1, n):
-        window_high = np.max(high[i - period + 1:i + 1])
-        window_low = np.min(low[i - period + 1:i + 1])
-        if window_high != window_low:
-            willr[i] = -100 * (window_high - close[i]) / (window_high - window_low)
-    
-    return willr
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - breakout structure"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    middle = (upper + pd.Series(low).rolling(window=period, min_periods=period).min().values) / 2
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, middle, lower
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -71,152 +68,120 @@ def generate_signals(prices):
     # === Load HTF data ONCE before loop ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1d SMA for trend (simple, proven)
-    sma_1d = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
+    # 1d EMA50 for trend (call ONCE, aligned)
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === Local 4h indicators ===
+    # === 4h Indicators (pre-compute, no loop) ===
+    trix = calculate_trix(close, period=9)
+    donch_upper, donch_lower, donch_mid = calculate_donchian(high, low, period=20)
     atr_14 = calculate_atr(high, low, close, period=14)
-    
-    # Donchian channels
-    dc_upper_20, dc_mid_20, dc_lower_20 = calculate_donchian(high, low, period=20)
-    
-    # Williams %R
-    willr = calculate_williams_r(high, low, close, period=14)
     
     # Volume ratio
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # Signals
+    # TRIX signal line (9-period EMA of TRIX)
+    trix_ema = pd.Series(trix).ewm(span=5, min_periods=5, adjust=False).mean().values
+    
     signals = np.zeros(n)
     SIZE = 0.25
     
     # Position tracking
     in_position = False
     position_side = 0
-    entry_price = 0.0
     entry_atr = 0.0
-    stop_price = 0.0
+    entry_bar = 0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    entry_bar = 0
     
-    warmup = 100
+    warmup = 100  # TRIX needs ~27 bars, Donchian needs 20
     
     for i in range(warmup, n):
         # Skip if indicators not ready
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        if np.isnan(trix[i]) or np.isnan(donch_lower[i]) or np.isnan(atr_14[i]) or atr_14[i] <= 0:
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(dc_upper_20[i]) or np.isnan(dc_lower_20[i]):
+        # Skip if HTF EMA not aligned
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        if np.isnan(sma_1d_aligned[i]):
-            signals[i] = 0.0
-            in_position = False
-            position_side = 0
-            continue
+        # === TREND DIRECTION (1d EMA50) ===
+        price_above_1d_ema = close[i] > ema_1d_aligned[i]
+        price_below_1d_ema = close[i] < ema_1d_aligned[i]
         
-        # === REGIME: Williams %R (0 to -100, oversold < -80, overbought > -20)
-        willr_val = willr[i] if not np.isnan(willr[i]) else -50
+        # === VOLUME CONFIRMATION ===
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === TREND: 1d SMA alignment ===
-        price_above_sma = close[i] > sma_1d_aligned[i]
-        price_below_sma = close[i] < sma_1d_aligned[i]
+        # === TRIX MOMENTUM ===
+        trix_turning_up = trix[i] > trix_ema[i] and trix[i-1] <= trix_ema[i-1]  # cross above signal
+        trix_turning_down = trix[i] < trix_ema[i] and trix[i-1] >= trix_ema[i-1]  # cross below signal
         
-        # Volume confirmation
-        vol_spike = vol_ratio[i] > 1.4
+        # Extreme TRIX for reversal (low = oversold, high = overbought)
+        trix_oversold = trix[i] < -0.5
+        trix_overbought = trix[i] > 0.5
         
-        # Donchian breakout signals (previous bar closes beyond channel)
-        upper_broken = close[i - 1] > dc_upper_20[i - 1]  # Previous bar closed above
-        lower_broken = close[i - 1] < dc_lower_20[i - 1]  # Previous bar closed below
+        # === DONCHIAN BREAKOUT ===
+        # Price breaks above 20-period high
+        donch_breakout_up = close[i] > donch_upper[i]
+        # Price breaks below 20-period low
+        donch_breakout_down = close[i] < donch_lower[i]
         
-        # Current bar testing breakout level
-        testing_upper = high[i] >= dc_upper_20[i - 1]
-        testing_lower = low[i] <= dc_lower_20[i - 1]
+        # Price at mid-channel (mean reversion target)
+        at_mid_channel = abs(close[i] - donch_mid[i]) < donch_mid[i] * 0.01
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG: Breakout above + oversold pullback (Williams %R < -60)
-            # Price above SMA, breakout confirmed, Williams showing pullback
-            if price_above_sma and (upper_broken or testing_upper) and vol_spike:
-                # Williams %R in oversold zone = good entry
-                if willr_val < -60:
-                    desired_signal = SIZE
-                # OR strong momentum (Williams crossing up from oversold)
-                elif i > 0 and willr[i - 1] < -80 and willr_val > -80:
-                    desired_signal = SIZE
+            # === LONG: TRIX turning up from oversold + Donchian breakout + trend alignment ===
+            if price_above_1d_ema and (trix_turning_up or trix_oversold) and donch_breakout_up and vol_spike:
+                desired_signal = SIZE
             
-            # === SHORT: Breakout below + overbought bounce (Williams %R > -40)
-            if price_below_sma and (lower_broken or testing_lower) and vol_spike:
-                # Williams %R in overbought zone = good entry
-                if willr_val > -40:
-                    desired_signal = -SIZE
-                # OR strong momentum (Williams crossing down from overbought)
-                elif i > 0 and willr[i - 1] > -20 and willr_val < -20:
-                    desired_signal = -SIZE
+            # === SHORT: TRIX turning down from overbought + Donchian breakdown + trend alignment ===
+            if price_below_1d_ema and (trix_turning_down or trix_overbought) and donch_breakout_down and vol_spike:
+                desired_signal = -SIZE
         
-        # === STOPLOSS (2.0 ATR trailing) ===
+        # === TRAILING STOPLOSS (2.5 ATR) ===
         if in_position and position_side > 0:
             highest_since_entry = max(highest_since_entry, high[i])
-            trailing_stop = highest_since_entry - 2.0 * entry_atr
-            stop_price = max(stop_price, trailing_stop)
-            if low[i] < stop_price:
+            trailing_stop = highest_since_entry - 2.5 * entry_atr
+            if low[i] < trailing_stop:
                 desired_signal = 0.0
         
         if in_position and position_side < 0:
             lowest_since_entry = min(lowest_since_entry, low[i])
-            trailing_stop = lowest_since_entry + 2.0 * entry_atr
-            stop_price = min(stop_price, trailing_stop)
-            if high[i] > stop_price:
+            trailing_stop = lowest_since_entry + 2.5 * entry_atr
+            if high[i] > trailing_stop:
                 desired_signal = 0.0
         
-        # === TAKE PROFIT: Exit at 2.5R or DC mid-line ===
+        # === TAKE PROFIT: price returns to mid-channel ===
         bars_held = i - entry_bar
-        if in_position and bars_held >= 3:
-            if position_side > 0:
-                profit_target = entry_price + 2.5 * entry_atr
-                if close[i] >= profit_target:
-                    desired_signal = 0.0
-                # Or DC mid-line resistance
-                elif close[i] >= dc_mid_20[i]:
-                    desired_signal = 0.0
-            elif position_side < 0:
-                profit_target = entry_price - 2.5 * entry_atr
-                if close[i] <= profit_target:
-                    desired_signal = 0.0
-                # Or DC mid-line support
-                elif close[i] <= dc_mid_20[i]:
-                    desired_signal = 0.0
+        if in_position and bars_held >= 3:  # Hold at least 3 bars (12h)
+            if position_side > 0 and at_mid_channel:
+                desired_signal = 0.0
+            if position_side < 0 and at_mid_channel:
+                desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
                 in_position = True
                 position_side = int(np.sign(desired_signal))
-                entry_price = close[i]
                 entry_atr = atr_14[i]
+                entry_bar = i
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                entry_bar = i
-                if position_side > 0:
-                    stop_price = entry_price - 2.0 * entry_atr
-                else:
-                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
                 position_side = 0
-                stop_price = 0.0
         
         signals[i] = desired_signal
     
