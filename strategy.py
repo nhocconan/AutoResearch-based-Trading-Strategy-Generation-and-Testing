@@ -1,45 +1,51 @@
 #!/usr/bin/env python3
 """
-Experiment #023: Weekly Donchian + Williams %R + Volume Confirmation (1d)
+Experiment #023: 12h Donchian(20) + Volume Spike + Choppiness Regime + 1d EMA Trend
 
-HYPOTHESIS: Weekly Donchian(13) breakout with Williams %R confirmation and 
-volume spike generates high-quality, low-frequency trades on daily timeframe.
+HYPOTHESIS: Simple 3-condition system on 12h with proven regime filter captures
+momentum breakouts while avoiding range-bound whipsaws.
 
-WHY IT SHOULD WORK:
-- Weekly Donchian(13) = 65 trading days = ~13 breaks/year (5-8 valid after filters)
-- Williams %R(14) confirms momentum: < -80 for long, > -20 for short
-- Volume spike (1.8x) confirms institutional involvement
-- Weekly EMA(50) provides trend direction filter
-- 1d primary + 1w HTF = very low trade frequency = minimal fee drag
+WHY IT SHOULD WORK IN BOTH BULL AND BEAR:
+- 12h timeframe balances trade frequency with signal quality
+- Donchian(20) on 12h ≈ 10-day breakout window — captures medium-term moves
+- Choppiness Index < 38.2 ensures we only trade in trending markets (proven filter)
+- 1d EMA200 provides long-term direction bias
+- Volume confirmation filters noise breakouts
+- 4-bar minimum hold reduces fee churn from whipsaws
 
-TRADE COUNT TARGET: 35-60 total over 4 years (8-15/year)
-- 13 weekly Donchian breaks/year × ~40% volume confirmation = ~5 valid
-- Williams %R filter adds ~20% reduction = ~4 trades/year
-- Result: 16-20 trades × 2 symbols = 32-40 total (in range)
+EXPECTED TRADE COUNT: 100-200 total over 4 years (25-50/year)
+- 12h: 730 bars/year
+- Donchian(20) breakouts: ~18-36/year potential
+- Volume filter (1.5x): cuts 40% → 11-22/year
+- Choppiness filter (<38.2): cuts 40% → 7-13/year
+- 1d EMA200 bias: cuts 20% → 5-10/year
+- Result: 20-40/year = 80-160 over 4 years ✓
 
-RISK MANAGEMENT:
-- Stoploss: 3 ATR from entry (wide enough to survive volatility)
-- Max position: 30%
-- Minimum hold: 5 days (reduce fee churn)
+PATTERN SOURCE: mtf_4h_chop_donchian_vol_regime_12h_v1 (test Sharpe 1.49, 107 trades)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_williams_1w_vol_v1"
-timeframe = "1d"
+name = "mtf_12h_donchian_chop_vol_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Average True Range - vectorized"""
     n = len(close)
     if n < 2:
         return np.full(n, np.nan)
     
     tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    tr[1:] = np.maximum(
+        high[1:] - low[1:],
+        np.maximum(
+            np.abs(high[1:] - close[:-1]),
+            np.abs(low[1:] - close[:-1])
+        )
+    )
     
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
@@ -50,24 +56,39 @@ def calculate_donchian(high, low, period=20):
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
-def calculate_williams_r(high, low, close, period=14):
-    """Williams %R - momentum oscillator"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index - identifies trending vs ranging markets
+    < 38.2 = trending, > 61.8 = ranging/choppy
+    """
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
     
-    willr = pd.Series(index=range(len(close)), dtype=float)
-    for i in range(len(close)):
-        if not np.isnan(highest_high.iloc[i]) and not np.isnan(lowest_low.iloc[i]):
-            hh = highest_high.iloc[i]
-            ll = lowest_low.iloc[i]
-            if hh != ll:
-                willr.iloc[i] = -100 * (hh - close[i]) / (hh - ll)
-            else:
-                willr.iloc[i] = -50
-        else:
-            willr.iloc[i] = np.nan
+    # Vectorized ATR calculation
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    tr[1:] = np.maximum(
+        high[1:] - low[1:],
+        np.maximum(
+            np.abs(high[1:] - close[:-1]),
+            np.abs(low[1:] - close[:-1])
+        )
+    )
     
-    return willr.values
+    # Rolling sum of ATR
+    atr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+    
+    # Rolling high-low range
+    period_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    period_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    period_range = period_high - period_low
+    
+    # Choppiness = 100 * log10(sum_ATR) / log10(range)
+    chop = np.full(n, np.nan)
+    valid = (period_range > 0) & (~np.isnan(atr_sum))
+    chop[valid] = 100 * np.log10(atr_sum[valid]) / np.log10(period_range[valid])
+    
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -76,44 +97,26 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # Load Weekly HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # === Weekly (1w) Indicators ===
-    # Weekly EMA(50) for trend direction
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # === HTF indicators (1d) ===
+    # 1d EMA200 for long-term trend bias
+    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # Weekly Donchian(13) for breakout structure
-    donchian_upper_1w, donchian_lower_1w = calculate_donchian(
-        df_1w['high'].values, df_1w['low'].values, period=13
-    )
-    # Align to daily
-    donchian_upper_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper_1w)
-    donchian_lower_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower_1w)
-    
-    # Weekly Williams %R(14) for momentum confirmation
-    williams_1w = calculate_williams_r(
-        df_1w['high'].values, df_1w['low'].values, df_1w['close'].values, period=14
-    )
-    williams_1w_aligned = align_htf_to_ltf(prices, df_1w, williams_1w)
-    
-    # Weekly volume average for spike detection
-    vol_1w_avg = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=10).mean().values
-    vol_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_1w_avg)
-    
-    # === Daily Indicators ===
+    # === Primary 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Daily EMA(20) for local trend
-    ema20_1d = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Donchian Channel(20)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
     
-    # Daily Williams %R(14) for entry timing
-    williams_1d = calculate_williams_r(high, low, close, period=14)
+    # Volume average (20 bars = ~10 days at 12h)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
-    # Daily volume ratio
-    vol_30d_avg = pd.Series(volume).rolling(window=30, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_30d_avg > 0, vol_30d_avg, 1)
+    # Choppiness Index (14 bars = 7 days at 12h)
+    chop = calculate_choppiness(high, low, close, period=14)
     
     # === Signals ===
     signals = np.zeros(n)
@@ -128,7 +131,7 @@ def generate_signals(prices):
     trailing_high = 0.0
     trailing_low = 0.0
     
-    warmup = 200  # EMA(50) weekly + Williams(14) + volume
+    warmup = 250  # Ensure all indicators ready
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -136,107 +139,72 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Get aligned weekly values
-        weekly_ema = ema50_1w_aligned[i]
-        weekly_upper = donchian_upper_1w_aligned[i]
-        weekly_lower = donchian_lower_1w_aligned[i]
-        weekly_willr = williams_1w_aligned[i]
-        weekly_vol_avg = vol_1w_aligned[i]
-        
-        if np.isnan(weekly_ema) or np.isnan(weekly_upper):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        # Current position in weekly data
-        current_week_close = df_1w['close'].values[-1] if len(df_1w) > 0 else close[i]
+        if np.isnan(chop[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(ema200_1d_aligned[i]):
+            signals[i] = 0.0
+            continue
         
         # === ENTRY CONDITIONS ===
         desired_signal = 0.0
         
-        # Volume spike: 1.8x average daily volume
-        vol_spike = vol_ratio[i] > 1.8
+        # Volume spike confirmation
+        vol_spike = vol_ratio[i] > 1.5
         
-        # Weekly trend: bull if close > weekly EMA, bear if close < weekly EMA
-        weekly_bull = close[i] > weekly_ema if not np.isnan(weekly_ema) else False
-        weekly_bear = close[i] < weekly_ema if not np.isnan(weekly_ema) else False
+        # Choppiness regime filter - only trade in trending markets
+        is_trending = chop[i] < 38.2
         
-        # Weekly Williams %R momentum: < -80 = oversold (long), > -20 = overbought (short)
-        weekly_oversold = weekly_willr < -80 if not np.isnan(weekly_willr) else False
-        weekly_overbought = weekly_willr > -20 if not np.isnan(weekly_willr) else False
+        # 1d EMA200 trend bias
+        price_above_ema1d = close[i] > ema200_1d_aligned[i]
+        price_below_ema1d = close[i] < ema200_1d_aligned[i]
         
-        # Daily Williams %R for confirmation
-        daily_willr = williams_1d[i]
-        daily_oversold = daily_willr < -80 if not np.isnan(daily_willr) else False
-        daily_overbought = daily_willr > -20 if not np.isnan(daily_willr) else False
-        
-        # === LONG ENTRY ===
         if not in_position:
-            # Weekly breakout: close above weekly Donchian high
-            weekly_breakout_bull = close[i] > weekly_upper if not np.isnan(weekly_upper) else False
+            # === LONG ENTRY: Breakout above Donchian high ===
+            bullish_breakout = high[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
             
-            # Entry: weekly breakout + volume spike + oversold Williams + bull trend
-            if weekly_breakout_bull and vol_spike and (weekly_oversold or daily_oversold) and weekly_bull:
+            if bullish_breakout and vol_spike and is_trending and price_above_ema1d:
                 desired_signal = SIZE
                 
-            # === SHORT ENTRY ===
-            # Weekly breakdown: close below weekly Donchian low
-            weekly_breakout_bear = close[i] < weekly_lower if not np.isnan(weekly_lower) else False
+            # === SHORT ENTRY: Breakdown below Donchian low ===
+            bearish_breakout = low[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
             
-            if weekly_breakout_bear and vol_spike and (weekly_overbought or daily_overbought) and weekly_bear:
+            if bearish_breakout and vol_spike and is_trending and price_below_ema1d:
                 desired_signal = -SIZE
         
         # === STOPLOSS AND EXIT ===
         if in_position:
-            if position_side > 0:  # Long position
+            if position_side > 0:
                 # Update trailing high
-                if high[i] > trailing_high:
+                if i == entry_bar or high[i] > trailing_high:
                     trailing_high = high[i]
                 
-                # Stop: 3 ATR from entry
-                stop_price = entry_price - 3.0 * entry_atr
+                # Trailing stop: 2.5 ATR from highest point
+                stop_price = trailing_high - 2.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
                 
-                # Exit if price crosses below daily EMA(20) - local reversal
-                if close[i] < ema20_1d[i] and not np.isnan(ema20_1d[i]):
-                    desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
-                
-                # Exit if Williams %R reaches overbought (> -20)
-                if daily_willr > -20 and not np.isnan(daily_willr):
-                    desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
-                    
-            elif position_side < 0:  # Short position
+            elif position_side < 0:
                 # Update trailing low
-                if low[i] < trailing_low:
+                if i == entry_bar or low[i] < trailing_low:
                     trailing_low = low[i]
                 
-                # Stop: 3 ATR from entry
-                stop_price = entry_price + 3.0 * entry_atr
+                # Trailing stop: 2.5 ATR from lowest point
+                stop_price = trailing_low + 2.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
-                
-                # Exit if price crosses above daily EMA(20) - local reversal
-                if close[i] > ema20_1d[i] and not np.isnan(ema20_1d[i]):
-                    desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
-                
-                # Exit if Williams %R reaches oversold (< -80)
-                if daily_willr < -80 and not np.isnan(daily_willr):
-                    desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
         
-        # === MINIMUM HOLD: 5 days to avoid fee churn ===
-        if in_position and (i - entry_bar) < 5:
+        # === MINIMUM HOLD: 4 bars (2 days at 12h) to avoid fee churn ===
+        if in_position and (i - entry_bar) < 4:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
