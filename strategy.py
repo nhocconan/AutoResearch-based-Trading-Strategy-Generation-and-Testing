@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #025: 12h Donchian + Weekly Trend + Volume + Choppiness Regime
+Experiment #025: 4h Donchian Breakout + HMA Trend + Volume + Choppiness Regime
 
-HYPOTHESIS: 12h timeframe with choppiness regime filter solves the 2022 bear market
-problem that killed previous 12h strategies. Choppiness < 50 = trending = safe to enter.
-Choppiness > 61.5 = ranging = skip (avoids 2022 whipsaw that destroyed #017).
+HYPOTHESIS:
+- 4h timeframe: proven to work (DB winners all use 4h with 100-300 trades)
+- Donchian(20): captures momentum breakouts every 20-40 bars on 4h
+- HMA(48): smoother trend direction, avoids short-term noise
+- Volume spike: 1.5x average confirms institutional interest
+- Choppiness regime: avoid sideways markets (CHOP > 61.8 = no entry)
+- HTF 12h: confirms larger trend direction before entry
 
 WHY IT SHOULD WORK IN BOTH MARKETS:
-- Bull (2021, 2023-24): Breakout above 20-bar high + volume spike + trending regime = ride the move
-- Bear (2022): Choppiness stays HIGH in ranging crash → NO entries during whipsaw
-- Range (2025): Choppiness also high → still no entries = preserved capital
+- Bull: Breakout + volume + HMA up + not choppy = ride momentum higher
+- Bear: Breakdown + volume + HMA down + not choppy = short the breakdown
+- Choppiness filter prevents whipsaw in range-bound periods
 
-The key fix from failed #017: adding Choppiness regime filter. #017 had only 43 trades but
-negative Sharpe because it entered during the 2022 chop/range. This version SKIPS 2022.
-
-EXPECTED TRADES: ~100-200 total over 4 years (25-50/year per symbol)
-- 12h Donchian(20) ≈ 11 breakouts/year per symbol
-- Volume spike (1.5x) → 40% pass = ~7/year
-- Weekly EMA trend → 50% pass = ~4/year
-- Choppiness < 50 regime → 70% pass = ~3/year
-- Plus re-entries and early exits → ~6-8/year = 24-32/year per symbol
-- 3 symbols × 4 years × 30/year = ~360 total (upper bound)
-- With min-hold 6 bars + tighter exit = ~200-250 total (acceptable)
+EXPECTED TRADES: 75-200 total over 4 years (19-50/year)
+- Donchian(20) on 4h = potential break every 20-40 bars = ~219-438/year
+- Volume spike 1.5x → reduces by ~40%
+- HMA trend filter → reduces by ~30%
+- Choppiness filter (>61.8 = no trade) → reduces by ~25%
+- Final: ~75-175 trades = statistical validity
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_weekly_vol_chop_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_hma_vol_chop_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -45,25 +44,43 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_choppiness(high, low, close, period=14):
-    """Choppiness Index - values < 50 = trending, > 61.5 = ranging"""
-    n = len(close)
-    chop = np.full(n, np.nan)
+def calculate_hma(data, period):
+    """Hull Moving Average"""
+    series = pd.Series(data)
+    half_length = period // 2
+    sqrt_length = int(np.sqrt(period))
     
-    for i in range(period, n):
-        # Sum of true range over period
-        tr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
-            tr_sum += tr
+    wma1 = series.rolling(window=half_length, min_periods=half_length).mean()
+    wma2 = series.rolling(window=period, min_periods=period).mean()
+    diff = 2 * wma1 - wma2
+    
+    hma = diff.rolling(window=sqrt_length, min_periods=sqrt_length).mean()
+    return hma.values
+
+def calculate_choppiness(high, low, close, period=14):
+    """
+    Choppiness Index (CEI): measures market choppiness vs trending
+    CHOP > 61.8 = choppy/range (avoid)
+    CHOP < 38.2 = trending (good for momentum)
+    """
+    n = len(close)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    chop = np.zeros(n, dtype=np.float64)
+    
+    for i in range(period - 1, n):
+        sum_tr = 0.0
+        for j in range(period):
+            tr_val = max(high[i - j] - low[i - j], 
+                        abs(high[i - j] - close[i - j - 1]) if i - j - 1 >= 0 else high[i - j] - low[i - j])
+            sum_tr += tr_val
         
-        # Highest high - lowest low over period
-        hh = max(high[i - period + 1:i + 1])
-        ll = min(low[i - period + 1:i + 1])
-        range_sum = hh - ll
+        highest_high = max(high[i - period + 1:i + 1])
+        lowest_low = min(low[i - period + 1:i + 1])
         
-        if range_sum > 0:
-            chop[i] = 100 * (np.log10(tr_sum) / np.log10(range_sum))
+        if highest_high - lowest_low > 0:
+            chop[i] = 100 * np.log10(sum_tr / (highest_high - lowest_low)) / np.log10(period)
     
     return chop
 
@@ -75,19 +92,25 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Weekly EMA(21) for trend
-    weekly_ema = pd.Series(df_1w['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    # === Calculate HTF HMA for trend confirmation ===
+    hma_12h = calculate_hma(df_12h['close'].values, 21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # === Local 12h indicators ===
+    # === Calculate local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Donchian Channel(20)
+    # Donchian Channel(20) - captures momentum breakouts
     donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_upper + donchian_lower) / 2.0
+    
+    # HMA(48) for local trend
+    hma_48 = calculate_hma(close, 48)
+    
+    # Choppiness Index(14)
+    chop = calculate_choppiness(high, low, close, period=14)
     
     # Volume average (20 bars)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -106,10 +129,9 @@ def generate_signals(prices):
     trailing_high = 0.0
     trailing_low = 0.0
     
-    warmup = 50  # Enough for Donchian20, ATR14, Choppiness14
+    warmup = 80  # Enough for Donchian20, HMA48, ATR14, chop14
     
     for i in range(warmup, n):
-        # Check required data
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
@@ -122,18 +144,22 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(weekly_ema_aligned[i]):
-            signals[i] = 0.0
-            continue
+        # === REGIME FILTER: Choppiness < 61.8 (not too choppy) ===
+        not_choppy = chop[i] < 61.8
         
-        desired_signal = 0.0
+        # === TREND: HMA(48) direction + HTF 12h HMA confirmation ===
+        hma_trending_up = hma_48[i] > hma_48[i-1] if not np.isnan(hma_48[i-1]) else True
+        hma_trending_down = hma_48[i] < hma_48[i-1] if not np.isnan(hma_48[i-1]) else False
         
-        # === REGIME CHECK: Only trade when trending ===
-        trending_regime = chop[i] < 50.0
+        # HTF trend: 12h HMA above/below price
+        htf_trend_up = (not np.isnan(hma_12h_aligned[i]) and 
+                        close[i] > hma_12h_aligned[i] and 
+                        hma_12h_aligned[i] > hma_12h_aligned[i-1] if not np.isnan(hma_12h_aligned[i-1]) else True)
+        htf_trend_down = (not np.isnan(hma_12h_aligned[i]) and 
+                          close[i] < hma_12h_aligned[i])
         
-        # === TREND DIRECTION: Weekly EMA ===
-        bull_trend = close[i] > weekly_ema_aligned[i]
-        bear_trend = close[i] < weekly_ema_aligned[i]
+        bull_trend = hma_trending_up and htf_trend_up
+        bear_trend = hma_trending_down and htf_trend_down
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
@@ -143,21 +169,23 @@ def generate_signals(prices):
         prev_donchian_low = donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else np.nan
         
         bullish_breakout = (not np.isnan(prev_donchian_high) and 
-                           high[i] > prev_donchian_high)
+                           close[i] > prev_donchian_high)
         bearish_breakout = (not np.isnan(prev_donchian_low) and 
-                           low[i] < prev_donchian_low)
+                           close[i] < prev_donchian_low)
         
         # === ENTRY LOGIC ===
+        desired_signal = 0.0
+        
         if not in_position:
-            # LONG: Trending regime + bullish breakout + volume spike + bull trend
-            if trending_regime and bullish_breakout and vol_spike and bull_trend:
+            # LONG: Bullish breakout + volume spike + bull trend + not choppy
+            if bullish_breakout and vol_spike and bull_trend and not_choppy:
                 desired_signal = SIZE
             
-            # SHORT: Trending regime + bearish breakout + volume spike + bear trend
-            elif trending_regime and bearish_breakout and vol_spike and bear_trend:
+            # SHORT: Bearish breakout + volume spike + bear trend + not choppy
+            elif bearish_breakout and vol_spike and bear_trend and not_choppy:
                 desired_signal = -SIZE
         
-        # === EXIT/STOPS LOGIC ===
+        # === EXIT LOGIC ===
         if in_position:
             if position_side > 0:
                 # Trailing high
@@ -171,8 +199,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                 
-                # Exit if weekly trend flips
-                elif close[i] < weekly_ema_aligned[i]:
+                # Exit if trend reverses (HMA turns down)
+                elif hma_48[i] < hma_48[i-2] if not np.isnan(hma_48[i-2]) else False:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
@@ -189,14 +217,14 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                 
-                # Exit if weekly trend flips
-                elif close[i] > weekly_ema_aligned[i]:
+                # Exit if trend reverses (HMA turns up)
+                elif hma_48[i] > hma_48[i-2] if not np.isnan(hma_48[i-2]) else False:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
         
-        # === MINIMUM HOLD: 6 bars to reduce fee churn ===
-        if in_position and (i - entry_bar) < 6:
+        # === MINIMUM HOLD: 4 bars to reduce fee churn ===
+        if in_position and (i - entry_bar) < 4:
             desired_signal = position_side * SIZE
         
         # === EXECUTE NEW POSITION ===
