@@ -1,28 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 6h Donchian Breakout + Weekly VWAP Trend + Volume (6h)
+Experiment #025: 12h Donchian Breakout + Choppiness Regime + Volume
 
-HYPOTHESIS: 6h timeframe balances between too few trades (12h/1d) and overtrading (4h).
-Weekly VWAP provides structural trend direction without being too restrictive.
-Donchian(20) captures medium-term breakouts every 20-40 bars. Volume spike confirms.
+HYPOTHESIS: 12h timeframe with tight Donchian(24) + Choppiness regime filter
+will generate 50-80 trades over 4 years with positive Sharpe.
 
-WHY IT SHOULD WORK IN BOTH MARKETS:
-- Bull: Breakout above 20-bar high + volume spike + above weekly VWAP = strong momentum
-- Bear: Breakdown below 20-bar low + volume spike + below weekly VWAP = strong short
-- Weekly VWAP acts as regime filter: prevents fighting major trend
+WHY IT SHOULD WORK:
+- Choppiness Index filters out 50% of bars (choppy = no entries)
+- Only enters during trending phases (<38.2 chop = strong trend)
+- 12h is slow enough to avoid overtrading but fast enough for statistical validity
+- Volume spike confirms momentum, not noise
 
-EXPECTED TRADES: 75-150 total over 4 years (19-37/year per symbol)
-- Donchian(20) on 6h = break every ~20-40 bars = 219-438 potential/year
-- Volume spike (1.5x) → reduces by ~40%
-- Weekly VWAP trend filter → reduces by ~30%
-- Final: ~75-150 trades = statistical validity
+EXPECTED TRADES: 50-80 total over 4 years (~12-20/year per symbol)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_donchian_weekly_vwap_vol_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_chop_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -39,13 +35,32 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_vwap(high, low, close, volume):
-    """Weekly VWAP - anchored to week start"""
-    typical_price = (high + low + close) / 3.0
-    cumvol = pd.Series(volume).cumsum()
-    cumtpv = pd.Series(typical_price * volume).cumsum()
-    vwap = cumtpv / cumvol
-    return vwap.values
+def calculate_choppiness_index(high, low, close, period=14):
+    """
+    Choppiness Index (CHOP)
+    CHOP > 61.8 = choppy/range market (avoid)
+    CHOP < 38.2 = trending market (enter)
+    """
+    n = len(close)
+    chop = np.full(n, np.nan)
+    
+    for i in range(period, n):
+        # Sum of ATR over period
+        atr_sum = 0.0
+        for j in range(period):
+            tr = max(high[i-j] - low[i-j], 
+                    abs(high[i-j] - close[i-j-1]) if i-j > 0 else high[i-j] - low[i-j],
+                    abs(low[i-j] - close[i-j-1]) if i-j > 0 else 0)
+            atr_sum += tr
+        
+        # Highest high - lowest low over period
+        hh = max(high[i-period+1:i+1])
+        ll = min(low[i-period+1:i+1])
+        
+        if hh - ll > 0 and atr_sum > 0:
+            chop[i] = 100 * np.log10(atr_sum / (hh - ll)) / np.log10(period)
+    
+    return chop
 
 def generate_signals(prices):
     close = prices["close"].values
@@ -55,35 +70,31 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly close for trend
-    weekly_close = df_1w['close'].values
-    weekly_vwap = calculate_vwap(
-        df_1w['high'].values,
-        df_1w['low'].values,
-        df_1w['close'].values,
-        df_1w['volume'].values
-    )
-    weekly_vwap_aligned = align_htf_to_ltf(prices, df_1w, weekly_vwap)
+    # Daily EMA for trend direction
+    daily_close = df_1d['close'].values
+    daily_ema = pd.Series(daily_close).ewm(span=21, min_periods=21, adjust=False).mean().values
+    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
     
-    # === Local 6h indicators ===
+    # === Local 12h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     
-    # Donchian Channel(20)
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian Channel(24) - medium-term structure
+    donchian_upper = pd.Series(high).rolling(window=24, min_periods=24).max().values
+    donchian_lower = pd.Series(low).rolling(window=24, min_periods=24).min().values
+    donchian_mid = (donchian_upper + donchian_lower) / 2
     
-    # Local 6h VWAP for trend
-    local_vwap = calculate_vwap(high, low, close, volume)
+    # Choppiness Index
+    chop = calculate_choppiness_index(high, low, close, period=14)
     
-    # Volume average (20 bars)
+    # Volume analysis
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     # === Signals ===
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25
     
     # Position tracking
     in_position = False
@@ -94,7 +105,7 @@ def generate_signals(prices):
     trailing_high = 0.0
     trailing_low = 0.0
     
-    warmup = 60  # Enough for Donchian20, ATR14, VWAP
+    warmup = 60  # Enough for Donchian24, ATR14, CHOP14
     
     for i in range(warmup, n):
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
@@ -105,20 +116,21 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(weekly_vwap_aligned[i]):
+        if np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        # === TREND DIRECTION: Weekly VWAP + local confirmation ===
-        prev_wvwap = weekly_vwap_aligned[i-1] if i > 0 and not np.isnan(weekly_vwap_aligned[i-1]) else weekly_vwap_aligned[i]
+        if np.isnan(daily_ema_aligned[i]):
+            signals[i] = 0.0
+            continue
         
-        above_weekly = close[i] > weekly_vwap_aligned[i]
-        above_local = close[i] > local_vwap[i]
-        bull_trend = above_weekly and above_local
+        # === REGIME FILTER: Choppiness Index ===
+        # Only enter when trending (CHOP < 38.2), avoid choppy markets
+        is_trending = chop[i] < 38.2
         
-        below_weekly = close[i] < weekly_vwap_aligned[i]
-        below_local = close[i] < local_vwap[i]
-        bear_trend = below_weekly and below_local
+        # === TREND DIRECTION: Daily EMA alignment ===
+        daily_trend_up = close[i] > daily_ema_aligned[i]
+        daily_trend_down = close[i] < daily_ema_aligned[i]
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
@@ -136,12 +148,12 @@ def generate_signals(prices):
         desired_signal = 0.0
         
         if not in_position:
-            # LONG: Bullish breakout + volume spike + bull trend
-            if bullish_breakout and vol_spike and bull_trend:
+            # LONG: Bullish breakout + volume spike + bull trend + trending regime
+            if bullish_breakout and vol_spike and daily_trend_up and is_trending:
                 desired_signal = SIZE
             
-            # SHORT: Bearish breakout + volume spike + bear trend
-            elif bearish_breakout and vol_spike and bear_trend:
+            # SHORT: Bearish breakout + volume spike + bear trend + trending regime
+            elif bearish_breakout and vol_spike and daily_trend_down and is_trending:
                 desired_signal = -SIZE
         
         # === EXIT LOGIC ===
@@ -159,7 +171,7 @@ def generate_signals(prices):
                     position_side = 0
                 
                 # Exit if trend flips
-                elif close[i] < weekly_vwap_aligned[i] * 0.995:  # slight buffer
+                elif close[i] < daily_ema_aligned[i] * 0.99:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
@@ -177,13 +189,13 @@ def generate_signals(prices):
                     position_side = 0
                 
                 # Exit if trend flips
-                elif close[i] > weekly_vwap_aligned[i] * 1.005:  # slight buffer
+                elif close[i] > daily_ema_aligned[i] * 1.01:
                     desired_signal = 0.0
                     in_position = False
                     position_side = 0
         
-        # === MINIMUM HOLD: 3 bars to reduce fee churn ===
-        if in_position and (i - entry_bar) < 3:
+        # === MINIMUM HOLD: 4 bars (2 days) to reduce fee churn ===
+        if in_position and (i - entry_bar) < 4:
             desired_signal = position_side * SIZE
         
         # === EXECUTE NEW POSITION ===
