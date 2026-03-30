@@ -1,50 +1,83 @@
 #!/usr/bin/env python3
 """
-Experiment #022: 4h Williams Alligator + Volume Spike + 1d SMA Filter
+Experiment #004: 1d TRIX Momentum + Choppiness Regime + Volume Spike
 
-HYPOTHESIS: Williams Alligator is a multi-SMA trend detection system that
-captures market structure without repainting. The Lips crossing above/below
-the Jaw provides clean trend signals. Combined with volume confirmation and
-1d SMA(50) for macro trend filter, this should:
-- Work in 2021 bull:捕捉動能突破
-- Work in 2022 bear: 空頭排列時做空
-- Work in 2025 range: Macro filter keeps flat in chop
+HYPOTHESIS: TRIX momentum captures trend acceleration without noise. Choppiness
+Index (CHOP) separates trending from ranging markets - only take signals when
+CHOP < 38.2 (trending). Combined with volume spike confirmation and 1w SMA for
+macro direction, this should work across all market regimes:
+- 2021 bull: TRIX crosses up with CHOP trending → long
+- 2022 bear: TRIX crosses down with CHOP trending → short
+- 2025 range: CHOP > 61.8 → flat (no trades in chop)
+- 2025 breakout: CHOP drops below 38.2 + TRIX cross → position
 
-KEY INSIGHT FROM DB: Winning strategies use ONE strong signal (price channel 
-or momentum oscillator) + volume confirmation + regime filter. Alligator 
-provides BOTH trend direction AND regime (awake/sleeping) information.
+KEY INSIGHT: CHOP is the meta-filter that prevents the biggest failure mode:
+taking momentum signals during choppy/ranging markets. DB shows TRIX+chop
+achieved ETHUSDT test Sharpe 1.32.
 
-TRADE COUNT: 75-200 total over 4 years (target 20-50/year).
-Size: 0.25.
+TRADE COUNT: 30-80 total over 4 years (7-20/year on 1d).
+Size: 0.30.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_alligator_vol_1d_sma_v1"
-timeframe = "4h"
+name = "mtf_1d_trix_chop_vol_1w_sma_v1"
+timeframe = "1d"
 leverage = 1.0
 
-def calculate_alligator(high, low, close, period=13):
+def calculate_trix(close, period=15):
+    """Triple EMA momentum oscillator"""
+    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean()
+    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
+    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
+    
+    # TRIX = rate of change of triple EMA
+    trix = np.zeros(len(close))
+    trix[0] = 0.0
+    for i in range(1, len(close)):
+        if ema3.iloc[i-1] != 0:
+            trix[i] = ((ema3.iloc[i] - ema3.iloc[i-1]) / ema3.iloc[i-1]) * 100
+        else:
+            trix[i] = 0.0
+    
+    # Signal line = SMA of TRIX
+    trix_series = pd.Series(trix)
+    signal = trix_series.rolling(window=9, min_periods=9).mean().values
+    
+    return trix, signal
+
+def calculate_choppiness(high, low, close, period=14):
     """
-    Williams Alligator indicator.
-    Jaw = SMA(median, 13) smoothed by SMA(8)
-    Teeth = SMA(median, 8) smoothed by SMA(5)
-    Lips = SMA(median, 5) smoothed by SMA(3)
+    Choppiness Index (CHOP): 100 * log10(sum ATR over period) / (max-high - min-low)
+    CHOP > 61.8 = choppy/ranging market
+    CHOP < 38.2 = trending market
     """
-    median = (high + low + close) / 3.0
+    n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
     
-    # Base SMAs
-    jaw_base = pd.Series(median).rolling(window=13, min_periods=13).mean().values
-    teeth_base = pd.Series(median).rolling(window=8, min_periods=8).mean().values
-    lips_base = pd.Series(median).rolling(window=5, min_periods=5).mean().values
+    # True Range
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # Smoothed values (SMMA-like using ewm for efficiency)
-    jaw = pd.Series(jaw_base).ewm(span=8, min_periods=8, adjust=False).mean().values
-    teeth = pd.Series(teeth_base).ewm(span=5, min_periods=5, adjust=False).mean().values
-    lips = pd.Series(lips_base).ewm(span=3, min_periods=3, adjust=False).mean().values
+    chop = np.full(n, np.nan)
     
-    return jaw, teeth, lips
+    for i in range(period, n):
+        atr_sum = np.sum(tr[i-period+1:i+1])
+        highest_high = np.max(high[i-period+1:i+1])
+        lowest_low = np.min(low[i-period+1:i+1])
+        
+        hl_range = highest_high - lowest_low
+        
+        if hl_range > 1e-10:
+            chop[i] = 100 * np.log10(atr_sum / hl_range) / np.log10(period)
+        else:
+            chop[i] = 61.8  # default to choppy
+    
+    return chop
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -67,47 +100,49 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d SMA for macro trend (call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    sma_1d_50 = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
-    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d_50)
+    # === HTF: 1w SMA for macro trend (call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    sma_1w_50 = pd.Series(df_1w['close'].values).rolling(window=50, min_periods=50).mean().values
+    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w_50)
     
-    # === Local 4h indicators ===
+    # === 1d Indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
+    trix, trix_signal = calculate_trix(close, period=15)
+    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Williams Alligator
-    jaw, teeth, lips = calculate_alligator(high, low, close, period=13)
-    
-    # Volume spike detection
+    # Volume metrics
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 1e-10, vol_ma, 1.0)
     
     # === Signals ===
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
-    # Position tracking
+    # State tracking
     in_position = False
     position_side = 0
-    entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 60  # Alligator needs time to stabilize
+    warmup = 100  # Need 1w SMA + TRIX warmup
     
     for i in range(warmup, n):
-        # NaN check
+        # NaN checks
         if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
             continue
         
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
+        if np.isnan(trix[i]) or np.isnan(trix_signal[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(sma_1d_aligned[i]):
+        if np.isnan(chop[i]):
+            signals[i] = 0.0
+            continue
+        
+        if np.isnan(sma_1w_aligned[i]):
             signals[i] = 0.0
             continue
         
@@ -118,28 +153,32 @@ def generate_signals(prices):
             else:
                 lowest_since_entry = min(lowest_since_entry, low[i])
         
-        # === ALLIGATOR SIGNALS ===
-        # Lips crosses above Teeth crosses above Jaw = bullish (alligator eating)
-        alligator_bullish = lips[i] > teeth[i] > jaw[i]
-        # Lips crosses below Teeth crosses below Jaw = bearish (alligator eating)
-        alligator_bearish = lips[i] < teeth[i] < jaw[i]
+        # === CHOPPINESS REGIME FILTER ===
+        # Only trade when CHOP < 38.2 (trending), avoid CHOP > 61.8 (choppy)
+        chop_trending = chop[i] < 38.2
+        chop_choppy = chop[i] > 61.8
         
-        # Alligator awake (spread between lines > threshold = trending)
-        alligator_spread = abs(lips[i] - jaw[i]) / jaw[i] if jaw[i] != 0 else 0
-        alligator_awake = alligator_spread > 0.005  # 0.5% minimum spread
+        # === TRIX MOMENTUM SIGNALS ===
+        # TRIX crossing above signal = bullish momentum
+        trix_bullish = trix[i] > trix_signal[i]
+        # TRIX crossing below signal = bearish momentum
+        trix_bearish = trix[i] < trix_signal[i]
         
-        # === HTF MACRO FILTER (1d SMA) ===
-        htf_bullish = close[i] > sma_1d_aligned[i]
-        htf_bearish = close[i] < sma_1d_aligned[i]
+        # TRIX zero line cross detection (approximation via sign change)
+        trix_above_zero = trix[i] > 0
+        trix_below_zero = trix[i] < 0
         
-        # === VOLUME CONFIRMATION (>1.5x average) ===
+        # === 1w MACRO TREND ===
+        htf_bullish = close[i] > sma_1w_aligned[i]
+        htf_bearish = close[i] < sma_1w_aligned[i]
+        
+        # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
-        # === MINIMUM HOLD: 3 bars (12h) to avoid immediate reversals ===
-        min_hold_bars = 3
-        min_hold = (i - entry_bar) >= min_hold_bars
+        # === MIN HOLD: 2 bars (2 days) ===
+        min_hold = (i - entry_bar) >= 2
         
-        # === ATR TRAILING STOP (2.5x ATR from entry high/low) ===
+        # === ATR TRAILING STOP (2.5x ATR) ===
         def check_atr_stop():
             if not in_position:
                 return False
@@ -152,10 +191,14 @@ def generate_signals(prices):
         if in_position:
             stop_hit = check_atr_stop()
             
-            # Exit on trend reversal with min hold
-            if position_side > 0 and alligator_bearish and min_hold:
+            # Exit on momentum reversal with min hold
+            if position_side > 0 and trix_bearish and min_hold:
                 stop_hit = True
-            if position_side < 0 and alligator_bullish and min_hold:
+            if position_side < 0 and trix_bullish and min_hold:
+                stop_hit = True
+            
+            # Exit if choppy market (opposite of our thesis)
+            if chop_choppy:
                 stop_hit = True
             
             if stop_hit:
@@ -167,21 +210,25 @@ def generate_signals(prices):
         
         # === NEW POSITIONS ===
         if not in_position:
-            # LONG: Alligator bullish + volume spike + HTF bullish + trending
-            if alligator_bullish and vol_spike and htf_bullish and alligator_awake:
+            # Skip if choppy - no entry in ranging markets
+            if chop_choppy:
+                signals[i] = 0.0
+                continue
+            
+            # LONG: TRIX bullish + volume spike + CHOP trending + 1w bullish
+            # Require TRIX momentum strengthening (cross above signal or above zero)
+            if trix_bullish and vol_spike and chop_trending and htf_bullish:
                 in_position = True
                 position_side = 1
-                entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
                 highest_since_entry = high[i]
                 signals[i] = SIZE
             
-            # SHORT: Alligator bearish + volume spike + HTF bearish + trending
-            elif alligator_bearish and vol_spike and htf_bearish and alligator_awake:
+            # SHORT: TRIX bearish + volume spike + CHOP trending + 1w bearish
+            elif trix_bearish and vol_spike and chop_trending and htf_bearish:
                 in_position = True
                 position_side = -1
-                entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
                 lowest_since_entry = low[i]
