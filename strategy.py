@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #011: 6h Camarilla Pivot + Williams %R + Choppiness Regime
+Experiment #021: 4h Donchian Breakout + 12h EMA Trend + Volume Spike
 
-HYPOTHESIS: Camarilla pivots provide key S3/R3 reversal zones not captured by
-Donchian. Combined with Williams %R momentum (not RSI, not ADX) and Choppiness
-regime filter, this targets mean-reversion at pivot levels in trending markets.
-
+HYPOTHESIS: This is a CLONE of the proven DB winner pattern:
+  mtf_4h_hma_donchian_volume_rsi_12h_atr_v1 (SOLUSDT: test_sharpe=1.382, 95tr)
+  
 WHY IT SHOULD WORK IN BOTH MARKETS:
-- Bull: R3 breakout + %R>80 + CHOP<50 = momentum continuation long
-- Bear: S3 breakdown + %R<20 + CHOP<50 = momentum continuation short
-- Range: Fade R3/S3 when CHOP>61.8, exit when CHOP<38.2 flips to trend
+- 4h timeframe: proven to avoid 15m/30m fee drag issues
+- Donchian(20) breakout: captures structural breaks, works in all market phases
+- 12h EMA16: provides trend direction without being too slow like weekly EMA
+- Volume spike confirmation: filters false breakouts
+- 2.5 ATR stoploss: proven risk management
 
-NOVELTY vs failed attempts:
-- Uses Camarilla (not Donchian) — different price structure
-- Uses Williams %R (not RSI/ADX) — more sensitive momentum
-- Combines pivot fade + breakout logic with regime filter
+EXPECTED TRADES: 75-200 per symbol over 4 years
+- Donchian(20) on 4h = ~1 breakout per 20-40 bars
+- Volume spike filter reduces by ~40%
+- 12h EMA16 trend filter reduces by ~30%
+- Final: ~100-200 total per symbol (safe range)
 
-EXPECTED TRADES: 80-150 total over 4 years (20-37/year per symbol)
-- R3/S3 touches happen ~2-4x per week per symbol
-- %R filter reduces by ~40%
-- Choppiness filter reduces by ~50%
-- Final: ~80-150 total (within target)
+KEY FIX FROM FAILURES:
+- Changed from 6h/12h/1d to 4h (proven timeframe)
+- Changed from weekly/daily EMA to 12h EMA (more signals, not too few)
+- Kept 3 conditions: breakout + vol + trend (not over-filtered)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_camarilla_wr_chop_v1"
-timeframe = "6h"
+name = "mtf_4h_donchian12_vol_ema16_12h_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -44,60 +45,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_williams_r(high, low, close, period=14):
-    """Williams %R - momentum oscillator"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    wr = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        if highest_high != lowest_low:
-            wr[i] = -100 * (highest_high - close[i]) / (highest_high - lowest_low)
-    return wr
-
-def calculate_choppiness_index(high, low, close, period=14):
-    """Choppiness Index - measures trend vs range"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    chop = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        # Sum of ATR over period
-        atr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            tr = max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
-            atr_sum += tr
-        
-        # Highest high - lowest low over period
-        hh = np.max(high[i - period + 1:i + 1])
-        ll = np.min(low[i - period + 1:i + 1])
-        
-        range_sum = hh - ll
-        
-        if range_sum > 0 and atr_sum > 0:
-            chop[i] = 100 * np.log10(atr_sum / range_sum) / np.log10(period)
-    
-    return chop
-
-def calculate_daily_camarilla(high_d, low_d, close_d):
-    """Daily Camarilla pivot levels"""
-    h_l = high_d - low_d
-    h_c = high_d - close_d
-    c_l = close_d - low_d
-    
-    r4 = close_d + h_l * 1.1 / 2
-    r3 = close_d + h_l * 1.1 / 4
-    r4_alt = h_c + close_d + h_l / 2  # Alternative calculation
-    r3_alt = h_c + close_d + h_l / 4
-    s3 = close_d - h_l * 1.1 / 4
-    s4 = close_d - h_l * 1.1 / 2
-    
-    return r4, r3, s3, s4
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -106,30 +53,20 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Daily EMA50 for trend alignment (align to 6h)
-    daily_ema50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_aligned = align_htf_to_ltf(prices, df_1d, daily_ema50)
+    # 12h EMA16 for trend direction (align to 4h)
+    htf_ema16 = pd.Series(df_12h['close'].values).ewm(span=16, min_periods=16, adjust=False).mean().values
+    ema16_aligned = align_htf_to_ltf(prices, df_12h, htf_ema16)
     
-    # Daily Camarilla levels from previous day (align to 6h)
-    df_1d_shifted = df_1d.copy()
-    df_1d_shifted['r4'] = df_1d['high'].shift(1) + 2 * (df_1d['close'].shift(1) - df_1d['low'].shift(1))
-    df_1d_shifted['r3'] = df_1d['close'].shift(1) + (df_1d['high'].shift(1) - df_1d['low'].shift(1)) / 2
-    df_1d_shifted['s3'] = df_1d['close'].shift(1) - (df_1d['high'].shift(1) - df_1d['low'].shift(1)) / 2
-    df_1d_shifted['s4'] = df_1d['close'].shift(1) - 2 * (df_1d['high'].shift(1) - df_1d['close'].shift(1))
-    
-    r3_aligned = align_htf_to_ltf(prices, df_1d_shifted, df_1d_shifted['r3'].values)
-    s3_aligned = align_htf_to_ltf(prices, df_1d_shifted, df_1d_shifted['s3'].values)
-    r4_aligned = align_htf_to_ltf(prices, df_1d_shifted, df_1d_shifted['r4'].values)
-    s4_aligned = align_htf_to_ltf(prices, df_1d_shifted, df_1d_shifted['s4'].values)
-    
-    # === Local 6h indicators ===
+    # === Local 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    williams_r = calculate_williams_r(high, low, close, period=14)
-    choppiness = calculate_choppiness_index(high, low, close, period=14)
     
-    # Volume average (20 bars)
+    # Donchian Channel(20) - price channel breakout
+    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume average (20 bars) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
@@ -143,10 +80,8 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
-    stop_price = 0.0
-    target_price = 0.0
     
-    warmup = 100  # Enough for all indicators
+    warmup = 80  # Enough for Donchian20, ATR14, EMA16 alignment
     
     for i in range(warmup, n):
         # NaN checks
@@ -154,65 +89,54 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(williams_r[i]) or np.isnan(choppiness[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(ema50_aligned[i]) or np.isnan(r3_aligned[i]):
+        if np.isnan(ema16_aligned[i]):
             signals[i] = 0.0
             continue
         
-        # === CHOPPINESS REGIME ===
-        # CHOP < 38.2 = trending (follow momentum)
-        # CHOP > 61.8 = ranging (fade pivots)
-        chop_trending = choppiness[i] < 38.2
-        chop_ranging = choppiness[i] > 61.8
-        
-        # === WILLIAMS %R MOMENTUM ===
-        # %R > -20 = overbought (bull momentum)
-        # %R < -80 = oversold (bear momentum)
-        bull_momentum = williams_r[i] > -20
-        bear_momentum = williams_r[i] < -80
-        
-        # === TREND DIRECTION: Daily EMA50 ===
-        bull_trend = close[i] > ema50_aligned[i]
-        bear_trend = close[i] < ema50_aligned[i]
+        # === TREND DIRECTION: 12h EMA16 ===
+        bull_trend = close[i] > ema16_aligned[i]
+        bear_trend = close[i] < ema16_aligned[i]
         
         # === VOLUME CONFIRMATION ===
         vol_spike = vol_ratio[i] > 1.5
         
-        # === CAMARILLA PIVOT SIGNALS ===
-        # R3 breakout: price crosses above yesterday's R3
-        r3_breakout = close[i] > r3_aligned[i] and close[i-1] <= r3_aligned[i]
-        # S3 breakdown: price crosses below yesterday's S3
-        s3_breakdown = close[i] < s3_aligned[i] and close[i-1] >= s3_aligned[i]
+        # === DONCHIAN BREAKOUT (use prior bar's channel) ===
+        # This ensures we're breaking OUT of established range
+        prev_high_19 = donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else np.nan
+        prev_low_19 = donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else np.nan
         
-        # === MINIMUM HOLD: 4 bars to reduce fee churn ===
-        min_hold_passed = (i - entry_bar) >= 4 if in_position else True
+        # Bullish breakout: close above prior 19-bar high
+        bullish_breakout = (not np.isnan(prev_high_19) and close[i] > prev_high_19)
+        
+        # Bearish breakout: close below prior 19-bar low
+        bearish_breakout = (not np.isnan(prev_low_19) and close[i] < prev_low_19)
+        
+        # === MINIMUM HOLD: 2 bars to reduce fee churn ===
+        min_hold_bars = (i - entry_bar) >= 2 if in_position else True
         
         # === EXITS ===
         if in_position:
-            # Update stop to trailing
+            # Stop-loss: 2.5 ATR from entry
             if position_side > 0:
-                # Long: trail stop below entry - 1.5 ATR
-                new_stop = high[i] - 2.0 * atr_14[i]
-                stop_price = min(stop_price, new_stop) if stop_price > 0 else new_stop
+                stop_price = entry_price - 2.5 * entry_atr
                 stop_hit = low[i] < stop_price
             else:
-                # Short: trail stop above entry + 1.5 ATR
-                new_stop = low[i] + 2.0 * atr_14[i]
-                stop_price = max(stop_price, new_stop) if stop_price > 0 else new_stop
+                stop_price = entry_price + 2.5 * entry_atr
                 stop_hit = high[i] > stop_price
             
-            # Trend exit: price crosses EMA50 against position
-            trend_exit = (position_side > 0 and close[i] < ema50_aligned[i]) or \
-                        (position_side < 0 and close[i] > ema50_aligned[i])
+            # Trend exit: price crosses EMA16
+            trend_exit = (position_side > 0 and close[i] < ema16_aligned[i]) or \
+                        (position_side < 0 and close[i] > ema16_aligned[i])
             
-            # Target hit: price reaches R4/S4 level
-            target_hit = (position_side > 0 and high[i] >= r4_aligned[i]) or \
-                        (position_side < 0 and low[i] <= s4_aligned[i])
-            
-            if stop_hit or (min_hold_passed and trend_exit) or target_hit:
+            if stop_hit:
+                signals[i] = 0.0
+                in_position = False
+                position_side = 0
+            elif min_hold_bars and trend_exit:
                 signals[i] = 0.0
                 in_position = False
                 position_side = 0
@@ -221,46 +145,22 @@ def generate_signals(prices):
         
         # === NEW POSITIONS ===
         if not in_position:
-            # LONG: R3 breakout + bull momentum + bull trend + vol spike
-            if r3_breakout and bull_momentum and bull_trend and vol_spike:
+            # LONG: Bullish breakout + volume spike + bull trend
+            if bullish_breakout and vol_spike and bull_trend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
-                stop_price = entry_price - 2.5 * entry_atr
                 signals[i] = SIZE
             
-            # SHORT: S3 breakdown + bear momentum + bear trend + vol spike
-            elif s3_breakdown and bear_momentum and bear_trend and vol_spike:
+            # SHORT: Bearish breakout + volume spike + bear trend
+            elif bearish_breakout and vol_spike and bear_trend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
-                stop_price = entry_price + 2.5 * entry_atr
                 signals[i] = -SIZE
-            
-            # RANGE FADE: If ranging market, fade R3/S3 with opposite logic
-            elif chop_ranging and min_hold_passed:
-                # Short at R3 in ranging (mean reversion)
-                if high[i] > r3_aligned[i] and close[i] < r3_aligned[i]:
-                    in_position = True
-                    position_side = -1
-                    entry_price = close[i]
-                    entry_atr = atr_14[i]
-                    entry_bar = i
-                    stop_price = entry_price + 2.0 * entry_atr
-                    signals[i] = -SIZE
-                
-                # Long at S3 in ranging (mean reversion)
-                elif low[i] < s3_aligned[i] and close[i] > s3_aligned[i]:
-                    in_position = True
-                    position_side = 1
-                    entry_price = close[i]
-                    entry_atr = atr_14[i]
-                    entry_bar = i
-                    stop_price = entry_price - 2.0 * entry_atr
-                    signals[i] = SIZE
     
     return signals
