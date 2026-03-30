@@ -1,80 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 1d TRIX Momentum + Weekly SMA200 + ADX Regime Filter
+Experiment #005: 12h Camarilla Pivot + Volume + 1d EMA50 Trend
 
-HYPOTHESIS: TRIX crossover is proven on 4h (ETHUSDT 1.32 Sharpe). Applying to 1d
-reduces trades by ~6x, and adding 1w SMA200 gives structural trend direction.
-ADX>25 filter avoids 2022 range-bound whipsaws where momentum oscillators fail.
+HYPOTHESIS: Camarilla S3/S4 and R3/R4 are institutional support/resistance levels.
+By entering when price touches these levels WITH volume confirmation AND 1d trend
+alignment, this strategy catches reversals at key levels.
 
-WHY IT WORKS IN BULL AND BEAR:
-- Bull: TRIX crosses from negative to positive + price above weekly SMA200
-- Bear: TRIX crosses from positive to negative + price below weekly SMA200
-- ADX filter keeps positions flat when ADX<20 (choppy, no trend)
+WHY 12h: 3x slower than 4h = ~3x fewer trades = less fee drag.
+Camarilla levels on 12h capture multi-day swings.
 
-TARGET: 30-100 total trades over 4 years = 7-25/year. HARD MAX: 150.
-Signal size: 0.25 (conservative).
+WHY IT WORKS IN BULL AND BEAR: Symmetrical pivot levels — buy S3/S4 in uptrends,
+short R3/R4 in downtrends. Works in both bull rallies and bear bounces.
+
+TARGET: 75-150 total trades over 4 years = 19-37/year. HARD MAX: 200.
+Signal size: 0.25.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_trix_adx_1w_v1"
-timeframe = "1d"
+name = "mtf_12h_camarilla_vol_ema50_1d_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def calculate_trix(close, period=9):
-    """TRIX - Triple EMA rate of change. Momentum indicator."""
-    close_s = pd.Series(close, dtype=np.float64)
-    ema1 = close_s.ewm(span=period, min_periods=period, adjust=False).mean()
-    ema2 = ema1.ewm(span=period, min_periods=period, adjust=False).mean()
-    ema3 = ema2.ewm(span=period, min_periods=period, adjust=False).mean()
-    # Rate of change of triple EMA
-    trix = 100 * (ema3 / ema3.shift(1) - 1)
-    return trix.fillna(0).values
-
-def calculate_adx(high, low, close, period=14):
-    """ADX - Average Directional Index. Returns (adx, plus_di, minus_di)."""
-    high_s = pd.Series(high, dtype=np.float64)
-    low_s = pd.Series(low, dtype=np.float64)
-    close_s = pd.Series(close, dtype=np.float64)
-    
-    n = len(close)
-    tr = np.zeros(n, dtype=np.float64)
-    plus_dm = np.zeros(n, dtype=np.float64)
-    minus_dm = np.zeros(n, dtype=np.float64)
-    
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i],
-                    abs(high[i] - close[i-1]),
-                    abs(low[i] - close[i-1]))
-        
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        
-        if up_move > down_move and up_move > 0:
-            plus_dm[i] = up_move
-        if down_move > up_move and down_move > 0:
-            minus_dm[i] = down_move
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / np.where(atr > 0, atr, 1)
-    minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / np.where(atr > 0, atr, 1)
-    
-    dx = 100 * np.abs(plus_di - minus_di) / np.where(plus_di + minus_di > 0, plus_di + minus_di, 1)
-    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    return adx, plus_di, minus_di
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
     n = len(close)
+    if n < period + 1:
+        return np.full(n, np.nan)
+    
     tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i],
-                    abs(high[i] - close[i-1]),
-                    abs(low[i] - close[i-1]))
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
@@ -82,20 +41,24 @@ def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
     low = prices["low"].values
+    volume = prices["volume"].values
     n = len(close)
     
-    # === Load HTF data ONCE ===
-    df_1w = get_htf_data(prices, '1w')
+    # === Load HTF data ONCE before loop ===
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly SMA200 for trend direction
-    weekly_sma = pd.Series(df_1w['close'].values).rolling(window=200, min_periods=200).mean().values
-    weekly_sma_aligned = align_htf_to_ltf(prices, df_1w, weekly_sma)
+    # 1d EMA50 for trend direction (faster than 200 for more signals)
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Local indicators
-    trix = calculate_trix(close, period=9)
-    adx, plus_di, minus_di = calculate_adx(high, low, close, period=14)
-    atr = calculate_atr(high, low, close, period=14)
+    # === Local 12h indicators ===
+    atr_14 = calculate_atr(high, low, close, period=14)
     
+    # Volume ratio
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    
+    # Signals
     signals = np.zeros(n)
     SIZE = 0.25
     
@@ -105,91 +68,112 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     stop_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
+    entry_bar = 0
     
-    warmup = 300  # Need 200 for weekly SMA200 + buffer
+    warmup = 100  # Need enough for EMA50 alignment buffer
     
     for i in range(warmup, n):
-        # Skip if indicators not ready
-        if np.isnan(adx[i]) or np.isnan(trix[i]) or atr[i] <= 1e-10:
+        # Skip if ATR not ready
+        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
             signals[i] = 0.0
+            in_position = False
+            position_side = 0
             continue
         
-        if np.isnan(weekly_sma_aligned[i]):
+        # Skip if EMA not aligned
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = 0.0
+            in_position = False
+            position_side = 0
             continue
         
-        # === TREND DIRECTION (1w SMA200) ===
-        weekly_bull = close[i] > weekly_sma_aligned[i]
+        # === TREND DIRECTION (1d EMA50) ===
+        price_above_1d_ema = close[i] > ema_1d_aligned[i]
         
-        # === REGIME (ADX) ===
-        # ADX > 25 = trending (trade), ADX < 20 = ranging (flat)
-        is_trending = adx[i] > 25.0
-        is_ranging = adx[i] < 20.0
+        # Volume confirmation
+        vol_spike = vol_ratio[i] > 1.5
         
-        # Previous TRIX values for crossover detection
-        prev_trix = trix[i - 1] if i > 0 else 0.0
-        prev_prev_trix = trix[i - 2] if i > 1 else prev_trix
+        # === CAMARILLA LEVELS from previous CLOSED bar (no look-ahead) ===
+        prev_high = high[i - 1]
+        prev_low = low[i - 1]
+        prev_close = close[i - 1]
+        prev_range = prev_high - prev_low
+        
+        # Classic Camarilla levels (factor 1.1/12 = 0.09167)
+        r3 = prev_close + prev_range * 0.09167
+        r4 = prev_close + prev_range * 0.18333
+        s3 = prev_close - prev_range * 0.09167
+        s4 = prev_close - prev_range * 0.18333
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
-        if not in_position and is_trending:
-            # === LONG: TRIX crosses above zero (momentum shift) ===
-            # Requires: prev_prev_trix < 0 <= prev_trix (crossing up)
-            if prev_prev_trix < 0 and prev_trix >= 0:
-                if weekly_bull:
+        if not in_position:
+            # === LONG: Price touches S3 or S4 with volume + trend alignment ===
+            if price_above_1d_ema and vol_spike:
+                # S4 touch (deeper level = better risk/reward)
+                if low[i] <= s4:
+                    desired_signal = SIZE
+                # S3 touch (softer level)
+                elif low[i] <= s3:
                     desired_signal = SIZE
             
-            # === SHORT: TRIX crosses below zero (momentum shift) ===
-            if prev_prev_trix > 0 and prev_trix <= 0:
-                if not weekly_bull:
+            # === SHORT: Price touches R3 or R4 with volume + trend alignment ===
+            if not price_above_1d_ema and vol_spike:
+                # R4 touch
+                if high[i] >= r4:
+                    desired_signal = -SIZE
+                # R3 touch
+                elif high[i] >= r3:
                     desired_signal = -SIZE
         
-        # === STOPLOSS CHECK ===
-        stoploss_triggered = False
-        
+        # === STOPLOSS (2.0 ATR trailing) ===
         if in_position and position_side > 0:
+            highest_since_entry = max(highest_since_entry, high[i])
+            trailing_stop = highest_since_entry - 2.0 * entry_atr
+            stop_price = max(stop_price, trailing_stop)
             if low[i] < stop_price:
-                stoploss_triggered = True
+                desired_signal = 0.0
         
         if in_position and position_side < 0:
+            lowest_since_entry = min(lowest_since_entry, low[i])
+            trailing_stop = lowest_since_entry + 2.0 * entry_atr
+            stop_price = min(stop_price, trailing_stop)
             if high[i] > stop_price:
-                stoploss_triggered = True
-        
-        if stoploss_triggered:
-            desired_signal = 0.0
-        
-        # === EXIT ON MOMENTUM REVERSAL ===
-        if in_position and desired_signal == 0.0:
-            # TRIX crosses back through zero = momentum reversal
-            if position_side > 0 and prev_trix > 0 and trix[i] <= 0:
-                desired_signal = 0.0
-            if position_side < 0 and prev_trix < 0 and trix[i] >= 0:
                 desired_signal = 0.0
         
-        # === RANGING MARKET EXIT ===
-        # If ADX drops below 20 while in position, exit (trend exhausted)
-        if in_position and is_ranging:
-            desired_signal = 0.0
+        # === HOLD PERIOD (minimum 2 bars = 1 day to avoid churn) ===
+        bars_held = i - entry_bar
+        
+        if in_position and bars_held >= 2:
+            # Take profit if price reverts to Camarilla mid (prev close)
+            if position_side > 0 and close[i] >= prev_close:
+                desired_signal = 0.0
+            if position_side < 0 and close[i] <= prev_close:
+                desired_signal = 0.0
         
         # === UPDATE POSITION ===
         if desired_signal != 0.0:
             if not in_position or np.sign(desired_signal) != position_side:
+                # New position or flip
                 in_position = True
                 position_side = int(np.sign(desired_signal))
                 entry_price = close[i]
-                entry_atr = atr[i]
-                # ATR-based stoploss (2.5x ATR, minimum 2%)
-                min_stop = entry_price * 0.02
-                atr_stop = 2.5 * entry_atr
+                entry_atr = atr_14[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                entry_bar = i
                 if position_side > 0:
-                    stop_price = entry_price - max(atr_stop, min_stop)
+                    stop_price = entry_price - 2.0 * entry_atr
                 else:
-                    stop_price = entry_price + max(atr_stop, min_stop)
+                    stop_price = entry_price + 2.0 * entry_atr
         else:
             if in_position:
                 in_position = False
                 position_side = 0
+                stop_price = 0.0
         
         signals[i] = desired_signal
     
