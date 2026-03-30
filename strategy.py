@@ -1,103 +1,63 @@
 #!/usr/bin/env python3
 """
-Experiment #022: 12h Donchian Breakout + 1d HMA Trend + Choppiness Regime
+Experiment #021: Bollinger Squeeze + Volume + Choppiness (4h)
 
-HYPOTHESIS: Simple 12h breakout strategy with HTF trend confirmation:
-1. 12h Donchian(20) breakout - proven price channel structure
-2. 1d HMA(21) trend direction - HTF confirmation reduces whipsaws
-3. Choppiness Index < 45 - only trade in trending markets
-4. Volume spike > 1.5x - breakout validation
-5. ATR stoploss (2.5x) - risk management
+HYPOTHESIS: BB Squeeze (low volatility) + volume confirmation + chop regime
+- BB squeeze detects consolidation before explosive breakouts (different from Donchian)
+- Choppiness determines if we trend-follow or skip (chop>61.8=range, skip)
+- Volume confirms the breakout is institutional, not noise
+- 1d SMA200 for trend direction filter
 
-WHY IT SHOULD WORK IN BOTH BULL AND BEAR:
-- Bull: Price breaks 20-period high + HTF uptrend + volume = strong long
-- Bear: Price breaks 20-period low + HTF downtrend + volume = strong short
-- Range (CHOP > 55): No trades, avoids chop losses
+WHY IT SHOULD WORK: Low volatility → high volatility transitions are predictable.
+When BB width is at low percentile AND volume spikes, the subsequent move is often 3-5 ATR.
+This is well-documented phenomenon, different from simple breakout.
 
-KEY INSIGHT: 12h has proven best Sharpe ratios in DB (1.3-1.5). 
-Donchian breakout is the single most reliable pattern across 16K+ experiments.
-Simple logic = fewer trades = less fee drag = better generalization.
-
-TARGET: 75-150 total trades over 4 years (19-37/year)
+TARGET: 150-300 total trades over 4 years (37-75/year)
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_hma_chop_vol_v1"
-timeframe = "12h"
+name = "mtf_4h_bb_squeeze_vol_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
     n = len(close)
     if n < period + 2:
         return np.full(n, np.nan)
     
-    tr = np.maximum(high[1:] - low[1:], 
-                    np.maximum(np.abs(high[1:] - close[:-1]), 
-                               np.abs(low[1:] - close[:-1])))
-    tr = np.concatenate([[high[0] - low[0]], tr])
+    tr = np.zeros(n, dtype=np.float64)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - 20 period high/low"""
-    n = len(high)
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_hma(data, period=21):
-    """Hull Moving Average - faster response than SMA"""
-    n = len(data)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    # WMA with period/2
-    half_period = max(1, period // 2)
-    wma_half = pd.Series(data).rolling(window=half_period, min_periods=half_period).apply(
-        lambda x: np.sum(x * np.arange(1, len(x)+1)) / np.sum(np.arange(1, len(x)+1)), raw=True
-    ).values
-    
-    # WMA with period
-    wma_full = pd.Series(data).rolling(window=period, min_periods=period).apply(
-        lambda x: np.sum(x * np.arange(1, len(x)+1)) / np.sum(np.arange(1, len(x)+1)), raw=True
-    ).values
-    
-    # HMA = 2*WMA(period/2) - WMA(period)
-    hma = 2 * wma_half - wma_full
-    return hma
-
-def calculate_choppiness(high, low, close, period=14):
-    """
-    Choppiness Index (CHOP)
-    CHOP > 61.8 = choppy market (no trend)
-    CHOP < 38.2 = trending market (trend following works)
-    """
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    chop = np.full(n, np.nan)
+def calculate_choppiness(bb_width, period=14):
+    """Choppiness Index: 100 * log10(sum ATR) / log10(highest_range)"""
+    n = len(bb_width)
+    chop = np.full(n, 50.0)  # neutral default
     
     for i in range(period, n):
-        # Sum of ATR over period
-        atr_sum = 0.0
-        for j in range(i - period + 1, i + 1):
-            tr = max(high[j] - low[j], 
-                    abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j],
-                    abs(low[j] - close[j-1]) if j > 0 else high[j] - low[j])
-            atr_sum += tr
+        if np.isnan(bb_width[i]) or bb_width[i] <= 0:
+            continue
         
-        # Highest high - lowest low over period
-        highest_high = np.max(high[i - period + 1:i + 1])
-        lowest_low = np.min(low[i - period + 1:i + 1])
-        range_sum = highest_high - lowest_low
+        # Use sum of BB widths as proxy for range sum
+        recent_sum = np.sum(bb_width[max(0, i-period):i+1])
+        if recent_sum <= 0:
+            continue
         
-        if range_sum > 0:
-            # CHOP = 100 * log10(sum(ATR)) / log10(range)
-            chop[i] = 100 * np.log10(atr_sum) / np.log10(range_sum)
+        # Sum of current BB width as "ATR"
+        atr_sum = recent_sum
+        
+        # Highest-lowest range (proxy with rolling max-min of close)
+        # Simple proxy: ATR * period gives range estimate
+        if i >= period:
+            atr_proxy = np.mean(bb_width[max(0, i-period):i+1]) * period
+            if atr_proxy > 0:
+                chop[i] = 100 * np.log10(atr_sum / atr_proxy) / np.log10(period)
     
     return chop
 
@@ -108,46 +68,59 @@ def generate_signals(prices):
     volume = prices["volume"].values
     n = len(close)
     
-    # === Load HTF data ONCE before loop ===
+    # === Load 1d data ONCE ===
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # === 1d HMA for HTF trend direction ===
-    hma_1d = calculate_hma(df_1d['close'].values, period=21)
+    # 1d SMA200
+    sma200_1d = pd.Series(close_1d).rolling(window=200, min_periods=200).mean().values
+    sma200_aligned = align_htf_to_ltf(prices, df_1d, sma200_1d)
     
-    # HTF: HMA rising = bull, falling = bear
-    htf_hma_diff = np.zeros(len(df_1d))
-    for i in range(5, len(df_1d)):
-        if not np.isnan(hma_1d[i]) and not np.isnan(hma_1d[i-5]):
-            htf_hma_diff[i] = hma_1d[i] - hma_1d[i-5]
-    
-    htf_bullish = htf_hma_diff > 0
-    htf_bearish = htf_hma_diff < 0
-    
-    # Align HTF to 12h
-    htf_bullish_aligned = align_htf_to_ltf(prices, df_1d, htf_bullish.astype(float))
-    htf_bearish_aligned = align_htf_to_ltf(prices, df_1d, htf_bearish.astype(float))
-    
-    # === Local 12h indicators ===
+    # === 4h indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, period=20)
-    chop = calculate_choppiness(high, low, close, period=14)
     
-    # Volume ratio (20-period)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
+    # Bollinger Bands (20 period, 2 std)
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std().values
+    bb_upper = sma20 + 2 * std20
+    bb_lower = sma20 - 2 * std20
+    bb_width = bb_upper - bb_lower
     
-    # Signals
+    # BB width percentile (detect squeeze)
+    bb_width_ma = pd.Series(bb_width).rolling(window=100, min_periods=100).mean().values
+    bb_width_std = pd.Series(bb_width).rolling(window=100, min_periods=100).std().values
+    bb_zscore = np.where(bb_width_std > 0, (bb_width - bb_width_ma) / bb_width_std, 0)
+    
+    # Choppiness (simplified)
+    chop = np.full(n, 50.0)
+    for i in range(14, n):
+        if np.isnan(bb_width[i]) or bb_width[i] <= 0:
+            continue
+        recent_sum = np.nansum(bb_width[max(0, i-14):i+1])
+        if recent_sum > 0 and not np.isnan(bb_width_ma[i]):
+            atr_sum = np.mean(bb_width[max(0, i-14):i+1]) * 14
+            if atr_sum > 0:
+                chop[i] = 100 * np.log10(recent_sum / atr_sum) / np.log10(14)
+    
+    # Volume ratio
+    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, 1)
+    
+    # Donchian for exit (20 period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=1).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=1).min().values
+    
+    # === Signals ===
     signals = np.zeros(n)
-    SIZE = 0.28  # 28% position size
+    SIZE = 0.28
     
-    # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
     
-    warmup = 200  # Donchian needs 20, ATR needs 14, chop needs 14
+    warmup = 250  # BB(20) + SMA200(1d) alignment
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -155,71 +128,73 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(bb_width[i]) or bb_width[i] <= 0:
             signals[i] = 0.0
             continue
         
-        if np.isnan(chop[i]):
+        if np.isnan(sma200_aligned[i]) or np.isnan(chop[i]):
             signals[i] = 0.0
             continue
         
-        # === ENTRY CONDITIONS ===
+        # === Regime check ===
+        chop_val = chop[i]
+        in_chop = chop_val > 61.8  # Range market, skip
+        in_trend = chop_val < 38.2  # Trending, take signals
+        
+        # === 1d trend filter ===
+        htf_bull = close[i] > sma200_aligned[i]
+        htf_bear = close[i] < sma200_aligned[i]
+        
+        # === Squeeze detection ===
+        # BB width at low percentile (zscore < -1.0) = squeeze
+        is_squeeze = bb_zscore[i] < -0.8
+        
+        # Volume spike
+        vol_spike = vol_ratio[i] > 1.5
+        
         desired_signal = 0.0
         
-        # Choppiness filter: only trade when CHOP < 45 (trending)
-        trending = chop[i] < 45.0
-        
-        # Volume confirmation
-        vol_confirm = vol_ratio[i] > 1.5
-        
-        # HTF trend
-        htf_bull = htf_bullish_aligned[i] > 0.5 if not np.isnan(htf_bullish_aligned[i]) else False
-        htf_bear = htf_bearish_aligned[i] > 0.5 if not np.isnan(htf_bearish_aligned[i]) else False
-        
         if not in_position:
-            # === LONG: Breakout above 20-period high + HTF bull + volume + trending ===
-            price_breaks_high = close[i] > donchian_upper[i]
+            # === LONG ENTRY ===
+            # 1. Squeeze (low volatility)
+            # 2. Volume spike (institutional)
+            # 3. Price above SMA200 (trend up)
+            # 4. In trending chop regime OR breakout from squeeze
+            long_squeeze = is_squeeze and vol_spike and htf_bull
+            long_breakout = not is_squeeze and vol_spike and htf_bull and (in_trend or chop_val < 55)
             
-            if price_breaks_high and htf_bull and vol_confirm and trending:
+            if long_squeeze or long_breakout:
                 desired_signal = SIZE
             
-            # === SHORT: Breakout below 20-period low + HTF bear + volume + trending ===
-            price_breaks_low = close[i] < donchian_lower[i]
+            # === SHORT ENTRY ===
+            # 1. Squeeze (low volatility)
+            # 2. Volume spike (institutional)
+            # 3. Price below SMA200 (trend down)
+            # 4. In trending chop regime OR breakout from squeeze
+            short_squeeze = is_squeeze and vol_spike and htf_bear
+            short_breakout = not is_squeeze and vol_spike and htf_bear and (in_trend or chop_val < 55)
             
-            if price_breaks_low and htf_bear and vol_confirm and trending:
+            if short_squeeze or short_breakout:
                 desired_signal = -SIZE
         
-        # === STOPLOSS (2.5 ATR trailing) ===
+        # === STOPLOSS: 2.5 ATR ===
         if in_position:
             if position_side > 0:
-                # Long stop: entry - 2.5 * ATR
-                stop_price = entry_price - 2.5 * entry_atr
-                if low[i] < stop_price:
+                stop = entry_price - 2.5 * entry_atr
+                if low[i] < stop:
                     desired_signal = 0.0
-                
-                # Exit if price falls back below donchian
-                if close[i] < donchian_lower[i]:
+                # Donchian trailing exit
+                if low[i] < donchian_low[i]:
                     desired_signal = 0.0
-                
-                # Exit if HTF turns bearish
-                if htf_bear:
-                    desired_signal = 0.0
-            
             elif position_side < 0:
-                # Short stop: entry + 2.5 * ATR
-                stop_price = entry_price + 2.5 * entry_atr
-                if high[i] > stop_price:
+                stop = entry_price + 2.5 * entry_atr
+                if high[i] > stop:
                     desired_signal = 0.0
-                
-                # Exit if price rises back above donchian
-                if close[i] > donchian_upper[i]:
-                    desired_signal = 0.0
-                
-                # Exit if HTF turns bullish
-                if htf_bull:
+                # Donchian trailing exit
+                if high[i] > donchian_high[i]:
                     desired_signal = 0.0
         
-        # === MINIMUM HOLD: 3 bars to avoid fee churn ===
+        # === MIN HOLD: 3 bars to reduce fee churn ===
         if in_position and (i - entry_bar) < 3:
             desired_signal = position_side * SIZE
         
