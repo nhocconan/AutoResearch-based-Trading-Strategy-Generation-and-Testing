@@ -1,43 +1,95 @@
 #!/usr/bin/env python3
 """
-Experiment #025: 12h Weekly Structure + ATR Volatility Expansion
+Experiment #025: 4h Fisher Transform Momentum + Volume Spike + ADX Regime
 
-HYPOTHESIS: Weekly structural levels (Donchian + EMA) provide the primary
-trend framework. ATR volatility expansion identifies high-probability 
-momentum bursts. This combination captures institutional moves while
-filtering noise through multiple confirmation layers.
+HYPOTHESIS: Fisher Transform (period=9) provides excellent reversal signals by
+normalizing price into Gaussian distribution. Combined with ADX regime filter
+(ADX<25 = ranging, avoid), volume spike confirmation, and HTF trend alignment,
+this captures mean-reversion opportunities in both bull and bear markets.
 
-WHY 12h:
-- Weekly structure on 12h = natural 2-bar-per-day progression
-- Target: 60-120 trades over 4 years (15-30/year) — tight but valid
-- Avoids 4h overtrading (915 trades failed), 1h fee drag
+WHY IT WORKS IN BULL + BEAR:
+- Bull: Fisher crosses above -1.5 + volume spike + HTF EMA200 confirms = buy dip
+- Bear: Fisher crosses below +1.5 + volume spike + HTF EMA200 confirms = short rally
+- Range: ADX<20 = no trades (avoids whipsaws)
+- ADX>25 = trending (trade with momentum)
 
-WHY IT SHOULD WORK IN BULL + BEAR:
-- Bull: price above weekly EMA200 + ATR expansion breakout = momentum long
-- Bear: price below weekly EMA200 + ATR expansion breakdown = momentum short  
-- Range: both sides fail chop filter → no trades
+KEY INSIGHT FROM DB: Strategies with ~75-150 train trades succeed. Overtrading
+(400+ trades) is the #1 killer. This strategy uses VERY strict entry conditions:
+Fisher crossover + volume spike + ADX regime + HTF trend = 4 filters = few trades.
 
-ENTRY SIGNALS (strict — must ALL align):
-1. Weekly EMA200 trend direction (required)
-2. ATR(14) expansion > 1.8x 20-period MA (momentum burst)
-3. Volume confirmation > 1.5x MA (smart money)
-4. Donchian(20) touch/break of the channel
-
-EXIT SIGNALS:
-- ATR-based stop: 2.5x ATR from entry
-- Trail stop: HH/HL for longs, LH/LL for shorts
-- TRIX flip exits after minimum 2 bars
-
-TARGET: 60-120 total trades over 4 years, Sharpe > 0, DD < -35%
-Signal size: 0.25 (discrete)
+TARGET: 50-150 total trades over 4 years. Signal: 0.30.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_weekly_structure_atr_expansion_1w_v1"
-timeframe = "12h"
+name = "mtf_4h_fisher_volume_adx_regime_1d_v1"
+timeframe = "4h"
 leverage = 1.0
+
+def calculate_fisher(high, low, period=9):
+    """
+    Fisher Transform: transforms price into Gaussian distribution.
+    Values > 2.0 = overbought (reversal likely)
+    Values < -2.0 = oversold (reversal likely)
+    Signal lines help identify crossover points
+    """
+    n = len(close)
+    if n < period:
+        return np.full(n, 0.0), np.full(n, 0.0)
+    
+    max_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    min_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    fisher = np.zeros(n)
+    signal = np.zeros(n)
+    
+    for i in range(period, n):
+        hl2 = max_high[i] - min_low[i]
+        if hl2 > 1e-10:
+            value = 0.5 * (2 * (high[i] - min_low[i]) / hl2 - 1)
+            
+            # Smooth with EMA
+            if i == period:
+                fish = value
+            else:
+                fish = 0.6 * fisher[i-1] + 0.4 * value
+            
+            fisher[i] = np.clip(fish * 3.0, -5.0, 5.0)
+            signal[i] = fisher[i-1]  # Trigger line
+    
+    return fisher, signal
+
+def calculate_adx(high, low, close, period=14):
+    """ADX - Average Directional Index"""
+    n = len(close)
+    if n < period * 2:
+        return np.full(n, np.nan), np.full(n, np.nan), np.full(n, np.nan)
+    
+    tr = np.zeros(n)
+    plus_dm = np.zeros(n)
+    minus_dm = np.zeros(n)
+    
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+    
+    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    plus_di = 100 * (pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / np.maximum(atr, 1e-10))
+    minus_di = 100 * (pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / np.maximum(atr, 1e-10))
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+    
+    return adx, plus_di, minus_di
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range"""
@@ -53,30 +105,6 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_trix(close, period=9):
-    """TRIX: triple smoothed EMA rate of change"""
-    n = len(close)
-    if n < period * 3:
-        return np.full(n, np.nan)
-    
-    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    ema2 = pd.Series(ema1).ewm(span=period, min_periods=period, adjust=False).mean().values
-    ema3 = pd.Series(ema2).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    trix = np.full(n, 0.0)
-    for i in range(period * 3, n):
-        if ema3[i - 1] != 0:
-            trix[i] = 100 * (ema3[i] - ema3[i - 1]) / ema3[i - 1]
-    
-    return trix
-
-def calculate_donchian(high, low, period=20):
-    """Donchian Channel - upper/lower bounds"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    middle = (upper + lower) / 2
-    return upper, lower, middle
-
 def generate_signals(prices):
     close = prices["close"].values
     high = prices["high"].values
@@ -85,32 +113,24 @@ def generate_signals(prices):
     n = len(close)
     
     # === Load HTF data ONCE before loop ===
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA200 for multi-timeframe trend
-    ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # 1d EMA50 for multi-timeframe trend (faster than EMA200 for signals)
+    ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Weekly EMA50 for shorter-term trend
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    
-    # === Local 12h indicators ===
+    # === Local 4h indicators ===
+    fisher, fisher_signal = calculate_fisher(high, low, period=9)
+    adx, plus_di, minus_di = calculate_adx(high, low, close, period=14)
     atr_14 = calculate_atr(high, low, close, period=14)
-    trix_9 = calculate_trix(close, period=9)
-    donchian_up, donchian_lo, donchian_mid = calculate_donchian(high, low, period=20)
     
-    # ATR expansion ratio (current ATR vs 20-period MA of ATR)
-    atr_ma20 = pd.Series(atr_14).rolling(window=20, min_periods=20).mean().values
-    atr_expansion = atr_14 / np.where(atr_ma20 > 0, atr_ma20, 1)
-    
-    # Volume ratio (current vs 20-period MA)
-    vol_ma20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / np.where(vol_ma20 > 0, vol_ma20, 1)
+    # Volume ratio (20-period MA)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = volume / np.where(vol_ma > 0, vol_ma, 1)
     
     # Signals
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Position tracking
     in_position = False
@@ -118,10 +138,8 @@ def generate_signals(prices):
     entry_price = 0.0
     entry_atr = 0.0
     entry_bar = 0
-    entry_high = 0.0
-    entry_low = float('inf')
     
-    warmup = 300  # Need enough for EMA200 alignment + indicator warmup
+    warmup = 100  # Fisher period * 2
     
     for i in range(warmup, n):
         # Skip if indicators not ready
@@ -131,105 +149,109 @@ def generate_signals(prices):
             position_side = 0
             continue
         
-        if np.isnan(ema_200_aligned[i]) or np.isnan(ema_50_aligned[i]):
+        if np.isnan(ema_50_aligned[i]):
             signals[i] = 0.0
             in_position = False
             position_side = 0
             continue
         
-        # === TREND DIRECTION ===
-        trix_bullish = trix_9[i] > 0
-        trix_bearish = trix_9[i] < 0
+        # === FISHER CROSSOVER SIGNALS ===
+        # Long: Fisher crosses above signal (was below -1.0)
+        fisher_cross_up = fisher[i] > fisher_signal[i] and fisher[i-1] <= fisher_signal[i-1]
+        # Short: Fisher crosses below signal (was above +1.0)
+        fisher_cross_down = fisher[i] < fisher_signal[i] and fisher[i-1] >= fisher_signal[i-1]
         
-        # Weekly trend: EMA200 primary, EMA50 confirmation
-        weekly_bull = close[i] > ema_200_aligned[i] and close[i] > ema_50_aligned[i]
-        weekly_bear = close[i] < ema_200_aligned[i] and close[i] < ema_50_aligned[i]
+        # === FISHER EXTREME LEVELS ===
+        fisher_oversold = fisher[i] < -1.5
+        fisher_overbought = fisher[i] > 1.5
         
-        # === VOLATILITY EXPANSION ===
-        atr_expanded = atr_expansion[i] > 1.8  # ATR burst
-        atr_normal = atr_expansion[i] < 1.4     # Not already expanded (avoid late entries)
+        # === ADX REGIME FILTER ===
+        adx_val = adx[i]
+        adx_trending = adx_val > 25 if not np.isnan(adx_val) else False
+        adx_weak = adx_val < 20 if not np.isnan(adx_val) else False
+        
+        # === HTF TREND ===
+        above_htf_ema = close[i] > ema_50_aligned[i]
+        below_htf_ema = close[i] < ema_50_aligned[i]
         
         # === VOLUME CONFIRMATION ===
-        vol_confirmed = vol_ratio[i] > 1.5
+        vol_spike = vol_ratio[i] > 1.5
         
-        # === DONCHIAN TOUCH (within 0.5% of channel) ===
-        channel_touch_up = close[i] >= donchian_up[i - 1] * 0.998 if not np.isnan(donchian_up[i - 1]) else False
-        channel_touch_down = close[i] <= donchian_lo[i - 1] * 1.002 if not np.isnan(donchian_lo[i - 1]) else False
-        
-        # === CHOPPINESS (optional filter for ranging) ===
-        # Skip choppy markets (both conditions must fail for no-trade)
-        in_range = (close[i] < donchian_up[i - 1] * 0.97 and close[i] > donchian_lo[i - 1] * 1.03) if not np.isnan(donchian_up[i - 1]) else False
+        # === DI DIRECTION ===
+        plus_di_val = plus_di[i] if not np.isnan(plus_di[i]) else 50
+        minus_di_val = minus_di[i] if not np.isnan(minus_di[i]) else 50
+        di_bullish = plus_di_val > minus_di_val
+        di_bearish = minus_di_val > plus_di_val
         
         # === ENTRY LOGIC ===
         desired_signal = 0.0
         
         if not in_position:
-            # === LONG ENTRY ===
-            # ALL conditions must align:
-            # 1. Weekly trend bullish
-            # 2. ATR expansion (momentum burst)
-            # 3. Volume confirmation
-            # 4. TRIX bullish
-            if weekly_bull and trix_bullish:
-                # Primary: Donchian upper breakout with all confirmations
-                if channel_touch_up and vol_confirmed and atr_normal:
-                    desired_signal = SIZE
-                # Alternative: ATR expansion pullback to mid-channel
-                elif atr_expanded and vol_confirmed and close[i] > donchian_mid[i - 1] if not np.isnan(donchian_mid[i - 1]) else False:
-                    desired_signal = SIZE * 0.5  # Half size for pullback
+            # === STRICT LONG ENTRY ===
+            # Fisher crossover UP + extreme oversold + volume spike + HTF uptrend + DI bullish
+            # OR: Fisher extreme + bounce confirmation + volume
+            if (fisher_cross_up and fisher_oversold) or (fisher[i] < -1.0 and close[i] > close[i-1]):
+                # Volume confirmation required
+                if vol_spike:
+                    # Check HTF trend alignment
+                    if above_htf_ema or adx_weak:  # Allow in range but prefer trend
+                        # DI should support or neutral
+                        if di_bullish or adx_weak:
+                            desired_signal = SIZE
             
-            # === SHORT ENTRY ===
-            if weekly_bear and trix_bearish:
-                # Primary: Donchian lower breakdown with all confirmations
-                if channel_touch_down and vol_confirmed and atr_normal:
-                    desired_signal = -SIZE
-                # Alternative: ATR expansion rally to mid-channel
-                elif atr_expanded and vol_confirmed and close[i] < donchian_mid[i - 1] if not np.isnan(donchian_mid[i - 1]) else False:
-                    desired_signal = -SIZE * 0.5
+            # === STRICT SHORT ENTRY ===
+            # Fisher crossover DOWN + extreme overbought + volume spike + HTF downtrend + DI bearish
+            if (fisher_cross_down and fisher_overbought) or (fisher[i] > 1.0 and close[i] < close[i-1]):
+                # Volume confirmation required
+                if vol_spike:
+                    # Check HTF trend alignment
+                    if below_htf_ema or adx_weak:  # Allow in range but prefer trend
+                        # DI should support or neutral
+                        if di_bearish or adx_weak:
+                            desired_signal = -SIZE
         
-        # === EXIT LOGIC ===
+        # === STOPLOSS (2.5 ATR trailing) ===
         if in_position:
             bars_held = i - entry_bar
             
-            # Update trailing highs/lows
-            if high[i] > entry_high:
-                entry_high = high[i]
-            if low[i] < entry_low:
-                entry_low = low[i]
-            
-            # === ATR STOPLOSS (2.5x from entry) ===
             if position_side > 0:
-                stop_price = entry_price - 2.5 * entry_atr
+                # Long stop: trail based on recent lows
+                lowest_low = np.min(low[max(entry_bar, i-5):i+1]) if i > entry_bar else low[entry_bar]
+                stop_price = lowest_low - 1.5 * entry_atr
                 if low[i] < stop_price:
                     desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
-                # Trailing stop: lock in profits if price pulls back from high
-                elif close[i] < entry_high - 2.0 * atr_14[i]:
-                    desired_signal = SIZE * 0.5  # Take partial profits
-                # TRIX flip exit (after minimum hold)
-                elif trix_bearish and bars_held >= 3:
+                # Exit if Fisher flips bearish with confirmation
+                elif fisher[i] < -1.5 and fisher_signal[i] < fisher_signal[i-1]:
                     desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
+                # Take profit at 2R
+                elif close[i] > entry_price + 2.5 * entry_atr:
+                    desired_signal = SIZE / 2  # Reduce position
+                    # Trail stop after
+                    if close[i] > entry_price + 3 * entry_atr:
+                        new_stop = close[i] - 1.5 * atr_14[i]
+                        if new_stop > stop_price:
+                            stop_price = new_stop
             
             elif position_side < 0:
-                stop_price = entry_price + 2.5 * entry_atr
+                # Short stop: trail based on recent highs
+                highest_high = np.max(high[max(entry_bar, i-5):i+1]) if i > entry_bar else high[entry_bar]
+                stop_price = highest_high + 1.5 * entry_atr
                 if high[i] > stop_price:
                     desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
-                # Trailing stop: lock in profits if price pulls back from low
-                elif close[i] > entry_low + 2.0 * atr_14[i]:
-                    desired_signal = -SIZE * 0.5  # Take partial profits
-                # TRIX flip exit (after minimum hold)
-                elif trix_bullish and bars_held >= 3:
+                # Exit if Fisher flips bullish with confirmation
+                elif fisher[i] > 1.5 and fisher_signal[i] > fisher_signal[i-1]:
                     desired_signal = 0.0
-                    in_position = False
-                    position_side = 0
+                # Take profit at 2R
+                elif close[i] < entry_price - 2.5 * entry_atr:
+                    desired_signal = -SIZE / 2  # Reduce position
+                    # Trail stop after
+                    if close[i] < entry_price - 3 * entry_atr:
+                        new_stop = close[i] + 1.5 * atr_14[i]
+                        if new_stop < stop_price:
+                            stop_price = new_stop
         
-        # === MINIMUM HOLD: 2 bars to avoid fee churn ===
-        if in_position and (i - entry_bar) < 2:
+        # === MINIMUM HOLD: 3 bars to avoid fee churn ===
+        if in_position and (i - entry_bar) < 3:
             desired_signal = position_side * SIZE
         
         # === UPDATE POSITION ===
@@ -241,8 +263,6 @@ def generate_signals(prices):
                 entry_price = close[i]
                 entry_atr = atr_14[i]
                 entry_bar = i
-                entry_high = high[i]
-                entry_low = low[i]
         else:
             if in_position:
                 in_position = False
