@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #1031: 6h Donchian(20) Breakout + 1d Camarilla Pivot + Volume Confirmation
-HYPOTHESIS: Combining 6h Donchian breakouts with 1d Camarilla pivot levels creates high-probability entries. 
-In ranging markets, price tends to reverse at R3/S3 and S4/R4 levels. In trending markets, breaks of R4/S4 
-with volume confirmation capture continuation. Uses 1d HTF for pivot calculation to avoid look-ahead. 
-Target: 75-150 total trades over 4 years (19-38/year) on 6h timeframe.
+Experiment #1035: 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Spike
+HYPOTHESIS: Donchian breakouts on 6h timeframe capture institutional order flow with lower noise than 4h. 
+Weekly pivot direction (from 1w timeframe) filters for higher probability trades: only long when price above weekly pivot, short when below. 
+Volume spike (>2.0x 20-period average) confirms institutional participation. 
+Target: 75-150 total trades over 4 years (19-37/year) on 6h timeframe. Works in both bull (breakout continuation) and bear (breakdown continuation) via pivot filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1031_6h_donchian20_1d_camarilla_vol_v1"
+name = "exp_1035_6h_donchian20_1w_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -22,20 +22,19 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels for 1d
-    camarilla_r4, camarilla_r3, camarilla_s3, camarilla_s4 = calculate_camarilla(high_1d, low_1d, close_1d)
-    
-    # Align HTF Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # === HTF: 1w data for weekly pivot levels (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low  # Resistance 1
+    weekly_s1 = 2 * weekly_pivot - weekly_high  # Support 1
+    # Align to 6h timeframe with shift(1) for completed weekly bars only
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
     # === 6h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -55,7 +54,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.25  # 25% position size (discrete level to minimize fee churn)
     
     # Position tracking state variables
     in_position = False
@@ -69,8 +68,8 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or
+            np.isnan(weekly_s1_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -111,35 +110,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 2.0x average)
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Camarilla-based entry logic
-            r4 = r4_aligned[i]
-            r3 = r3_aligned[i]
-            s3 = s3_aligned[i]
-            s4 = s4_aligned[i]
+            # Weekly pivot filter: only trade in direction of weekly pivot
+            above_weekly_pivot = price > weekly_pivot_aligned[i]
+            below_weekly_pivot = price < weekly_pivot_aligned[i]
             
-            # Long conditions:
-            # 1. Break above R4 with volume (bullish continuation)
-            # 2. Rejection at S3 with volume (mean reversion long)
-            long_breakout = price > donch_high[i] and price > r4
-            long_rejection = price < donch_low[i] and price > s3 and price < s4
-            
-            # Short conditions:
-            # 1. Break below S4 with volume (bearish continuation)
-            # 2. Rejection at R3 with volume (mean reversion short)
-            short_breakout = price < donch_low[i] and price < s4
-            short_rejection = price > donch_high[i] and price < r3 and price > r4
-            
-            if long_breakout or long_rejection:
+            # Donchian breakout with pivot filter
+            if price > donch_high[i] and above_weekly_pivot:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif short_breakout or short_rejection:
+            elif price < donch_low[i] and below_weekly_pivot:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -152,52 +138,21 @@ def generate_signals(prices):
     
     return signals
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    n = len(high)
-    r4 = np.full(n, np.nan)
-    r3 = np.full(n, np.nan)
-    s3 = np.full(n, np.nan)
-    s4 = np.full(n, np.nan)
-    
-    for i in range(n):
-        if np.isnan(high[i]) or np.isnan(low[i]) or np.isnan(close[i]):
-            continue
-        diff = high[i] - low[i]
-        c = close[i]
-        r4[i] = c + (diff * 1.1 / 2)
-        r3[i] = c + (diff * 1.1 / 4)
-        s3[i] = c - (diff * 1.1 / 4)
-        s4[i] = c - (diff * 1.1 / 2)
-    
-    return r4, r3, s3, s4
-
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average"""
-    if len(close) < period:
-        return np.full_like(close, np.nan)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA for half period
-    wma_half = np.zeros_like(close)
-    for i in range(half_period, len(close)):
-        weights = np.arange(1, half_period + 1)
-        wma_half[i] = np.dot(close[i - half_period + 1:i + 1], weights) / weights.sum()
-    
-    # WMA for full period
-    wma_full = np.zeros_like(close)
-    for i in range(period, len(close)):
-        weights = np.arange(1, period + 1)
-        wma_full[i] = np.dot(close[i - period + 1:i + 1], weights) / weights.sum()
-    
-    # Raw HMA: 2*WMA(half) - WMA(full)
-    raw_hma = 2 * wma_half - wma_full
-    
-    # Final WMA of raw HMA with sqrt_period
-    hma = np.zeros_like(close)
-    for i in range(sqrt_period, len(close)):
-        weights = np.arange(1, sqrt_period + 1)
-        hma[i] = np.dot(raw_hma[i - sqrt_period + 1:i + 1], weights) / weights.sum()
-    
-    return hma
+if __name__ == "__main__":
+    # Quick self-test
+    import pandas as pd
+    import numpy as np
+    data = {
+        'open_time': pd.date_range('2021-01-01', periods=100, freq='6h'),
+        'open': np.random.randn(100).cumsum() + 100,
+        'high': np.random.randn(100).cumsum() + 102,
+        'low': np.random.randn(100).cumsum() + 98,
+        'close': np.random.randn(100).cumsum() + 100,
+        'volume': np.random.rand(100) * 1000 + 500,
+        'taker_buy_volume': np.random.rand(100) * 500,
+        'trades': np.random.randint(50, 200, 100)
+    }
+    prices = pd.DataFrame(data)
+    signals = generate_signals(prices)
+    print(f"Signals generated: {len(signals)}")
+    print(f"Non-zero signals: {np.count_nonzero(signals)}")
