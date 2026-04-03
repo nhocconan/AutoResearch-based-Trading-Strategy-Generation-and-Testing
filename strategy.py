@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #100: 4h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts in direction of daily HMA trend with volume confirmation (>1.5x) capture medium-term momentum. Uses discrete sizing (0.25) and ATR stoploss (2.0*ATR). Target: 75-200 total trades over 4 years (19-50/year). Works in bull/bear via trend filter and volatility-based stops.
+Experiment #101: 4h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation + chop filter
+HYPOTHESIS: Adding a choppiness regime filter (CHOP > 61.8 = range) to avoid false breakouts in sideways markets. 
+Only take breakouts in trending regimes (CHOP <= 61.8) in direction of daily HMA trend. 
+Uses discrete sizing (0.25) and ATR stoploss (2.0*ATR). Target: 75-200 total trades over 4 years (19-50/year).
+Works in bull/bear via trend filter and volatility-based stops. Chop filter reduces whipsaws in ranging markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_100_4h_donchian20_1d_hma_vol_v1"
+name = "exp_101_4h_donchian20_1d_hma_vol_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -34,6 +37,30 @@ def generate_signals(prices):
     # Trend: 1 if close > HMA, -1 if close < HMA
     daily_trend = np.where(close_1d > hma_1d_values, 1, -1)
     daily_trend_aligned = align_htf_to_ltf(prices, df_1d, daily_trend)
+    
+    # === HTF: 1d data for Choppiness Index (CHOP) regime filter ===
+    # CHOP = 100 * log10(sum(ATR(14)) / (n * log(n))) / log10(n)
+    # We'll calculate ATR(14) on daily data then CHOP over 14 periods
+    tr_1d = np.zeros(len(df_1d))
+    for i in range(1, len(df_1d)):
+        tr_1d[i] = max(df_1d['high'].iloc[i] - df_1d['low'].iloc[i], 
+                       abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
+                       abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1]))
+    tr_1d[0] = df_1d['high'].iloc[0] - df_1d['low'].iloc[0]
+    atr_1d = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # Chop calculation over 14 periods
+    chop_period = 14
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=chop_period, min_periods=chop_period).sum().values
+    highest_high_14 = pd.Series(df_1d['high'].values).rolling(window=chop_period, min_periods=chop_period).max().values
+    lowest_low_14 = pd.Series(df_1d['low'].values).rolling(window=chop_period, min_periods=chop_period).min().values
+    chop_denom = highest_high_14 - lowest_low_14
+    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)  # avoid division by zero
+    chop_raw = 100 * np.log10(sum_atr_14 / (chop_period * np.log10(chop_period))) / np.log10(chop_period)
+    chop_values = chop_raw  # Already scaled 0-100
+    # Regime: CHOP > 61.8 = ranging (avoid breakouts), CHOP <= 61.8 = trending (take breakouts)
+    chop_regime = chop_values <= 61.8  # True when trending
+    chop_regime_aligned = align_htf_to_ltf(prices, df_1d, chop_regime)
     
     # === 4h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
@@ -67,11 +94,14 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(daily_trend_aligned[i]) or
-            np.isnan(atr[i])):
+            np.isnan(atr[i]) or np.isnan(chop_regime_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        
+        # --- Regime Filter: Only take breakouts in trending markets (CHOP <= 61.8) ---
+        trending_regime = chop_regime_aligned[i]
         
         # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
         volume_spike = vol_ratio[i] > 1.5
@@ -119,7 +149,7 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        if volume_spike:
+        if volume_spike and trending_regime:
             # Long: breakout above upper channel AND bullish daily trend
             if breakout_up and bullish_trend:
                 in_position = True
