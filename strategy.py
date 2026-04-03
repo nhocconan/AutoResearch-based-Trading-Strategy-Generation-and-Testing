@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #137: 4h Donchian(20) breakout + 1d HTF EMA(50) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend (using actual 1d candles) and volume confirmation (>1.5x) capture medium-term momentum with controlled trade frequency. The 1d HTF EMA filter reduces false breakouts in choppy markets while volume ensures institutional participation. ATR-based stops manage risk. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #138: 1d Donchian(20) breakout + 1w HTF HMA(21) trend + volume confirmation
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA(21) trend and volume spikes (>1.8x) capture swing momentum with low trade frequency. Weekly HMA filter reduces false breakouts in choppy markets while volume ensures institutional participation. ATR-based stops manage risk. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_137_4h_donchian20_1d_ema50_vol_v1"
-timeframe = "4h"
+name = "exp_138_1d_donchian20_1w_hma21_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,22 +19,28 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA(50) trend (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = pd.Series(df_1d['close'].values)
-    ema_50_1d = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_trend_1d = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === HTF: 1w data for HMA(21) trend (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = pd.Series(df_1w['close'].values)
+    # HMA(21) = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
+    wma_half = close_1w.ewm(span=half_len, adjust=False).mean()
+    wma_full = close_1w.ewm(span=21, adjust=False).mean()
+    raw_hma = 2 * wma_half - wma_full
+    hma_21_1w = raw_hma.ewm(span=sqrt_len, adjust=False).mean().values
+    hma_trend_1w = align_htf_to_ltf(prices, df_1w, hma_21_1w)
     
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 1d Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 1d Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)  # default to 1.0 for warmup period
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -56,23 +62,23 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema_trend_1d[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(hma_trend_1w[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio[i] > 1.5
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
+        volume_spike = vol_ratio[i] > 1.8
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- HTF EMA Trend: price above/below EMA ---
-        bullish_trend = close[i] > ema_trend_1d[i]
-        bearish_trend = close[i] < ema_trend_1d[i]
+        # --- HTF HMA Trend: price above/below HMA ---
+        bullish_trend = close[i] > hma_trend_1w[i]
+        bearish_trend = close[i] < hma_trend_1w[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -97,8 +103,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 8 bars (~32h on 4h) to avoid overtrading
-            if bars_since_entry > 8:
+            # Optional: time-based exit after 15 bars (~15 days on 1d) to avoid overtrading
+            if bars_since_entry > 15:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
