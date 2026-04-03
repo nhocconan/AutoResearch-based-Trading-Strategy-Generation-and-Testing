@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #1545: 12h Donchian(20) Breakout + 1d Trend + Volume + ATR Stoploss
-HYPOTHESIS: 12h Donchian breakouts with 1d EMA50 trend alignment and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. Position size fixed at 0.25 to limit drawdown. Target: 75-150 total trades over 4 years (19-37/year) by using tight entry conditions and multi-timeframe confluence.
+Experiment #1546: 4h Donchian(20) Breakout + 1d EMA Trend + Volume + ATR Stoploss
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA trend, confirmed by volume spikes (>1.5x average), capture medium-term trends in both bull and bear markets. Using discrete position sizing (0.25) and ATR-based stoploss (2.0x) to limit drawdown. Target: 100-180 total trades over 4 years (25-45/year) by requiring confluence of trend, breakout, and volume.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1545_12h_donchian20_1d_trend_vol_v1"
-timeframe = "12h"
+name = "exp_1546_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,11 +17,7 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
-    
-    # Pre-compute session hours for filter (optional, can be removed if too restrictive)
-    hours = pd.DatetimeIndex(open_time).hour
     
     # === HTF: 1d data for trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
@@ -30,16 +26,16 @@ def generate_signals(prices):
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 12h Indicators: Donchian(20) ===
+    # === 4h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -67,8 +63,6 @@ def generate_signals(prices):
             continue
         
         price = close[i]
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)  # UTC 08-20 session filter (can be removed if too restrictive)
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -98,13 +92,12 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         # Require 1d trend alignment
-        trend_following = trend_1d_aligned[i] != 0  # Should always be true, but keeping for structure
+        trend_following = (trend_1d_aligned[i] != 0)
         
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
-        # Session filter: only trade during active hours (can be removed if too restrictive)
-        if trend_following and volume_spike and in_session:
+        if trend_following and volume_spike:
             # Breakout: price breaks above upper band OR below lower band
             if price > donch_high[i] and trend_1d_aligned[i] > 0:  # Uptrend breakout
                 in_position = True
