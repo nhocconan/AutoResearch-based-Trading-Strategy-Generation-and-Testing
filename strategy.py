@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #028: 12h Donchian Breakout + Volume + Chop Filter Strategy
-
-HYPOTHESIS: Uses 12h Donchian channel (20) breakouts with 1w/1d HTF trend filters, 
-volume confirmation, and choppiness regime filter. Only trades in strong trends 
-(ADX > 25) or low chop (CHOP < 38.2) to avoid whipsaws. Position size 0.25 to 
-limit drawdown. Target: 75-150 total trades over 4 years (19-37/year).
+Experiment #032: 12h Donchian(20) breakout + 1d volume spike + ATR stoploss
+HYPOTHESIS: Donchian breakouts on 12h with volume confirmation capture institutional interest at key structural levels.
+Volume spike (>2x average) confirms breakout validity, reducing false signals. ATR-based stoploss (2.5x) manages risk.
+Designed to work in both bull and bear markets by trading breakouts in direction of momentum with proper risk control.
+Target: 75-150 trades over 4 years (19-37/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_028_12h_donchian_vol_chop_v1"
+name = "exp_032_12h_donchian20_1d_vol_spike_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -23,111 +22,102 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w and 1d data for trend filters (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
+    # === HTF: 1d data for volume spike confirmation (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 1w EMA50 for long-term trend
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate 1d volume MA(20) for spike detection
+    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = np.zeros(len(df_1d))
+    vol_ratio_1d[20:] = df_1d['volume'].values[20:] / vol_ma_20_1d[20:]
+    vol_ratio_1d[:20] = 1.0  # Neutral for warmup
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # 1d EMA50 for medium-term trend
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # === 12h Indicators: Donchian(20) channels ===
+    def calculate_donchian(high, low, period=20):
+        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        return upper, lower
     
-    # === 12h Indicators: Donchian Channel (20) ===
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.max(arr[i - window + 1:i + 1])
-        return result
+    donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.min(arr[i - window + 1:i + 1])
-        return result
-    
-    donchian_high = rolling_max(high, 20)
-    donchian_low = rolling_min(low, 20)
-    donchian_mid = (donchian_high + donchian_low) / 2
-    
-    # === 12h Indicators: ADX(14) for trend strength ===
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
+    # === 12h Indicators: ATR(14) for stoploss ===
+    tr_12h = np.zeros(n)
+    tr_12h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr_12h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    for i in range(1, n):
-        plus_dm[i] = high[i] - high[i-1] if high[i] - high[i-1] > high[i-1] - low[i-1] and high[i] - high[i-1] > 0 else 0
-        minus_dm[i] = high[i-1] - low[i-1] if high[i-1] - low[i-1] > high[i] - high[i-1] and high[i-1] - low[i-1] > 0 else 0
-    
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    plus_di_14 = 100 * pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values / atr_14
-    minus_di_14 = 100 * pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values / atr_14
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14 + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # === 12h Indicators: Choppiness Index (14) ===
-    def rolling_sum(arr, window):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.sum(arr[i - window + 1:i + 1])
-        return result
-    
-    atr_sum = rolling_sum(tr, 14)
-    highest_high = rolling_max(high, 14)
-    lowest_low = rolling_min(low, 14)
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low + 1e-10)) / np.log10(14)
-    
-    # === 12h Indicators: Volume Ratio (20) ===
-    def rolling_mean(arr, window):
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        for i in range(window - 1, len(arr)):
-            result[i] = np.mean(arr[i - window + 1:i + 1])
-        return result
-    
-    vol_ma_20 = rolling_mean(volume, 20)
-    vol_ratio = volume / (vol_ma_20 + 1e-10)
+    atr_14 = pd.Series(tr_12h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
     SIZE = 0.25  # Position sizing (25% of capital)
     
-    warmup = 50  # Sufficient warmup for all indicators
+    # Position tracking state variables
+    in_position = False
+    position_side = 0
+    entry_price = 0.0
+    bars_since_entry = 0  # Track bars in position for minimum holding period
+    
+    warmup = 50  # Warmup for Donchian and volume stability
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(adx[i]) or np.isnan(chop[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
+            np.isnan(atr_14[i]) or np.isnan(vol_ratio_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        price = close[i]
+        # --- Volume Confirmation: Require volume spike (> 2x average) ---
+        volume_spike = vol_ratio_1d_aligned[i] > 2.0
         
-        # --- Trend Alignment: 1w and 1d EMA50 ---
-        is_uptrend_htf = price > ema50_1w_aligned[i] and price > ema50_1d_aligned[i]
-        is_downtrend_htf = price < ema50_1w_aligned[i] and price < ema50_1d_aligned[i]
+        # --- Donchian Breakout Conditions ---
+        breakout_up = high[i] > donch_upper[i-1]  # Break above upper channel
+        breakout_down = low[i] < donch_lower[i-1]  # Break below lower channel
         
-        # --- Regime Filter: ADX > 25 (trending) OR Chop < 38.2 (low chop) ---
-        is_trending_regime = adx[i] > 25
-        is_low_chop = chop[i] < 38.2
-        regime_ok = is_trending_regime or is_low_chop
+        # --- Exit Logic (ATR-based stoploss) ---
+        if in_position:
+            bars_since_entry += 1
+            
+            # ATR-based stoploss
+            if position_side > 0:  # Long position
+                stop_level = entry_price - 2.5 * atr_14[i]
+                if low[i] < stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+            else:  # Short position
+                stop_level = entry_price + 2.5 * atr_14[i]
+                if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+            
+            # Minimum holding period of 2 bars to reduce churn
+            if bars_since_entry < 2:
+                signals[i] = position_side * SIZE
+                continue
+            
+            # Hold position
+            signals[i] = position_side * SIZE
+            continue
         
-        # --- Volume Confirmation: vol_ratio > 1.5 ---
-        volume_ok = vol_ratio[i] > 1.5
-        
-        # --- Breakout Conditions ---
-        long_breakout = price > donchian_high[i-1]  # Break above previous high
-        short_breakout = price < donchian_low[i-1]  # Break below previous low
-        
-        # --- Entry Logic ---
-        if is_uptrend_htf and long_breakout and regime_ok and volume_ok:
+        # --- New Position Entry Logic (Only if Flat) ---
+        # Enter on Donchian breakout with volume confirmation
+        if breakout_up and volume_spike:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            bars_since_entry = 0
             signals[i] = SIZE
-        elif is_downtrend_htf and short_breakout and regime_ok and volume_ok:
+        elif breakout_down and volume_spike:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            bars_since_entry = 0
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
