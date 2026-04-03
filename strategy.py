@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #653: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h Hull Moving Average(21) trend capture institutional participation with low overtrading risk. 
-Volume confirmation ensures breakout validity. Designed for 4h to hit 75-200 total trades over 4 years (19-50/year).
-Uses 12h HMA for bull/bear agnostic trend filter and ATR-based stoploss for risk control.
-Target: 25-50 trades/year per symbol with Sharpe > 0.5 on test.
+Experiment #654: 1h RSI(14) mean reversion with 4h/1d trend filter and volume confirmation
+HYPOTHESIS: In ranging markets (common in 2025 BTC/ETH), RSI extremes reverse. 
+Use 4h EMA(50) and 1d EMA(200) for trend alignment: only take mean-reversion trades 
+in direction of higher timeframe trend. Volume spike confirms institutional interest.
+Session filter (08-20 UTC) reduces noise. Target 15-37 trades/year with discrete sizing.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_653_4h_donchian20_12h_hma_vol_v1"
-timeframe = "4h"
+name = "exp_654_1h_rsi_meanrev_4h_1d_trend_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,33 +22,36 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for HMA trend (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # === Precompute session hours ONCE (open_time is datetime64[ms]) ===
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Calculate 12h HMA(21) for trend filter
-    def calculate_hma(arr, period):
-        half_period = int(period / 2)
-        sqrt_period = int(np.sqrt(period))
-        wma1 = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
-        wma2 = pd.Series(arr).ewm(span=period, adjust=False).mean().values
-        raw_hma = 2 * wma1 - wma2
-        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
-        return hma
+    # === HTF: 4h data for EMA(50) trend (Call ONCE before loop) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    hma_12h = calculate_hma(close_12h, 21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    # === HTF: 1d data for EMA(200) trend (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === 4h Indicators: Donchian Channel (20) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # === 1h Indicators: RSI(14) ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = pd.Series(gain).ewm(span=14, min_periods=14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, min_periods=14, adjust=False).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.ones_like(avg_gain), where=avg_loss!=0)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 1h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 1h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -57,7 +60,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.20  # 20% position size
     
     # Position tracking state variables
     in_position = False
@@ -65,38 +68,43 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for 12h HMA(21) and Donchian calculations
+    warmup = 200  # sufficient for 1d EMA(200)
     
     for i in range(warmup, n):
+        # --- Session Filter: 08-20 UTC ---
+        if not (8 <= hours[i] <= 20):
+            signals[i] = 0.0
+            continue
+        
         # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(hma_12h_aligned[i]) or
+        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]) or 
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.7x average) ---
-        volume_spike = vol_ratio[i] > 1.7
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
+        volume_spike = vol_ratio[i] > 1.8
         
-        # --- Donchian Breakout Conditions ---
-        breakout_up = price > highest_high[i]
-        breakout_down = price < lowest_low[i]
+        # --- Trend Alignment: 4h EMA50 and 1d EMA200 ---
+        uptrend_4h = price > ema_4h_aligned[i]
+        uptrend_1d = price > ema_1d_aligned[i]
+        downtrend_4h = price < ema_4h_aligned[i]
+        downtrend_1d = price < ema_1d_aligned[i]
         
-        # --- HMA Trend Filter ---
-        # In uptrend: price > HMA(21)
-        # In downtrend: price < HMA(21)
-        uptrend = price > hma_12h_aligned[i]
-        downtrend = price < hma_12h_aligned[i]
+        # --- RSI Mean Reversion Conditions ---
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.5*ATR below entry
-                stop_level = entry_price - 2.5 * atr[i]
+                # Stoploss: 2.0*ATR below entry
+                stop_level = entry_price - 2.0 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -104,8 +112,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                # Stoploss: 2.5*ATR above entry
-                stop_level = entry_price + 2.5 * atr[i]
+                # Stoploss: 2.0*ATR above entry
+                stop_level = entry_price + 2.0 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -113,8 +121,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 8 bars (~32h on 4h) to avoid overtrading
-            if bars_since_entry > 8:
+            # Optional: time-based exit after 12 bars (~12h on 1h) to avoid overtrading
+            if bars_since_entry > 12:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -126,15 +134,15 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + uptrend
-            if breakout_up and uptrend:
+            # Long: RSI oversold + uptrend alignment
+            if rsi_oversold and uptrend_4h and uptrend_1d:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + downtrend
-            elif breakout_down and downtrend:
+            # Short: RSI overbought + downtrend alignment
+            elif rsi_overbought and downtrend_4h and downtrend_1d:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
