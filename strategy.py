@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #724: 1d Donchian20 + 1w Pivot Direction + Volume Spike
-HYPOTHESIS: Daily Donchian(20) breakouts filtered by 1w weekly pivot direction (above/below weekly pivot) 
+HYPOTHESIS: 1d Donchian(20) breakouts filtered by 1w weekly pivot direction (above/below weekly pivot) 
 and volume confirmation (>2.0x average volume) captures institutional breakouts with proper HTF alignment. 
 Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear markets: long when price 
 breaks above Donchian upper AND above weekly pivot, short when breaks below Donchian lower AND below weekly pivot. 
@@ -99,8 +99,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~6d on 1d) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 5 bars (~5d on 1d) to avoid overtrading
+            if bars_since_entry > 5:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
