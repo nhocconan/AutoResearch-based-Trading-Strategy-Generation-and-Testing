@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #235: 6h Elder Ray + Weekly Pivot Regime + Volume Spike
+Experiment #225: 12h Donchian(20) Breakout + 1d HMA Trend + Volume Confirmation + ATR Stoploss
 
-HYPOTHESIS: Elder Ray (Bull/Bear Power) identifies institutional buying/selling pressure, filtered by weekly pivot regime (above/below weekly pivot = bull/bear bias) and volume spike confirmation. This captures strong momentum moves with institutional participation while avoiding choppy markets. Works in both bull and bear markets by following the prevailing power balance. Targets 12-37 trades/year on 6h timeframe (50-150 total over 4 years) to minimize fee drag.
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d HMA trend direction capture swing momentum with institutional participation. Volume confirmation filters false breakouts. This strategy targets 12-37 trades/year (50-150 total over 4 years) on 12h timeframe to minimize fee drag while capturing medium-term trends in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_elder_ray_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_hma_volume_1d_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,56 +20,52 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA200 trend filter ===
+    # === HTF: 1d data for HMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate EMA(200) on 1d close
-    if len(df_1d) >= 200:
+    # Calculate HMA(21) on 1d close
+    if len(df_1d) >= 21:
+        # Hull Moving Average: WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        half_len = 21 // 2  # 10
+        sqrt_len = int(np.sqrt(21))  # 4
+        
+        def wma(arr, period):
+            if len(arr) < period:
+                return np.full_like(arr, np.nan)
+            weights = np.arange(1, period + 1)
+            return np.convolve(arr, weights, mode='valid') / weights.sum()
+        
         close_1d = df_1d['close'].values
-        ema_200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-        ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    else:
-        ema_200_1d_aligned = np.full(n, np.nan)
-    
-    # === HTF: 1w data for weekly pivot points ===
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly pivot points (standard: P = (H+L+C)/3)
-    if len(df_1w) >= 1:
-        high_1w = df_1w['high'].values
-        low_1w = df_1w['low'].values
-        close_1w = df_1w['close'].values
+        wma_half = np.full_like(close_1d, np.nan)
+        wma_full = np.full_like(close_1d, np.nan)
         
-        # Weekly pivot: P = (H+L+C)/3
-        weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
-        # Weekly R1: 2*P - L
-        weekly_r1 = 2 * weekly_pivot - low_1w
-        # Weekly S1: 2*P - H
-        weekly_s1 = 2 * weekly_pivot - high_1w
+        for i in range(len(close_1d)):
+            if i >= half_len - 1:
+                wma_half[i] = wma(close_1d[max(0, i-half_len+1):i+1], half_len)[-1]
+            if i >= 21 - 1:
+                wma_full[i] = wma(close_1d[max(0, i-21+1):i+1], 21)[-1]
         
-        # Align to 6h timeframe
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-        weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-        weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+        raw_hma = 2 * wma_half - wma_full
+        hma_21 = np.full_like(raw_hma, np.nan)
+        for i in range(len(raw_hma)):
+            if i >= sqrt_len - 1 and not np.isnan(raw_hma[i]):
+                hma_21[i] = wma(raw_hma[max(0, i-sqrt_len+1):i+1], sqrt_len)[-1]
+        
+        # Align to 12h timeframe
+        hma_21_aligned = align_htf_to_ltf(prices, df_1d, hma_21)
     else:
-        weekly_pivot_aligned = np.full(n, np.nan)
-        weekly_r1_aligned = np.full(n, np.nan)
-        weekly_s1_aligned = np.full(n, np.nan)
+        hma_21_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators ===
-    # ATR(14) for volatility and stoploss
+    # === 12h Indicators ===
+    atr_14 = np.zeros(n)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power = high - ema_13  # Buying pressure
-    bear_power = low - ema_13   # Selling pressure (negative values indicate selling pressure)
-    
-    # Volume confirmation: 1.5x average volume
+    dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === Signals Initialization ===
@@ -83,37 +79,26 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 200  # Ensure enough data for HTF and indicator calculations
+    warmup = 100  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(atr_14[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(ema_200_1d_aligned[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i])):
+        if (np.isnan(atr_14[i]) or np.isnan(dc_upper_20[i]) or np.isnan(dc_lower_20[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(hma_21_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Elder Ray Signals ---
-        # Strong bullish pressure: Bull Power > 0 and increasing
-        bull_power_rising = bull_power[i] > bull_power[i-1] if i > 0 else False
-        strong_bullish = bull_power[i] > 0 and bull_power_rising
+        # --- Price Channel Breakout ---
+        bullish_breakout = close[i] > dc_upper_20[i]
+        bearish_breakout = close[i] < dc_lower_20[i]
         
-        # Strong bearish pressure: Bear Power < 0 and decreasing (more negative)
-        bear_power_falling = bear_power[i] < bear_power[i-1] if i > 0 else False
-        strong_bearish = bear_power[i] < 0 and bear_power_falling
-        
-        # --- Regime Filters ---
-        # Weekly pivot regime: price above/below weekly pivot determines bias
-        price_above_weekly_pivot = close[i] > weekly_pivot_aligned[i]
-        price_below_weekly_pivot = close[i] < weekly_pivot_aligned[i]
-        
-        # EMA200 trend filter: ensures alignment with higher timeframe trend
-        above_ema200 = close[i] > ema_200_1d_aligned[i]
-        below_ema200 = close[i] < ema_200_1d_aligned[i]
+        # --- HTF Trend Filter ---
+        # Use 1d HMA for trend direction
+        hma_trend_bullish = close[i] > hma_21_aligned[i]
+        hma_trend_bearish = close[i] < hma_21_aligned[i]
         
         # --- Volume Confirmation ---
-        vol_ok = volume[i] > vol_ma_20[i] * 1.5 if vol_ma_20[i] > 1e-10 else False  # 1.5x volume spike
+        vol_ok = volume[i] > vol_ma_20[i] * 2.0 if vol_ma_20[i] > 1e-10 else False  # 2x volume spike
         
         # --- Position Management (Exit Logic) ---
         stop_hit = False
@@ -129,16 +114,16 @@ def generate_signals(prices):
                 if high[i] > stop_level:
                     stop_hit = True
             
-            # Exit conditions: power weakening or opposite pressure
-            min_hold = (i - entry_bar) >= 2  # Minimum 2 bars hold (~12h)
+            # Exit conditions: trend reversal or opposite Donchian touch
+            min_hold = (i - entry_bar) >= 2  # Minimum 2 bars hold (~1 day)
             if min_hold:
                 if position_side > 0:
-                    # Exit long: Bull Power turns negative OR Bear Power becomes strong
-                    if bull_power[i] <= 0 or strong_bearish:
+                    # Exit long: price touches lower Donchian OR breaks below 1d HMA
+                    if close[i] <= dc_lower_20[i] or close[i] < hma_21_aligned[i]:
                         stop_hit = True
                 else:  # position_side < 0
-                    # Exit short: Bear Power turns positive OR Bull Power becomes strong
-                    if bear_power[i] >= 0 or strong_bullish:
+                    # Exit short: price touches upper Donchian OR breaks above 1d HMA
+                    if close[i] >= dc_upper_20[i] or close[i] > hma_21_aligned[i]:
                         stop_hit = True
             
             if stop_hit:
@@ -153,16 +138,16 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic (Only if Flat) ---
         # Long conditions: 
-        # Strong bullish power + price above weekly pivot + above EMA200 + volume confirmation
-        if strong_bullish and price_above_weekly_pivot and above_ema200 and vol_ok:
+        # Breakout above upper Donchian with price above 1d HMA and volume confirmation
+        if bullish_breakout and hma_trend_bullish and vol_ok:
             in_position = True
             position_side = 1
             entry_bar = i
             highest_since_entry = high[i]
             signals[i] = SIZE
         # Short conditions:
-        # Strong bearish power + price below weekly pivot + below EMA200 + volume confirmation
-        elif strong_bearish and price_below_weekly_pivot and below_ema200 and vol_ok:
+        # Breakout below lower Donchian with price below 1d HMA and volume confirmation
+        elif bearish_breakout and hma_trend_bearish and vol_ok:
             in_position = True
             position_side = -1
             entry_bar = i
@@ -173,4 +158,4 @@ def generate_signals(prices):
     
     return signals
 
-}
+</think>
