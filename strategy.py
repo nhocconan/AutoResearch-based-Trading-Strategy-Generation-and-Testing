@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Experiment #196: 12h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Confirmation
+Experiment #188: 12h Donchian(20) Breakout + 1w Pivot Direction + Volume Confirmation
 
-HYPOTHESIS: 12h Donchian breakouts aligned with weekly pivot levels from 1d timeframe capture institutional order flow around key support/resistance levels. Weekly pivots (calculated from prior week's OHLC) provide structural reference points that work in both bull and bear markets by identifying areas where price is likely to react. Volume confirmation ensures breakouts have participation. Targets 12-37 trades/year on 12h timeframe to balance opportunity with fee drag.
+HYPOTHESIS: 12h Donchian breakouts aligned with weekly pivot levels from 1w timeframe capture institutional order flow around key support/resistance levels. Weekly pivots (calculated from prior week's OHLC) provide structural reference points that work in both bull and bear markets by identifying areas where price is likely to react. Volume confirmation ensures breakouts have participation. Targets 12-37 trades/year on 12h timeframe to balance opportunity with fee drag.
 """
 
 import numpy as np
@@ -20,16 +20,16 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for weekly pivot levels (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
+    # === HTF: 1w data for weekly pivot levels (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivots from daily OHLC (prior week's data)
+    # Calculate weekly pivots from weekly OHLC (prior week's data)
     # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
-    # We'll use rolling window of 5 days (approximate week) with proper alignment
-    if len(df_1d) >= 5:
-        weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(1).values
-        weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(1).values
-        weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().shift(1).values
+    # We'll use shift(1) to ensure we only use completed weekly bars
+    if len(df_1w) >= 1:
+        weekly_high = pd.Series(df_1w['high']).shift(1).values
+        weekly_low = pd.Series(df_1w['low']).shift(1).values
+        weekly_close = pd.Series(df_1w['close']).shift(1).values
         
         # Weekly pivot point
         weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
@@ -42,13 +42,13 @@ def generate_signals(prices):
         weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
         
         # Align to 12h timeframe
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-        weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-        weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
-        weekly_r2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2)
-        weekly_s2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2)
-        weekly_r3_aligned = align_htf_to_ltf(prices, df_1d, weekly_r3)
-        weekly_s3_aligned = align_htf_to_ltf(prices, df_1d, weekly_s3)
+        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+        weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+        weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+        weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
+        weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
+        weekly_r3_aligned = align_htf_to_ltf(prices, df_1w, weekly_r3)
+        weekly_s3_aligned = align_htf_to_ltf(prices, df_1w, weekly_s3)
     else:
         # Fallback if insufficient data
         weekly_pivot_aligned = np.full(n, np.nan)
@@ -120,7 +120,7 @@ def generate_signals(prices):
                     stop_hit = True
             
             # Exit conditions: trend reversal or opposite Donchian touch
-            min_hold = (i - entry_bar) >= 2  # Minimum 2 bars hold (~1 day)
+            min_hold = (i - entry_bar) >= 3  # Minimum 3 bars hold (~1.5 days)
             if min_hold:
                 if position_side > 0:
                     # Exit long: price touches lower Donchian OR breaks below weekly pivot
