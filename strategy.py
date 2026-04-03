@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #039: 6h Williams %R + 12h EMA(50) trend + volume confirmation
-HYPOTHESIS: Williams %R identifies short-term overbought/oversold conditions on 6h,
-while 12h EMA(50) provides medium-term trend filter. Volume spike confirms momentum.
-In bull markets: buy when Williams %R < -80 (oversold) in uptrend with volume.
-In bear markets: sell when Williams %R > -20 (overbought) in downtrend with volume.
-This mean-reversion-with-trend approach works in both regimes by requiring trend alignment.
-Target: 75-200 total trades over 4 years (19-50/year) to balance frequency and edge.
+Experiment #048: 12h Donchian(20) breakout + 1w HMA trend + volume confirmation
+HYPOTHESIS: Price breaking 12h Donchian(20) channels with 1w HMA(21) trend alignment and volume spike (>1.8x) captures momentum with controlled frequency. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0) to manage risk. Target: 50-150 total trades over 4 years (12-37/year) for statistical validity and low fee drift. Works in both bull (breakouts with trend) and bear (short breakdowns with trend) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_039_6h_williamsr_12h_ema_vol_v1"
-timeframe = "6h"
+name = "exp_048_12h_donchian20_1w_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,29 +19,35 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for EMA trend filter (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
+    # === HTF: 1w data for HMA trend filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate EMA(50) on 12h close
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate HMA(21) on 1w close
+    def hma(series, period):
+        if len(series) < period:
+            return np.full_like(series, np.nan)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma_half = pd.Series(series).ewm(span=half_period, adjust=False).mean()
+        wma_full = pd.Series(series).ewm(span=period, adjust=False).mean()
+        raw_hma = 2 * wma_half - wma_full
+        hma_result = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
+        return hma_result.values
     
-    # === 6h Indicators: Williams %R(14) ===
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.full(n, -50.0)  # default neutral
-    for i in range(14, n):
-        if highest_high[i] != lowest_low[i]:
-            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
-        else:
-            williams_r[i] = -50.0
+    hma_1w = hma(df_1w['close'].values, 21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Donchian Channel (20) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)  # default to 1.0 for warmup period
+    vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    vol_ratio[:20] = 1.0
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -68,23 +69,25 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(williams_r[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(ema_12h_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(hma_1w_aligned[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio[i] > 1.5
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
+        volume_spike = vol_ratio[i] > 1.8
         
-        # --- Williams %R Conditions ---
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
+        # --- Donchian Breakout Conditions ---
+        breakout_up = price > highest_high[i]
+        breakout_down = price < lowest_low[i]
         
-        # --- Trend Filter: 12h EMA alignment ---
-        uptrend = price > ema_12h_aligned[i]
-        downtrend = price < ema_12h_aligned[i]
+        # --- Trend Filter: 1w HMA alignment ---
+        # Uptrend: price above 1w HMA
+        # Downtrend: price below 1w HMA
+        uptrend = price > hma_1w_aligned[i]
+        downtrend = price < hma_1w_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -109,8 +112,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 8 bars (~4 days on 6h) to avoid overtrading
-            if bars_since_entry > 8:
+            # Optional: time-based exit after 4 bars (~48h on 12h) to avoid overtrading
+            if bars_since_entry > 4:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -122,15 +125,15 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Williams %R oversold AND uptrend
-            if oversold and uptrend:
+            # Long: breakout above upper channel AND uptrend
+            if breakout_up and uptrend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Williams %R overbought AND downtrend
-            elif overbought and downtrend:
+            # Short: breakout below lower channel AND downtrend
+            elif breakout_down and downtrend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
