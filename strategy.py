@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #1273: 4h Donchian(20) Breakout + 12h Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture intermediate-term trends with optimal trade frequency.
-Trend filter from 12h timeframe ensures alignment with higher-timeframe momentum. Volume confirmation (>1.5x average)
-filters for institutional participation. Designed to work in both bull (breakouts continue) and bear (breakdowns continue)
-markets by following the 12h trend direction. Target: 75-200 total trades over 4 years (19-50/year).
+HYPOTHESIS: Donchian(20) breakouts on 4h capture intermediate-term swings with optimal trade frequency.
+Trend filter from 12h ensures alignment with higher-timeframe momentum (avoids counter-trend trades).
+Volume confirmation (>1.6x average) filters for institutional participation.
+ATR(14) stoploss (2.0x) manages risk. Designed for both bull (breakouts continue) and bear (breakdowns continue) markets.
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -25,9 +26,9 @@ def generate_signals(prices):
     # === HTF: 12h data for trend filter (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
-    # Simple trend: price > previous close = uptrend, < = downtrend
-    trend_12h = np.zeros(len(close_12h))
-    trend_12h[1:] = np.where(close_12h[1:] > close_12h[:-1], 1, -1)
+    # EMA(20) trend: price > EMA20 = uptrend, < = downtrend
+    ema_12h = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    trend_12h = np.where(close_12h > ema_12h, 1, -1)
     trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
     # === 4h Indicators: Donchian(20) ===
@@ -95,8 +96,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 1.6x average)
+        volume_spike = vol_ratio[i] > 1.6
         
         if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
