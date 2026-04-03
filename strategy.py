@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #1260: 4h Donchian(20) Breakout + 1d Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture intermediate-term trends with optimal trade frequency. 
-Trend filter from 1d timeframe ensures alignment with higher-timeframe momentum. Volume confirmation (>1.5x average) 
-filters for institutional participation. Designed to work in both bull (breakouts continue) and bear (breakdowns continue) 
-markets by following the 1d trend direction. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #1261: 4h Donchian(20) Breakout + 1d Trend + Volume Confirmation (Revised)
+HYPOTHESIS: Donchian(20) breakouts on 4h capture intermediate-term momentum. 
+Trend filter from 1d (price > 20-period EMA) ensures alignment with higher-timeframe direction. 
+Volume confirmation (>1.8x average) filters for institutional participation. 
+Designed for fewer trades (target: 75-200/4 years) to avoid fee drag in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1260_4h_donchian20_1d_trend_vol_v1"
+name = "exp_1261_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,12 +22,12 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for trend filter (price > 20 EMA) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    # Simple trend: price > previous close = uptrend, < = downtrend
-    trend_1d = np.zeros(len(close_1d))
-    trend_1d[1:] = np.where(close_1d[1:] > close_1d[:-1], 1, -1)
+    # 20-period EMA on 1d close
+    ema_20_1d = pd.Series(close_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_20_1d, 1, -1)  # 1=uptrend, -1=downtrend
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     # === 4h Indicators: Donchian(20) ===
@@ -95,8 +95,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 1.8x average) - stricter to reduce trades
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
@@ -118,3 +118,4 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+</tr>
