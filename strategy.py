@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #180: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike (Optimized)
+Experiment #317: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike + ATR Stoploss
 
 HYPOTHESIS: 4h Donchian channel breakouts filtered by 1d Hull Moving Average trend 
-and volume spikes (>2.5x average) capture strong momentum moves with reduced false 
+and volume spikes (>2.0x average) capture strong momentum moves with reduced false 
 breakouts. The 1d HMA provides a longer-term trend filter (more stable than 12h), 
 balancing responsiveness and smoothness. 4h timeframe targets 19-50 trades/year (75-200 total 
 over 4 years) to minimize fee drag while capturing significant moves. Works in both 
@@ -11,17 +11,18 @@ bull (breakouts with volume) and bear (failed breaks reverse sharply) markets. U
 ATR-based stoploss for risk management.
 
 OPTIMIZATIONS FROM PREVIOUS EXPERIMENTS:
-- Reduced volume threshold to 2.0x (from 2.5x) to increase trade frequency to target range
-- Added minimum holding period of 2 bars to reduce churn
-- Adjusted warmup to 80 for better stability
+- Increased volume threshold to 2.5x (from 2.0x) to reduce trade frequency to target range
+- Added minimum holding period of 3 bars to reduce churn
+- Adjusted warmup to 100 for better stability
 - Maintained discrete position sizing at 0.25
+- Added choppiness index regime filter to avoid whipsaws in ranging markets
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_180_4h_donchian_1d_hma_volume_v1"
+name = "exp_317_4h_donchian_1d_hma_volume_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -49,6 +50,26 @@ def generate_signals(prices):
     
     hma_1d = calculate_hma(df_1d['close'].values, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    
+    # === HTF: 1d data for Choppiness Index regime filter ===
+    def calculate_choppiness(high_arr, low_arr, close_arr, period):
+        if len(close_arr) < period:
+            return np.full_like(close_arr, np.nan)
+        atr = np.zeros(len(close_arr))
+        atr[0] = high_arr[0] - low_arr[0]
+        for i in range(1, len(close_arr)):
+            atr[i] = max(high_arr[i] - low_arr[i], 
+                         abs(high_arr[i] - close_arr[i-1]), 
+                         abs(low_arr[i] - close_arr[i-1]))
+        sum_atr = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
+        highest_high = pd.Series(high_arr).rolling(window=period, min_periods=period).max().values
+        lowest_low = pd.Series(low_arr).rolling(window=period, min_periods=period).min().values
+        ratio = sum_atr / (highest_high - lowest_low)
+        chop = 100 * np.log10(ratio) / np.log10(period)
+        return chop
+    
+    chop_1d = calculate_choppiness(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     # === 4h Indicators: Donchian Channel (20) ===
     donchian_h = np.full(n, np.nan)
@@ -84,13 +105,13 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 80  # Reduced warmup for better signal generation
+    warmup = 100  # Increased warmup for better stability
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
             np.isnan(hma_1d_aligned[i]) or np.isnan(atr_14[i]) or 
-            np.isnan(vol_ratio[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -98,9 +119,12 @@ def generate_signals(prices):
         price_above_hma = close[i] > hma_1d_aligned[i]
         price_below_hma = close[i] < hma_1d_aligned[i]
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        # Adjusted from 2.5x to 2.0x to increase trade frequency to target range
-        volume_spike = vol_ratio[i] > 2.0
+        # --- Volume Confirmation: Require volume spike (> 2.5x average) ---
+        volume_spike = vol_ratio[i] > 2.5
+        
+        # --- Choppiness Regime Filter: Avoid ranging markets (CHOP > 61.8) ---
+        # Only trade when market is trending (CHOP < 61.8)
+        not_choppy = chop_1d_aligned[i] < 61.8
         
         # --- Donchian Breakout Conditions ---
         breakout_up = close[i] > donchian_h[i]
@@ -142,8 +166,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Minimum holding period of 2 bars to reduce churn
-            if bars_since_entry < 2:
+            # Minimum holding period of 3 bars to reduce churn
+            if bars_since_entry < 3:
                 signals[i] = position_side * SIZE
                 continue
             
@@ -152,11 +176,11 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Donchian breakout up + volume spike + price above 1d HMA
-        long_condition = breakout_up and volume_spike and price_above_hma
+        # Long: Donchian breakout up + volume spike + price above 1d HMA + not choppy
+        long_condition = breakout_up and volume_spike and price_above_hma and not_choppy
         
-        # Short: Donchian breakout down + volume spike + price below 1d HMA
-        short_condition = breakout_down and volume_spike and price_below_hma
+        # Short: Donchian breakout down + volume spike + price below 1d HMA + not choppy
+        short_condition = breakout_down and volume_spike and price_below_hma and not_choppy
         
         if long_condition:
             in_position = True
