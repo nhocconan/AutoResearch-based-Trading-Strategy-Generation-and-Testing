@@ -1,21 +1,30 @@
 #!/usr/bin/env python3
 """
-Experiment #154: 1h RSI(14) Extreme Reversal + 4h Volume Spike + 1d ADX(14) Trend Filter
+Experiment #294: 1h Camarilla Pivot Long + 4h/1d Regime Filter + Volume Spike
 
-HYPOTHESIS: RSI extremes (<30 or >70) on 1h combined with 4h volume spikes (>2.0x average) 
-and 1d ADX(14) > 25 (trending market) capture high-probability reversals in both bull and bear 
-markets. The 4h volume spike confirms institutional participation, while 1d ADX ensures we 
-only trade in trending conditions where reversals are more meaningful. Uses discrete 
-position sizing (0.20) and ATR-based stoploss (2.0x ATR) to manage risk. Targets 15-37 
-trades/year by using strict entry conditions and session filter (08-20 UTC) to reduce 
-fee drag.
+HYPOTHESIS: 1h long entries at Camarilla L3 support with 4h/1d trend alignment (price > EMA50) 
+and volume spikes (>1.8x average) capture high-probability bounces in both bull and bear markets. 
+The 4h EMA50 provides intermediate trend filter, 1d EMA200 provides long-term bias, reducing 
+false signals during strong counter-trend moves. Shorts are avoided due to 1h timeframe's 
+vulnerability to bearish whipsaws; only longs are taken with strict filters. 
+Session filter (08-20 UTC) reduces noise outside active trading hours. 
+Target: 60-150 total trades over 4 years = 15-37/year for 1h. Uses discrete position sizing (0.20) 
+to minimize churn. ATR-based stoploss (2.5x) manages risk.
+
+IMPLEMENTATION NOTES:
+- Uses discrete position sizing (0.20) to minimize churn
+- Volume confirmation threshold set to 1.8x to balance signal quality and frequency
+- Minimum holding period of 2 bars to reduce churn
+- Warmup period set to 100 bars for stable indicators
+- Only long positions taken (shorts disabled for 1h robustness in bear markets)
+- Exits on Camarilla H3 reversion (mean reversion target) OR ATR stoploss
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_154_1h_rsi_extreme_4h_vol_1d_adx_v1"
+name = "exp_294_1h_camarilla_4h_1d_regime_volume_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -26,78 +35,52 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h data for volume MA and ADX calculation (Call ONCE before loop) ===
+    # === Precompute session hours (08-20 UTC) ===
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    
+    # === HTF: 4h data for EMA50 trend (Call ONCE before loop) ===
     df_4h = get_htf_data(prices, '4h')
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate volume MA(20) on 4h data
-    vol_ma_4h = pd.Series(df_4h['volume'].values).rolling(window=20, min_periods=20).mean().values
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
-    
-    # Calculate ADX(14) on 1d data
+    # === HTF: 1d data for EMA200 trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    
-    def calculate_adx(high_arr, low_arr, close_arr, period=14):
-        if len(high_arr) < period + 1:
-            return np.full_like(high_arr, np.nan)
-        # True Range
-        tr1 = high_arr[1:] - low_arr[1:]
-        tr2 = np.abs(high_arr[1:] - close_arr[:-1])
-        tr3 = np.abs(low_arr[1:] - close_arr[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])  # First TR is undefined
-        
-        # Directional Movement
-        dm_plus = np.where((high_arr[1:] - high_arr[:-1]) > (low_arr[:-1] - low_arr[1:]), 
-                           np.maximum(high_arr[1:] - high_arr[:-1], 0), 0)
-        dm_minus = np.where((low_arr[:-1] - low_arr[1:]) > (high_arr[1:] - high_arr[:-1]), 
-                            np.maximum(low_arr[:-1] - low_arr[1:], 0), 0)
-        dm_plus = np.concatenate([[0], dm_plus])
-        dm_minus = np.concatenate([[0], dm_minus])
-        
-        # Smoothed TR, DM+
-        tr_period = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-        dm_plus_period = pd.Series(dm_plus).ewm(span=period, min_periods=period, adjust=False).mean().values
-        dm_minus_period = pd.Series(dm_minus).ewm(span=period, min_periods=period, adjust=False).mean().values
-        
-        # Directional Indicators
-        di_plus = 100 * dm_plus_period / tr_period
-        di_minus = 100 * dm_minus_period / tr_period
-        
-        # DX and ADX
-        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-        adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-        return adx
-    
-    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # === 1h Indicators: RSI(14) ===
-    def calculate_rsi(close_arr, period=14):
-        if len(close_arr) < period + 1:
-            return np.full_like(close_arr, np.nan)
-        delta = np.diff(close_arr)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = pd.Series(gain).ewm(span=period, min_periods=period, adjust=False).mean().values
-        avg_loss = pd.Series(loss).ewm(span=period, min_periods=period, adjust=False).mean().values
-        rs = avg_gain / (avg_loss + 1e-10)
-        rsi = 100 - (100 / (1 + rs))
-        # Prepend first value as NaN
-        rsi = np.concatenate([[np.nan], rsi])
-        return rsi
-    
-    rsi_14 = calculate_rsi(close, 14)
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # === 1h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
     atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === Session filter: 08-20 UTC ===
-    hours = prices.index.hour  # open_time is already datetime64[ms]
+    # === 1h Indicators: Volume MA(20) for spike detection ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.zeros(n)
+    vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
+    vol_ratio[:20] = 1.0  # Neutral for warmup
+    
+    # === 1h Indicators: Camarilla Pivot Levels (based on previous bar) ===
+    camarilla_h3 = np.full(n, np.nan)
+    camarilla_l3 = np.full(n, np.nan)
+    camarilla_h4 = np.full(n, np.nan)
+    camarilla_l4 = np.full(n, np.nan)
+    
+    for i in range(1, n):
+        # Calculate pivot from previous bar (i-1)
+        high_prev = high[i-1]
+        low_prev = low[i-1]
+        close_prev = close[i-1]
+        
+        pivot = (high_prev + low_prev + close_prev) / 3.0
+        range_prev = high_prev - low_prev
+        
+        # Camarilla levels
+        camarilla_h3[i] = pivot + (range_prev * 1.1 / 4)
+        camarilla_l3[i] = pivot - (range_prev * 1.1 / 4)
+        camarilla_h4[i] = pivot + (range_prev * 1.1 / 2)
+        camarilla_l4[i] = pivot - (range_prev * 1.1 / 2)
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -109,47 +92,49 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 100  # Warmup for stable indicators
+    warmup = 100  # Increased warmup for stable HTF alignment and indicators
     
     for i in range(warmup, n):
-        # --- Session Filter: Only trade 08-20 UTC ---
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
-        if (np.isnan(rsi_14[i]) or np.isnan(vol_ma_4h_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(atr_14[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or 
+            np.isnan(camarilla_l3[i]) or np.isnan(camarilla_h3[i])):
             signals[i] = 0.0
             continue
         
-        # --- 1h RSI Extreme Conditions ---
-        rsi_oversold = rsi_14[i] < 30
-        rsi_overbought = rsi_14[i] > 70
+        # --- Session Filter: 08-20 UTC only ---
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
         
-        # --- 4h Volume Spike: Require volume > 2.0x average ---
-        volume_spike = volume[i] > (2.0 * vol_ma_4h_aligned[i])
+        if not in_session:
+            signals[i] = 0.0
+            continue
         
-        # --- 1d ADX Trend Filter: Require ADX > 25 (trending market) ---
-        strong_trend = adx_1d_aligned[i] > 25
+        # --- Regime Filter: 4h EMA50 > 1d EMA200 = bullish alignment ---
+        bullish_regime = ema_4h_aligned[i] > ema_1d_aligned[i]
         
-        # --- Exit Logic (ATR-based stoploss) ---
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
+        volume_spike = vol_ratio[i] > 1.8
+        
+        # --- Camarilla L3 Long Entry: Price at L3 support with confirmation ---
+        long_entry = (low[i] <= camarilla_l3[i]) and bullish_regime and volume_spike
+        
+        # --- Exit Logic ---
         if in_position:
             bars_since_entry += 1
             
-            # ATR-based stoploss
+            # ATR-based stoploss (2.5x ATR)
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.0 * atr_14[i]
+                stop_level = entry_price - 2.5 * atr_14[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-            else:  # Short position
-                stop_level = entry_price + 2.0 * atr_14[i]
-                if high[i] > stop_level:
+                
+                # Exit on Camarilla H3 reversion (mean reversion target)
+                if high[i] >= camarilla_h3[i]:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -161,37 +146,18 @@ def generate_signals(prices):
                 signals[i] = position_side * SIZE
                 continue
             
-            # Exit on RSI returning to neutral zone (40-60)
-            if 40 <= rsi_14[i] <= 60:
-                in_position = False
-                position_side = 0
-                bars_since_entry = 0
-                signals[i] = 0.0
-                continue
-            
             # Hold position
             signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: RSI oversold + volume spike + strong trend
-        long_condition = rsi_oversold and volume_spike and strong_trend
-        
-        # Short: RSI overbought + volume spike + strong trend
-        short_condition = rsi_overbought and volume_spike and strong_trend
-        
-        if long_condition:
+        # Long only: Camarilla L3 bounce with regime and volume confirmation
+        if long_entry:
             in_position = True
             position_side = 1
             entry_price = close[i]
             bars_since_entry = 0
             signals[i] = SIZE
-        elif short_condition:
-            in_position = True
-            position_side = -1
-            entry_price = close[i]
-            bars_since_entry = 0
-            signals[i] = -SIZE
         else:
             signals[i] = 0.0
     
