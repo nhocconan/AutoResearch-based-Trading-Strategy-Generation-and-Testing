@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #780: 4h Donchian(20) + 1d HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: Donchian breakouts capture momentum, filtered by 1d HMA trend direction 
+HYPOTHESIS: Donchian(20) breakouts on 4h capture momentum, filtered by 1d HMA(21) trend direction 
 and volume confirmation (>2.0x average). Long when price breaks above Donchian upper 
 AND 1d HMA rising AND volume spike. Short when price breaks below Donchian lower 
-AND 1d HMA falling AND volume spike. Works in bull/bear markets: in bull trends, 
-1d HMA rising filters for longs; in bear trends, 1d HMA falling filters for shorts. 
+AND 1d HMA falling AND volume spike. Works in bull/bear: HMA filters for trend-aligned entries.
 Uses discrete position sizing (0.25). Target: 75-200 total trades over 4 years (19-50/year).
 """
 
