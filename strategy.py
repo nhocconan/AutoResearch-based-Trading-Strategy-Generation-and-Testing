@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #036: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation
-HYPOTHESIS: Price breaking 12h Donchian(20) channels with 1d HMA(21) trend alignment and volume spike (>2.0x) captures momentum with controlled frequency. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0) to manage risk. Target: 75-150 total trades over 4 years (19-37/year) for statistical validity and low fee drift. Works in both bull (breakouts with trend) and bear (short breakdowns with trend) markets.
+Experiment #042: 12h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation
+HYPOTHESIS: Price breaking 12h Donchian(20) channels with 1d HMA(21) trend alignment and volume spike (>1.6x) captures momentum with low frequency. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0). Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag. Works in bull (breakouts with uptrend) and bear (breakdowns with downtrend) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_036_12h_donchian20_1d_hma_vol_v1"
+name = "exp_042_12h_donchian20_1d_hma_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -76,8 +76,8 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
+        # --- Volume Confirmation: Require volume spike (> 1.6x average) ---
+        volume_spike = vol_ratio[i] > 1.6
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
@@ -112,8 +112,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 4 bars (~48h on 12h) to avoid overtrading
-            if bars_since_entry > 4:
+            # Optional: time-based exit after 6 bars (~3 days on 12h) to avoid overtrading
+            if bars_since_entry > 6:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
