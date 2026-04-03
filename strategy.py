@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #074: 1h Camarilla pivot + volume spike + chop regime filter
-HYPOTHESIS: 1h Camarilla pivot levels act as intraday support/resistance. 
-Long when price breaks above H3 with volume spike in choppy market (CHOP>61.8). 
-Short when price breaks below L3 with volume spike in choppy market. 
-Uses 4h for trend filter (price > EMA20) and 1d for regime (CHOP>61.8). 
-Target: 15-37 trades/year (60-150 total over 4 years) to minimize fee drag.
-Works in both bull/bear: chop regime filters trending markets, volume confirms breakouts.
+Experiment #094: 1h Donchian Breakout + 4h Volume Spike + 1d Trend Filter
+
+HYPOTHESIS: Donchian channel breakouts on 1h timeframe, confirmed by 4h volume spikes 
+and filtered by 1d trend direction (price > EMA50 for longs, < EMA50 for shorts), 
+creates a strategy that captures momentum moves with institutional participation. 
+Using higher timeframes for direction and volume confirmation reduces false breakouts, 
+while the 1h timeframe provides timely entry. Targets 15-37 trades/year (60-150 total) 
+to minimize fee drag. Position size fixed at 0.20 (20%) to control drawdown.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_camarilla_vol_trend_v1"
+name = "mtf_1h_donchian_vol_trend_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -24,105 +25,136 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h data for EMA trend filter (Call ONCE before loop) ===
+    # Pre-compute session filter (08-20 UTC) once before loop
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    
+    # === HTF: 4h data for volume spike (Call ONCE before loop) ===
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) >= 20:
-        ema_20_4h = pd.Series(df_4h['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
-        ema_20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_20_4h)
+        vol_4h = df_4h['volume'].values
+        vol_ma_20 = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+        vol_ratio_4h = np.zeros(len(vol_4h))
+        vol_ratio_4h[20:] = vol_4h[20:] / vol_ma_20[20:]
+        vol_ratio_4h[:20] = 1.0
+        vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
     else:
-        ema_20_4h_aligned = np.full(n, np.nan)
+        vol_ratio_4h_aligned = np.full(n, 1.0)
     
-    # === HTF: 1d data for chop regime filter (Call ONCE before loop) ===
+    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 14:
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
+    if len(df_1d) >= 50:
         close_1d = df_1d['close'].values
-        # True Range
-        tr1 = high_1d - low_1d
-        tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-        tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = high_1d[0] - low_1d[0]  # First period
-        atr_1d = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-        # Chop = 100 * log10(sum(TR14)/ (max(high14)-min(low14))) / log10(14)
-        sum_tr14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-        max_h14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-        min_l14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-        chop_raw = 100 * (np.log10(sum_tr14) - np.log10(max_h14 - min_l14)) / np.log10(14)
-        chop_raw = np.nan_to_num(chop_raw, nan=50.0)
-        chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_raw)
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     else:
-        chop_1d_aligned = np.full(n, 50.0)
+        ema_50_1d_aligned = np.full(n, np.nan)
     
-    # === Session filter: 08-20 UTC (pre-compute for efficiency) ===
-    hours = prices.index.hour  # Already DatetimeIndex
-    
-    # === 1h Indicators ===
-    # Camarilla pivot levels (based on previous day)
-    camarilla_high = np.zeros(n)
-    camarilla_low = np.zeros(n)
-    # Calculate once per day using previous day's OHLC
-    prev_high = np.roll(high, 24)  # 24*1h = 1d ago
-    prev_low = np.roll(low, 24)
-    prev_close = np.roll(close, 24)
-    # Handle first 24 bars
-    prev_high[:24] = prev_high[24] if n > 24 else high[0]
-    prev_low[:24] = prev_low[24] if n > 24 else low[0]
-    prev_close[:24] = prev_close[24] if n > 24 else close[0]
-    camarilla_high = prev_close + 1.1 * (prev_high - prev_low) / 6  # H3
-    camarilla_low = prev_close - 1.1 * (prev_high - prev_low) / 6   # L3
-    
-    # Volume confirmation: current vs 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.divide(volume, vol_ma_20, out=np.ones_like(volume), where=vol_ma_20!=0)
+    # === 1h Indicators: Donchian Channel (20) ===
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    if n >= 20:
+        for i in range(20, n):
+            donchian_high[i] = np.max(high[i-20:i])
+            donchian_low[i] = np.min(low[i-20:i])
+        # Warmup period: use expanding window
+        for i in range(20):
+            donchian_high[i] = np.max(high[:i+1])
+            donchian_low[i] = np.min(low[:i+1])
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # Discrete position sizing (20% of capital)
+    SIZE = 0.20  # Fixed position size (20% of capital)
+    
+    # Position tracking state variables
+    in_position = False
+    position_side = 0
+    entry_price = 0.0
     
     warmup = 100  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
-        # --- Session Filter: 08-20 UTC ---
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        # --- Session Filter: Only trade 08-20 UTC ---
+        if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
         # --- Data Validity Check ---
-        if (np.isnan(ema_20_4h_aligned[i]) or np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ratio_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Regime Filter: Only trade in choppy market (CHOP > 61.8) ---
-        if chop_1d_aligned[i] <= 61.8:
-            signals[i] = 0.0
+        # --- Regime Filter: Only trade in direction of 1d EMA50 ---
+        price_above_1d_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_1d_ema = close[i] < ema_50_1d_aligned[i]
+        
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
+        volume_spike = vol_ratio_4h_aligned[i] > 1.8
+        
+        # --- Exit Logic (ATR-based stoploss) ---
+        if in_position:
+            # Calculate ATR(14) for stoploss
+            tr = np.zeros(i+1)
+            tr[0] = high[0] - low[0]
+            for j in range(1, i+1):
+                tr[j] = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().iloc[-1]
+            
+            if position_side > 0:  # Long position
+                stop_level = entry_price - 2.5 * atr_14
+                if low[i] < stop_level:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+                # Take profit at Donchian Low (trailing stop) or extreme move
+                if close[i] <= donchian_low[i] or close[i] >= entry_price + 4.0 * atr_14:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+            else:  # Short position
+                stop_level = entry_price + 2.5 * atr_14
+                if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+                # Take profit at Donchian High (trailing stop) or extreme move
+                if close[i] >= donchian_high[i] or close[i] <= entry_price - 4.0 * atr_14:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+            
+            # Hold position
+            signals[i] = position_side * SIZE
             continue
         
-        # --- Trend Filter: Price above/below 4h EMA20 ---
-        price_above_ema = close[i] > ema_20_4h_aligned[i]
-        price_below_ema = close[i] < ema_20_4h_aligned[i]
-        
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio[i] > 1.5
-        
-        # --- Entry Logic ---
+        # --- New Position Entry Logic (Only if Flat) ---
+        # Long: Price breaks above Donchian High with volume spike in uptrend
         long_condition = (
-            close[i] > camarilla_high[i] and 
-            price_above_ema and 
-            volume_spike
+            close[i] > donchian_high[i] and 
+            volume_spike and 
+            price_above_1d_ema
         )
         
+        # Short: Price breaks below Donchian Low with volume spike in downtrend
         short_condition = (
-            close[i] < camarilla_low[i] and 
-            price_below_ema and 
-            volume_spike
+            close[i] < donchian_low[i] and 
+            volume_spike and 
+            price_below_1d_ema
         )
         
         if long_condition:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
             signals[i] = SIZE
         elif short_condition:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
