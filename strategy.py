@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #138: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Confirmation
+Experiment #141: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
 
-HYPOTHESIS: 1d Donchian breakouts aligned with 1w HMA trend capture swing momentum
-with lower whipsaw than shorter timeframes. 1w HMA (21) filters for long-term trend direction
-while being responsive to major regime changes. Volume confirmation (1.5x average)
-ensures institutional participation. Discrete position sizing (0.25) and ATR trailing stop
-(2.5x) manage risk. Targets 10-25 trades/year on 1d timeframe to minimize fee drag.
-Works in bull/bear markets by trading breakouts in direction of 1w HMA trend.
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d HMA(21) trend capture swing momentum
+while reducing whipsaw in choppy markets. Volume confirmation (>2.0x 20-bar average)
+ensures institutional participation. ATR-based trailing stop (2.5x) manages risk.
+Designed for 20-35 trades/year on 4h timeframe to minimize fee drag and work in
+both bull (breakout longs) and bear (breakout shorts) regimes by following 1d HMA trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_1w_hma_volume_v1"
-timeframe = "1d"
+name = "mtf_4h_donchian_hma_1d_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -53,12 +52,12 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # === HTF: 1d data for HMA trend (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # === 1d Indicators ===
+    # === 4h Indicators ===
     atr_14 = np.zeros(n)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
@@ -86,20 +85,20 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(atr_14[i]) or np.isnan(dc_upper_20[i]) or np.isnan(dc_lower_20[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(hma_1w_aligned[i])):
+            np.isnan(vol_ma_20[i]) or np.isnan(hma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- 1w HMA Trend ---
-        hma_bullish = close[i] > hma_1w_aligned[i]
-        hma_bearish = close[i] < hma_1w_aligned[i]
+        # --- 1d HMA Trend ---
+        hma_bullish = close[i] > hma_1d_aligned[i]
+        hma_bearish = close[i] < hma_1d_aligned[i]
         
         # --- Price Channel Breakout ---
         bullish_breakout = close[i] > dc_upper_20[i]
         bearish_breakout = close[i] < dc_lower_20[i]
         
-        # --- Volume Confirmation ---
-        vol_ok = volume[i] > vol_ma_20[i] * 1.5 if vol_ma_20[i] > 1e-10 else False  # 1.5x volume spike
+        # --- Volume Confirmation (2.0x average) ---
+        vol_ok = volume[i] > vol_ma_20[i] * 2.0 if vol_ma_20[i] > 1e-10 else False
         
         # --- Position Management (Exit Logic) ---
         stop_hit = False
@@ -116,15 +115,15 @@ def generate_signals(prices):
                     stop_hit = True
             
             # Exit conditions: trend reversal or opposite Donchian touch
-            min_hold = (i - entry_bar) >= 2  # Minimum 2 bars hold (~2d)
+            min_hold = (i - entry_bar) >= 3  # Minimum 3 bars hold (~12h)
             if min_hold:
                 if position_side > 0:
                     # Exit long: price touches lower Donchian OR breaks below HMA
-                    if close[i] <= dc_lower_20[i] or close[i] < hma_1w_aligned[i]:
+                    if close[i] <= dc_lower_20[i] or close[i] < hma_1d_aligned[i]:
                         stop_hit = True
                 else:  # position_side < 0
                     # Exit short: price touches upper Donchian OR breaks above HMA
-                    if close[i] >= dc_upper_20[i] or close[i] > hma_1w_aligned[i]:
+                    if close[i] >= dc_upper_20[i] or close[i] > hma_1d_aligned[i]:
                         stop_hit = True
             
             if stop_hit:
@@ -139,7 +138,7 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic (Only if Flat) ---
         # Long conditions: 
-        # Breakout above upper Donchian with bullish 1w HMA trend and volume confirmation
+        # Breakout above upper Donchian with bullish 1d HMA trend and volume confirmation
         if bullish_breakout and hma_bullish and vol_ok:
             in_position = True
             position_side = 1
@@ -147,7 +146,7 @@ def generate_signals(prices):
             highest_since_entry = high[i]
             signals[i] = SIZE
         # Short conditions:
-        # Breakout below lower Donchian with bearish 1w HMA trend and volume confirmation
+        # Breakout below lower Donchian with bearish 1d HMA trend and volume confirmation
         elif bearish_breakout and hma_bearish and vol_ok:
             in_position = True
             position_side = -1
@@ -158,3 +157,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
