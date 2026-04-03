@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #2104: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Daily Donchian breakouts capture institutional order flow with lower fee impact.
-- Primary: 1d Donchian(20) breakout with volume > 1.8x 20-bar average
+HYPOTHESIS: Daily Donchian channel breakouts capture institutional order flow with lower frequency.
+- Primary: 1d Donchian(20) breakout with volume > 2.0x 20-bar average (strict filter)
 - HTF: 1w HMA(21) trend filter (only trade in direction of higher timeframe trend)
-- Exit: ATR(14) trailing stop (2.5*ATR) or opposite Donchian touch
-- Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe
-- Works in bull/bear by following weekly institutional trend with precise daily entries
+- Exit: ATR(14) trailing stop (2.5*ATR) or opposite Donchian channel touch
+- Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
+- Works in bull/bear markets by following 1w institutional trend with precise 1d entries.
 """
 
 import numpy as np
@@ -42,7 +42,7 @@ def generate_signals(prices):
     wma_full = np.array([np.nan] * len(close_1w))
     wma_half = np.array([np.nan] * len(close_1w))
     
-    for i in range(20, len(close_1w)):
+    for i in range(20, len(close_1w)):  # 21-1 = 20 for WMA(21)
         wma_full[i] = np.mean(close_1w[i-20:i+1] * np.arange(1, 22))
     for i in range(half_len-1, len(close_1w)):
         wma_half[i] = np.mean(close_1w[i-half_len+1:i+1] * np.arange(1, half_len+1))
@@ -65,7 +65,7 @@ def generate_signals(prices):
     donchian_upper = high_ma
     donchian_lower = low_ma
     
-    # Volume MA for spike detection
+    # Volume MA for spike detection (strict threshold)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -139,8 +139,8 @@ def generate_signals(prices):
         # Require 1w trend alignment for bias filter
         trend_bias = trend_1w_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.8x average)
-        volume_spike = vol_ratio[i] > 1.8
+        # Volume confirmation: require volume spike (> 2.0x average) - STRICT
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # Long entry: price breaks above upper Donchian AND 1w trend up
