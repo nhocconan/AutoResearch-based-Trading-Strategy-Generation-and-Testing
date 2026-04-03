@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #2100: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts with 1d HMA trend filter and volume spike capture institutional order flow.
-Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average
-HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
-Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
-Works in bull/bear by following 1d institutional trend with precise 4h entries.
+Experiment #2101: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian channel breakouts capture institutional order flow. 
+- Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average
+- HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
+- Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
+- Works in bull/bear markets by following 1d institutional trend with precise 4h entries.
 Target: 75-200 total trades over 4 years (19-50/year).
 """
 
@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2100_4h_donchian20_1d_hma_vol_v1"
+name = "exp_2101_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
