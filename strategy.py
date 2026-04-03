@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #075: 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Spike
+Experiment #075: 6h Weekly Pivot Reversal with Volume Spike and ATR Filter
 
-HYPOTHESIS: 6h Donchian breakouts aligned with weekly pivot levels (from 1d HTF) capture institutional order flow.
-Weekly pivot provides structural support/resistance from prior week's range. Volume confirmation (2.0x average) ensures
-follow-through. Designed for 12-30 trades/year to minimize fee drag while maintaining statistical significance.
-Uses discrete position sizing (0.25) to reduce churn. Works in both bull/bear markets by trading breakouts
-in direction of weekly pivot bias.
+HYPOTHESIS: Price reversals at weekly pivot levels (R1/S1, R2/S2) with volume confirmation
+capture institutional order flow exhaustion. Weekly pivots act as magnet levels where
+smart money takes profit or initiates new positions. Volume spike (>1.5x average) confirms
+participation. ATR filter ensures sufficient momentum. Designed for 15-25 trades/year
+to minimize fee drag while maintaining statistical significance. Works in both bull/bear
+markets by fading extremes and trading continuations at higher pivot levels.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_donchian_weekly_pivot_volume_v1"
+name = "mtf_6h_weekly_pivot_reversal_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -31,15 +32,9 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 def calculate_weekly_pivot(df_daily):
-    """Calculate weekly pivot levels from daily OHLC data.
-    Uses prior week's high, low, close to compute:
-    PP = (H + L + C) / 3
-    R1 = 2*PP - L, S1 = 2*PP - H
-    R2 = PP + (H - L), S2 = PP - (H - L)
-    R3 = H + 2*(PP - L), S3 = L - 2*(H - PP)
-    """
+    """Calculate weekly pivot levels from daily OHLC data."""
     n = len(df_daily)
-    if n < 5:  # Need at least a week of data
+    if n < 5:
         return {
             'PP': np.full(n, np.nan),
             'R1': np.full(n, np.nan), 'S1': np.full(n, np.nan),
@@ -47,18 +42,14 @@ def calculate_weekly_pivot(df_daily):
             'R3': np.full(n, np.nan), 'S3': np.full(n, np.nan)
         }
     
-    # Convert to pandas for rolling window
     high = pd.Series(df_daily['high'].values)
     low = pd.Series(df_daily['low'].values)
     close = pd.Series(df_daily['close'].values)
     
-    # Weekly aggregation: get Friday's values (assuming 5 trading days)
-    # Simple approach: use rolling 5-day window for weekly high/low/close
     weekly_high = high.rolling(window=5, min_periods=5).max()
     weekly_low = low.rolling(window=5, min_periods=5).min()
     weekly_close = close.rolling(window=5, min_periods=5).last()
     
-    # Calculate pivot points
     PP = (weekly_high + weekly_low + weekly_close) / 3.0
     R1 = 2 * PP - weekly_low
     S1 = 2 * PP - weekly_high
@@ -96,8 +87,6 @@ def generate_signals(prices):
     
     # === 6h Indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === Signals Initialization ===
@@ -107,7 +96,7 @@ def generate_signals(prices):
     # Position tracking state variables
     in_position = False
     position_side = 0
-    entry_bar = -1
+    entry_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
@@ -115,24 +104,15 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(atr_14[i]) or np.isnan(dc_upper_20[i]) or np.isnan(dc_lower_20[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(PP_aligned[i]) or np.isnan(R1_aligned[i]) or 
-            np.isnan(S1_aligned[i]) or np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or
+        if (np.isnan(atr_14[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(PP_aligned[i]) or np.isnan(R1_aligned[i]) or np.isnan(S1_aligned[i]) or
+            np.isnan(R2_aligned[i]) or np.isnan(S2_aligned[i]) or
             np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Weekly Pivot Bias ---
-        # Price above weekly pivot = bullish bias, below = bearish bias
-        pivot_bullish = close[i] > PP_aligned[i]
-        pivot_bearish = close[i] < PP_aligned[i]
-        
-        # --- Price Channel Breakout ---
-        bullish_breakout = close[i] > dc_upper_20[i]
-        bearish_breakout = close[i] < dc_lower_20[i]
-        
         # --- Volume Confirmation ---
-        vol_ok = volume[i] > vol_ma_20[i] * 2.0 if vol_ma_20[i] > 1e-10 else False  # 2.0x volume spike
+        vol_ok = volume[i] > vol_ma_20[i] * 1.5 if vol_ma_20[i] > 1e-10 else False
         
         # --- Position Management (Exit Logic) ---
         stop_hit = False
@@ -140,25 +120,23 @@ def generate_signals(prices):
         if in_position:
             # ATR-based trailing stoploss
             if position_side > 0:
-                stop_level = highest_since_entry - 2.0 * atr_14[i]
+                stop_level = highest_since_entry - 2.5 * atr_14[i]
                 if low[i] < stop_level:
                     stop_hit = True
             else:  # Short position
-                stop_level = lowest_since_entry + 2.0 * atr_14[i]
+                stop_level = lowest_since_entry + 2.5 * atr_14[i]
                 if high[i] > stop_level:
                     stop_hit = True
             
-            # Exit conditions: trend reversal or opposite Donchian touch
-            min_hold = (i - entry_bar) >= 2  # Minimum 2 bars hold (~12h)
-            if min_hold:
-                if position_side > 0:
-                    # Exit long: price touches lower Donchian OR breaks below S1
-                    if close[i] <= dc_lower_20[i] or close[i] < S1_aligned[i]:
-                        stop_hit = True
-                else:  # position_side < 0
-                    # Exit short: price touches upper Donchian OR breaks above R1
-                    if close[i] >= dc_upper_20[i] or close[i] > R1_aligned[i]:
-                        stop_hit = True
+            # Profit taking: reduce position at 2R profit
+            if position_side > 0:
+                profit_level = entry_price + 2.0 * atr_14[i]
+                if high[i] >= profit_level and signals[i] == SIZE:
+                    signals[i] = SIZE * 0.5  # Reduce to half position
+            else:  # Short position
+                profit_level = entry_price - 2.0 * atr_14[i]
+                if low[i] <= profit_level and signals[i] == -SIZE:
+                    signals[i] = -SIZE * 0.5  # Reduce to half position
             
             if stop_hit:
                 signals[i] = 0.0
@@ -167,24 +145,62 @@ def generate_signals(prices):
                 highest_since_entry = 0.0
                 lowest_since_entry = float('inf')
             else:
-                signals[i] = position_side * SIZE
+                signals[i] = position_side * SIZE if abs(signals[i]) == SIZE else signals[i]
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long conditions: 
-        # Breakout above upper Donchian with bullish weekly pivot bias and volume confirmation
-        if bullish_breakout and pivot_bullish and vol_ok:
+        # Calculate distances to pivot levels for proximity check
+        dist_to_R1 = abs(close[i] - R1_aligned[i]) / close[i] if close[i] > 0 else float('inf')
+        dist_to_S1 = abs(close[i] - S1_aligned[i]) / close[i] if close[i] > 0 else float('inf')
+        dist_to_R2 = abs(close[i] - R2_aligned[i]) / close[i] if close[i] > 0 else float('inf')
+        dist_to_S2 = abs(close[i] - S2_aligned[i]) / close[i] if close[i] > 0 else float('inf')
+        dist_to_R3 = abs(close[i] - R3_aligned[i]) / close[i] if close[i] > 0 else float('inf')
+        dist_to_S3 = abs(close[i] - S3_aligned[i]) / close[i] if close[i] > 0 else float('inf')
+        
+        # Proximity threshold: within 0.3% of pivot level
+        proximity_threshold = 0.003
+        
+        near_R1 = dist_to_R1 < proximity_threshold
+        near_S1 = dist_to_S1 < proximity_threshold
+        near_R2 = dist_to_R2 < proximity_threshold
+        near_S2 = dist_to_S2 < proximity_threshold
+        near_R3 = dist_to_R3 < proximity_threshold
+        near_S3 = dist_to_S3 < proximity_threshold
+        
+        # Momentum check: price must be moving away from pivot after touch
+        if i >= 2:
+            price_momentum = (close[i] - close[i-2]) / close[i-2] if close[i-2] > 0 else 0
+        else:
+            price_momentum = 0
+        
+        # Long entries:
+        # 1. Near S1/S2/S3 with bullish momentum (bounce)
+        # 2. Near R3 with bearish momentum (breakout continuation)
+        if (near_S1 or near_S2 or near_S3) and price_momentum > 0.001 and vol_ok:
             in_position = True
             position_side = 1
-            entry_bar = i
+            entry_price = close[i]
             highest_since_entry = high[i]
             signals[i] = SIZE
-        # Short conditions:
-        # Breakout below lower Donchian with bearish weekly pivot bias and volume confirmation
-        elif bearish_breakout and pivot_bearish and vol_ok:
+        elif near_R3 and price_momentum > 0.002 and vol_ok:  # Breakout continuation
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            signals[i] = SIZE
+        # Short entries:
+        # 1. Near R1/R2/R3 with bearish momentum (rejection)
+        # 2. Near S3 with bullish momentum (breakdown continuation)
+        elif (near_R1 or near_R2 or near_R3) and price_momentum < -0.001 and vol_ok:
             in_position = True
             position_side = -1
-            entry_bar = i
+            entry_price = close[i]
+            lowest_since_entry = low[i]
+            signals[i] = -SIZE
+        elif near_S3 and price_momentum < -0.002 and vol_ok:  # Breakdown continuation
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
             lowest_since_entry = low[i]
             signals[i] = -SIZE
         else:
