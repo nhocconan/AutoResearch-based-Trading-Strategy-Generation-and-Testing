@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #665: 12h Donchian(20) breakout + 1d EMA(50) filter + volume confirmation + ATR stoploss
-HYPOTHESIS: 12h Donchian breakouts filtered by 1d EMA(50) trend capture momentum with low noise. Volume confirmation ensures breakout validity. Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year). Works in bull/bear markets via trend filter: only long when price > 1d EMA50, only short when price < 1d EMA50. Added tighter volume confirmation (2.0x) and ATR-based stoploss to manage risk.
+HYPOTHESIS: 12h Donchian breakouts filtered by 1d EMA(50) trend capture major momentum moves with low frequency. 
+Volume confirmation ensures breakout validity. Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year). 
+Works in bull/bear markets via trend filter: only long when price > 1d EMA50, only short when price < 1d EMA50.
 """
 
 import numpy as np
@@ -96,6 +98,14 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
+            
+            # Optional: time-based exit after 4 bars (~48h on 12h) to avoid overtrading
+            if bars_since_entry > 4:
+                in_position = False
+                position_side = 0
+                bars_since_entry = 0
+                signals[i] = 0.0
+                continue
             
             signals[i] = position_side * SIZE
             continue
