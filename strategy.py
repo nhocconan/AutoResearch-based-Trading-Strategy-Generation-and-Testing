@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #1974: 1h Donchian Breakout + 4h/1d Trend + Volume Confirmation
-HYPOTHESIS: 1h Donchian(20) breakouts aligned with 4h EMA(20) trend and 1d EMA(50) filter,
-with volume confirmation (>1.5x 20-period average) and session filter (08-20 UTC),
-capture institutional breakouts in both bull and bear markets. Target: 60-150 total trades.
+Experiment #1975: 6h Donchian Breakout + Weekly Pivot Direction + Volume Confirmation
+HYPOTHESIS: Weekly pivot levels from 1w timeframe provide strong institutional support/resistance that works in both bull and bear markets. 
+Strategy: 
+- Use 1w Camarilla pivot levels to determine bias: price > weekly R3 = bullish bias, price < weekly S3 = bearish bias
+- Enter on 6h breakout of 20-period Donchian channel only when aligned with 1w bias and volume > 2.0x 20-period average
+- Exit when price touches opposite Donchian band (mean reversion) or weekly pivot level (S3/R3)
+- Works in bull/bear markets by following weekly institutional flow. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1974_1h_donchian20_4h_1d_trend_vol_v1"
-timeframe = "1h"
+name = "exp_1975_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,36 +24,44 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h data for EMA(20) trend filter (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_20_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
-    trend_4h = np.where(close_4h > ema_20_4h, 1, -1)
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
+    # === HTF: 1w data for Camarilla pivot levels (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === HTF: 1d data for EMA(50) trend filter (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_50_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # Calculate 1w Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R4 = C + Range * 1.1/2
+    # R3 = C + Range * 1.1/4
+    # S3 = C - Range * 1.1/4
+    # S4 = C - Range * 1.1/2
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    r3_1w = close_1w + range_1w * 1.1 / 4.0
+    s3_1w = close_1w - range_1w * 1.1 / 4.0
     
-    # === 1h Indicators: Donchian(20) channels ===
-    donchian_window = 20
-    upper = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lower = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Align 1w levels to 6h timeframe (shifted by 1 for completed bars only)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
     
-    # === 1h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Donchian Channel(20) ===
+    # Upper band = highest high of last 20 periods
+    # Lower band = lowest low of last 20 periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === Session filter: 08-20 UTC (pre-compute hours array) ===
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -58,64 +69,38 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = max(donchian_window, 20, 50)  # sufficient for all indicators
+    warmup = 20  # sufficient for Donchian and volume MA
     
     for i in range(warmup, n):
-        # --- Session Filter: Only trade 08-20 UTC ---
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(trend_4h_aligned[i]) or np.isnan(trend_1d_aligned[i]) or
+        if (np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
+            np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic: ATR-based stoploss (2*ATR) and time-based exit ---
+        # --- Exit Logic ---
         if in_position:
             bars_since_entry += 1
             
-            # Calculate ATR(14) for dynamic stoploss
-            if i >= 14:
-                tr1 = high[i] - low[i]
-                tr2 = abs(high[i] - close[i-1])
-                tr3 = abs(low[i] - close[i-1])
-                tr = max(tr1, tr2, tr3)
-                # Simple ATR calculation using previous value
-                if i == 14:
-                    atr = tr
-                else:
-                    atr = 0.93 * atr_prev + 0.07 * tr  # Wilder's smoothing
-                atr_prev = atr
-            else:
-                atr = 1.0  # fallback
-            
+            # Exit conditions
             exit_signal = False
             
             if position_side > 0:  # Long position
-                # Stoploss: 2*ATR below entry
-                if price < entry_price - 2.0 * atr:
+                # Exit if price touches lower Donchian band (mean reversion)
+                if price <= donchian_lower[i]:
                     exit_signal = True
-                # Time exit: close position after 24 bars (1 day)
-                elif bars_since_entry >= 24:
-                    exit_signal = True
-                # Reverse signal: opposite Donchian break
-                elif price < lower[i]:
+                # Exit if price touches weekly S3 (strong support)
+                elif price <= s3_1w_aligned[i]:
                     exit_signal = True
             else:  # Short position
-                # Stoploss: 2*ATR above entry
-                if price > entry_price + 2.0 * atr:
+                # Exit if price touches upper Donchian band (mean reversion)
+                if price >= donchian_upper[i]:
                     exit_signal = True
-                # Time exit: close position after 24 bars (1 day)
-                elif bars_since_entry >= 24:
-                    exit_signal = True
-                # Reverse signal: opposite Donchian break
-                elif price > upper[i]:
+                # Exit if price touches weekly R3 (strong resistance)
+                elif price >= r3_1w_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -128,23 +113,19 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require both 4h and 1d trend alignment for bias filter
-        trend_bias_4h = trend_4h_aligned[i]
-        trend_bias_1d = trend_1d_aligned[i]
+        # Volume confirmation: require volume spike (> 2.0x average)
+        volume_spike = vol_ratio[i] > 2.0
         
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
-        
-        if volume_spike and trend_bias_4h == trend_bias_1d:
-            # Long entry: price breaks above upper Donchian AND both trends up
-            if trend_bias_4h > 0 and trend_bias_1d > 0 and price > upper[i]:
+        if volume_spike:
+            # Long entry: price breaks above upper Donchian AND price above weekly R3 (bullish bias)
+            if price > donchian_upper[i] and price > r3_1w_aligned[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short entry: price breaks below lower Donchian AND both trends down
-            elif trend_bias_4h < 0 and trend_bias_1d < 0 and price < lower[i]:
+            # Short entry: price breaks below lower Donchian AND price below weekly S3 (bearish bias)
+            elif price < donchian_lower[i] and price < s3_1w_aligned[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
