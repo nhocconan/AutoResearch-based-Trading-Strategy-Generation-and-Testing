@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #155: 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Spike
+Experiment #295: 6h Camarilla Pivot Levels with Weekly Trend Filter and Volume Confirmation
 
-HYPOTHESIS: 6h Donchian breakouts filtered by weekly pivot trend direction (price above/below weekly pivot) 
-and volume spikes (>2.0x average) capture strong momentum moves with reduced false breakouts. 
-Weekly pivot provides stable trend filter from higher timeframe (1w), avoiding whipsaws in both bull 
-and bear markets. Targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag. 
-Uses ATR-based stoploss for risk management. Works in bull markets (breakouts with volume) and bear 
-markets (failed breaks reverse sharply from pivot levels).
+HYPOTHESIS: Camarilla pivot levels derived from daily bars act as intraday support/resistance.
+In strong weekly trends (price above/below weekly EMA20), breaks of R4/S4 levels with volume
+confirmation (>1.8x average volume) signal continuation. Fades at R3/S3 levels with volume
+provide mean reversion opportunities in ranging markets. 6h timeframe balances signal quality
+and trade frequency (target: 12-37 trades/year). Works in bull markets (continuation breaks),
+bear markets (failed continuations reverse sharply), and ranging markets (mean reversion at
+extremes). ATR-based stoploss manages risk.
+
+IMPLEMENTATION NOTES:
+- Uses discrete position sizing (0.25) to minimize churn
+- Volume confirmation threshold: 1.8x average volume
+- Minimum holding period: 2 bars to reduce churn
+- Warmup period: 100 bars for stable HTF alignment
+- Long: Break above R4 with volume + weekly uptrend OR fade at R3 with volume + weekly downtrend
+- Short: Break below S4 with volume + weekly downtrend OR fade at S3 with volume + weekly uptrend
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_155_6h_donchian_weekly_pivot_volume_v1"
+name = "exp_295_6h_camarilla_weekly_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -25,32 +34,37 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for Weekly Pivot (Call ONCE before loop) ===
+    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate Camarilla pivot levels for each 1d bar
+    camarilla_h4 = np.full(len(df_1d), np.nan)
+    camarilla_l4 = np.full(len(df_1d), np.nan)
+    camarilla_h3 = np.full(len(df_1d), np.nan)
+    camarilla_l3 = np.full(len(df_1d), np.nan)
+    
+    for i in range(len(df_1d)):
+        h = df_1d['high'].iloc[i]
+        l = df_1d['low'].iloc[i]
+        c = df_1d['close'].iloc[i]
+        diff = h - l
+        camarilla_h4[i] = c + diff * 1.1 / 2
+        camarilla_l4[i] = c - diff * 1.1 / 2
+        camarilla_h3[i] = c + diff * 1.1 / 4
+        camarilla_l3[i] = c - diff * 1.1 / 4
+    
+    # Align Camarilla levels to 6h timeframe (shifted by 1 for completed bars only)
+    h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # === HTF: 1w data for weekly trend filter (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate Weekly Pivot (Standard: (H+L+C)/3) and Support/Resistance levels
-    typical_price = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3
-    weekly_pivot = typical_price.values
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    
-    # Weekly R1, S1 (for trend filter: price > weekly_pivot = bullish, < weekly_pivot = bearish)
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-    
-    # === 6h Indicators: Donchian Channel (20) ===
-    donchian_h = np.full(n, np.nan)
-    donchian_l = np.full(n, np.nan)
-    donchian_m = np.full(n, np.nan)
-    
-    for i in range(20, n):
-        donchian_h[i] = np.max(high[i-20:i])
-        donchian_l[i] = np.min(low[i-20:i])
-        donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
+    # Calculate weekly EMA20 for trend filter
+    ema_20w = pd.Series(df_1w['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_20w_aligned = align_htf_to_ltf(prices, df_1w, ema_20w)
     
     # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
@@ -76,57 +90,49 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 50  # Ensure enough data for HTF pivot, ATR, and Donchian
+    warmup = 100  # Increased warmup for stable HTF alignment and indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(atr_14[i]) or 
+        if (np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or 
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(ema_20w_aligned[i]) or np.isnan(atr_14[i]) or 
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- Weekly Pivot Trend Filter: Price > Pivot = bullish bias, Price < Pivot = bearish bias ---
-        price_above_pivot = close[i] > weekly_pivot_aligned[i]
-        price_below_pivot = close[i] < weekly_pivot_aligned[i]
+        # === Weekly Trend Filter ===
+        weekly_uptrend = close[i] > ema_20w_aligned[i]
+        weekly_downtrend = close[i] < ema_20w_aligned[i]
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
+        # === Volume Confirmation ===
+        volume_spike = vol_ratio[i] > 1.8
         
-        # --- Donchian Breakout Conditions ---
-        breakout_up = close[i] > donchian_h[i]
-        breakout_down = close[i] < donchian_l[i]
+        # === Camarilla Level Conditions ===
+        # Breakout conditions (continuation in trend direction)
+        breakout_r4 = close[i] > h4_aligned[i]
+        breakdown_s4 = close[i] < l4_aligned[i]
         
-        # --- Exit Logic (ATR-based stoploss) ---
+        # Fade conditions (mean reversion from extremes)
+        fade_r3 = close[i] < h3_aligned[i]  # Price moved back below R3
+        fade_s3 = close[i] > l3_aligned[i]  # Price moved back above S3
+        
+        # === Exit Logic (ATR-based stoploss) ===
         if in_position:
             bars_since_entry += 1
             
             # ATR-based stoploss
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.0 * atr_14[i]
+                stop_level = entry_price - 2.5 * atr_14[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on Donchian middle line reversion (take profit)
-                if close[i] < donchian_m[i]:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
             else:  # Short position
-                stop_level = entry_price + 2.0 * atr_14[i]
+                stop_level = entry_price + 2.5 * atr_14[i]
                 if high[i] > stop_level:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-                # Exit on Donchian middle line reversion (take profit)
-                if close[i] > donchian_m[i]:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -138,24 +144,46 @@ def generate_signals(prices):
                 signals[i] = position_side * SIZE
                 continue
             
+            # Exit conditions: opposite Camarilla level touch or middle line reversion
+            if position_side > 0:  # Long exit
+                if close[i] < l3_aligned[i] or close[i] < (h4_aligned[i] + l4_aligned[i]) / 2:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+            else:  # Short exit
+                if close[i] > h3_aligned[i] or close[i] > (h4_aligned[i] + l4_aligned[i]) / 2:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+            
             # Hold position
             signals[i] = position_side * SIZE
             continue
         
-        # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Donchian breakout up + volume spike + price above weekly pivot
-        long_condition = breakout_up and volume_spike and price_above_pivot
+        # === New Position Entry Logic (Only if Flat) ===
+        # Long: 
+        #   1) Breakout above R4 with volume + weekly uptrend (continuation)
+        #   2) Fade below R3 with volume + weekly downtrend (mean reversion in downtrend)
+        long_breakout = breakout_r4 and volume_spike and weekly_uptrend
+        long_fade = fade_r3 and volume_spike and weekly_downtrend
         
-        # Short: Donchian breakout down + volume spike + price below weekly pivot
-        short_condition = breakout_down and volume_spike and price_below_pivot
+        # Short:
+        #   1) Breakdown below S4 with volume + weekly downtrend (continuation)
+        #   2) Fade above S3 with volume + weekly uptrend (mean reversion in uptrend)
+        short_breakout = breakdown_s4 and volume_spike and weekly_downtrend
+        short_fade = fade_s3 and volume_spike and weekly_uptrend
         
-        if long_condition:
+        if long_breakout or long_fade:
             in_position = True
             position_side = 1
             entry_price = close[i]
             bars_since_entry = 0
             signals[i] = SIZE
-        elif short_condition:
+        elif short_breakout or short_fade:
             in_position = True
             position_side = -1
             entry_price = close[i]
