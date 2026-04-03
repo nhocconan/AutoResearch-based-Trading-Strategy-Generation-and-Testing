@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #293: 4h Donchian(20) breakout + 12h HMA(21) trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Price breaking 4h Donchian(20) channels with 12h HMA(21) trend confirmation and volume spike captures strong momentum moves in both bull and bear markets. The 12h HMA filters for higher-timeframe trend alignment, reducing false breakouts. Volume confirmation ensures institutional participation. ATR-based stoploss manages risk. Discrete sizing (0.25) minimizes fee drag. Target: 75-200 total trades over 4 years.
+Experiment #294: 1h Supertrend(10,3) + 4h/1d Donchian(20) trend filter + volume spike + session filter (08-20 UTC)
+HYPOTHESIS: Supertrend catches momentum on 1h while 4h/1d Donchian channels ensure we only trade with the higher timeframe trend. Volume spike confirms institutional participation. Session filter avoids low-liquidity Asian session noise. Discrete sizing (0.20) minimizes fee drag. Target: 60-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_293_4h_donchian20_12h_hma21_vol_v1"
-timeframe = "4h"
+name = "exp_294_1h_supertrend10_3_4h1d_donchian20_vol_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,65 +19,81 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for HMA(21) trend (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
-    hma_period = 21
+    # === HTF: 4h and 1d data for Donchian channels (Call ONCE before loop) ===
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate HMA(21) on 12h close
-    half_period = hma_period // 2
-    sqrt_period = int(np.sqrt(hma_period))
+    # 4h Donchian(20)
+    donch_high_4h = pd.Series(df_4h['high'].values).rolling(window=20, min_periods=20).max().shift(1).values
+    donch_low_4h = pd.Series(df_4h['low'].values).rolling(window=20, min_periods=20).min().shift(1).values
+    donch_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_high_4h)
+    donch_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_4h)
     
-    # WMA function
-    def wma(values, window):
-        weights = np.arange(1, window + 1, dtype=np.float64)
-        return np.convolve(values, weights, mode='valid') / weights.sum()
+    # 1d Donchian(20)
+    donch_high_1d = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().shift(1).values
+    donch_low_1d = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().shift(1).values
+    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
+    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
     
-    # Calculate HMA: WMA(2 * WMA(n/2) - WMA(n), sqrt(n))
-    wma_half = np.array([np.nan] * len(df_12h))
-    wma_full = np.array([np.nan] * len(df_12h))
-    
-    for i in range(half_period, len(df_12h)):
-        wma_half[i] = wma(df_12h['close'].values[i - half_period + 1:i + 1], half_period)
-    
-    for i in range(hma_period, len(df_12h)):
-        wma_full[i] = wma(df_12h['close'].values[i - hma_period + 1:i + 1], hma_period)
-    
-    # HMA = WMA(2*WMA_half - WMA_full, sqrt_period)
-    hma_12h = np.array([np.nan] * len(df_12h))
-    for i in range(hma_period, len(df_12h)):
-        if not np.isnan(wma_half[i]) and not np.isnan(wma_full[i]):
-            diff = 2 * wma_half[i] - wma_full[i]
-            start_idx = i - hma_period + 1
-            end_idx = i + 1
-            if start_idx >= 0 and end_idx <= len(df_12h):
-                wma_diff = wma(df_12h['close'].values[start_idx:end_idx], sqrt_period)
-                if not np.isnan(wma_diff):
-                    hma_12h[i] = wma_diff
-    
-    # Align HMA to 4h timeframe
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
-    
-    # === 4h Indicators: Donchian(20) channels ===
-    donchian_period = 20
-    highest_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
-    
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 1h Indicators: Supertrend(10,3) ===
+    # True Range
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    atr = pd.Series(tr).ewm(span=10, min_periods=10, adjust=False).mean().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # Basic Upper and Lower Bands
+    basic_ub = (high + low) / 2 + 3 * atr
+    basic_lb = (high + low) / 2 - 3 * atr
+    
+    # Final Upper and Lower Bands
+    final_ub = np.zeros(n)
+    final_lb = np.zeros(n)
+    final_ub[0] = basic_ub[0]
+    final_lb[0] = basic_lb[0]
+    for i in range(1, n):
+        if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
+            final_ub[i] = basic_ub[i]
+        else:
+            final_ub[i] = final_ub[i-1]
+            
+        if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
+            final_lb[i] = basic_lb[i]
+        else:
+            final_lb[i] = final_lb[i-1]
+    
+    # Supertrend
+    supertrend = np.zeros(n)
+    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
+    supertrend[0] = final_ub[0]
+    direction[0] = 1
+    for i in range(1, n):
+        if close[i] > final_ub[i-1]:
+            direction[i] = 1
+        elif close[i] < final_lb[i-1]:
+            direction[i] = -1
+        else:
+            direction[i] = direction[i-1]
+        
+        if direction[i] == 1:
+            supertrend[i] = final_lb[i]
+        else:
+            supertrend[i] = final_ub[i]
+    
+    # === 1h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     vol_ratio[:20] = 1.0
     
+    # === Session filter: 08-20 UTC (pre-compute hours) ===
+    # prices.index is already DatetimeIndex
+    hours = prices.index.hour.values
+    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.20
     
     # Position tracking state variables
     in_position = False
@@ -85,68 +101,101 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 60  # Enough for Donchian(20), ATR(14), Vol MA(20), HMA calc
+    warmup = 50  # enough for Donchian(20) and Supertrend
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(atr[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(hma_12h_aligned[i])):
+            np.isnan(donch_high_4h_aligned[i]) or np.isnan(donch_low_4h_aligned[i]) or
+            np.isnan(donch_high_1d_aligned[i]) or np.isnan(donch_low_1d_aligned[i]) or
+            np.isnan(supertrend[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        hour = hours[i]
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
+        # --- Session Filter: Only trade 08-20 UTC ---
+        if not (8 <= hour <= 20):
+            if in_position:
+                # Keep position but don't allow new entries outside session
+                signals[i] = position_side * SIZE
+                continue
+            else:
+                signals[i] = 0.0
+                continue
         
-        # --- Donchian Breakout Conditions ---
-        breakout_up = price > highest_high[i]
-        breakout_down = price < lowest_low[i]
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio[i] > 1.5
         
-        # --- 12h HMA Trend Filter ---
-        # Long only when price above 12h HMA (bullish trend)
-        # Short only when price below 12h HMA (bearish trend)
-        long_trend = price > hma_12h_aligned[i]
-        short_trend = price < hma_12h_aligned[i]
+        # --- Trend Conditions: Must align with BOTH 4h and 1d Donchian ---
+        # Uptrend: price above both 4h and 1d Donchian lower bands
+        # Downtrend: price below both 4h and 1d Donchian upper bands
+        uptrend_4h = price > donch_low_4h_aligned[i]
+        uptrend_1d = price > donch_low_1d_aligned[i]
+        downtrend_4h = price < donch_high_4h_aligned[i]
+        downtrend_1d = price < donch_high_1d_aligned[i]
         
-        # --- Exit Logic (ATR-based stoploss) ---
+        # --- Supertrend Entry Signals ---
+        supertrend_long = direction[i] == 1 and price > supertrend[i]
+        supertrend_short = direction[i] == -1 and price < supertrend[i]
+        
         if in_position:
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.5*ATR below entry
-                stop_level = entry_price - 2.5 * atr[i]
+                # Stoploss: 2*ATR below entry
+                stop_level = entry_price - 2.0 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
+                # Exit: Supertrend reversal or loss of 1h/4h/1d alignment
+                if (direction[i] == -1 or  # Supertrend flipped
+                    not (price > donch_low_4h_aligned[i] and price > donch_low_1d_aligned[i])):  # Lost uptrend alignment
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
             else:  # Short position
-                # Stoploss: 2.5*ATR above entry
-                stop_level = entry_price + 2.5 * atr[i]
+                # Stoploss: 2*ATR above entry
+                stop_level = entry_price + 2.0 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
+                # Exit: Supertrend reversal or loss of 1h/4h/1d alignment
+                if (direction[i] == 1 or  # Supertrend flipped
+                    not (price < donch_high_4h_aligned[i] and price < donch_high_1d_aligned[i])):  # Lost downtrend alignment
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+            
+            if bars_since_entry < 2:
+                signals[i] = position_side * SIZE
+                continue
             
             signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up AND bullish 12h HMA trend
-            if breakout_up and long_trend:
+            # Long: Supertrend bullish AND price above both 4h and 1d Donchian lower bands
+            if supertrend_long and uptrend_4h and uptrend_1d:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down AND bearish 12h HMA trend
-            elif breakout_down and short_trend:
+            # Short: Supertrend bearish AND price below both 4h and 1d Donchian upper bands
+            elif supertrend_short and downtrend_4h and downtrend_1d:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
