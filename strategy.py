@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #1889: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Spike
-HYPOTHESIS: Donchian channel breakouts capture strong momentum moves. Combined with 1d EMA50 trend filter, volume confirmation (>1.5x average), and discrete position sizing, this strategy enters in the direction of the breakout only when aligned with higher timeframe trend. Uses 4h timeframe to target 75-200 trades over 4 years (19-50/year). Works in both bull and bear markets by following the 1d trend. Position size: 0.25.
+Experiment #1889: 4h Donchian(20) Breakout + 1d EMA50 Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: Donchian breakouts capture strong momentum moves. Combined with 1d EMA50 trend filter, volume confirmation (>2x average), and ATR-based stoploss (2*ATR), this strategy enters in the direction of the breakout only when aligned with higher timeframe trend and sufficient momentum. Works in both bull and bear markets by following the 1d trend. Target: 75-200 total trades over 4 years (19-50/year) with discrete position sizing of 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1889_4h_donchian20_1d_ema_vol_v1"
+name = "exp_1889_4h_donchian20_1d_ema_vol_atr_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,8 +29,18 @@ def generate_signals(prices):
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     # === 4h Indicators: Donchian Channel (20) ===
+    # Upper band = highest high of last 20 periods
+    # Lower band = lowest low of last 20 periods
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === 4h Indicators: ATR(14) for stoploss ===
+    # True Range
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -52,13 +62,14 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(atr[i]) or np.isnan(trend_1d_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic: Reverse signal or adverse move ---
+        # --- Exit Logic: ATR stoploss or Donchian reversal ---
         if in_position:
             bars_since_entry += 1
             
@@ -66,18 +77,18 @@ def generate_signals(prices):
             exit_signal = False
             
             if position_side > 0:  # Long position
-                # Exit if price breaks below Donchian lower band (20)
-                if price < lowest_low[i]:
+                # Stoploss: 2*ATR below entry
+                if price <= entry_price - 2.0 * atr[i]:
                     exit_signal = True
-                # Exit if 1d trend flips
-                elif trend_1d_aligned[i] < 0:
+                # Exit if price breaks below Donchian lower band (20)
+                elif price < lowest_low[i]:
                     exit_signal = True
             else:  # Short position
-                # Exit if price breaks above Donchian upper band (20)
-                if price > highest_high[i]:
+                # Stoploss: 2*ATR above entry
+                if price >= entry_price + 2.0 * atr[i]:
                     exit_signal = True
-                # Exit if 1d trend flips
-                elif trend_1d_aligned[i] > 0:
+                # Exit if price breaks above Donchian upper band (20)
+                elif price > highest_high[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -93,8 +104,8 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 2x average)
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # Long entry: price breaks above Donchian upper band (20) AND 1d trend up
