@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #504: 1d Donchian(20) breakout + 1w EMA(20) trend + volume confirmation
-HYPOTHESIS: 1d Donchian breakouts aligned with 1w EMA(20) trend capture major trend momentum while avoiding counter-trend whipsaws. Volume confirmation (>1.5x average) filters weak breakouts. 1d timeframe minimizes fee drag while capturing sufficient moves. Works in bull markets (trend-aligned breakouts) and avoids bear market traps by requiring strong trend alignment. Discrete position sizing (0.25) manages drawdown. Target: 75-250 total trades over 4 years.
+Experiment #504: 1d Donchian(20) breakout + 1w EMA(50) trend + volume confirmation
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA(50) trend capture major trend moves while avoiding counter-trend whipsaws. Volume confirmation (>1.5x average) filters weak breakouts. Daily timeframe targets 30-100 trades over 4 years to minimize fee drag. Works in bull markets (trend-aligned breakouts) and avoids bear market traps by requiring strong trend alignment. Discrete position sizing (0.25) manages drawdown.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_504_1d_donchian20_1w_ema20_vol_v1"
+name = "exp_504_1d_donchian20_1w_ema50_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -19,10 +19,10 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for EMA(20) trend (Call ONCE before loop) ===
+    # === HTF: 1w data for EMA(50) trend (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = pd.Series(df_1w['close'].values)
-    ema_1w = close_1w.ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_1w = close_1w.ewm(span=50, min_periods=50, adjust=False).mean().values
     
     # Align EMA trend to 1d timeframe (shifted by 1 for completed 1w bar only)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
@@ -53,7 +53,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 200  # sufficient for EMA(20) warmup + other indicators
+    warmup = 200  # sufficient for EMA(50) warmup + other indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -101,8 +101,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 15 bars (~3 weeks on 1d) to avoid overtrading
-            if bars_since_entry > 15:
+            # Optional: time-based exit after 10 bars (~10 days on 1d) to avoid overtrading
+            if bars_since_entry > 10:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
