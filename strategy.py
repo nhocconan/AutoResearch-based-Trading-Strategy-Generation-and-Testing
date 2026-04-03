@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #145: 12h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
+Experiment #286: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
 
-HYPOTHESIS: 12h Donchian breakouts filtered by 1d HMA(21) trend direction (price > HMA = bullish bias, 
-price < HMA = bearish bias) and volume spikes (>2.0x average) capture strong momentum moves with 
-reduced false breakouts. The 1d HMA provides a stable trend filter from higher timeframe, more reliable 
-than shorter MA for avoiding whipsaws. Targets 12-37 trades/year (50-150 total over 4 years) to minimize 
-fee drag while capturing significant moves. Works in bull markets (breakouts with volume) and bear markets 
-(failed breaks reverse sharply from HMA levels). Uses ATR-based stoploss for risk management.
-Timeframe: 12h, HTF: 1d.
+HYPOTHESIS: 4h Donchian channel breakouts filtered by 1d Hull Moving Average trend 
+and volume spikes (>2.0x average) capture strong momentum moves with reduced false 
+breakouts. The 1d HMA provides a longer-term trend filter (more stable than 12h), 
+balancing responsiveness and smoothness. 4h timeframe targets 19-50 trades/year (75-200 total 
+over 4 years) to minimize fee drag while capturing significant moves. Works in both 
+bull (breakouts with volume) and bear (failed breaks reverse sharply) markets. Uses 
+ATR-based stoploss for risk management.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_145_12h_donchian_1d_hma_volume_v1"
-timeframe = "12h"
+name = "exp_286_4h_donchian_1d_hma_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,24 +26,25 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for HMA(21) trend (Call ONCE before loop) ===
+    # === HTF: 1d data for HMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate HMA(21) on 1d close
-    def hma(series, period):
-        """Hull Moving Average"""
+    # Calculate HMA(21) on 1d data
+    def calculate_hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
         half_period = period // 2
         sqrt_period = int(np.sqrt(period))
-        wma1 = pd.Series(series).ewm(span=half_period, adjust=False).mean()
-        wma2 = pd.Series(series).ewm(span=period, adjust=False).mean()
-        raw_hma = 2 * wma1 - wma2
-        hma_result = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
-        return hma_result.values
+        wma_half = pd.Series(arr).rolling(window=half_period, min_periods=half_period).mean().values
+        wma_full = pd.Series(arr).rolling(window=period, min_periods=period).mean().values
+        raw_hma = 2.0 * wma_half - wma_full
+        hma = pd.Series(raw_hma).rolling(window=sqrt_period, min_periods=sqrt_period).mean().values
+        return hma
     
-    hma_1d = hma(df_1d['close'].values, 21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # === 12h Indicators: Donchian Channel (20) ===
+    # === 4h Indicators: Donchian Channel (20) ===
     donchian_h = np.full(n, np.nan)
     donchian_l = np.full(n, np.nan)
     donchian_m = np.full(n, np.nan)
@@ -53,7 +54,7 @@ def generate_signals(prices):
         donchian_l[i] = np.min(low[i-20:i])
         donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
@@ -61,7 +62,7 @@ def generate_signals(prices):
     
     atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
@@ -87,7 +88,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # --- HMA Trend Filter: Price > HMA = bullish bias, Price < HMA = bearish bias ---
+        # --- 1d HMA Trend Filter: Price > HMA = bullish bias, Price < HMA = bearish bias ---
         price_above_hma = close[i] > hma_1d_aligned[i]
         price_below_hma = close[i] < hma_1d_aligned[i]
         
