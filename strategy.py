@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
 Experiment #598: 1d Donchian(20) breakout + 1w EMA50 trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts on daily timeframe aligned with weekly EMA50 trend capture major market moves with low trade frequency. Weekly EMA50 provides robust trend filter that adapts to both bull and bear markets by reducing whipsaw. Volume confirmation (>2.0x average) ensures institutional participation. ATR-based stoploss (2.5) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 30-100 total trades over 4 years by using tight entry conditions (breakout + EMA trend + volume spike) on 1d timeframe.
+HYPOTHESIS: Donchian breakouts on daily timeframe aligned with weekly EMA50 trend capture medium-term momentum with low trade frequency suitable for 1d timeframe. 
+Weekly EMA50 provides strong trend filter that adapts to both bull and bear markets by reducing whipsaw during sideways periods. 
+Volume confirmation (>2.0x average) ensures institutional participation and reduces false breakouts. 
+ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. 
+Target: 50-100 total trades over 4 years by using tight entry conditions (breakout + weekly trend + volume spike).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_598_1d_donchian20_1w_ema_vol_v1"
+name = "exp_598_1d_donchian20_1w_ema50_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -88,8 +92,8 @@ def generate_signals(prices):
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.5*ATR below entry
-                stop_level = entry_price - 2.5 * atr[i]
+                # Stoploss: 2.0*ATR below entry
+                stop_level = entry_price - 2.0 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -97,8 +101,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                # Stoploss: 2.5*ATR above entry
-                stop_level = entry_price + 2.5 * atr[i]
+                # Stoploss: 2.0*ATR above entry
+                stop_level = entry_price + 2.0 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -139,5 +143,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-}
