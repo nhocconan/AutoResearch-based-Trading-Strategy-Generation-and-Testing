@@ -1,62 +1,77 @@
 #!/usr/bin/env python3
 """
-Experiment #198: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Confirmation
+Experiment #191: 6h ADX + Williams Alligator Combination
 
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA trend capture medium-term institutional momentum. Weekly HMA (21) from 1w timeframe filters for dominant trend direction, reducing false breakouts in choppy markets. Volume confirmation ensures breakouts have participation. Targets 7-25 trades/year on 1d timeframe to minimize fee drag while capturing significant moves. Works in both bull (long breakouts with rising weekly HMA) and bear (short breakdowns with falling weekly HMA) markets by using HTF trend as regime filter.
+HYPOTHESIS: Combining ADX trend strength with Williams Alligator (SMMA crossover) on 6h timeframe
+provides robust trend-following signals. ADX > 25 filters for trending markets, while Alligator
+jaw-teeth-lips alignment confirms direction. Uses 1d timeframe for HTF trend filter to avoid
+counter-trend trades. Target: 75-150 total trades over 4 years (19-37/year) - within winning range.
+Works in both bull and bear markets by only taking trades in direction of stronger trend (via HTF).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_20_w_hma_volume_v1"
-timeframe = "1d"
+name = "mtf_6h_adx_alligator_1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
-    close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
-    volume = prices["volume"].values.astype(np.float64)
+    close = prices["close"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
+    # === HTF: 1d data for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    # 1d EMA(50) for HTF trend direction
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    htf_trend_up = ema_50_1d > np.roll(ema_50_1d, 1)  # Rising EMA50 = uptrend
+    htf_trend_down = ema_50_1d < np.roll(ema_50_1d, 1)  # Falling EMA50 = downtrend
+    htf_trend_up_aligned = align_htf_to_ltf(prices, df_1d, htf_trend_up)
+    htf_trend_down_aligned = align_htf_to_ltf(prices, df_1d, htf_trend_down)
     
-    # Calculate HMA(21) on weekly close
-    if len(df_1w) >= 21:
-        # Hull Moving Average: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        
-        def wma(values, window):
-            if len(values) < window:
-                return np.full_like(values, np.nan)
-            weights = np.arange(1, window + 1)
-            return np.convolve(values, weights / weights.sum(), mode='valid')
-        
-        close_1w = df_1w['close'].values.astype(np.float64)
-        wma_full = np.concatenate([np.full(20, np.nan), wma(close_1w, 21)])
-        wma_half = np.concatenate([np.full(half_len-1, np.nan), wma(close_1w, half_len)])
-        wma_diff = 2 * wma_half - wma_full
-        hma_21 = np.concatenate([np.full(20 + sqrt_len - 2, np.nan), wma(wma_diff[20:], sqrt_len)])
-        
-        # Align to daily timeframe
-        hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
-    else:
-        hma_21_aligned = np.full(n, np.nan)
+    # === 6h Indicators ===
+    # ADX(14) for trend strength
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    plus_dm = np.insert(plus_dm, 0, 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    minus_dm = np.insert(minus_dm, 0, 0)
     
-    # === 1d Indicators ===
-    atr_14 = np.zeros(n)
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
     
-    dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
+    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
+    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    
+    # Williams Alligator: SMMA(13,8), SMMA(8,5), SMMA(5,3)
+    def smma(source, length):
+        """Smoothed Moving Average"""
+        sma = pd.Series(source).rolling(window=length, min_periods=length).mean().values
+        smma_vals = np.full_like(source, np.nan, dtype=np.float64)
+        smma_vals[length-1] = sma[length-1]
+        for i in range(length, len(source)):
+            if not np.isnan(sma[i]):
+                smma_vals[i] = (smma_vals[i-1] * (length-1) + sma[i]) / length
+            else:
+                smma_vals[i] = smma_vals[i-1]
+        return smma_vals
+    
+    jaw = smma(close, 13)  # Blue line
+    teeth = smma(close, 8)  # Red line
+    lips = smma(close, 5)   # Green line
+    
+    # Alligator signals: Lips > Teeth > Jaw = UP, Lips < Teeth < Jaw = DOWN
+    alligator_up = (lips > teeth) & (teeth > jaw)
+    alligator_down = (lips < teeth) & (teeth < jaw)
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -65,86 +80,54 @@ def generate_signals(prices):
     # Position tracking state variables
     in_position = False
     position_side = 0
+    entry_price = 0.0
     entry_bar = -1
-    highest_since_entry = 0.0
-    lowest_since_entry = float('inf')
     
     warmup = 100  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(atr_14[i]) or np.isnan(dc_upper_20[i]) or np.isnan(dc_lower_20[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(hma_21_aligned[i])):
+        if (np.isnan(adx[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(htf_trend_up_aligned[i]) or 
+            np.isnan(htf_trend_down_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Price Channel Breakout ---
-        bullish_breakout = close[i] > dc_upper_20[i]
-        bearish_breakout = close[i] < dc_lower_20[i]
+        # --- ADX + Alligator Entry Logic ---
+        # Strong trend (ADX > 25) + Alligator alignment + HTF trend filter
+        strong_trend = adx[i] > 25
         
-        # --- Weekly HMA Trend ---
-        # Rising weekly HMA = bullish bias
-        # Falling weekly HMA = bearish bias
-        hma_rising = hma_21_aligned[i] > hma_21_aligned[i-1] if i > 0 else False
-        hma_falling = hma_21_aligned[i] < hma_21_aligned[i-1] if i > 0 else False
+        # Long: ADX > 25 + Alligator bullish alignment + HTF uptrend
+        long_condition = strong_trend & alligator_up[i] & htf_trend_up_aligned[i]
+        # Short: ADX > 25 + Alligator bearish alignment + HTF downtrend
+        short_condition = strong_trend & alligator_down[i] & htf_trend_down_aligned[i]
         
-        # --- Volume Confirmation ---
-        vol_ok = volume[i] > vol_ma_20[i] * 1.5 if vol_ma_20[i] > 1e-10 else False  # 1.5x volume spike
-        
-        # --- Position Management (Exit Logic) ---
-        stop_hit = False
-        
+        # --- Position Management ---
         if in_position:
-            # ATR-based trailing stoploss
-            if position_side > 0:
-                stop_level = highest_since_entry - 2.5 * atr_14[i]
-                if low[i] < stop_level:
-                    stop_hit = True
-            else:  # Short position
-                stop_level = lowest_since_entry + 2.5 * atr_14[i]
-                if high[i] > stop_level:
-                    stop_hit = True
+            # Check for trend weakening or Alligator reversal
+            if position_side > 0:  # Long
+                exit_condition = (adx[i] < 20) | ~alligator_up[i] | ~htf_trend_up_aligned[i]
+            else:  # Short
+                exit_condition = (adx[i] < 20) | ~alligator_down[i] | ~htf_trend_down_aligned[i]
             
-            # Exit conditions: trend reversal or opposite Donchian touch
-            min_hold = (i - entry_bar) >= 3  # Minimum 3 bars hold
-            if min_hold:
-                if position_side > 0:
-                    # Exit long: price touches lower Donchian OR weekly HMA turns bearish
-                    if close[i] <= dc_lower_20[i] or hma_falling:
-                        stop_hit = True
-                else:  # position_side < 0
-                    # Exit short: price touches upper Donchian OR weekly HMA turns bullish
-                    if close[i] >= dc_upper_20[i] or hma_rising:
-                        stop_hit = True
-            
-            if stop_hit:
-                signals[i] = 0.0
+            if exit_condition:
                 in_position = False
                 position_side = 0
-                highest_since_entry = 0.0
-                lowest_since_entry = float('inf')
+                signals[i] = 0.0
             else:
                 signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long conditions: 
-        # Breakout above upper Donchian with rising weekly HMA and volume confirmation
-        if bullish_breakout and hma_rising and vol_ok:
+        if long_condition:
             in_position = True
             position_side = 1
-            entry_bar = i
-            highest_since_entry = high[i]
+            entry_price = close[i]
             signals[i] = SIZE
-        # Short conditions:
-        # Breakout below lower Donchian with falling weekly HMA and volume confirmation
-        elif bearish_breakout and hma_falling and vol_ok:
+        elif short_condition:
             in_position = True
             position_side = -1
-            entry_bar = i
-            lowest_since_entry = low[i]
+            entry_price = close[i]
             signals[i] = -SIZE
-        else:
-            signals[i] = 0.0
     
     return signals
