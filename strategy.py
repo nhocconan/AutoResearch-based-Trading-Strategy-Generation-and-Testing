@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #243: 4h Donchian(20) breakout + 12h trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts on 4h aligned with 12h EMA(21) trend direction capture high-probability moves. Volume confirmation (>1.5x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) balances return and fee drag. Target: 75-200 total trades over 4 years (19-50/year). Works in bull markets via breakout continuation with trend and in bear markets via mean reversion at opposite band, with symmetry for longs/shorts.
+Experiment #235: 6h Camarilla pivot + 1d trend filter + volume spike
+HYPOTHESIS: On 6h timeframe, Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) combined with 1d EMA50 trend filter and volume confirmation (>1.5x average) captures high-probability reversals and continuations. In bull markets, longs at S3/S4 with trend; in bear markets, shorts at R3/R4 with trend. Uses discrete position sizing (0.25) to manage fee drag and drawdown. Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_243_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_235_6h_camarilla_1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,23 +19,46 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for EMA trend (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # === HTF: 1d data for EMA50 trend (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === 4h Indicators: Donchian(20) channels ===
-    donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === HTF: 1w data for weekly pivot points (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    # Weekly OHLC for pivot calculation
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # === 4h Indicators: ATR(14) for stoploss ===
-    tr_4h = np.zeros(n)
-    tr_4h[0] = high[0] - low[0]
+    # Calculate weekly Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R3 = Pivot + Range * 1.1
+    # S3 = Pivot - Range * 1.1
+    # R4 = Pivot + Range * 1.5
+    # S4 = Pivot - Range * 1.5
+    pivot_1w = (weekly_high + weekly_low + weekly_close) / 3.0
+    range_1w = weekly_high - weekly_low
+    r3_1w = pivot_1w + range_1w * 1.1
+    s3_1w = pivot_1w - range_1w * 1.1
+    r4_1w = pivot_1w + range_1w * 1.5
+    s4_1w = pivot_1w - range_1w * 1.5
+    
+    # Align weekly pivot levels to 6h timeframe
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    
+    # === 6h Indicators: ATR(14) for stoploss ===
+    tr_6h = np.zeros(n)
+    tr_6h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_4h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr_4h).ewm(span=14, min_periods=14, adjust=False).mean().values
+        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
@@ -51,13 +74,14 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 60
+    warmup = 60  # Enough for weekly pivot and EMA50
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
-            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(ema_12h_aligned[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(r3_1w_aligned[i]) or
+            np.isnan(s3_1w_aligned[i]) or np.isnan(r4_1w_aligned[i]) or
+            np.isnan(s4_1w_aligned[i]) or np.isnan(atr_14[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -66,13 +90,9 @@ def generate_signals(prices):
         # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
         volume_spike = vol_ratio[i] > 1.5
         
-        # --- Donchian Breakout Conditions ---
-        breakout_up = high[i] > donch_upper[i-1]
-        breakout_down = low[i] < donch_lower[i-1]
-        
-        # --- EMA Trend Condition ---
-        ema_trend_up = close[i] > ema_12h_aligned[i]
-        ema_trend_down = close[i] < ema_12h_aligned[i]
+        # --- 1d Trend Condition ---
+        trend_up = price > ema_1d_aligned[i]
+        trend_down = price < ema_1d_aligned[i]
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -86,7 +106,8 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                if breakout_down and volume_spike and ema_trend_down:
+                # Take profit at opposite S3/R3 level
+                if price > s3_1w_aligned[i] and position_side > 0:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -100,7 +121,8 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                if breakout_up and volume_spike and ema_trend_up:
+                # Take profit at opposite R3/S3 level
+                if price < r3_1w_aligned[i] and position_side < 0:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -115,27 +137,38 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Require volume spike + breakout conditions + EMA trend alignment
+        # Mean reversion at S3/R3 with trend
         if volume_spike:
-            # Long: breakout up AND EMA trend up
-            if breakout_up and ema_trend_up:
+            # Long: price at or below S3 AND uptrend
+            if price <= s3_1w_aligned[i] and trend_up:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: breakout down AND EMA trend down
-            elif breakout_down and ema_trend_down:
+            # Short: price at or above R3 AND downtrend
+            elif price >= r3_1w_aligned[i] and trend_down:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = -SIZE
+            # Breakout continuation at S4/R4 with trend
+            elif price < s4_1w_aligned[i] and trend_down:
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = -SIZE
+            elif price > r4_1w_aligned[i] and trend_up:
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = SIZE
             else:
                 signals[i] = 0.0
         else:
             signals[i] = 0.0
     
     return signals
-
-</think>
