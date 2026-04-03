@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #486: 4h Donchian(20) breakout + 1d EMA(200) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(200) trend capture major trend momentum while avoiding counter-trend whipsaws. Volume confirmation (>1.6x average) filters weak breakouts. Uses tighter volume threshold and longer EMA to reduce trade frequency (target: 75-200 trades over 4 years). Works in bull markets (trend-aligned breakouts) and avoids bear market traps by requiring strong trend alignment. Discrete position sizing (0.25) manages drawdown.
+Experiment #486: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend capture medium-term momentum. Volume confirmation (>1.5x average) ensures breakout validity. Discrete position sizing (0.25) balances return and risk. Designed to work in bull markets (breakouts with trend) and avoid whipsaws in bear/range regimes via trend filter. Uses proven structure from top performers (exp_141/146/149) with improved HTF alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_486_4h_donchian20_1d_ema200_vol_v1"
+name = "exp_486_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,10 +19,10 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA(200) trend (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA(50) trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = pd.Series(df_1d['close'].values)
-    ema_1d = close_1d.ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_1d = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
     
     # Align EMA trend to 4h timeframe (shifted by 1 for completed 1d bar only)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
@@ -53,7 +53,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 200  # sufficient for EMA(200) warmup + other indicators
+    warmup = 60  # sufficient for 20-period indicators + HTF warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -65,8 +65,8 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.6x average) ---
-        volume_spike = vol_ratio[i] > 1.6
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio[i] > 1.5
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
@@ -101,8 +101,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 10 bars (~40h on 4h) to avoid overtrading
-            if bars_since_entry > 10:
+            # Optional: time-based exit after 8 bars (~32h on 4h) to avoid overtrading
+            if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
