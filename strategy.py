@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #1174: 1h Donchian(20) Breakout + 4h/1d Trend + Volume Confirmation + Session Filter
-HYPOTHESIS: Donchian(20) breakouts on 1h timeframe with 4h/1d trend alignment and volume confirmation capture high-probability moves. 
-Session filter (08-20 UTC) reduces noise. Target: 60-150 total trades over 4 years (15-37/year) on 1h timeframe.
-Uses 4h/1d for signal direction, 1h only for entry timing to minimize fee drag.
+Experiment #1174: 1h Donchian(20) Breakout + 4h/1d Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 1h timeframe capture short-term swing moves with controlled frequency. 
+Trend filters from 4h and 1d timeframes prevent counter-trend entries and improve win rate. 
+Volume confirmation (>1.5x average) ensures institutional participation. Session filter (08-20 UTC) reduces noise trades.
+Target: 60-150 total trades over 4 years = 15-37/year for 1h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1174_1h_donchian20_4h_1d_trend_vol_session_v1"
+name = "exp_1174_1h_donchian20_4h_1d_trend_vol_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -19,7 +20,6 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
     # === HTF: 4h data for trend filter (Call ONCE before loop) ===
@@ -54,9 +54,8 @@ def generate_signals(prices):
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === Session filter: 08-20 UTC (pre-compute before loop) ===
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # === Session filter: 08-20 UTC ===
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -78,8 +77,9 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # --- Session Check ---
-        if not in_session[i]:
+        # --- Session Filter: Only trade between 08:00-20:00 UTC ---
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
@@ -116,26 +116,24 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Require BOTH 4h and 1d trend to agree for stronger signal
-            if (trend_4h_aligned[i] > 0 and trend_1d_aligned[i] > 0 and 
-                price > donch_high[i]):  # Bullish breakout
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            elif (trend_4h_aligned[i] < 0 and trend_1d_aligned[i] < 0 and 
-                  price < donch_low[i]):  # Bearish breakout
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
+            # Require BOTH 4h and 1d trend to agree for entry
+            if trend_4h_aligned[i] > 0 and trend_1d_aligned[i] > 0:  # Both uptrend
+                if price > donch_high[i]:  # Break above upper band
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
+            elif trend_4h_aligned[i] < 0 and trend_1d_aligned[i] < 0:  # Both downtrend
+                if price < donch_low[i]:  # Break below lower band
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
             else:
                 signals[i] = 0.0
         else:
             signals[i] = 0.0
     
     return signals
-
-</think>
