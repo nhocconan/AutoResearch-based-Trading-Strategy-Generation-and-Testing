@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #1001: 4h Donchian(20) Breakout + HMA Trend + Volume Confirmation + ATR Stoploss
-HYPOTHESIS: Donchian(20) breakouts capture institutional order flow. Long when price breaks above upper band with HMA(21) uptrend and volume spike (>1.5x avg). Short when price breaks below lower band with HMA(21) downtrend and volume spike. Uses discrete position sizing (0.30) to balance reward/risk. Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
+Experiment #1001: 4h Donchian(20) Breakout + HMA Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: Donchian(20) breakouts capture institutional order flow. Long when price breaks above upper band with HMA(21) uptrend and volume spike (>1.5x avg). Short when price breaks below lower band with HMA(21) downtrend and volume spike. Uses discrete position sizing (0.25) to reduce fee impact. Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
 """
 
 import numpy as np
@@ -46,7 +46,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.25  # 25% position size to reduce fee churn
     
     # Position tracking state variables
     in_position = False
