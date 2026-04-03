@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #2131: 6h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h timeframe capture intermediate-term momentum, 
-filtered by 1d Camarilla pivot levels (fade at R3/S3, breakout continuation at R4/S4) 
-and volume spikes. Works in bull markets via breakout continuation and bear markets 
-via mean reversion at extreme pivot levels. Target: 75-200 total trades over 4 years.
+Experiment #2131: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts capture intermediate-term momentum, filtered by 1d weekly pivot 
+direction (trend bias from higher timeframe structure) and volume confirmation to avoid false breaks.
+Weekly pivot levels (calculated from prior 1d week) provide strong support/resistance zones.
+Only trade breakouts in direction of weekly pivot trend to improve win rate.
+Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets.
+Target: 75-200 total trades over 4 years (19-50/year) for 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2131_6h_donchian20_1d_camarilla_vol_v1"
+name = "exp_2131_6h_donchian20_1d_weekly_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -22,33 +24,37 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
+    # === HTF: 1d data for weekly pivot calculation (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R4 = C + (H-L) * 1.500
-    # R3 = C + (H-L) * 1.250
-    # S3 = C - (H-L) * 1.250
-    # S4 = C - (H-L) * 1.500
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate weekly pivot points from prior week's OHLC (using 1d data)
+    # Week = 5 trading days (approximate, ignoring weekends for simplicity)
+    week_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
+    week_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
+    week_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().values  # last close of week
     
-    r4_1d = close_1d + range_1d * 1.500
-    r3_1d = close_1d + range_1d * 1.250
-    s3_1d = close_1d - range_1d * 1.250
-    s4_1d = close_1d - range_1d * 1.500
+    # Weekly pivot point (PP) = (High + Low + Close) / 3
+    pp = (week_high + week_low + week_close) / 3.0
+    # Weekly R1 = 2*PP - Low
+    r1 = 2 * pp - week_low
+    # Weekly S1 = 2*PP - High
+    s1 = 2 * pp - week_high
+    # Weekly R2 = PP + (High - Low)
+    r2 = pp + (week_high - week_low)
+    # Weekly S2 = PP - (High - Low)
+    s2 = pp - (week_high - week_low)
+    # Weekly R3 = High + 2*(PP - Low)
+    r3 = week_high + 2 * (pp - week_low)
+    # Weekly S3 = Low - 2*(High - PP)
+    s3 = week_low - 2 * (week_high - pp)
     
-    # Align Camarilla levels to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Trend bias: 1 if price above weekly PP, -1 if below (using prior week's values)
+    # Align to 6h timeframe
+    trend_bias_1d = np.where(close_1d > pp, 1, -1)
+    trend_bias_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
     
     # === 6h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
     # Donchian channels
@@ -57,7 +63,7 @@ def generate_signals(prices):
     donchian_upper = high_ma
     donchian_lower = low_ma
     
-    # Volume MA for spike detection
+    # Volume MA for spike detection (moderate threshold to balance trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -87,9 +93,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(pivot_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
-            np.isnan(r4_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(s4_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(trend_bias_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -106,8 +110,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price reaches S3 (mean reversion target)
-                elif price <= s3_1d_aligned[i]:
+                # Exit if price touches lower Donchian (mean reversion)
+                elif price <= donchian_lower[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -120,8 +124,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price reaches R3 (mean reversion target)
-                elif price >= r3_1d_aligned[i]:
+                # Exit if price touches upper Donchian (mean reversion)
+                elif price >= donchian_upper[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -130,36 +134,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
+        # Require weekly pivot trend alignment for bias filter
+        trend_bias = trend_bias_1d_aligned[i]
+        
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Long entry: price breaks above upper Donchian AND above R4 (breakout continuation)
-            if price > donchian_upper[i] and price > r4_1d_aligned[i]:
+            # Long entry: price breaks above upper Donchian AND weekly trend up
+            if trend_bias > 0 and price > donchian_upper[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below lower Donchian AND below S4 (breakdown continuation)
-            elif price < donchian_lower[i] and price < s4_1d_aligned[i]:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = -SIZE
-            # Long mean reversion: price touches S3 AND shows rejection (close > open)
-            elif price <= s3_1d_aligned[i] and close[i] > open[i]:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = SIZE
-            # Short mean reversion: price touches R3 AND shows rejection (close < open)
-            elif price >= r3_1d_aligned[i] and close[i] < open[i]:
+            # Short entry: price breaks below lower Donchian AND weekly trend down
+            elif trend_bias < 0 and price < donchian_lower[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
