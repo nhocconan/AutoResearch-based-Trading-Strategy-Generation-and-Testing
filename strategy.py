@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #064: 1d Donchian(20) breakout + 1w HMA(21) trend + volume spike
-HYPOTHESIS: Donchian breakouts on daily timeframe aligned with weekly HMA trend capture major momentum moves. 
-Weekly trend filter reduces whipsaw in bear markets, while daily Donchian provides precise entry/exit. 
-Volume confirmation (>2.0x average) filters false breakouts. ATR stoploss (2.5x) and minimum holding period (5 days) 
-reduce churn. Targeting 30-100 trades over 4 years (7-25/year) for low fee drag and strong test generalization.
+Experiment #072: 12h Donchian Breakout + Volume + ADX Regime Filter
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts with volume confirmation (>1.5x average)
+and ADX>25 indicate strong momentum continuation. In ranging markets (ADX<20), fade at
+Donchian channel extremes. This adapts to bull/bear regimes via ADX filtering. Uses 1d HTF
+for trend filter (price above/below 50 EMA). Target: 75-150 trades over 4 years on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_064_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_072_12h_donchian_breakout_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,45 +22,58 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
+    # === HTF: 1d data for trend filter (50 EMA) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Calculate HMA(21) on 1w close
-    def calculate_hma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
-        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
-        hma_raw = 2 * wma_half - wma_full
-        hma = pd.Series(hma_raw).ewm(span=sqrt_period, adjust=False).mean().values
-        return hma
-    
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
-    
-    # === 1d Indicators: Donchian(20) channels ===
+    # === 12h Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
         return upper, lower
     
-    donch_upper, donch_lower = calculate_donchian(high, low, 20)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
-    # === 1d Indicators: ATR(14) for stoploss ===
-    tr_1d = np.zeros(n)
-    tr_1d[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr_1d[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    # === 12h Indicators: ADX(14) for regime detection ===
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = high[0] - low[0]
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed values
+        atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+        dm_plus_smooth = pd.Series(dm_plus).ewm(span=period, adjust=False, min_periods=period).mean().values
+        dm_minus_smooth = pd.Series(dm_minus).ewm(span=period, adjust=False, min_periods=period).mean().values
+        
+        # Directional Indicators
+        di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+        di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+        
+        # DX and ADX
+        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+        adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
+        return adx
     
-    atr_14 = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+    adx = calculate_adx(high, low, close, 14)
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
-    vol_ratio[:20] = 1.0  # Neutral for warmup
+    vol_ratio[:20] = 1.0
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -70,67 +83,64 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    bars_since_entry = 0  # Track bars in position for minimum holding period
+    bars_since_entry = 0
     
-    warmup = 50  # Warmup for HMA stability
+    warmup = 50  # Warmup for ADX, Donchian, volume stability
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(hma_1w_aligned[i]) or np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
-            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(adx[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- HMA Trend: Determine 1w trend direction ---
         price = close[i]
-        hma_trend_up = price > hma_1w_aligned[i]  # Above HMA = uptrend
-        hma_trend_down = price < hma_1w_aligned[i]  # Below HMA = downtrend
+        vol_spike = vol_ratio[i] > 1.5  # Volume spike threshold
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
+        # --- Regime Detection ---
+        is_trending = adx[i] > 25
+        is_ranging = adx[i] < 20
         
-        # --- Donchian Breakout Conditions ---
-        breakout_up = high[i] > donch_upper[i-1]  # Break above upper channel
-        breakout_down = low[i] < donch_lower[i-1]  # Break below lower channel
-        
-        # --- Exit Logic (ATR-based stoploss) ---
+        # --- Exit Logic ---
         if in_position:
             bars_since_entry += 1
             
-            # ATR-based stoploss
-            if position_side > 0:  # Long position
-                stop_level = entry_price - 2.5 * atr_14[i]
-                if low[i] < stop_level:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-                # Exit on opposite Donchian breakout with volume (profit taking)
-                if breakout_down and volume_spike:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-            else:  # Short position
-                stop_level = entry_price + 2.5 * atr_14[i]
-                if high[i] > stop_level:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-                # Exit on opposite Donchian breakout with volume (profit taking)
-                if breakout_up and volume_spike:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
+            # Exit conditions based on regime
+            if is_trending:
+                # In trending market: exit on opposite Donchian break with volume
+                if position_side > 0:  # Long
+                    if low[i] < donchian_lower[i-1] and vol_spike:
+                        in_position = False
+                        position_side = 0
+                        bars_since_entry = 0
+                        signals[i] = 0.0
+                        continue
+                else:  # Short
+                    if high[i] > donchian_upper[i-1] and vol_spike:
+                        in_position = False
+                        position_side = 0
+                        bars_since_entry = 0
+                        signals[i] = 0.0
+                        continue
+            else:  # Ranging market
+                # Exit when price returns to middle of channel
+                if position_side > 0:  # Long
+                    if price < (donchian_upper[i-1] + donchian_lower[i-1]) / 2:
+                        in_position = False
+                        position_side = 0
+                        bars_since_entry = 0
+                        signals[i] = 0.0
+                        continue
+                else:  # Short
+                    if price > (donchian_upper[i-1] + donchian_lower[i-1]) / 2:
+                        in_position = False
+                        position_side = 0
+                        bars_since_entry = 0
+                        signals[i] = 0.0
+                        continue
             
-            # Minimum holding period of 5 bars to reduce churn
-            if bars_since_entry < 5:
+            # Minimum holding period of 2 bars
+            if bars_since_entry < 2:
                 signals[i] = position_side * SIZE
                 continue
             
@@ -138,21 +148,18 @@ def generate_signals(prices):
             signals[i] = position_side * SIZE
             continue
         
-        # --- New Position Entry Logic (Only if Flat) ---
-        # Only trade when breakout aligns with 1w HMA trend
-        if hma_trend_up:
-            # Long: Donchian breakout up AND volume spike AND price above 1w HMA
-            if breakout_up and volume_spike:
+        # --- New Position Entry Logic ---
+        if is_trending:
+            # Trending market: breakout continuation with HTF filter
+            # Long: price above Donchian upper + above HTF EMA50
+            # Short: price below Donchian lower + below HTF EMA50
+            if price > donchian_upper[i-1] and price > ema_50_1d_aligned[i] and vol_spike:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            else:
-                signals[i] = 0.0
-        elif hma_trend_down:
-            # Short: Donchian breakout down AND volume spike AND price below 1w HMA
-            if breakout_down and volume_spike:
+            elif price < donchian_lower[i-1] and price < ema_50_1d_aligned[i] and vol_spike:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -160,8 +167,26 @@ def generate_signals(prices):
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
+        elif is_ranging:
+            # Ranging market: fade at Donchian extremes
+            if price < donchian_upper[i-1] and price > (donchian_upper[i-1] + donchian_lower[i-1]) * 0.8 and vol_spike:
+                # Near upper band from below - short fade
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = -SIZE
+            elif price > donchian_lower[i-1] and price < (donchian_upper[i-1] + donchian_lower[i-1]) * 0.2 and vol_spike:
+                # Near lower band from above - long fade
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = SIZE
+            else:
+                signals[i] = 0.0
         else:
-            # Exactly at HMA (rare), do not trade
+            # Transition regime (ADX between 20-25) - no trade
             signals[i] = 0.0
     
     return signals
