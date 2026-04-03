@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #009: 4h Donchian(20) Breakout + 1d Trend Filter + Volume Spike + ATR Stoploss
+Experiment #149: 4h Donchian(20) Breakout + 1d Trend Filter + Volume Spike + ATR Stoploss
 
 HYPOTHESIS: Donchian channel breakouts on 4h timeframe, filtered by 1d trend (price > EMA200) 
 and confirmed by volume spikes (>2x average), capture strong momentum moves in both bull 
