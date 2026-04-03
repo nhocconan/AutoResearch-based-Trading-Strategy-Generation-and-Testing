@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #1191: 6h Donchian(20) Breakout + 1d Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 6h timeframe capture intermediate-term trends with optimal trade frequency (target: 50-150 total trades over 4 years). 
+Experiment #1192: 12h Donchian(20) Breakout + 1d Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture swing trades with optimal trade frequency for 12h (target: 50-150 total trades over 4 years). 
 Trend filter from 1d timeframe ensures alignment with higher-timeframe momentum. Volume confirmation (>1.5x average) filters for institutional participation. 
 Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 1d trend direction.
 """
@@ -10,8 +10,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1191_6h_donchian20_1d_trend_vol_v1"
-timeframe = "6h"
+name = "exp_1192_12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,16 +29,16 @@ def generate_signals(prices):
     trend_1d[1:] = np.where(close_1d[1:] > close_1d[:-1], 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 6h Indicators: Donchian(20) ===
+    # === 12h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
