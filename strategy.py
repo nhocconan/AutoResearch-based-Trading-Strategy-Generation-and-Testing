@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #287: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h aligned with 1d weekly pivot (R1/S1) direction capture high-probability moves. Volume confirmation (>1.8x average) filters weak breakouts. Works in bull markets via breakout continuation and in bear markets via mean reversion at opposite pivot level. Target: 75-200 total trades over 4 years (19-50/year). Uses discrete sizing (0.25) to minimize fee drag.
+Experiment #288: 12h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+HYPOTHESIS: Donchian breakouts on 12h aligned with 1d weekly pivot (R1/S1) direction capture high-probability moves. Volume confirmation (>1.8x average) filters weak breakouts. Works in bull markets via breakout continuation and in bear markets via mean reversion at opposite pivot level. Target: 50-150 total trades over 4 years (12-37/year). Uses discrete sizing (0.25) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_287_6h_donchian20_1d_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_288_12h_donchian20_1d_weekly_pivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,8 +23,6 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate weekly pivot points from prior week (using prior week's OHLC)
-    # For each 6h bar, we use the prior completed week's H/L/C
-    # We'll calculate weekly pivot on 1d data then align
     week_high = df_1d['high'].rolling(window=5, min_periods=5).max().shift(1)  # Prior week high
     week_low = df_1d['low'].rolling(window=5, min_periods=5).min().shift(1)    # Prior week low
     week_close = df_1d['close'].rolling(window=5, min_periods=5).last().shift(1)  # Prior week close
@@ -35,25 +33,25 @@ def generate_signals(prices):
     r2 = pivot + (week_high - week_low)
     s2 = pivot - (week_high - week_low)
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
     r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
     s2_aligned = align_htf_to_ltf(prices, df_1d, s2.values)
     
-    # === 6h Indicators: Donchian(20) channels ===
+    # === 12h Indicators: Donchian(20) channels ===
     donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: ATR(14) for stoploss ===
-    tr_6h = np.zeros(n)
-    tr_6h[0] = high[0] - low[0]
+    # === 12h Indicators: ATR(14) for stoploss ===
+    tr_12h = np.zeros(n)
+    tr_12h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
+        tr_12h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr_12h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
