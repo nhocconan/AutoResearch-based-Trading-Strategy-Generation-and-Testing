@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #095: 6h Volume-Weighted RSI + 1w Trend Filter
+Experiment #096: 12h Donchian Breakout + 1d Volume Spike + ATR Regime Filter
 
-HYPOTHESIS: Volume-weighted RSI (VW-RSI) on 6h timeframe identifies overextended conditions,
-while 1-week trend filter (price > EMA50) ensures alignment with higher timeframe direction.
-VW-RSI gives more weight to price moves on high volume, reducing false signals from low-volume
-noise. Strategy targets mean reversion at extreme VW-RSI levels (<20 for long, >80 for short)
-with volume confirmation and trend filter. Designed to work in both bull and bear markets by
-only taking trend-aligned entries. Targets 12-37 trades/year on 6h timeframe (50-150 total over 4 years).
+HYPOTHESIS: Donchian(20) breakouts on 12h timeframe, confirmed by 1d volume spike (>2x average) 
+and filtered by ATR-based regime (trending when ATR(14) > ATR(50)), captures strong momentum 
+moves in both bull and bear markets. The 12h timeframe minimizes fee drag while Donchian 
+breakouts provide objective entry/exit levels. Volume confirms institutional participation, 
+and ATR regime filter avoids choppy markets. Targets 12-37 trades/year (50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_vwrsi_1w_trend_v1"
-timeframe = "6h"
+name = "mtf_12h_donchian_vol_regime_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,110 +24,120 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
+    # === HTF: 1d data for volume spike and ATR regime (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate EMA(50) on 1w close
-    if len(df_1w) >= 50:
-        close_1w = df_1w['close'].values
-        ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate 1d volume ratio (current vs 20-period average)
+    if len(df_1d) >= 20:
+        vol_1d = df_1d['volume'].values
+        vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+        vol_ratio_1d = np.zeros(len(vol_1d))
+        vol_ratio_1d[20:] = vol_1d[20:] / vol_ma_20[20:]
+        vol_ratio_1d[:20] = 1.0
+        vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     else:
-        ema_50_1w_aligned = np.full(n, np.nan)
+        vol_ratio_1d_aligned = np.full(n, 1.0)
     
-    # === 6h Indicators ===
-    # Calculate Volume-Weighted RSI(14)
-    # VW-RSI = 100 - (100 / (1 + RS)), where RS = Avg Gain_Vol / Avg Loss_Vol
-    # Gain_Vol = max(close - prev_close, 0) * volume
-    # Loss_Vol = max(prev_close - close, 0) * volume
-    
-    price_change = np.diff(close, prepend=close[0])
-    gain_vol = np.where(price_change > 0, price_change * volume, 0.0)
-    loss_vol = np.where(price_change < 0, -price_change * volume, 0.0)
-    
-    # Wilder's smoothing (alpha = 1/period)
-    period = 14
-    alpha = 1.0 / period
-    
-    avg_gain_vol = np.zeros(n)
-    avg_loss_vol = np.zeros(n)
-    
-    # Initialize with simple average for first period
-    if n >= period:
-        avg_gain_vol[period-1] = np.mean(gain_vol[:period])
-        avg_loss_vol[period-1] = np.mean(loss_vol[:period])
+    # Calculate 1d ATR(14) and ATR(50) for regime filter
+    if len(df_1d) >= 50:
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
+        close_1d = df_1d['close'].values
         
-        # Wilder's smoothing for rest
-        for i in range(period, n):
-            avg_gain_vol[i] = alpha * gain_vol[i] + (1 - alpha) * avg_gain_vol[i-1]
-            avg_loss_vol[i] = alpha * loss_vol[i] + (1 - alpha) * avg_loss_vol[i-1]
+        # True Range
+        tr = np.zeros(len(close_1d))
+        tr[0] = high_1d[0] - low_1d[0]
+        for i in range(1, len(close_1d)):
+            tr[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+        
+        atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+        atr_50 = pd.Series(tr).ewm(span=50, min_periods=50, adjust=False).mean().values
+        
+        # Regime: trending when ATR(14) > ATR(50) (expanding volatility)
+        atr_regime = atr_14 > atr_50
+        atr_regime_aligned = align_htf_to_ltf(prices, df_1d, atr_regime)
+    else:
+        atr_regime_aligned = np.full(n, False)
+        atr_14 = np.full(n, np.nan)
     
-    # Avoid division by zero
-    rs = np.zeros(n)
-    vw_rsi = np.zeros(n)
-    for i in range(n):
-        if avg_loss_vol[i] == 0:
-            rs[i] = np.inf
-            vw_rsi[i] = 100.0
-        elif avg_gain_vol[i] == 0:
-            rs[i] = 0
-            vw_rsi[i] = 0.0
-        else:
-            rs[i] = avg_gain_vol[i] / avg_loss_vol[i]
-            vw_rsi[i] = 100.0 - (100.0 / (1.0 + rs[i]))
+    # === 12h Indicators ===
+    # Calculate Donchian channels (20-period) on 12h using prior completed 12h bar
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    
+    # Need 12h data for calculation
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) >= 20:
+        high_12h = df_12h['high'].values
+        low_12h = df_12h['low'].values
+        
+        # Calculate rolling max/min on 12h
+        dh_12h = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+        dl_12h = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+        
+        # Align to 12h timeframe
+        dh_12h_aligned = align_htf_to_ltf(prices, df_12h, dh_12h)
+        dl_12h_aligned = align_htf_to_ltf(prices, df_12h, dl_12h)
+        
+        # For each 12h bar, use PRIOR completed 12h bar's Donchian levels
+        for i in range(n):
+            # Map current time to 12h bar index
+            # We'll use the aligned arrays directly - they already give us the prior completed bar's values
+            donchian_high[i] = dh_12h_aligned[i]
+            donchian_low[i] = dl_12h_aligned[i]
+    else:
+        donchian_high = np.full(n, np.nan)
+        donchian_low = np.full(n, np.nan)
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # Discrete position sizing (25% of capital)
+    SIZE = 0.25  # 25% position size
     
-    # Position tracking state variables
+    # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
     
-    warmup = max(100, period * 2)  # Ensure enough data for HTF and indicator calculations
+    warmup = 100  # Ensure enough data for HTF calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if np.isnan(ema_50_1w_aligned[i]):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(atr_regime_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Trend Filter: Only trade in direction of 1w trend ---
-        price_above_1w_ema = close[i] > ema_50_1w_aligned[i]
-        price_below_1w_ema = close[i] < ema_50_1w_aligned[i]
-        
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
-            # Calculate ATR(14) for stoploss
-            tr = np.zeros(i+1)
-            tr[0] = high[0] - low[0]
+            # Calculate ATR(14) on 12h for stoploss (using available data)
+            tr_12h = np.zeros(i+1)
+            tr_12h[0] = high[0] - low[0]
             for j in range(1, i+1):
-                tr[j] = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-            atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().iloc[-1]
+                tr_12h[j] = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            atr_12h = pd.Series(tr_12h).ewm(span=14, min_periods=14, adjust=False).mean().iloc[-1]
             
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.5 * atr_14
+                stop_level = entry_price - 2.5 * atr_12h
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Exit when VW-RSI returns to neutral territory (40-60)
-                if 40 <= vw_rsi[i] <= 60:
+                # Exit when price breaks below Donchian low (trailing exit)
+                if close[i] < donchian_low[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_level = entry_price + 2.5 * atr_14
+                stop_level = entry_price + 2.5 * atr_12h
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Exit when VW-RSI returns to neutral territory (40-60)
-                if 40 <= vw_rsi[i] <= 60:
+                # Exit when price breaks above Donchian high (trailing exit)
+                if close[i] > donchian_high[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -139,14 +148,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: VW-RSI oversold (<20) in uptrend
+        # Long: Price breaks above Donchian high with volume spike and trending regime
         long_condition = (
-            vw_rsi[i] < 20 and price_above_1w_ema
+            close[i] > donchian_high[i] and 
+            vol_ratio_1d_aligned[i] > 2.0 and 
+            atr_regime_aligned[i]
         )
         
-        # Short: VW-RSI overbought (>80) in downtrend
+        # Short: Price breaks below Donchian low with volume spike and trending regime
         short_condition = (
-            vw_rsi[i] > 80 and price_below_1w_ema
+            close[i] < donchian_low[i] and 
+            vol_ratio_1d_aligned[i] > 2.0 and 
+            atr_regime_aligned[i]
         )
         
         if long_condition:
