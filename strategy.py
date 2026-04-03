@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #587: 6h Donchian(20) breakout + 1d pivot direction + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts aligned with 1d pivot direction (bullish above pivot, bearish below) capture medium-term momentum with lower trade frequency than 4h. Volume confirmation (>2.0x average) ensures institutional participation. Targets 50-150 total trades over 4 years by using tight entry conditions (breakout + pivot alignment + volume spike).
+Experiment #588: 12h Donchian(20) breakout + 1w EMA50 trend + volume confirmation + ATR stoploss
+HYPOTHESIS: 12h Donchian breakouts aligned with 1w EMA50 trend capture multi-week momentum with lower trade frequency. 
+1w EMA50 provides a strong trend filter that avoids whipsaw in both bull and bear markets. Volume confirmation (>2.0x average) 
+ensences institutional participation. ATR-based stoploss (2.5) manages risk. Discrete position sizing (0.25) limits drawdown. 
+Targets 50-150 total trades over 4 years by using tight entry conditions (breakout + EMA trend + volume spike).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_587_6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_588_12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,40 +22,29 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for pivot levels (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === HTF: 1w data for EMA50 trend (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels for 1d timeframe
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = close_1d + 1.1 * (high_1d - low_1d) / 12.0
-    s1_1d = close_1d - 1.1 * (high_1d - low_1d) / 12.0
-    r2_1d = close_1d + 1.1 * (high_1d - low_1d) / 6.0
-    s2_1d = close_1d - 1.1 * (high_1d - low_1d) / 6.0
-    r3_1d = close_1d + 1.1 * (high_1d - low_1d) / 4.0
-    s3_1d = close_1d - 1.1 * (high_1d - low_1d) / 4.0
-    r4_1d = close_1d + 1.1 * (high_1d - low_1d) / 2.0
-    s4_1d = close_1d - 1.1 * (high_1d - low_1d) / 2.0
+    # Calculate EMA50 on 1w timeframe
+    if len(close_1w) >= 50:
+        ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    else:
+        ema_1w = np.full(len(close_1w), np.nan)
     
-    # Align 1d pivot levels to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Align EMA50 to 12h timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # === 6h Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)  # default to 1.0 for warmup period
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -69,12 +61,12 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for Donchian and volume calculations
+    warmup = 50  # sufficient for EMA50 calculation
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(pivot_1d_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(ema_1w_aligned[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -88,11 +80,11 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- 1d Pivot Direction Filter ---
-        # Bullish bias: price above R3 (strong resistance turned support)
-        bullish_bias = price > r3_1d_aligned[i]
-        # Bearish bias: price below S3 (strong support turned resistance)
-        bearish_bias = price < s3_1d_aligned[i]
+        # --- 1w EMA50 Trend Filter ---
+        # Bullish trend: price above 1w EMA50
+        bullish_trend = price > ema_1w_aligned[i]
+        # Bearish trend: price below 1w EMA50
+        bearish_trend = price < ema_1w_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -117,8 +109,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 12 bars (~3 days on 6h) to avoid overtrading
-            if bars_since_entry > 12:
+            # Optional: time-based exit after 4 bars (~2 days on 12h) to avoid overtrading
+            if bars_since_entry > 4:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -130,15 +122,15 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + bullish 1d bias (above R3)
-            if breakout_up and bullish_bias:
+            # Long: Donchian breakout up + bullish 1w EMA50 trend
+            if breakout_up and bullish_trend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + bearish 1d bias (below S3)
-            elif breakout_down and bearish_bias:
+            # Short: Donchian breakout down + bearish 1w EMA50 trend
+            elif breakout_down and bearish_trend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
