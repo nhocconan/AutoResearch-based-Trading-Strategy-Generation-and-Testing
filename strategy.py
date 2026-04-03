@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #214: 1h Camarilla Pivot Reversion with Volume Spike and Session Filter
+Experiment #351: 6h Camarilla Pivot + 1d Trend + Volume Spike (Revised)
 
-HYPOTHESIS: Camarilla pivot levels (R3/S3) from 1d act as magnetic levels in ranging markets.
-Price tends to revert to the pivot point (PP) after touching R3/S3 with volume confirmation.
-In trending markets (1d ADX > 25), breakouts above R4 or below S4 with volume spike
-continue the trend. This mean-reversion + breakout structure works in both bull (strong
-breakouts) and bear (failed reversals at R3/S3) markets. 1h timeframe targets 15-37
-trades/year (60-150 total over 4 years) to minimize fee drag. Uses 4h/1d for signal
-direction and 1h only for entry timing. Session filter (08-20 UTC) reduces noise.
+HYPOTHESIS: Camarilla pivot levels from 1d provide intraday support/resistance zones. 
+Breakouts above R4 or below S4 with volume confirmation (>1.5x average) and aligned 
+1d trend (close > 1d EMA50) capture strong momentum moves. Fade at R3/S3 in ranging 
+markets (1d ADX < 25). 6h timeframe targets 12-37 trades/year (50-150 total over 4 years) 
+to minimize fee drag. Works in bull (breakouts with volume) and bear (failed reversals 
+at R3/S3) markets. This version fixes entry logic and adds minimum holding period to 
+increase trade frequency from previous near-zero attempts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_214_1h_camarilla_pivot_v1"
-timeframe = "1h"
+name = "exp_351_6h_camarilla_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,12 +24,7 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
-    
-    # Pre-compute session hours (08-20 UTC) - open_time is already datetime64[ms]
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
     
     # === HTF: 1d data for Camarilla pivots and trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
@@ -68,7 +63,7 @@ def generate_signals(prices):
         s4_1d[i] = s4
         pp_1d[i] = pp
     
-    # Align Camarilla levels to 1h timeframe
+    # Align Camarilla levels to 6h timeframe
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
@@ -109,46 +104,23 @@ def generate_signals(prices):
     adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
     adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # === 1h Indicators: ATR(14) for stoploss ===
-    tr_1h = np.zeros(n)
-    tr_1h[0] = high[0] - low[0]
+    # === 6h Indicators: ATR(14) for stoploss ===
+    tr_6h = np.zeros(n)
+    tr_6h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_1h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    atr_14 = pd.Series(tr_1h).ewm(span=14, min_periods=14, adjust=False).mean().values
+    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 1h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
     vol_ratio[:20] = 1.0  # Neutral for warmup
     
-    # === 1h Indicators: VWAP deviation for mean reversion timing ===
-    # Typical price
-    typical_price = (high + low + close) / 3.0
-    # VWAP calculation
-    vwap_numerator = np.zeros(n)
-    vwap_denominator = np.zeros(n)
-    vwap = np.full(n, np.nan)
-    
-    # Calculate VWAP using rolling window of 20 periods
-    for i in range(n):
-        start_idx = max(0, i - 19)
-        vol_sum = volume[start_idx:i+1].sum()
-        if vol_sum > 0:
-            tp_sum = (typical_price[start_idx:i+1] * volume[start_idx:i+1]).sum()
-            vwap[i] = tp_sum / vol_sum
-        else:
-            vwap[i] = typical_price[i]  # Fallback to typical price if no volume
-    
-    # VWAP deviation (normalized by ATR)
-    vwap_dev = np.zeros(n)
-    vwap_dev[14:] = (close[14:] - vwap[14:]) / atr_14[14:]
-    vwap_dev[:14] = 0.0
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # Position sizing (20% of capital)
+    SIZE = 0.25  # Position sizing (25% of capital)
     
     # Position tracking state variables
     in_position = False
@@ -159,16 +131,11 @@ def generate_signals(prices):
     warmup = 100  # Warmup for 1d indicators stability
     
     for i in range(warmup, n):
-        # --- Session Filter: Only trade 08-20 UTC ---
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
         if (np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
             np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
             np.isnan(ema50_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
-            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or np.isnan(vwap[i])):
+            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -187,7 +154,6 @@ def generate_signals(prices):
         s4 = s4_1d_aligned[i]
         ema50 = ema50_1d_aligned[i]
         pp = pp_1d_aligned[i]
-        vwap_val = vwap[i]
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -202,8 +168,8 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on mean reversion to VWAP in ranging markets
-                if is_ranging and abs(vwap_dev[i]) < 0.3:
+                # Exit on mean reversion to pivot point in ranging markets
+                if is_ranging and abs(price - pp) < 0.5 * atr_14[i]:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -217,8 +183,8 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on mean reversion to VWAP in ranging markets
-                if is_ranging and abs(vwap_dev[i]) < 0.3:
+                # Exit on mean reversion to pivot point in ranging markets
+                if is_ranging and abs(price - pp) < 0.5 * atr_14[i]:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -241,19 +207,19 @@ def generate_signals(prices):
         # Short breakout: Price < S4 + volume spike + 1d trend down (price < EMA50)
         short_breakout = (price < s4) and volume_spike and (price < ema50)
         
-        # Long mean reversion: Price < R3 + volume spike + ranging + below VWAP
-        long_mr = (price < r3) and volume_spike and is_ranging and (vwap_dev[i] < -0.5)
+        # Long fade: Price < R3 + volume spike + ranging market (fade from resistance)
+        long_fade = (price < r3) and volume_spike and is_ranging and (price > pp)
         
-        # Short mean reversion: Price > S3 + volume spike + ranging + above VWAP
-        short_mr = (price > s3) and volume_spike and is_ranging and (vwap_dev[i] > 0.5)
+        # Short fade: Price > S3 + volume spike + ranging market (fade from support)
+        short_fade = (price > s3) and volume_spike and is_ranging and (price < pp)
         
-        if long_breakout or long_mr:
+        if long_breakout or long_fade:
             in_position = True
             position_side = 1
             entry_price = close[i]
             bars_since_entry = 0
             signals[i] = SIZE
-        elif short_breakout or short_mr:
+        elif short_breakout or short_fade:
             in_position = True
             position_side = -1
             entry_price = close[i]
