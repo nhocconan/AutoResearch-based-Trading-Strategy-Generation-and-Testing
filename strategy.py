@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #987: 6h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: Institutional order flow accumulates at weekly pivot levels. 6h Donchian(20) breakouts aligned with weekly pivot direction (above/below weekly pivot) capture momentum with institutional backing. Volume confirmation (>1.5x average) filters false breakouts. Discrete position sizing (0.30) manages risk. Weekly pivot acts as regime filter - price above weekly pivot = bullish bias (longs only), below = bearish bias (shorts only). Target: 75-200 total trades over 4 years (19-50/year) on 6h timeframe.
+Experiment #989: 4h Donchian(20) Breakout + HMA Trend + Volume Confirmation + ATR Stoploss
+HYPOTHESIS: Donchian(20) breakouts capture institutional order flow. Long when price breaks above upper band with HMA(21) uptrend and volume spike (>1.5x avg). Short when price breaks below lower band with HMA(21) downtrend and volume spike. Uses discrete position sizing (0.30) to balance reward/risk. Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_987_6h_donchian20_1d_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_989_4h_donchian20_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,33 +19,25 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for weekly pivot (Call ONCE before loop) ===
+    # === HTF: 1d data for additional trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    hma_1d = calculate_hma(close_1d, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate weekly pivot from prior week (using last 5 daily bars = 1 week)
-    weekly_pivot = np.full(n, np.nan)
-    if len(high_1d) >= 5:
-        # Rolling window of 5 days (1 week) on 1d data
-        rolling_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-        rolling_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-        rolling_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().values
-        weekly_pivot_1d = (rolling_high + rolling_low + rolling_close) / 3.0
-        # Align to 6h timeframe
-        weekly_pivot = align_htf_to_ltf(prices, df_1d, weekly_pivot_1d)
-    
-    # === 6h Indicators: Donchian(20) ===
+    # === 4h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: HMA(21) for trend filter ===
+    hma = calculate_hma(close, 21)
+    
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -67,8 +59,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(weekly_pivot[i])):
+            np.isnan(hma[i]) or np.isnan(hma_1d_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -97,8 +89,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 12 bars (~3d on 6h) to avoid overtrading
-            if bars_since_entry > 12:
+            # Optional: time-based exit after 8 bars (~2d on 4h) to avoid overtrading
+            if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -113,20 +105,20 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Weekly pivot regime filter: price above/below weekly pivot determines bias
-            price_above_pivot = price > weekly_pivot[i]
-            price_below_pivot = price < weekly_pivot[i]
+            # HMA trend filter: 4h HMA(21) direction + 1d HMA(21) alignment
+            hma_uptrend = hma[i] > hma[i-1]
+            hma_downtrend = hma[i] < hma[i-1]
+            hma_1d_uptrend = hma_1d_aligned[i] > hma_1d_aligned[i-1] if i > 0 else False
+            hma_1d_downtrend = hma_1d_aligned[i] < hma_1d_aligned[i-1] if i > 0 else False
             
-            # Donchian breakout with weekly pivot alignment
-            if price > donch_high[i] and price_above_pivot:
-                # Bullish breakout in bullish regime (above weekly pivot)
+            # Breakout continuation: price breaks above upper band OR below lower band
+            if price > donch_high[i] and hma_uptrend and hma_1d_uptrend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and price_below_pivot:
-                # Bearish breakout in bearish regime (below weekly pivot)
+            elif price < donch_low[i] and hma_downtrend and hma_1d_downtrend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -140,7 +132,7 @@ def generate_signals(prices):
     return signals
 
 def calculate_hma(close, period):
-    """Calculate Hull Moving Average - kept for potential use but not used in this strategy"""
+    """Calculate Hull Moving Average"""
     if len(close) < period:
         return np.full_like(close, np.nan)
     half_period = period // 2
