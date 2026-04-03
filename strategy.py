@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #144: 1d Donchian(20) Breakout + 1w Trend Filter + Volume Spike + ATR Stoploss
+Experiment #004: 1d Donchian(20) Breakout + 1w Trend Filter + Volume Spike + ATR Stoploss
 
 HYPOTHESIS: Donchian channel breakouts on 1d timeframe, filtered by 1w trend (price > EMA50) 
 and confirmed by volume spikes (>2x average), capture strong momentum moves in both bull 
 and bear markets. The Donchian structure provides objective breakout levels, the 1w EMA50 
 filter ensures alignment with higher timeframe trend (avoiding counter-trend trades), and 
-volume confirmation filters out false breakouts. Targets 75-150 total trades over 4 years 
-(19-38/year) to minimize fee drag while capturing high-probability trends.
+volume confirmation filters out false breakouts. Targets 10-30 trades/year on 1d timeframe 
+(40-120 total over 4 years) to minimize fee drag while capturing high-probability trends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_vol_trend_v1"
+name = "exp_004_1d_donchian_1w_volume_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -46,7 +46,7 @@ def generate_signals(prices):
         donchian_l[i] = np.min(low[i-20:i])
         donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
     
-    # === 1d Indicators: ATR(14) for stoploss and volume average ===
+    # === 1d Indicators: ATR(14) for stoploss ===
     atr_14 = np.full(n, np.nan)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
@@ -70,7 +70,7 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     
-    warmup = 50  # Ensure enough data for HTF EMA50 and ATR
+    warmup = 200  # Ensure enough data for HTF EMA50 and ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
