@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #1911: 6h Williams %R Extreme + 1d Volume Spike + Camarilla Pivot Breakout
-HYPOTHESIS: Williams %R extremes (overbought/oversold) on 6h combined with 1d volume spikes and breakouts
-beyond Camarilla R4/S4 levels capture institutional order flow in both bull and bear markets.
-The strategy avoids overtrading by requiring multiple confluence factors: extreme momentum,
-volume confirmation, and structural breakout. Target: 75-150 total trades over 4 years.
+Experiment #1912: 12h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture significant price moves when aligned with 1d EMA(50) trend and volume confirmation (>1.5x average). 
+This strategy targets fewer, higher-quality trades by requiring confluence of price structure (breakout), trend filter (1d EMA), and volume spike. 
+Designed to work in both bull and bear markets by following the dominant 1d trend while using 12h for precise entry timing. 
+Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1911_6h_williamsr_1d_camarilla_vol_v1"
-timeframe = "6h"
+name = "exp_1912_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,45 +22,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivot levels and volume (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d Camarilla pivot levels
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R4 = C + Range * 1.1/2
-    # R3 = C + Range * 1.1/4
-    # S3 = C - Range * 1.1/4
-    # S4 = C - Range * 1.1/2
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r4_1d = close_1d + range_1d * 1.1 / 2.0
-    r3_1d = close_1d + range_1d * 1.1 / 4.0
-    s3_1d = close_1d - range_1d * 1.1 / 4.0
-    s4_1d = close_1d - range_1d * 1.1 / 2.0
+    # Calculate 1d EMA(50) for trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_50_1d, 1, -1)  # 1 = uptrend, -1 = downtrend
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # 1d volume MA(20) for spike detection
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = np.ones(len(volume_1d))
-    vol_ratio_1d[20:] = volume_1d[20:] / vol_ma_1d[20:]
+    # === 12h Indicators: Donchian(20) channels ===
+    # Calculate rolling max/min for Donchian channels
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align 1d levels and volume ratio to 6h timeframe (shifted by 1 for completed bars only)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
-    
-    # === 6h Indicators: Williams %R(14) for momentum extremes ===
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.full(n, np.nan)
-    williams_r[13:] = ((highest_high[13:] - close[13:]) / (highest_high[13:] - lowest_low[13:])) * -100
+    # === 12h Indicators: Volume MA(20) for spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.ones(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -72,38 +51,48 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for Williams %R(14) and 1d indicators
+    warmup = 50  # sufficient for Donchian(20), EMA(50), and volume MA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(williams_r[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or
+            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic ---
+        # --- Exit Logic: ATR-based stoploss and Donchian opposite touch ---
         if in_position:
             bars_since_entry += 1
             
-            # Exit conditions
+            # Calculate ATR(14) for dynamic stoploss
+            # Simplified ATR calculation using high-low range
+            tr1 = high[i] - low[i]
+            tr2 = np.abs(high[i] - close[i-1]) if i > 0 else tr1
+            tr3 = np.abs(low[i] - close[i-1]) if i > 0 else tr1
+            tr = np.maximum(tr1, np.maximum(tr2, tr3))
+            # Use rolling average of TR for ATR(14)
+            if i >= 14:
+                atr_14 = pd.Series([tr if j==i else np.nan for j in range(i+1)]).rolling(window=14, min_periods=14).mean().iloc[-1]
+            else:
+                atr_14 = np.nan
+            
             exit_signal = False
             
             if position_side > 0:  # Long position
-                # Exit if price returns to 1d pivot (mean reversion)
-                # Or if Williams %R exits extreme zone (> -20)
-                if price <= pivot_1d_aligned[i]:
+                # Stoploss: 2 * ATR below entry
+                if not np.isnan(atr_14) and price < entry_price - 2.0 * atr_14:
                     exit_signal = True
-                elif williams_r[i] > -20:  # No longer oversold
+                # Exit if price touches Donchian lower channel (20-period low)
+                elif price <= low_min[i]:
                     exit_signal = True
             else:  # Short position
-                # Exit if price returns to 1d pivot (mean reversion)
-                # Or if Williams %R exits extreme zone (< -80)
-                if price >= pivot_1d_aligned[i]:
+                # Stoploss: 2 * ATR above entry
+                if not np.isnan(atr_14) and price > entry_price + 2.0 * atr_14:
                     exit_signal = True
-                elif williams_r[i] < -80:  # No longer overbought
+                # Exit if price touches Donchian upper channel (20-period high)
+                elif price >= high_max[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -116,19 +105,19 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require 1d volume spike (> 1.8x average)
-        volume_spike = vol_ratio_1d_aligned[i] > 1.8
+        # Require volume confirmation: volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Long entry: Williams %R deeply oversold (< -80) AND price breaks above R4
-            if williams_r[i] < -80 and price > r4_1d_aligned[i]:
+            # Long entry: price breaks above Donchian upper channel AND 1d trend up
+            if trend_1d_aligned[i] > 0 and price > high_max[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short entry: Williams %R deeply overbought (> -20) AND price breaks below S4
-            elif williams_r[i] > -20 and price < s4_1d_aligned[i]:
+            # Short entry: price breaks below Donchian lower channel AND 1d trend down
+            elif trend_1d_aligned[i] < 0 and price < low_min[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
