@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #1887: 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: Donchian breakouts capture strong momentum. Weekly pivot direction (from 1w timeframe) provides structural bias: price above weekly pivot = bullish bias, below = bearish bias. Volume confirmation (>1.5x average) ensures breakout validity. This combination works in both bull and bear markets by aligning with weekly structure. Target: 75-200 total trades over 4 years (19-50/year) with discrete position sizing of 0.25.
+Experiment #1887: 6h Camarilla Pivot + Volume Spike + ADX Regime Filter
+HYPOTHESIS: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) 
+capture institutional order flow. Combined with 1d trend filter (EMA50), volume 
+confirmation (>1.5x average), and ADX regime filter (ADX>20 = trending), this 
+strategy fades at R3/S3 in ranging markets and breaks out at R4/S4 in trending 
+markets. Works in both bull and bear markets by adapting to regime. Target: 
+75-150 total trades over 4 years (19-37/year) with discrete position sizing of 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1887_6h_donchian20_1w_pivot_vol_v1"
+name = "exp_1887_6h_camarilla_pivot_1d_ema_vol_adx_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -19,24 +24,65 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for weekly pivot calculation (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # === HTF: 1d data for pivot points and trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly pivot points: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
+    # Calculate Camarilla pivot levels for 1d
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R4 = C + (H-L) * 1.1/2
+    # R3 = C + (H-L) * 1.1/4
+    # S3 = C - (H-L) * 1.1/4
+    # S4 = C - (H-L) * 1.1/2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r4_1d = close_1d + range_1d * 1.1 / 2.0
+    r3_1d = close_1d + range_1d * 1.1 / 4.0
+    s3_1d = close_1d - range_1d * 1.1 / 4.0
+    s4_1d = close_1d - range_1d * 1.1 / 2.0
     
-    # Weekly bias: 1 = bullish (above pivot), -1 = bearish (below pivot)
-    weekly_bias = np.where(close_1w > pivot_1w, 1, -1)
-    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias)
+    # 1d EMA(50) for trend direction
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_50_1d, 1, -1)
     
-    # === 6h Indicators: Donchian Channel (20) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Align HTF arrays to 6h
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    
+    # === 6h Indicators: ADX(14) for regime filter ===
+    # True Range
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    tr[0] = high[0] - low[0]
+    
+    # Directional Movement
+    dm_plus = np.zeros(n)
+    dm_minus = np.zeros(n)
+    for i in range(1, n):
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        dm_plus[i] = up_move if up_move > down_move and up_move > 0 else 0
+        dm_minus[i] = down_move if down_move > up_move and down_move > 0 else 0
+    
+    # Smoothed values
+    tr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    dm_plus_14 = pd.Series(dm_plus).ewm(span=14, min_periods=14, adjust=False).mean().values
+    dm_minus_14 = pd.Series(dm_minus).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_14 / (tr_14 + 1e-10)
+    di_minus = 100 * dm_minus_14 / (tr_14 + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -53,12 +99,14 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 60  # sufficient for weekly data alignment and Donchian(20)
+    warmup = 50  # sufficient for EMA(50) and ADX(14)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(weekly_bias_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
+            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(adx[i]) or np.isnan(trend_1d_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -72,18 +120,24 @@ def generate_signals(prices):
             exit_signal = False
             
             if position_side > 0:  # Long position
-                # Exit if price breaks below Donchian lower band (20)
-                if price < lowest_low[i]:
+                # Exit if price reaches S3 (mean reversion target)
+                if price <= s3_1d_aligned[i]:
                     exit_signal = True
-                # Exit if weekly bias flips to bearish
-                elif weekly_bias_aligned[i] < 0:
+                # Exit if ADX weakens significantly (trend ending)
+                elif adx[i] < 15:
+                    exit_signal = True
+                # Exit if 1d trend flips strongly
+                elif trend_1d_aligned[i] < 0 and adx[i] > 25:
                     exit_signal = True
             else:  # Short position
-                # Exit if price breaks above Donchian upper band (20)
-                if price > highest_high[i]:
+                # Exit if price reaches R3 (mean reversion target)
+                if price >= r3_1d_aligned[i]:
                     exit_signal = True
-                # Exit if weekly bias flips to bullish
-                elif weekly_bias_aligned[i] > 0:
+                # Exit if ADX weakens significantly (trend ending)
+                elif adx[i] < 15:
+                    exit_signal = True
+                # Exit if 1d trend flips strongly
+                elif trend_1d_aligned[i] > 0 and adx[i] > 25:
                     exit_signal = True
             
             if exit_signal:
@@ -96,28 +150,52 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require weekly bias for directional filter
-        bias = weekly_bias_aligned[i]
-        
-        # Volume confirmation: require volume spike (> 1.5x average)
+        # Require volume confirmation: volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Long entry: price breaks above Donchian upper band (20) AND weekly bias bullish
-            if bias > 0 and price > highest_high[i]:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            # Short entry: price breaks below Donchian lower band (20) AND weekly bias bearish
-            elif bias < 0 and price < lowest_low[i]:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
+            # Determine market regime based on ADX
+            trending = adx[i] > 25
+            ranging = adx[i] < 20
+            
+            if trending:
+                # Trending market: breakout continuation at R4/S4
+                # Long breakout: price breaks above R4 AND 1d trend up
+                if trend_1d_aligned[i] > 0 and price > r4_1d_aligned[i]:
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
+                # Short breakout: price breaks below S4 AND 1d trend down
+                elif trend_1d_aligned[i] < 0 and price < s4_1d_aligned[i]:
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
+                else:
+                    signals[i] = 0.0
+            elif ranging:
+                # Ranging market: mean reversion at R3/S3
+                # Long mean reversion: price drops to S3 AND 1d trend not strongly down
+                if trend_1d_aligned[i] >= -1 and price <= s3_1d_aligned[i]:
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
+                # Short mean reversion: price rises to R3 AND 1d trend not strongly up
+                elif trend_1d_aligned[i] <= 1 and price >= r3_1d_aligned[i]:
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
+                else:
+                    signals[i] = 0.0
             else:
+                # Transition zone (ADX 20-25): no clear signal
                 signals[i] = 0.0
         else:
             signals[i] = 0.0
