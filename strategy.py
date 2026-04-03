@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #1513: 4h Donchian(20) Breakout + 12h Trend + Volume Confirmation + Chop Filter
-HYPOTHESIS: Donchian(20) breakouts on 4h capture medium-term swings with 12h EMA(50) trend filter for direction.
-Volume confirmation (>1.3x average) and choppiness regime filter (CHOP > 38.2) reduce false breakouts.
-ATR-based stoploss (2.0) manages risk. Uses 12h HTF for trend to avoid look-ahead and improve alignment.
-Designed for 19-50 trades/year (75-200 total over 4 years) by using tight entry conditions and multi-timeframe confluence.
-Works in bull/bear markets by following 12h trend direction.
+HYPOTHESIS: Donchian(20) breakouts on 4h capture medium-term swings with 12h EMA(20) trend filter for direction.
+Volume confirmation (>1.5x average) and choppiness regime filter (CHOP > 50) reduce false breakouts.
+ATR-based stoploss (2.0) manages risk. Designed for 19-50 trades/year (75-200 total over 4 years) by using
+tight entry conditions and multi-timeframe confluence. Works in bull/bear markets by following 12h trend direction.
 """
 
 import numpy as np
@@ -27,32 +26,32 @@ def generate_signals(prices):
     # === HTF: 12h data for trend filter (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
-    # EMA(50) for 12h trend
-    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # EMA(20) for 12h trend
+    ema_12h = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
     trend_12h = np.where(close_12h > ema_12h, 1, -1)
     trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
-    # === HTF: 1w data for chop regime filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    # True Range for 1w
-    tr1 = np.zeros(len(close_1w))
-    for i in range(1, len(close_1w)):
-        tr1[i] = max(high_1w[i] - low_1w[i], abs(high_1w[i] - close_1w[i-1]), abs(low_1w[i] - close_1w[i-1]))
-    tr1[0] = high_1w[0] - low_1w[0]
-    atr1w = pd.Series(tr1).ewm(span=14, min_periods=14, adjust=False).mean().values
-    # +DM and -DM for 1w
-    up_move = np.zeros(len(high_1w))
-    down_move = np.zeros(len(high_1w))
-    for i in range(1, len(high_1w)):
-        up_move[i] = high_1w[i] - high_1w[i-1]
-        down_move[i] = low_1w[i-1] - low_1w[i]
+    # === HTF: 1d data for chop regime filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    # True Range for 1d
+    tr1d = np.zeros(len(close_1d))
+    for i in range(1, len(close_1d)):
+        tr1d[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+    tr1d[0] = high_1d[0] - low_1d[0]
+    atr1d = pd.Series(tr1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # +DM and -DM for 1d
+    up_move = np.zeros(len(high_1d))
+    down_move = np.zeros(len(high_1d))
+    for i in range(1, len(high_1d)):
+        up_move[i] = high_1d[i] - high_1d[i-1]
+        down_move[i] = low_1d[i-1] - low_1d[i]
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     # Smoothed +DM, -DM, ATR
-    tr_ma = pd.Series(atr1w).ewm(span=14, min_periods=14, adjust=False).mean().values
+    tr_ma = pd.Series(atr1d).ewm(span=14, min_periods=14, adjust=False).mean().values
     plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
     minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
     # +DI and -DI
@@ -61,7 +60,7 @@ def generate_signals(prices):
     # DX and Choppiness
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
     chop = 100 * np.log10(tr_ma * np.sqrt(14)) / np.log10(dx + 1e-10)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
     
     # === 4h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -131,11 +130,11 @@ def generate_signals(prices):
         # Require 12h trend alignment
         trend_following = trend_12h_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.3x average)
-        volume_spike = vol_ratio[i] > 1.3
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
-        # Chop regime filter: require CHOP > 38.2 (trending market)
-        chop_filter = chop_aligned[i] > 38.2
+        # Chop regime filter: require CHOP > 50 (trending market)
+        chop_filter = chop_aligned[i] > 50.0
         
         if trend_following != 0 and volume_spike and chop_filter:
             # Breakout: price breaks above upper band OR below lower band
