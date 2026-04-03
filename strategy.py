@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #657: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA(50) trend capture strong momentum with low overtrading. Daily EMA provides robust trend filter that works in both bull and bear markets. Volume confirmation ensures breakout validity. Designed for 4h to hit 75-200 total trades over 4 years (19-50/year).
+Experiment #657: 4h Donchian(20) breakout + daily EMA(50) trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA(50) trend capture strong momentum with low overtrading.
+Daily EMA provides trend filter that works in both bull and bear markets (price above/below EMA).
+Volume confirmation ensures breakout validity. Designed for 4h to hit 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -75,8 +77,8 @@ def generate_signals(prices):
         breakout_down = price < lowest_low[i]
         
         # --- Daily EMA Trend Filter ---
-        # Long bias: price above daily EMA(50)
-        # Short bias: price below daily EMA(50)
+        # Long bias: price above daily EMA(50) (uptrend)
+        # Short bias: price below daily EMA(50) (downtrend)
         long_bias = price > ema_50_aligned[i]
         short_bias = price < ema_50_aligned[i]
         
@@ -116,14 +118,14 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + price above daily EMA(50)
+            # Long: Donchian breakout up + price above EMA(50) (uptrend)
             if breakout_up and long_bias:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + price below daily EMA(50)
+            # Short: Donchian breakout down + price below EMA(50) (downtrend)
             elif breakout_down and short_bias:
                 in_position = True
                 position_side = -1
