@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #1650: 1d Donchian(20) Breakout + 1w HMA Trend + Volume + ATR Stoploss
-HYPOTHESIS: 1d Donchian breakouts with 1w HMA trend alignment and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 1w timeframe filters out noise from shorter-term fluctuations, while the 1d Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 50-100 total trades over 4 years (12-25/year) by using tight entry conditions and multi-timeframe confluence.
+Experiment #1651: 6h Donchian(20) Breakout + 1d Williams %R + Volume Confirmation
+HYPOTHESIS: 6h Donchian breakouts aligned with 1d Williams %R extremes (oversold for longs, overbought for shorts) and volume spikes (>1.5x average) capture medium-term swings with proper timing. The 1d Williams %R acts as a momentum filter to avoid buying strength or selling weakness, while volume confirms institutional participation. Target: 75-150 total trades over 4 years (19-37/year) by using tight multi-timeframe confluence.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1650_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_1651_6h_donchian20_1d_willr_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,35 +17,44 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # HMA(21): Hull Moving Average
-    def hull_moving_average(arr, period):
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
-        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
-        raw_hma = 2 * wma_half - wma_full
-        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
-        return hma
-    hma_1w = hull_moving_average(close_1w, 21)
-    trend_1w = np.where(close_1w > hma_1w, 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # === HTF: 1d data for Williams %R filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 1d Indicators: Donchian(20) ===
+    # Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    def williams_r(high, low, close, period=14):
+        highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        wr = np.zeros_like(close)
+        for i in range(len(close)):
+            if i < period - 1:
+                wr[i] = np.nan
+            else:
+                hh = highest_high[i]
+                ll = lowest_low[i]
+                if hh == ll:
+                    wr[i] = -50.0  # avoid division by zero
+                else:
+                    wr[i] = ((hh - close[i]) / (hh - ll)) * -100.0
+        return wr
+    
+    willr_1d = williams_r(high_1d, low_1d, close_1d, 14)
+    willr_1d_aligned = align_htf_to_ltf(prices, df_1d, willr_1d)
+    
+    # === 6h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -67,7 +76,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(willr_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -100,21 +109,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1w trend alignment
-        trend_following = trend_1w_aligned[i] != 0  # Should always be ±1
+        # Williams %R conditions: oversold (< -80) for long, overbought (> -20) for short
+        willr_oversold = willr_1d_aligned[i] < -80.0
+        willr_overbought = willr_1d_aligned[i] > -20.0
         
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
-        if trend_following and volume_spike:
-            # Breakout: price breaks above upper band OR below lower band
-            if price > donch_high[i] and trend_1w_aligned[i] > 0:  # Uptrend breakout
+        if volume_spike:
+            # Breakout: price breaks above upper band OR below lower band with Williams %R filter
+            if price > donch_high[i] and willr_oversold:  # Uptrend breakout from oversold
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and trend_1w_aligned[i] < 0:  # Downtrend breakdown
+            elif price < donch_low[i] and willr_overbought:  # Downtrend breakdown from overbought
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
