@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #003: 4h Donchian(20) Breakout + 12h Trend + Volume Spike
+Experiment #002: 12h Donchian(24) Breakout + 1d Trend + Volume Spike
 
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe, when aligned with 12h trend (price above/below 12h EMA50) and confirmed by volume spikes (>1.5x 20-bar MA), capture strong trending moves. Uses ATR-based trailing stop (2.5x ATR). Designed for low trade frequency (~19-50/year) to minimize fee drag in both bull and bear markets by requiring confluence of breakout, 12h trend, and volume confirmation.
+HYPOTHESIS: Donchian(24) breakouts on 12h timeframe, when aligned with 1d trend (price above/below 1d EMA50) and confirmed by volume spikes (>1.5x 20-bar MA), capture strong trending moves with low trade frequency (~12-37/year) to minimize fee drag in both bull and bear markets by requiring confluence of breakout, trend, and volume.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_12h_trend_volume_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -33,16 +33,16 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h EMA for trend filter (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # === HTF: 1d EMA for trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 4h Indicators ===
+    # === 12h Indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    dc_upper_24 = pd.Series(high).rolling(window=24, min_periods=24).max().shift(1).values
+    dc_lower_24 = pd.Series(low).rolling(window=24, min_periods=24).min().shift(1).values
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === Signals Initialization ===
@@ -60,21 +60,21 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(atr_14[i]) or np.isnan(dc_upper_20[i]) or np.isnan(dc_lower_20[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(ema_50_12h_aligned[i])):
+        if (np.isnan(atr_14[i]) or np.isnan(dc_upper_24[i]) or np.isnan(dc_lower_24[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # --- Price Levels ---
-        ema_50_12h = ema_50_12h_aligned[i]
+        ema_50_1d = ema_50_1d_aligned[i]
         
-        # --- 12h Trend Filter ---
-        trend_bullish = close[i] > ema_50_12h
-        trend_bearish = close[i] < ema_50_12h
+        # --- 1d Trend Filter ---
+        trend_bullish = close[i] > ema_50_1d
+        trend_bearish = close[i] < ema_50_1d
         
         # --- Price Channel Breakout ---
-        bullish_breakout = close[i] > dc_upper_20[i]
-        bearish_breakout = close[i] < dc_lower_20[i]
+        bullish_breakout = close[i] > dc_upper_24[i]
+        bearish_breakout = close[i] < dc_lower_24[i]
         
         # --- Volume Confirmation ---
         vol_ok = volume[i] > vol_ma_20[i] * 1.5 if vol_ma_20[i] > 1e-10 else False  # 1.5x volume spike
@@ -94,7 +94,7 @@ def generate_signals(prices):
                     stop_hit = True
             
             # Exit conditions: trend reversal
-            min_hold = (i - entry_bar) >= 2  # Minimum 2 bars hold (~8h)
+            min_hold = (i - entry_bar) >= 2  # Minimum 2 bars hold (~24h)
             if min_hold:
                 if position_side > 0:
                     # Exit long: trend turns bearish
@@ -116,14 +116,14 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long conditions: Breakout above DC upper with bullish 12h trend AND volume confirmation
+        # Long conditions: Breakout above DC upper with bullish 1d trend AND volume confirmation
         if bullish_breakout and trend_bullish and vol_ok:
             in_position = True
             position_side = 1
             entry_bar = i
             highest_since_entry = high[i]
             signals[i] = SIZE
-        # Short conditions: Breakout below DC lower with bearish 12h trend AND volume confirmation
+        # Short conditions: Breakout below DC lower with bearish 1d trend AND volume confirmation
         elif bearish_breakout and trend_bearish and vol_ok:
             in_position = True
             position_side = -1
