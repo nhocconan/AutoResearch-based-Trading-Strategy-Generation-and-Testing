@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #099: 6h Williams %R + 12h ADX Trend + Volume Confirmation
+Experiment #119: 6h Williams %R + 12h Volume Spike + 1d ADX Trend Filter
 
 HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h timeframe, 
-filtered by 12h ADX(14) > 25 to ensure we trade only in trending markets, and 12h volume 
-confirmation (> 1.5x average) to ensure institutional participation. In bull markets, we 
-buy oversold pullbacks in uptrends; in bear markets, we sell overbought bounces in downtrends. 
-ATR-based stoploss manages risk. Targets 12-37 trades/year on 6h timeframe (50-150 total over 
-4 years) to minimize fee drag while capturing medium-term swings.
+combined with 12h volume spike confirmation and 1d ADX trend filter (>25) to ensure 
+trending market conditions. This strategy targets mean reversion in strong trends 
+(Williams %R >80 for short in downtrend, <20 for long in uptrend) with volume 
+confirmation to filter false signals. Designed for 12-37 trades/year on 6h timeframe 
+(50-150 total over 4 years) to minimize fee drag while capturing high-probability 
+reversals within established trends. Works in both bull and bear markets by 
+aligning with higher timeframe direction via ADX.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_williamsr_adx_vol_v1"
+name = "mtf_6h_williamsr_vol_trend_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -25,47 +27,8 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for ADX trend filter and volume confirmation (Call ONCE before loop) ===
+    # === HTF: 12h data for volume spike (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
-    
-    # Calculate ADX(14) on 12h
-    if len(df_12h) >= 14:
-        high_12h = df_12h['high'].values
-        low_12h = df_12h['low'].values
-        close_12h = df_12h['close'].values
-        
-        # True Range
-        tr = np.zeros(len(close_12h))
-        tr[0] = high_12h[0] - low_12h[0]
-        for i in range(1, len(close_12h)):
-            tr[i] = max(high_12h[i] - low_12h[i], 
-                       abs(high_12h[i] - close_12h[i-1]), 
-                       abs(low_12h[i] - close_12h[i-1]))
-        
-        # Directional Movement
-        dm_plus = np.zeros(len(close_12h))
-        dm_minus = np.zeros(len(close_12h))
-        for i in range(1, len(close_12h)):
-            up_move = high_12h[i] - high_12h[i-1]
-            down_move = low_12h[i-1] - low_12h[i]
-            dm_plus[i] = up_move if up_move > down_move and up_move > 0 else 0
-            dm_minus[i] = down_move if down_move > up_move and down_move > 0 else 0
-        
-        # Smoothed TR, DM+ , DM-
-        tr_ma = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-        dm_plus_ma = pd.Series(dm_plus).ewm(span=14, min_periods=14, adjust=False).mean().values
-        dm_minus_ma = pd.Series(dm_minus).ewm(span=14, min_periods=14, adjust=False).mean().values
-        
-        # DI+ and DI-
-        di_plus = 100 * dm_plus_ma / tr_ma
-        di_minus = 100 * dm_minus_ma / tr_ma
-        
-        # DX and ADX
-        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-        adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
-        adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    else:
-        adx_12h_aligned = np.full(n, 0.0)
     
     # Calculate volume ratio (current vs 20-period average) on 12h
     if len(df_12h) >= 20:
@@ -78,17 +41,58 @@ def generate_signals(prices):
     else:
         vol_ratio_12h_aligned = np.full(n, 1.0)
     
+    # === HTF: 1d data for ADX trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate ADX(14) on 1d
+    if len(df_1d) >= 14:
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
+        close_1d = df_1d['close'].values
+        
+        # True Range
+        tr1 = high_1d - low_1d
+        tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+        tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First period
+        
+        # Directional Movement
+        dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                           np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+        dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                            np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed values
+        tr_14 = pd.Series(tr).ewm(span=14, adjust=False).mean().values
+        dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False).mean().values
+        dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False).mean().values
+        
+        # Directional Indicators
+        di_plus = 100 * dm_plus_14 / tr_14
+        di_minus = 100 * dm_minus_14 / tr_14
+        
+        # DX and ADX
+        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+        adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
+        
+        # Align to LTF
+        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    else:
+        adx_1d_aligned = np.full(n, 0.0)
+    
     # === 6h Indicators ===
     # Williams %R(14)
-    williams_r = np.zeros(n)
-    for i in range(n):
-        start_idx = max(0, i - 13)
-        highest_high = np.max(high[start_idx:i+1])
-        lowest_low = np.min(low[start_idx:i+1])
-        if highest_high != lowest_low:
-            williams_r[i] = (highest_high - close[i]) / (highest_high - lowest_low) * -100
-        else:
-            williams_r[i] = -50  # Neutral when no range
+    if n >= 14:
+        highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+        lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+        williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+        # Handle division by zero (when high == low)
+        williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    else:
+        williams_r = np.full(n, -50)
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -103,19 +107,16 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(adx_12h_aligned[i]) or np.isnan(vol_ratio_12h_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(vol_ratio_12h_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Trend Filter: Require ADX > 25 for trending market ---
-        is_trending = adx_12h_aligned[i] > 25
+        # --- Regime Filter: Only trade when ADX > 25 (trending market) ---
+        trending_market = adx_1d_aligned[i] > 25
         
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) on 12h ---
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
         volume_spike = vol_ratio_12h_aligned[i] > 1.5
-        
-        # --- Williams %R Conditions ---
-        oversold = williams_r[i] < -80  # Oversold
-        overbought = williams_r[i] > -20  # Overbought
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -133,8 +134,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit when Williams %R reaches overbought (exit long)
-                if williams_r[i] > -20:
+                # Take profit at Williams %R reversal (exit extreme)
+                if williams_r[i] > -20:  # Exit overbought
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -146,8 +147,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit when Williams %R reaches oversold (exit short)
-                if williams_r[i] < -80:
+                # Take profit at Williams %R reversal (exit extreme)
+                if williams_r[i] < -80:  # Exit oversold
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -158,18 +159,29 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Williams %R oversold in uptrend with volume confirmation
+        # Long: Williams %R oversold (< -80) in uptrend (we infer trend from price vs EMA50 proxy)
+        # Use price vs 20-period EMA on 6h as short-term trend filter
+        if i >= 20:
+            ema_20 = pd.Series(close[:i+1]).ewm(span=20, adjust=False).mean().iloc[-1]
+            price_above_ema = close[i] > ema_20
+            price_below_ema = close[i] < ema_20
+        else:
+            price_above_ema = True  # Default to allow trading during warmup
+            price_below_ema = True
+        
         long_condition = (
-            oversold and 
-            is_trending and 
-            volume_spike
+            williams_r[i] < -80 and  # Oversold
+            price_above_ema and      # In short-term uptrend
+            trending_market and      # Higher timeframe trend confirmed
+            volume_spike             # Volume confirmation
         )
         
-        # Short: Williams %R overbought in downtrend with volume confirmation
+        # Short: Williams %R overbought (> -20) in downtrend
         short_condition = (
-            overbought and 
-            is_trending and 
-            volume_spike
+            williams_r[i] > -20 and  # Overbought
+            price_below_ema and      # In short-term downtrend
+            trending_market and      # Higher timeframe trend confirmed
+            volume_spike             # Volume confirmation
         )
         
         if long_condition:
