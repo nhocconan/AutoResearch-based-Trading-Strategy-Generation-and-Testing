@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #1958: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian channel breakouts capture institutional momentum, filtered by weekly HMA trend to avoid counter-trend whipsaws. Volume confirmation ensures breakout legitimacy. Works in bull/bear markets by only trading with the higher timeframe trend. Target: 30-100 total trades over 4 years.
+Experiment #1959: 6h Williams %R Extreme + 12h ADX Trend Filter + Volume Spike
+HYPOTHESIS: Williams %R identifies overbought/oversold conditions on 6h timeframe. 
+ADX from 12h filters for trending markets (ADX > 25) to avoid false signals in chop.
+Volume spike (>2x average) confirms institutional participation at extremes.
+In trending markets, extremes often continue rather than reverse - we breakout in direction of trend.
+Works in both bull/bear by following 12h trend direction. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1958_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_1959_6h_williamsr_12h_adx_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,46 +23,66 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === HTF: 12h data for ADX trend filter (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate 1w HMA(21) - Hull Moving Average
-    def hma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        half = period // 2
-        sqrt = int(np.sqrt(period))
-        wma2 = np.full_like(arr, np.nan)
-        wma1 = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= half - 1:
-                wma2[i] = np.mean(arr[i-half+1:i+1])
-            if i >= period - 1:
-                wma1[i] = np.mean(arr[i-period+1:i+1])
-        raw_hma = 2 * wma2 - wma1
-        hma_result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= sqrt - 1:
-                hma_result[i] = np.mean(raw_hma[i-sqrt+1:i+1])
-        return hma_result
+    # Calculate ADX(14) on 12h
+    period = 14
+    # True Range
+    tr1 = high_12h[1:] - low_12h[1:]
+    tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+    tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])  # align with indices
     
-    hma_21_1w = hma(close_1w, 21)
-    hma_21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_21_1w)
+    # Directional Movement
+    up_move = high_12h[1:] - high_12h[:-1]
+    down_move = low_12h[:-1] - low_12h[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    # === Primary: 1d Donchian(20) channels ===
-    def donchian_channel(high_arr, low_arr, period):
-        upper = np.full_like(high_arr, np.nan)
-        lower = np.full_like(low_arr, np.nan)
-        for i in range(len(high_arr)):
-            if i >= period - 1:
-                upper[i] = np.max(high_arr[i-period+1:i+1])
-                lower[i] = np.min(low_arr[i-period+1:i+1])
-        return upper, lower
+    # Smoothed values using Wilder's smoothing (alpha = 1/period)
+    def WilderSmoothing(data, period):
+        result = np.full_like(data, np.nan, dtype=np.float64)
+        if len(data) >= period:
+            # First value is simple average
+            result[period-1] = np.nanmean(data[:period])
+            # Subsequent values: Wilder smoothing
+            for i in range(period, len(data)):
+                if not np.isnan(result[i-1]):
+                    result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
     
-    upper_20, lower_20 = donchian_channel(high, low, 20)
+    atr = WilderSmoothing(tr, period)
+    plus_di = 100 * WilderSmoothing(plus_dm, period) / atr
+    minus_di = 100 * WilderSmoothing(minus_dm, period) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = WilderSmoothing(dx, period)
     
-    # === 1d volume confirmation: volume > 1.5x 20-period average ===
+    # Trend: ADX > 25 indicates trending market
+    trend_strong = adx > 25.0
+    trend_direction = np.where(plus_di > minus_di, 1, -1)  # +DI > -DI = uptrend
+    
+    # Align 12h indicators to 6h timeframe
+    trend_strong_aligned = align_htf_to_ltf(prices, df_12h, trend_strong)
+    trend_direction_aligned = align_htf_to_ltf(prices, df_12h, trend_direction)
+    
+    # === 6h Indicators: Williams %R(14) ===
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.where(
+        (highest_high - lowest_low) != 0,
+        ((highest_high - close) / (highest_high - lowest_low)) * -100,
+        -50  # neutral when no range
+    )
+    
+    # === 6h Indicators: Volume Spike Detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -73,12 +97,12 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for Donchian(20) and HMA
+    warmup = 50  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(upper_20[i]) or np.isnan(lower_20[i]) or
-            np.isnan(hma_21_1w_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(trend_strong_aligned[i]) or np.isnan(trend_direction_aligned[i]) or
+            np.isnan(williams_r[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -88,17 +112,20 @@ def generate_signals(prices):
         if in_position:
             bars_since_entry += 1
             
-            # Exit conditions: opposite Donchian break
+            # Exit conditions
             exit_signal = False
             
-            if position_side > 0:  # Long position
-                # Exit if price breaks below lower Donchian
-                if price < lower_20[i]:
+            # Exit if Williams %R returns to neutral zone (-50) 
+            if position_side > 0:  # Long
+                if williams_r[i] >= -50:
                     exit_signal = True
-            else:  # Short position
-                # Exit if price breaks above upper Donchian
-                if price > upper_20[i]:
+            else:  # Short
+                if williams_r[i] <= -50:
                     exit_signal = True
+            
+            # Time-based exit: max 12 bars (3 days) to prevent overstaying
+            if bars_since_entry >= 12:
+                exit_signal = True
             
             if exit_signal:
                 in_position = False
@@ -110,32 +137,33 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require weekly HMA trend alignment
-        price_above_hma = close_1w[-1] > hma_21_1w[-1] if len(close_1w) == len(hma_21_1w) else False
-        # Use aligned HMA for current bar trend
-        hma_trend_up = hma_21_1w_aligned[i] > 0  # Simplified: if HMA value is valid, assume trend
-        
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
-        
-        if volume_spike:
-            # Long entry: price breaks above upper Donchian AND weekly HMA uptrend
-            if hma_trend_up and price > upper_20[i]:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            # Short entry: price breaks below lower Donchian AND weekly HMA downtrend
-            elif not hma_trend_up and price < lower_20[i]:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
+        # Require strong trend on 12h
+        if trend_strong_aligned[i]:
+            trend_dir = trend_direction_aligned[i]
+            
+            # Volume confirmation: require significant spike (> 2x average)
+            volume_spike = vol_ratio[i] > 2.0
+            
+            if volume_spike:
+                # Long entry: Williams %R oversold (< -80) AND 12h uptrend
+                if trend_dir > 0 and williams_r[i] < -80:
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
+                # Short entry: Williams %R overbought (> -20) AND 12h downtrend
+                elif trend_dir < 0 and williams_r[i] > -20:
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         else:
-            signals[i] = 0.0
+            signals[i] = 0.0  # choppy market - no trades
     
     return signals
