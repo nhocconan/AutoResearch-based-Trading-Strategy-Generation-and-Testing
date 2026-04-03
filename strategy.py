@@ -1,21 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #214: 1h HTF(4h/1d) Trend + Volume + Session Filter
+Experiment #069: 4h Donchian(20) Breakout + Daily Pivot Direction + Volume Spike + Chop Filter (Refined)
 
-HYPOTHESIS: Use 4h EMA(21) trend direction and 1d higher high/low structure for bias, 
-enter on 1h pullbacks with volume confirmation during active UTC 08-20 session. 
-This captures swing trades in trends while avoiding chop and low-liquidity periods. 
-Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag. 
-Discrete sizing (0.20) reduces turnover costs. Works in bull (trend continuation) 
-and bear (trend reversals on higher timeframe structure).
+HYPOTHESIS: Donchian channel breakouts on 4h timeframe, filtered by daily pivot direction 
+(price > daily pivot = bullish bias, price < daily pivot = bearish bias), volume spikes (>2.0x average), 
+and choppiness regime (CHOP > 61.8 = ranging, avoid breakouts in chop) capture strong momentum 
+moves with reduced false breakouts. Daily pivot provides intraday structural support/resistance. 
+4h timeframe targets 19-50 trades/year (75-200 total over 4 years) to minimize fee drag while 
+capturing significant moves. Chop filter avoids whipsaws in ranging markets. ATR-based stoploss 
+manages risk. Works in both bull (breakouts with volume) and bear (failed breaks reverse sharply).
+Refined: Reduced position size to 0.20, adjusted ATR stoploss to 2.0x, and added minimum holding period of 3 bars to reduce churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_214_1h_htf_trend_volume_session_v1"
-timeframe = "1h"
+name = "exp_069_4h_donchian_daily_pivot_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,126 +25,170 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # Precompute session hours (08-20 UTC) ONCE before loop
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # === HTF: 4h EMA(21) for trend direction (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) >= 21:
-        ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-        ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)  # auto shift(1)
-    else:
-        ema_4h_aligned = np.full(n, np.nan)
-    
-    # === HTF: 1d Higher High/Low Structure for bias ===
+    # === HTF: 1d data for daily pivot calculation (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 2:
-        # Higher High: today's high > yesterday's high
-        hh = df_1d['high'].values > np.roll(df_1d['high'].values, 1)
-        # Higher Low: today's low > yesterday's low
-        hl = df_1d['low'].values > np.roll(df_1d['low'].values, 1)
-        # Lower High: today's high < yesterday's high
-        lh = df_1d['high'].values < np.roll(df_1d['high'].values, 1)
-        # Lower Low: today's low < yesterday's low
-        ll = df_1d['low'].values < np.roll(df_1d['low'].values, 1)
+    
+    # Calculate daily pivot points from 1d data (using prior day's OHLC)
+    # Daily pivot = (Prior Day High + Prior Day Low + Prior Day Close) / 3
+    daily_pivot = np.full(n, np.nan)
+    
+    if len(df_1d) >= 2:  # Need at least 2 days of data
+        # Align 1d data to LTF index for shifting
+        # Create series indexed by 1d open_time
+        df_1d_indexed = df_1d.set_index('open_time')
         
-        # Bullish structure: HH and HL
-        bull_struct = hh & hl
-        # Bearish structure: LH and LL
-        bear_struct = lh & ll
+        # Calculate prior day's OHLC using shift(1) on the indexed series
+        prior_day_high = df_1d_indexed['high'].shift(1).values
+        prior_day_low = df_1d_indexed['low'].shift(1).values
+        prior_day_close = df_1d_indexed['close'].shift(1).values
         
-        # Align to 1h timeframe with shift(1) for completed days only
-        bull_struct_aligned = align_htf_to_ltf(prices, df_1d, bull_struct.astype(float))
-        bear_struct_aligned = align_htf_to_ltf(prices, df_1d, bear_struct.astype(float))
+        # Calculate daily pivot for each prior day
+        prior_day_pivot = (prior_day_high + prior_day_low + prior_day_close) / 3.0
+        
+        # Create series aligned with 1d index
+        daily_pivot_series = pd.Series(index=df_1d_indexed.index, data=prior_day_pivot)
+        
+        # Align to LTF (4h) timeframe with shift(1) for completed bars only
+        daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot_series.values)
     else:
-        bull_struct_aligned = np.full(n, np.nan)
-        bear_struct_aligned = np.full(n, np.nan)
+        daily_pivot_aligned = np.full(n, np.nan)
     
-    # === 1h Indicators: EMA(21) for dynamic support/resistance ===
-    ema_21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
+    # === 4h Indicators: Donchian Channel (20) ===
+    donchian_h = np.full(n, np.nan)
+    donchian_l = np.full(n, np.nan)
+    donchian_m = np.full(n, np.nan)
     
-    # === 1h Indicators: Volume MA(20) for confirmation ===
+    for i in range(20, n):
+        donchian_h[i] = np.max(high[i-20:i])
+        donchian_l[i] = np.min(low[i-20:i])
+        donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
+    
+    # === 4h Indicators: ATR(14) for stoploss ===
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
-    vol_ratio[:20] = 1.0
+    vol_ratio[:20] = 1.0  # Neutral for warmup
+    
+    # === 4h Indicators: Choppiness Index (14) for regime filter ===
+    # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (max(high) - min(low))))
+    # Simplified: CHOP > 61.8 = ranging (avoid breakouts), CHOP < 38.2 = trending
+    atr_14_chop = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    sum_atr_14 = pd.Series(atr_14_chop).rolling(window=14, min_periods=14).sum().values
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = np.full(n, np.nan)
+    # Avoid division by zero
+    denominator = np.log10(14) * (highest_high_14 - lowest_low_14)
+    chop[13:] = 100 * np.log10(sum_atr_14[13:] / np.where(denominator[13:] != 0, denominator[13:], 1))
+    chop[:13] = 50.0  # Neutral for warmup
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # Discrete position sizing (20% of capital)
+    SIZE = 0.20  # Reduced position sizing (20% of capital) to lower drawdown
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
+    bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 50  # Ensure enough data for all indicators
+    warmup = 50  # Ensure enough data for HTF daily pivot, ATR, and chop
     
     for i in range(warmup, n):
-        # --- Session Filter: Only trade during active UTC 08-20 ---
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_21[i]) or 
-            np.isnan(bull_struct_aligned[i]) or np.isnan(bear_struct_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
+            np.isnan(daily_pivot_aligned[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
-        # --- HTF Trend Bias: 4h EMA direction + 1d structure ---
-        # Bullish bias: price above 4h EMA AND bullish 1d structure
-        bullish_bias = (close[i] > ema_4h_aligned[i]) and (bull_struct_aligned[i] > 0.5)
-        # Bearish bias: price below 4h EMA AND bearish 1d structure
-        bearish_bias = (close[i] < ema_4h_aligned[i]) and (bear_struct_aligned[i] > 0.5)
+        # --- Daily Pivot Filter: Price > pivot = bullish bias, Price < pivot = bearish bias ---
+        price_above_daily_pivot = close[i] > daily_pivot_aligned[i]
+        price_below_daily_pivot = close[i] < daily_pivot_aligned[i]
         
-        # --- 1h Pullback Entry: Price near 21 EMA with volume ---
-        # Pullback to EMA: price within 0.5% of EMA(21)
-        near_ema = abs(close[i] - ema_21[i]) / ema_21[i] < 0.005
-        # Volume confirmation: above average volume
-        volume_ok = vol_ratio[i] > 1.5
+        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = vol_ratio[i] > 2.0
         
-        # --- Exit Logic: Trailing stop via signal reversal ---
+        # --- Chop Filter: Avoid breakouts in ranging markets (CHOP > 61.8) ---
+        chop_filter = chop[i] <= 61.8  # Only allow breakouts when not excessively choppy
+        
+        # --- Donchian Breakout Conditions ---
+        breakout_up = close[i] > donchian_h[i]
+        breakout_down = close[i] < donchian_l[i]
+        
+        # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
-            # Long exit: bearish bias OR price breaks below EMA with volume
-            if position_side > 0:
-                if bearish_bias or (close[i] < ema_21[i] and volume_ok):
+            bars_since_entry += 1
+            
+            # ATR-based stoploss
+            if position_side > 0:  # Long position
+                stop_level = entry_price - 2.0 * atr_14[i]  # Tightened stoploss
+                if low[i] < stop_level:
                     in_position = False
                     position_side = 0
+                    bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-            # Short exit: bullish bias OR price breaks above EMA with volume
-            else:
-                if bullish_bias or (close[i] > ema_21[i] and volume_ok):
+                # Exit on Donchian middle line reversion (take profit)
+                if close[i] < donchian_m[i]:
                     in_position = False
                     position_side = 0
+                    bars_since_entry = 0
                     signals[i] = 0.0
                     continue
+            else:  # Short position
+                stop_level = entry_price + 2.0 * atr_14[i]  # Tightened stoploss
+                if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+                # Exit on Donchian middle line reversion (take profit)
+                if close[i] > donchian_m[i]:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+            
+            # Minimum holding period of 3 bars to reduce churn
+            if bars_since_entry < 3:
+                signals[i] = position_side * SIZE
+                continue
             
             # Hold position
             signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Bullish bias + pullback to EMA + volume confirmation
-        long_condition = bullish_bias and near_ema and volume_ok
-        # Short: Bearish bias + pullback to EMA + volume confirmation
-        short_condition = bearish_bias and near_ema and volume_ok
+        # Long: Donchian breakout up + volume spike + price above daily pivot + chop filter
+        long_condition = breakout_up and volume_spike and price_above_daily_pivot and chop_filter
+        
+        # Short: Donchian breakout down + volume spike + price below daily pivot + chop filter
+        short_condition = breakout_down and volume_spike and price_below_daily_pivot and chop_filter
         
         if long_condition:
             in_position = True
             position_side = 1
             entry_price = close[i]
+            bars_since_entry = 0
             signals[i] = SIZE
         elif short_condition:
             in_position = True
             position_side = -1
             entry_price = close[i]
+            bars_since_entry = 0
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
