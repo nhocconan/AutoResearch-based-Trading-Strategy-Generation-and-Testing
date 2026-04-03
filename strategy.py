@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #301: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation
-HYPOTHESIS: Price breaking 4h Donchian(20) channels with 1d HMA trend filter and volume confirmation captures strong momentum moves. In bull markets, breakouts above upper channel with uptrend continue up. In bear markets, breakouts below lower channel with downtrend continue down. The 1d HMA acts as a regime filter to avoid counter-trend whipsaws. Volume confirmation ensures breakout validity. Discrete sizing (0.25) minimizes fee drag. Target: 75-200 total trades over 4 years.
+Experiment #302: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation
+HYPOTHESIS: Price breaking 12h Donchian(20) channels with 1d HMA trend filter and volume confirmation captures strong momentum moves with lower trade frequency suitable for 12h timeframe. The 1d HMA acts as regime filter to avoid counter-trend entries. Volume confirmation ensures breakout validity. Discrete sizing (0.25) minimizes fee drag. Target: 50-150 total trades over 4 years for 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_301_4h_donchian20_1d_hma_vol_v1"
-timeframe = "4h"
+name = "exp_302_12h_donchian20_1d_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,11 +37,11 @@ def generate_signals(prices):
     hma_1d = hma(df_1d['close'].values, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -57,7 +57,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 60
+    warmup = 60  # sufficient for 20-period indicators + HMA warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -114,8 +114,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 24 bars (6 days on 4h)
-            if bars_since_entry > 24:
+            # Optional: time-based exit after 12 bars (6 days on 12h)
+            if bars_since_entry > 12:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
