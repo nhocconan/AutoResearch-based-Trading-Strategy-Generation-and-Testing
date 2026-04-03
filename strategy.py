@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #1153: 4h Donchian(20) Breakout + 12h HMA Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture swing moves with lower frequency than 6h. 
-Trend filter from 12h timeframe (HMA(21)) provides stronger regime filter than 1d close comparison. 
-Volume confirmation (>1.5x avg) ensures institutional participation. 
-Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets. 
-Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
+HYPOTHESIS: Donchian(20) breakouts on 4h capture swing moves with institutional volume confirmation.
+12h HMA(21) trend filter prevents counter-trend entries. Discrete position sizing (0.25) and 
+ATR-based stoploss (2.0x ATR) control risk. Designed for 75-200 trades over 4 years (19-50/year).
+Works in bull markets (breakouts continue) and bear markets (breakdowns continue with trend filter).
 """
 
 import numpy as np
@@ -26,16 +25,43 @@ def generate_signals(prices):
     # === HTF: 12h data for HMA trend filter (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
-    # HMA(21): Hull Moving Average
-    def calculate_hma(arr, period):
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        wma1 = pd.Series(arr).ewm(span=half_period, adjust=False).mean()
-        wma2 = pd.Series(arr).ewm(span=period, adjust=False).mean()
-        raw_hma = 2 * wma1 - wma2
-        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
-        return hma.values
-    hma_12h = calculate_hma(close_12h, 21)
+    
+    # Calculate HMA(21) on 12h: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
+    
+    def wma(values, window):
+        if len(values) < window:
+            return np.full_like(values, np.nan)
+        weights = np.arange(1, window + 1)
+        return np.convolve(values, weights / weights.sum(), mode='valid')
+    
+    # Pad arrays for WMA calculation
+    wma_half = np.full_like(close_12h, np.nan)
+    wma_full = np.full_like(close_12h, np.nan)
+    
+    for i in range(half_len, len(close_12h)):
+        wma_half[i] = np.mean(close_12h[i-half_len+1:i+1] * np.arange(1, half_len+1)) / (half_len*(half_len+1)/2)
+    for i in range(21, len(close_12h)):
+        wma_full[i] = np.mean(close_12h[i-20:i+1] * np.arange(1, 22)) / (21*22/2)
+    
+    # HMA = WMA(2*WMA_half - WMA_full, sqrt_len)
+    raw_hma = np.full_like(close_12h, np.nan)
+    for i in range(sqrt_len-1, len(close_12h)):
+        if not (np.isnan(wma_half[i]) or np.isnan(wma_full[i])):
+            val = 2 * wma_half[i] - wma_full[i]
+            start_idx = i - sqrt_len + 1
+            if start_idx >= 0:
+                segment = raw_hma[start_idx:i+1] if start_idx > 0 else np.array([])
+                if len(segment) == sqrt_len:
+                    weights = np.arange(1, sqrt_len + 1)
+                    raw_hma[i] = np.sum(segment * weights) / (sqrt_len * (sqrt_len + 1) / 2)
+                elif len(segment) > 0:
+                    # Handle edge case with available data
+                    weights = np.arange(1, len(segment) + 1)
+                    raw_hma[i] = np.sum(segment * weights) / (len(segment) * (len(segment) + 1) / 2)
+    
+    hma_12h = raw_hma
     hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
     # === 4h Indicators: Donchian(20) ===
@@ -108,13 +134,13 @@ def generate_signals(prices):
         
         if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
-            if price > donch_high[i] and hma_12h_aligned[i] > close_12h[-1] if len(close_12h) > 0 else False:  # 12h HMA uptrend proxy
+            if price > donch_high[i] and close[i] > hma_12h_aligned[i]:  # 12h uptrend (price above HMA)
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and hma_12h_aligned[i] < close_12h[-1] if len(close_12h) > 0 else False:  # 12h HMA downtrend proxy
+            elif price < donch_low[i] and close[i] < hma_12h_aligned[i]:  # 12h downtrend (price below HMA)
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
