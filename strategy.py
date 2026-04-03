@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #044: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 1d aligned with 1w HMA trend capture major momentum moves with structural support/resistance.
-Volume confirmation (>2.0x average) filters false breakouts. ATR stoploss (2.5x) reduces drawdown.
-Using 1d primary timeframe targets 30-100 trades over 4 years (7-25/year) to minimize fee drag.
-Works in both bull/bear markets by following the 1w trend while using 1d for precise entry/exit.
+Experiment #048: 12h Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 12h aligned with 1w HMA trend capture major momentum shifts with structural support/resistance.
+Volume confirmation (>2.0x average) filters false breakouts. ATR stoploss (2.5x) reduces whipsaw.
+Targeting 50-150 trades over 4 years by using strict 12h timeframe and strong volume filter.
+Works in bull markets via trend following and bear markets via short signals from 1w HMA.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_044_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_048_12h_donchian20_1w_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,7 +40,7 @@ def generate_signals(prices):
     hma_1w = calculate_hma(df_1w['close'].values, 21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # === 1d Indicators: Donchian(20) channels ===
+    # === 12h Indicators: Donchian(20) channels ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -48,15 +48,15 @@ def generate_signals(prices):
     
     donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
-    # === 1d Indicators: ATR(14) for stoploss ===
-    tr_1d = np.zeros(n)
-    tr_1d[0] = high[0] - low[0]
+    # === 12h Indicators: ATR(14) for stoploss ===
+    tr_12h = np.zeros(n)
+    tr_12h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_1d[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr_12h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    atr_14 = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+    atr_14 = pd.Series(tr_12h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
