@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #1332: 12h Camarilla Pivot Reversal + 1d Trend + Volume Spike
-HYPOTHESIS: Camarilla pivot levels (L3, L4, H3, H4) on 12h act as intraday support/resistance. 
-In strong 1d trends, price often reverses from these levels. Volume spike (>2x) confirms participation. 
-Works in bull markets (buy L3/L4 in uptrend) and bear markets (sell H3/H4 in downtrend). 
-ATR stoploss manages risk. Target: 75-150 total trades over 4 years (19-37/year).
+Experiment #1333: 4h Donchian(20) Breakout + 12h Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture intermediate-term trends with moderate trade frequency (target: 75-200 total over 4 years). 
+Trend filter from 12h timeframe ensures alignment with higher-timeframe momentum. Volume confirmation (>1.8x average) filters for institutional participation. 
+Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 12h trend direction. 
+Uses ATR-based stoploss for risk management. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1332_12h_camarilla_1d_trend_vol_v1"
-timeframe = "12h"
+name = "exp_1333_4h_donchian20_12h_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,47 +22,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    # 1d trend: EMA(20) slope
-    ema_1d = pd.Series(close_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
-    trend_1d = np.zeros(len(close_1d))
-    trend_1d[20:] = np.where(ema_1d[20:] > ema_1d[:-20], 1, -1)  # rising/falling
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # === HTF: 12h data for trend filter (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    # Simple trend: price > previous close = uptrend, < = downtrend
+    trend_12h = np.zeros(len(close_12h))
+    trend_12h[1:] = np.where(close_12h[1:] > close_12h[:-1], 1, -1)
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
-    # === 12h Indicators: Camarilla Pivot Levels from previous day ===
-    # Need previous day's high, low, close
-    # Since we're on 12h, we approximate using rolling window of 2 bars (24h)
-    # But better: use actual 1d data from HTF
-    if len(df_1d) >= 2:
-        prev_high = df_1d['high'].shift(1).values  # previous day's high
-        prev_low = df_1d['low'].shift(1).values    # previous day's low
-        prev_close = df_1d['close'].shift(1).values # previous day's close
-    else:
-        prev_high = df_1d['high'].values
-        prev_low = df_1d['low'].values
-        prev_close = df_1d['close'].values
+    # === 4h Indicators: Donchian(20) ===
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Camarilla levels
-    range_ = prev_high - prev_low
-    camarilla_h3 = prev_close + range_ * 1.1 / 4
-    camarilla_h4 = prev_close + range_ * 1.1 / 2
-    camarilla_l3 = prev_close - range_ * 1.1 / 4
-    camarilla_l4 = prev_close - range_ * 1.1 / 2
-    
-    # Align to 12h timeframe (shifted by 1 for completed day)
-    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -79,12 +56,12 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for EMA and volume MA
+    warmup = 20  # sufficient for Donchian and volume MA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(trend_12h_aligned[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -118,30 +95,26 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Reversal from Camarilla levels in direction of 1d trend
-            if trend_1d_aligned[i] > 0:  # 1d uptrend
-                # Buy near support (L3, L4)
-                if price <= l3_12h[i] * 1.002 or price <= l4_12h[i] * 1.002:  # small buffer
-                    in_position = True
-                    position_side = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                    signals[i] = SIZE
-            else:  # 1d downtrend
-                # Sell near resistance (H3, H4)
-                if price >= h3_12h[i] * 0.998 or price >= h4_12h[i] * 0.998:  # small buffer
-                    in_position = True
-                    position_side = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                    signals[i] = -SIZE
-        
-        # Default: no signal
-        if not in_position:
+            # Breakout: price breaks above upper band OR below lower band
+            if price > donch_high[i] and trend_12h_aligned[i] > 0:  # 12h uptrend
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = SIZE
+            elif price < donch_low[i] and trend_12h_aligned[i] < 0:  # 12h downtrend
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = -SIZE
+            else:
+                signals[i] = 0.0
+        else:
             signals[i] = 0.0
     
     return signals
