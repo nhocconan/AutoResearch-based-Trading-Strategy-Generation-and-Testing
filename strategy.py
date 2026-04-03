@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #617: 4h Donchian(20) breakout + 1d EMA200 trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA200 trend capture institutional momentum with reduced whipsaw. Volume confirmation ensures participation. Using 1d HTF (not 12h) for cleaner trend signal and fewer trades. Target: 75-200 total trades over 4 years via tight entry conditions.
+Experiment #617: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend capture medium-term momentum with reduced whipsaw. Volume confirmation ensures institutional participation. Target: 75-200 total trades over 4 years via tight entry conditions (Donchian breakout + HTF trend + volume spike).
 """
 
 import numpy as np
@@ -19,12 +19,12 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA200 trend (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA(50) trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(200) on 1d
-    ema_1d = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
+    # Calculate EMA(50) on 1d
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # === 4h Indicators: Donchian Channel (20) ===
@@ -53,7 +53,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 200  # sufficient for EMA200 and Donchian calculations
+    warmup = 50  # sufficient for Donchian and EMA calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -72,9 +72,9 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- HTF Trend Filter: 1d EMA200 direction ---
-        # Long only when price above 1d EMA200 (uptrend)
-        # Short only when price below 1d EMA200 (downtrend)
+        # --- HTF Trend Filter: 1d EMA(50) direction ---
+        # Long only when price above 1d EMA(50) (uptrend)
+        # Short only when price below 1d EMA(50) (downtrend)
         ema_trend_up = price > ema_1d_aligned[i]
         ema_trend_down = price < ema_1d_aligned[i]
         
@@ -114,14 +114,14 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + 1d EMA200 uptrend
+            # Long: Donchian breakout up + 1d EMA(50) uptrend
             if breakout_up and ema_trend_up:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + 1d EMA200 downtrend
+            # Short: Donchian breakout down + 1d EMA(50) downtrend
             elif breakout_down and ema_trend_down:
                 in_position = True
                 position_side = -1
