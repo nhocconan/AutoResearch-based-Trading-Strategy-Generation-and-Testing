@@ -1,26 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #194: 1h Mean Reversion with 4h/1d Trend Filter and Volume Confirmation
+Experiment #331: 6h Camarilla Pivot + 1d Trend + Volume Spike
 
-HYPOTHESIS: In ranging markets (common in 2025 BTC/ETH), price reverts to the 1h VWAP 
-when aligned with higher timeframe trend (4h/1d) and confirmed by volume spikes. 
-Uses discrete position sizing (0.20) and session filter (08-20 UTC) to minimize fee drag. 
-Targets 15-37 trades/year (60-150 total over 4 years) by requiring confluence of: 
-1) Price deviation from 1h VWAP (>1.5 ATR), 
-2) 4h/1d trend alignment (EMA21), 
-3) Volume spike (>1.8x average), 
-4) Active trading session. 
-ATR-based stoploss (2.0) manages risk. Works in bull (buy dips in uptrend) and 
-sell rallies in downtrend) and bear (fade rallies in downtrend, buy dips in uptrend) 
-markets by following higher timeframe direction.
+HYPOTHESIS: Camarilla pivot levels from 1d provide intraday support/resistance zones. 
+Breakouts above R4 or below S4 with volume confirmation (>1.5x average) and aligned 
+1d trend (close > 1d EMA50) capture strong momentum moves. Fade at R3/S3 in ranging 
+markets (1d ADX < 25). 6h timeframe targets 12-37 trades/year (50-150 total over 4 years) 
+to minimize fee drag. Works in bull (breakouts with volume) and bear (failed reversals 
+at R3/S3) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_194_1h_vwap_mean_reversion_4h_1d_trend_v1"
-timeframe = "1h"
+name = "exp_331_6h_camarilla_1d_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,119 +25,165 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute session hours (08-20 UTC) - avoid datetime operations in loop
-    hours = prices.index.hour  # prices.index is DatetimeIndex from parquet
-    
-    # === HTF: 4h and 1d EMA21 for trend alignment (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
+    # === HTF: 1d data for Camarilla pivots and trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate EMA(21) on HTF data
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    # Calculate Camarilla pivot levels for 1d
+    def calculate_camarilla(h, l, c):
+        """Calculate Camarilla pivot levels: R4, R3, R2, R1, PP, S1, S2, S3, S4"""
+        range_ = h - l
+        pp = (h + l + c) / 3.0
+        r4 = c + range_ * 1.1 / 2.0
+        r3 = c + range_ * 1.1 / 4.0
+        r2 = c + range_ * 1.1 / 6.0
+        r1 = c + range_ * 1.1 / 12.0
+        s1 = c - range_ * 1.1 / 12.0
+        s2 = c - range_ * 1.1 / 6.0
+        s3 = c - range_ * 1.1 / 4.0
+        s4 = c - range_ * 1.1 / 2.0
+        return r4, r3, r2, r1, pp, s1, s2, s3, s4
     
-    # Align HTF EMA to 1h timeframe with shift(1) for completed bars only
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate for each 1d bar
+    r4_1d = np.full(len(df_1d), np.nan)
+    r3_1d = np.full(len(df_1d), np.nan)
+    s3_1d = np.full(len(df_1d), np.nan)
+    s4_1d = np.full(len(df_1d), np.nan)
+    pp_1d = np.full(len(df_1d), np.nan)
     
-    # === 1h Indicators: VWAP and ATR(14) ===
-    # Typical price for VWAP
-    typical_price = (high + low + close) / 3.0
-    # VWAP = cumulative(TP * volume) / cumulative(volume)
-    cum_vol = np.cumsum(volume)
-    cum_vol_tp = np.cumsum(typical_price * volume)
-    vwap = np.divide(cum_vol_tp, cum_vol, out=np.full_like(cum_vol_tp, np.nan), where=cum_vol!=0)
+    for i in range(len(df_1d)):
+        r4, r3, r2, r1, pp, s1, s2, s3, s4 = calculate_camarilla(
+            df_1d['high'].iloc[i], 
+            df_1d['low'].iloc[i], 
+            df_1d['close'].iloc[i]
+        )
+        r4_1d[i] = r4
+        r3_1d[i] = r3
+        s3_1d[i] = s3
+        s4_1d[i] = s4
+        pp_1d[i] = pp
     
-    # ATR(14) for stoploss and deviation threshold
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
+    # Align Camarilla levels to 6h timeframe
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    pp_1d_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # Calculate 1d ADX for regime detection (trending vs ranging)
+    def calculate_adx(high, low, close, period=14):
+        """Calculate ADX (Average Directional Index)"""
+        plus_dm = np.zeros(len(high))
+        minus_dm = np.zeros(len(high))
+        tr = np.zeros(len(high))
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            if plus_dm[i] == minus_dm[i]:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smoothed values
+        atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+        plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
+        minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+        return adx
+    
+    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # === 6h Indicators: ATR(14) for stoploss ===
+    tr_6h = np.zeros(n)
+    tr_6h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # === 1h Indicators: Volume MA(20) for spike detection ===
+    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.divide(volume, vol_ma_20, out=np.ones_like(volume), where=vol_ma_20!=0)
+    vol_ratio = np.zeros(n)
+    vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
+    vol_ratio[:20] = 1.0  # Neutral for warmup
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # Position sizing (20% of capital) - discrete level to minimize churn
+    SIZE = 0.25  # Position sizing (25% of capital)
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
-    bars_since_entry = 0
+    bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 100  # Sufficient for VWAP, ATR, EMA alignment
+    warmup = 100  # Warmup for 1d indicators stability
     
     for i in range(warmup, n):
-        # Skip if any required data is NaN
-        if (np.isnan(vwap[i]) or np.isnan(atr_14[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(vol_ratio[i])):
+        # --- Data Validity Check ---
+        if (np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
+            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
+            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Session filter: 08-20 UTC only
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
+        # --- 1d Regime Filter: ADX > 25 = trending, ADX < 25 = ranging ---
+        is_trending = adx_1d_aligned[i] > 25
+        is_ranging = adx_1d_aligned[i] < 25
         
-        # Calculate deviation from VWAP in ATR units
-        deviation = close[i] - vwap[i]
-        deviation_atr = abs(deviation) / atr_14[i] if atr_14[i] > 0 else 0
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio[i] > 1.5
         
-        # Volume confirmation: require spike > 1.8x average
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Price Levels ---
+        price = close[i]
+        r4 = r4_1d_aligned[i]
+        r3 = r3_1d_aligned[i]
+        s3 = s3_1d_aligned[i]
+        s4 = s4_1d_aligned[i]
+        ema50 = ema50_1d_aligned[i]
+        pp = pp_1d_aligned[i]
         
-        # Trend alignment: price relative to HTF EMA21
-        price_above_4h_ema = close[i] > ema_4h_aligned[i]
-        price_below_4h_ema = close[i] < ema_4h_aligned[i]
-        price_above_1d_ema = close[i] > ema_1d_aligned[i]
-        price_below_1d_ema = close[i] < ema_1d_aligned[i]
-        
-        # Require both 4h and 1d trend to agree (stronger filter)
-        bullish_trend = price_above_4h_ema and price_above_1d_ema
-        bearish_trend = price_below_4h_ema and price_below_1d_ema
-        
-        # Mean reentry conditions:
-        # Long: price significantly below VWAP (>1.5 ATR) + bullish HTF trend + volume spike
-        long_condition = (deviation < -1.5 * atr_14[i]) and bullish_trend and volume_spike
-        
-        # Short: price significantly above VWAP (>1.5 ATR) + bearish HTF trend + volume spike
-        short_condition = (deviation > 1.5 * atr_14[i]) and bearish_trend and volume_spike
-        
+        # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
             bars_since_entry += 1
             
-            # ATR-based stoploss (2.0 ATR)
+            # ATR-based stoploss
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.0 * atr_14[i]
+                stop_level = entry_price - 2.5 * atr_14[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Take profit: return to VWAP (mean reversion complete)
-                if close[i] >= vwap[i]:
+                # Exit on mean reversion to pivot point in ranging markets
+                if is_ranging and abs(price - pp) < 0.5 * atr_14[i]:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_level = entry_price + 2.0 * atr_14[i]
+                stop_level = entry_price + 2.5 * atr_14[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Take profit: return to VWAP
-                if close[i] <= vwap[i]:
+                # Exit on mean reversion to pivot point in ranging markets
+                if is_ranging and abs(price - pp) < 0.5 * atr_14[i]:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -158,14 +199,26 @@ def generate_signals(prices):
             signals[i] = position_side * SIZE
             continue
         
-        # New position entry
-        if long_condition:
+        # --- New Position Entry Logic (Only if Flat) ---
+        # Long breakout: Price > R4 + volume spike + 1d trend up (price > EMA50)
+        long_breakout = (price > r4) and volume_spike and (price > ema50)
+        
+        # Short breakout: Price < S4 + volume spike + 1d trend down (price < EMA50)
+        short_breakout = (price < s4) and volume_spike and (price < ema50)
+        
+        # Long fade: Price < R3 + volume spike + ranging market (fade from resistance)
+        long_fade = (price < r3) and volume_spike and is_ranging and (price > pp)
+        
+        # Short fade: Price > S3 + volume spike + ranging market (fade from support)
+        short_fade = (price > s3) and volume_spike and is_ranging and (price < pp)
+        
+        if long_breakout or long_fade:
             in_position = True
             position_side = 1
             entry_price = close[i]
             bars_since_entry = 0
             signals[i] = SIZE
-        elif short_condition:
+        elif short_breakout or short_fade:
             in_position = True
             position_side = -1
             entry_price = close[i]
