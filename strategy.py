@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #1690: 1d Donchian(20) Breakout + 1w HMA Trend + Volume + ATR Stoploss
-HYPOTHESIS: 1d Donchian breakouts with 1w HMA trend alignment and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 1w timeframe filters out noise from shorter-term fluctuations, while the 1d Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 50-100 total trades over 4 years (12-25/year) by using tight entry conditions and multi-timeframe confluence.
+Experiment #1691: 6h Donchian(20) Breakout + 1d Camarilla Pivot + Volume Confirmation
+HYPOTHESIS: 6h Donchian breakouts with 1d Camarilla pivot direction and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 1d Camarilla pivot provides institutional support/resistance levels, while the 6h Donchian offers clear breakout levels. Volume confirmation filters false breakouts. Position size fixed at 0.25 to balance return and drawdown. Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1690_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_1691_6h_donchian20_1d_camarilla_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,32 +20,43 @@ def generate_signals(prices):
     open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # HMA(21): Hull Moving Average
-    def hull_moving_average(arr, period):
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
-        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
-        raw_hma = 2 * wma_half - wma_full
-        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
-        return hma
-    hma_1w = hull_moving_average(close_1w, 21)
-    trend_1w = np.where(close_1w > hma_1w, 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 1d Indicators: Donchian(20) ===
+    # Calculate Camarilla pivot levels from previous 1d bar
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
+    # We use the previous completed 1d bar (shifted by align_htf_to_ltf)
+    pivot_point = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    camarilla_r4 = close_1d + (range_1d * 1.1 / 2.0)
+    camarilla_r3 = close_1d + (range_1d * 1.1 / 4.0)
+    camarilla_s3 = close_1d - (range_1d * 1.1 / 4.0)
+    camarilla_s4 = close_1d - (range_1d * 1.1 / 2.0)
+    
+    # Align HTF arrays to LTF (6h) with shift(1) for completed bars only
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Determine pivot bias: bullish if price > R3, bearish if price < S3
+    # We'll use the 1d close price for bias determination
+    camarilla_bias = np.where(close_1d > camarilla_r3, 1, np.where(close_1d < camarilla_s3, -1, 0))
+    camarilla_bias_aligned = align_htf_to_ltf(prices, df_1d, camarilla_bias)
+    
+    # === 6h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -67,7 +78,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(camarilla_bias_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -100,21 +111,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1w trend alignment
-        trend_following = trend_1w_aligned[i] != 0  # Should always be ±1
+        # Require Camarilla bias alignment (±1)
+        bias_aligned = camarilla_bias_aligned[i] != 0
         
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
-        if trend_following and volume_spike:
-            # Breakout: price breaks above upper band OR below lower band
-            if price > donch_high[i] and trend_1w_aligned[i] > 0:  # Uptrend breakout
+        if bias_aligned and volume_spike:
+            # Breakout: price breaks above upper band in bullish bias OR below lower band in bearish bias
+            if price > donch_high[i] and camarilla_bias_aligned[i] > 0:  # Bullish breakout
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and trend_1w_aligned[i] < 0:  # Downtrend breakdown
+            elif price < donch_low[i] and camarilla_bias_aligned[i] < 0:  # Bearish breakdown
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
