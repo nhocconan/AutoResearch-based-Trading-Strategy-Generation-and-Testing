@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #1677: 4h Donchian(20) Breakout + 1d HMA Trend + Volume + ATR Stoploss
-HYPOTHESIS: 4h Donchian breakouts with 1d HMA trend alignment and volume confirmation (>1.3x average) capture medium-term swings in both bull and bear markets. The 1d timeframe filters out noise from shorter-term fluctuations, while the 4h Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 75-200 total trades over 4 years (19-50/year) by using tight entry conditions and multi-timeframe confluence.
+HYPOTHESIS: 4h Donchian breakouts with 1d HMA trend alignment and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 1d timeframe filters out noise from shorter-term fluctuations, while the 4h Donchian provides clear breakout levels. Position size fixed at 0.30 to balance return and drawdown. Target: 100-200 total trades over 4 years (25-50/year) by using tight entry conditions and multi-timeframe confluence.
 """
 
 import numpy as np
@@ -54,7 +54,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.30  # 30% position size
     
     # Position tracking state variables
     in_position = False
@@ -103,8 +103,8 @@ def generate_signals(prices):
         # Require 1d trend alignment
         trend_following = trend_1d_aligned[i] != 0  # Should always be ±1
         
-        # Volume confirmation: require volume spike (> 1.3x average)
-        volume_spike = vol_ratio[i] > 1.3
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
         if trend_following and volume_spike:
             # Breakout: price breaks above upper band OR below lower band
@@ -126,5 +126,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
