@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #274: 1h Volume-Weighted RSI + 4h EMA Trend + 1d Choppiness Regime
+Experiment #275: 6h Williams %R + Weekly Pivot Structure + Volume Spike
 
-HYPOTHESIS: Combining volume-weighted RSI on 1h for overextension reversal signals with 4h EMA trend alignment and 1d choppiness regime filter creates a robust mean-reversion strategy that works in both bull and bear markets. The 4h EMA provides medium-term trend direction, the 1d chop filter avoids ranging markets where mean reversion fails, and volume-weighted RSI identifies exhaustion points with institutional participation. Targets 15-37 trades/year on 1h timeframe (60-150 total over 4 years) to minimize fee drag while capturing high-probability reversals at trend extremes.
+HYPOTHESIS: Williams %R(14) identifies overextension on 6h timeframe, while weekly pivot levels (from 1w data) provide institutional support/resistance structure. Long when %R < -80 (oversold) AND price above weekly pivot (bullish bias), short when %R > -20 (overbought) AND price below weekly pivot (bearish bias). Volume spike (>1.5x 20-period average) confirms institutional participation. This combines mean reversion extrapolation with structural pivot levels to work in both bull (buying oversold dips above pivot) and bear (selling overbought rallies below pivot) markets. Targets 12-37 trades/year on 6h timeframe (50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_vwrsi_ema_chop_v1"
-timeframe = "1h"
+name = "mtf_6h_williamsr_weekly_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,99 +20,56 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h data for EMA trend (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
+    # === HTF: 1w data for weekly pivot levels (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate EMA(50) on 4h close
-    if len(df_4h) >= 50:
-        close_4h = df_4h['close'].values
-        ema_50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
+    # Calculate weekly pivot points (standard formula)
+    if len(df_1w) >= 1:
+        weekly_high = df_1w['high'].values
+        weekly_low = df_1w['low'].values
+        weekly_close = df_1w['close'].values
+        
+        # Weekly pivot point and support/resistance levels
+        weekly_pp = (weekly_high + weekly_low + weekly_close) / 3.0
+        weekly_r1 = 2 * weekly_pp - weekly_low
+        weekly_s1 = 2 * weekly_pp - weekly_high
+        weekly_r2 = weekly_pp + (weekly_high - weekly_low)
+        weekly_s2 = weekly_pp - (weekly_high - weekly_low)
+        weekly_r3 = weekly_high + 2 * (weekly_pp - weekly_low)
+        weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pp)
+        
+        # Align to 6h timeframe (use previous week's levels - no look-ahead)
+        weekly_pp_aligned = align_htf_to_ltf(prices, df_1w, weekly_pp)
+        weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+        weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
+        weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2)
+        weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2)
+        weekly_r3_aligned = align_htf_to_ltf(prices, df_1w, weekly_r3)
+        weekly_s3_aligned = align_htf_to_ltf(prices, df_1w, weekly_s3)
     else:
-        ema_50_4h_aligned = np.full(n, np.nan)
+        weekly_pp_aligned = np.full(n, np.nan)
+        weekly_r1_aligned = np.full(n, np.nan)
+        weekly_s1_aligned = np.full(n, np.nan)
+        weekly_r2_aligned = np.full(n, np.nan)
+        weekly_s2_aligned = np.full(n, np.nan)
+        weekly_r3_aligned = np.full(n, np.nan)
+        weekly_s3_aligned = np.full(n, np.nan)
     
-    # === HTF: 1d data for choppiness regime (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
+    # === 6h Indicators ===
+    # Williams %R(14)
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.full(n, np.nan)
+    valid = (highest_high_14 != lowest_low_14) & ~(np.isnan(highest_high_14) | np.isnan(lowest_low_14))
+    williams_r[valid] = -100 * (highest_high_14[valid] - close[valid]) / (highest_high_14[valid] - lowest_low_14[valid])
     
-    # Calculate Choppiness Index(14) on 1d data
-    if len(df_1d) >= 14:
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        close_1d = df_1d['close'].values
-        
-        # True Range
-        tr_1d = np.zeros(len(close_1d))
-        tr_1d[0] = high_1d[0] - low_1d[0]
-        for i in range(1, len(close_1d)):
-            tr_1d[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
-        
-        # Sum of TR over 14 periods
-        sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-        
-        # Highest high and lowest low over 14 periods
-        max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-        min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-        
-        # Choppiness Index = 100 * log10(sum_tr_14 / (max_high_14 - min_low_14)) / log10(14)
-        chop_1d = np.full(len(close_1d), np.nan)
-        valid = (sum_tr_14 > 0) & (max_high_14 > min_low_14) & ~(np.isnan(sum_tr_14) | np.isnan(max_high_14) | np.isnan(min_low_14))
-        chop_1d[valid] = 100 * np.log10(sum_tr_14[valid] / (max_high_14[valid] - min_low_14[valid])) / np.log10(14)
-        
-        # Align to 1h timeframe
-        chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    else:
-        chop_1d_aligned = np.full(n, np.nan)
-    
-    # === 1h Indicators ===
-    # Volume-Weighted RSI(14)
-    def vwma(series, period):
-        """Volume Weighted Moving Average"""
-        if len(series) < period:
-            return np.full_like(series, np.nan)
-        weights = np.arange(1, period + 1)
-        return np.convolve(series, weights, mode='valid') / weights.sum()
-    
-    # Calculate typical price and volume-weighted changes
-    typical_price = (high + low + close) / 3.0
-    price_change = np.diff(typical_price, prepend=typical_price[0])
-    
-    # Separate gains and losses
-    gains = np.where(price_change > 0, price_change, 0.0)
-    losses = np.where(price_change < 0, -price_change, 0.0)
-    
-    # Volume-weighted gains and losses
-    vol_gains = gains * volume
-    vol_losses = losses * volume
-    
-    # Calculate VW-RSI using Wilder's smoothing (similar to RSI but volume-weighted)
-    avg_vol_gain = np.zeros(n)
-    avg_vol_loss = np.zeros(n)
-    
-    # Initialize first values
-    if n > 0:
-        avg_vol_gain[13] = np.nansum(vol_gains[1:14]) / 14 if np.any(~np.isnan(vol_gains[1:14])) else 0
-        avg_vol_loss[13] = np.nansum(vol_losses[1:14]) / 14 if np.any(~np.isnan(vol_losses[1:14])) else 0
-    
-    # Wilder's smoothing
-    for i in range(14, n):
-        avg_vol_gain[i] = (avg_vol_gain[i-1] * 13 + vol_gains[i]) / 14
-        avg_vol_loss[i] = (avg_vol_loss[i-1] * 13 + vol_losses[i]) / 14
-    
-    # Calculate VW-RSI
-    vwrsi = np.zeros(n)
-    for i in range(13, n):
-        if avg_vol_loss[i] != 0:
-            rs = avg_vol_gain[i] / avg_vol_loss[i]
-            vwrsi[i] = 100 - (100 / (1 + rs))
-        else:
-            vwrsi[i] = 100 if avg_vol_gain[i] > 0 else 50
-    
-    # For first 13 periods, set to 50 (neutral)
-    vwrsi[:13] = 50
+    # Volume Spike (>1.5x 20-period average)
+    volume_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma_20 * 1.5)
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # Discrete position sizing (20% of capital)
+    SIZE = 0.25  # Discrete position sizing (25% of capital)
     
     # Position tracking state variables
     in_position = False
@@ -122,32 +79,11 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(vwrsi[i]) or np.isnan(ema_50_4h_aligned[i]) or np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(weekly_pp_aligned[i]) or 
+            np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or
+            np.isnan(volume_ma_20[i])):
             signals[i] = 0.0
             continue
-        
-        # --- Session Filter: 08-20 UTC ---
-        hour = pd.Timestamp(prices.iloc[i]['open_time']).hour
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
-        # --- Regime Filter: Avoid choppy markets (Choppiness > 61.8 = ranging) ---
-        # Only trade when market is trending (Choppiness < 38.2) or moderate (38.2-61.8)
-        # Avoid strong ranging regimes where mean reversion fails
-        if chop_1d_aligned[i] > 61.8:
-            signals[i] = 0.0
-            continue
-        
-        # --- Price Trend Alignment ---
-        price_above_ema = close[i] > ema_50_4h_aligned[i]
-        price_below_ema = close[i] < ema_50_4h_aligned[i]
-        
-        # --- Volume-Weighted RSI Signals ---
-        # Oversold: VWRSI < 30 (with volume confirmation suggests institutional accumulation)
-        # Overbought: VWRSI > 70 (with volume confirmation suggests institutional distribution)
-        oversold = vwrsi[i] < 30
-        overbought = vwrsi[i] > 70
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -159,27 +95,27 @@ def generate_signals(prices):
             atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().iloc[-1]
             
             if position_side > 0:  # Long position
-                stop_level = close[entry_bar] - 2.0 * atr_14
+                stop_level = close[entry_bar] - 2.5 * atr_14
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at VWRSI > 50 (mean reversion complete)
-                if vwrsi[i] > 50:
+                # Take profit at weekly R1 or when %R > -20 (mean reversion)
+                if high[i] >= weekly_r1_aligned[i] or williams_r[i] > -20:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_level = close[entry_bar] + 2.0 * atr_14
+                stop_level = close[entry_bar] + 2.5 * atr_14
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at VWRSI < 50 (mean reversion complete)
-                if vwrsi[i] < 50:
+                # Take profit at weekly S1 or when %R < -80 (mean reversion)
+                if low[i] <= weekly_s1_aligned[i] or williams_r[i] < -80:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -190,14 +126,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Oversold VWRSI with price above 4h EMA (bullish alignment)
-        if oversold and price_above_ema:
+        # Long: Oversold Williams %R with price above weekly pivot AND volume spike
+        if (williams_r[i] < -80 and 
+            close[i] > weekly_pp_aligned[i] and 
+            volume_spike[i]):
             in_position = True
             position_side = 1
             entry_bar = i
             signals[i] = SIZE
-        # Short: Overbought VWRSI with price below 4h EMA (bearish alignment)
-        elif overbought and price_below_ema:
+        # Short: Overbought Williams %R with price below weekly pivot AND volume spike
+        elif (williams_r[i] > -20 and 
+              close[i] < weekly_pp_aligned[i] and 
+              volume_spike[i]):
             in_position = True
             position_side = -1
             entry_bar = i
