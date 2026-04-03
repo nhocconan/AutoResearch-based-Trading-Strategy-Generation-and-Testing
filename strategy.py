@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #1844: 1d Donchian(20) Breakout + 1w HMA Trend + Volume + ATR Stoploss
-HYPOTHESIS: 1d Donchian breakouts aligned with 1w HMA trend and volume confirmation (>1.5x average) capture major swings in both bull and bear markets. The 1w timeframe filters noise, while 1d Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 30-100 total trades over 4 years (7-25/year) by using tight entry conditions and multi-timeframe confluence.
+HYPOTHESIS: 1d Donchian breakouts aligned with 1w HMA trend and volume confirmation (>1.5x average) capture major swings in both bull and bear markets. The 1w timeframe filters out noise from shorter-term fluctuations, while the 1d Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 30-100 total trades over 4 years (7-25/year) by using tight entry conditions and multi-timeframe confluence.
 """
 
 import numpy as np
