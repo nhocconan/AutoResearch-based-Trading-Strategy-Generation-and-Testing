@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 Experiment #830: 1d Donchian(20) + 1w HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: Daily Donchian breakouts capture multi-day momentum, filtered by weekly HMA trend direction 
-and volume confirmation (>2.0x average). Long when price breaks above Donchian upper 
-AND weekly HMA rising AND volume spike. Short when price breaks below Donchian lower 
-AND weekly HMA falling AND volume spike. Works in bull/bear markets: in bull trends, 
-weekly HMA rising filters for longs; in bear trends, weekly HMA falling filters for shorts. 
-Uses discrete position sizing (0.25). Target: 30-100 total trades over 4 years (7-25/year).
+HYPOTHESIS: Daily Donchian breakouts capture intermediate-term momentum, filtered by 
+weekly HMA trend direction and volume confirmation (>2.0x average). Long when price 
+breaks above Donchian upper AND weekly HMA rising AND volume spike. Short when price 
+breaks below Donchian lower AND weekly HMA falling AND volume spike. Works in bull/bear 
+markets: in bull trends, weekly HMA rising filters for longs; in bear trends, weekly 
+HMA falling filters for shorts. Uses discrete position sizing (0.25). Target: 30-100 
+total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -127,14 +128,14 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Long: price breaks above Donchian upper AND 1w HMA rising
+            # Long: price breaks above Donchian upper AND weekly HMA rising
             if price > upper_20[i] and hma_trend_1w_aligned[i] > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: price breaks below Donchian lower AND 1w HMA falling
+            # Short: price breaks below Donchian lower AND weekly HMA falling
             elif price < lower_20[i] and hma_trend_1w_aligned[i] < 0:
                 in_position = True
                 position_side = -1
