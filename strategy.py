@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #727: 6h Donchian20 + 1d Camarilla Pivot + Volume Spike
-HYPOTHESIS: 6h Donchian(20) breakouts filtered by 1d Camarilla pivot levels (fade at R3/S3, breakout at R4/S4) 
+Experiment #727: 6h Donchian20 + 1d Pivot Direction + Volume Spike
+HYPOTHESIS: 6h Donchian(20) breakouts filtered by 1d daily pivot direction (above/below daily pivot) 
 and volume confirmation (>2.0x average volume) captures institutional breakouts with proper HTF alignment. 
 Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear markets: long when price 
-breaks above Donchian upper AND above R4, short when breaks below Donchian lower AND below S4. 
+breaks above Donchian upper AND above daily pivot, short when breaks below Donchian lower AND below daily pivot. 
 Target: 75-200 total trades over 4 years (19-50/year).
 """
 
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_727_6h_donchian20_1d_camarilla_vol_v1"
+name = "exp_727_6h_donchian20_1d_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,24 +23,19 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
+    # === HTF: 1d data for daily pivot direction (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for 1d timeframe
-    # Camarilla formula: Pivot = (H+L+C)/3, Range = H-L
-    camarilla_pivot = (high_1d + low_1d + close_1d) / 3.0
-    camarilla_range = high_1d - low_1d
+    # Calculate daily pivot points (standard formula)
+    daily_pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Daily pivot direction: 1 = price above pivot (bullish bias), -1 = price below pivot (bearish bias)
+    daily_pivot_dir = np.where(close_1d > daily_pivot, 1, -1)
     
-    # Camarilla levels: R4 = Pivot + Range * 1.1/2, S4 = Pivot - Range * 1.1/2
-    camarilla_r4 = camarilla_pivot + camarilla_range * 1.1 / 2.0
-    camarilla_s4 = camarilla_pivot - camarilla_range * 1.1 / 2.0
-    
-    # Align Camarilla levels to 6h timeframe
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Align daily pivot direction to 6h timeframe
+    daily_pivot_dir_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot_dir)
     
     # === 6h Indicators: Donchian Channel (20) ===
     donchian_period = 20
@@ -74,8 +69,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(camarilla_r4_aligned[i]) or
-            np.isnan(camarilla_s4_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(daily_pivot_dir_aligned[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -120,15 +115,18 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Long: price breaks above Donchian upper AND above R4 (breakout continuation)
-            if high[i] > donchian_high[i] and close[i] > camarilla_r4_aligned[i]:
+            # Get regime from 1d daily pivot direction
+            regime = daily_pivot_dir_aligned[i]
+            
+            # Long: price breaks above Donchian upper AND daily pivot direction bullish
+            if high[i] > donchian_high[i] and regime > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: price breaks below Donchian lower AND below S4 (breakout continuation)
-            elif low[i] < donchian_low[i] and close[i] < camarilla_s4_aligned[i]:
+            # Short: price breaks below Donchian lower AND daily pivot direction bearish
+            elif low[i] < donchian_low[i] and regime < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
