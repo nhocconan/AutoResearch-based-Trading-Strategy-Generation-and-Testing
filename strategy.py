@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #205: 12h Donchian(20) Breakout + 1d Trend + Volume Spike + ATR Stoploss
+Experiment #342: 12h Donchian(20) Breakout + 1d EMA50 Trend + Volume Spike + ATR Stoploss
 
-HYPOTHESIS: 12h Donchian channel breakouts filtered by 1-day EMA50 trend and volume spikes (>2.0x average) 
-capture strong momentum with reduced false breakouts. The 12h timeframe targets 12-37 trades/year (50-150 total) 
-to minimize fee drag. Works in bull markets (breakouts with volume in uptrend) and bear markets 
+HYPOTHESIS: 12h Donchian channel breakouts filtered by 1-day EMA50 trend and volume spikes (>2.0x average)
+capture strong momentum with reduced false breakouts. The 12h timeframe targets 12-37 trades/year (50-150 total)
+to minimize fee drag. Works in bull markets (breakouts with volume in uptrend) and bear markets
 (failed breaks reverse sharply in downtrend). Uses ATR-based stoploss for risk management.
 """
 
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_205_12h_donchian_1d_trend_volume_v1"
+name = "exp_342_12h_donchian_1d_trend_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
