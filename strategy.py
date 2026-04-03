@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-Experiment #080: 4h Donchian(20) breakout + 1d HMA trend + 1w volume confirmation
+Experiment #081: 4h Donchian(20) breakout + HMA trend + volume confirmation + ATR stoploss
 
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe, filtered by 1d HMA(21) trend and 1w volume spike (>1.8x average), capture medium-term momentum while avoiding false breakouts. The 1d HMA ensures alignment with higher timeframe direction, 1w volume confirms institutional participation, and ATR-based stoploss manages risk. Targets 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag while maintaining edge in both bull and bear markets.
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe, filtered by 1d HMA(21) trend and 1w volume 
+confirmation, capture medium-term momentum while avoiding false breakouts. The 1d HMA ensures 
+alignment with higher timeframe direction, 1w volume confirms institutional participation, and 
+ATR-based stoploss manages risk. Targets 19-50 trades/year on 4h timeframe (75-200 total over 
+4 years) to minimize fee drag while maintaining edge in both bull and bear markets.
 """
 
 import numpy as np
