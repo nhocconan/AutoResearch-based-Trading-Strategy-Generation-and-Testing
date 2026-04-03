@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #054: 1h EMA(8,21) crossover + 4h/1d EMA(50) trend filter + volume spike + session filter
-HYPOTHESIS: 1h EMA crossovers aligned with 4h/1d EMA trend and volume spikes capture momentum with structural confirmation.
-Session filter (08-20 UTC) reduces noise. Position size fixed at 0.20 to control drawdown. Target: 60-150 total trades over 4 years.
-Works in bull/bear markets by requiring alignment with higher timeframe trends.
+Experiment #059: 6h Camarilla Pivot + Volume Spike + Regime Filter (ADX)
+HYPOTHESIS: Camarilla pivot levels (R3/S3, R4/S4) from 12h timeframe act as strong support/resistance.
+Breakouts above R4 or below S4 with volume confirmation (>1.8x average) and ADX>25 indicate strong momentum.
+In ranging markets (ADX<20), fade at R3/S3 levels. This adapts to both bull/bear regimes by using ADX
+to determine market state and applying appropriate logic. Target: 75-150 trades over 4 years on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_054_1h_ema8_21_4h_1d_ema50_vol_session_v1"
-timeframe = "1h"
+name = "exp_059_6h_camarilla_pivot_volume_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,138 +22,169 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h and 1d data for EMA(50) trend filters (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # === HTF: 12h data for Camarilla pivot levels (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate EMA(50) on 4h close
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # === 12h Indicators: Camarilla Pivot Levels (based on previous day) ===
+    def calculate_camarilla(high, low, close):
+        # Typical price for pivot
+        pivot = (high + low + close) / 3.0
+        range_ = high - low
+        # Camarilla levels
+        r4 = pivot + (range_ * 1.1 / 2)
+        r3 = pivot + (range_ * 1.1 / 4)
+        s3 = pivot - (range_ * 1.1 / 4)
+        s4 = pivot - (range_ * 1.1 / 2)
+        return r3, r4, s3, s4, pivot
     
-    # Calculate EMA(50) on 1d close
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate for each 12h bar (using previous bar's data)
+    h_12h = df_12h['high'].values
+    l_12h = df_12h['low'].values
+    c_12h = df_12h['close'].values
     
-    # === 1h Indicators: EMA(8) and EMA(21) for crossover ===
-    ema_8 = pd.Series(close).ewm(span=8, min_periods=8, adjust=False).mean().values
-    ema_21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
+    camarilla_r3 = np.full_like(c_12h, np.nan)
+    camarilla_r4 = np.full_like(c_12h, np.nan)
+    camarilla_s3 = np.full_like(c_12h, np.nan)
+    camarilla_s4 = np.full_like(c_12h, np.nan)
+    camarilla_pivot = np.full_like(c_12h, np.nan)
     
-    # === 1h Indicators: ATR(14) for stoploss ===
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    for i in range(1, len(c_12h)):
+        r3, r4, s3, s4, p = calculate_camarilla(h_12h[i-1], l_12h[i-1], c_12h[i-1])
+        camarilla_r3[i] = r3
+        camarilla_r4[i] = r4
+        camarilla_s3[i] = s3
+        camarilla_s4[i] = s4
+        camarilla_pivot[i] = p
     
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # Align to 6h timeframe
+    camarilla_r3_6h = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_r4_6h = align_htf_to_ltf(prices, df_12h, camarilla_r4)
+    camarilla_s3_6h = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    camarilla_s4_6h = align_htf_to_ltf(prices, df_12h, camarilla_s4)
+    camarilla_pivot_6h = align_htf_to_ltf(prices, df_12h, camarilla_pivot)
     
-    # === 1h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: ADX(14) for regime detection ===
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = high[0] - low[0]  # First value
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed values
+        atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
+        dm_plus_smooth = pd.Series(dm_plus).ewm(span=period, adjust=False, min_periods=period).mean().values
+        dm_minus_smooth = pd.Series(dm_minus).ewm(span=period, adjust=False, min_periods=period).mean().values
+        
+        # Directional Indicators
+        di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+        di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+        
+        # DX and ADX
+        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+        adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
+        return adx
+    
+    adx = calculate_adx(high, low, close, 14)
+    
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
     vol_ratio[:20] = 1.0  # Neutral for warmup
     
-    # === Session filter: 08-20 UTC (precompute before loop) ===
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # Position sizing (20% of capital)
+    SIZE = 0.25  # Position sizing (25% of capital)
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
-    bars_since_entry = 0  # Track bars in position for minimum holding period
+    bars_since_entry = 0
     
-    warmup = 100  # Warmup for EMA stability
+    warmup = 50  # Warmup for ADX and volume stability
     
     for i in range(warmup, n):
-        # --- Session Filter: Only trade 08-20 UTC ---
-        if hours[i] < 8 or hours[i] > 20:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
-        if (np.isnan(ema_8[i]) or np.isnan(ema_21[i]) or np.isnan(ema_4h_aligned[i]) or
-            np.isnan(ema_1d_aligned[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(adx[i]) or np.isnan(camarilla_r3_6h[i]) or np.isnan(camarilla_r4_6h[i]) or
+            np.isnan(camarilla_s3_6h[i]) or np.isnan(camarilla_s4_6h[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vol_spike = vol_ratio[i] > 1.8  # Volume spike threshold
         
-        # --- EMA Trend Filters: Require alignment with 4h and 1d EMA(50) ---
-        trend_4h_up = price > ema_4h_aligned[i]
-        trend_4h_down = price < ema_4h_aligned[i]
-        trend_1d_up = price > ema_1d_aligned[i]
-        trend_1d_down = price < ema_1d_aligned[i]
+        # --- Regime Detection ---
+        is_trending = adx[i] > 25
+        is_ranging = adx[i] < 20
         
-        # --- EMA Crossover Signals ---
-        ema_cross_up = ema_8[i] > ema_21[i] and ema_8[i-1] <= ema_21[i-1]
-        ema_cross_down = ema_8[i] < ema_21[i] and ema_8[i-1] >= ema_21[i-1]
-        
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
-        
-        # --- Exit Logic (ATR-based stoploss) ---
+        # --- Exit Logic ---
         if in_position:
             bars_since_entry += 1
             
-            # ATR-based stoploss
-            if position_side > 0:  # Long position
-                stop_level = entry_price - 2.5 * atr_14[i]
-                if low[i] < stop_level:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-            else:  # Short position
-                stop_level = entry_price + 2.5 * atr_14[i]
-                if high[i] > stop_level:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
+            # Exit conditions based on regime
+            if is_trending:
+                # In trending market: exit on opposite Camarilla break with volume
+                if position_side > 0:  # Long
+                    if low[i] < camarilla_s3_6h[i] and vol_spike:
+                        in_position = False
+                        position_side = 0
+                        bars_since_entry = 0
+                        signals[i] = 0.0
+                        continue
+                else:  # Short
+                    if high[i] > camarilla_r3_6h[i] and vol_spike:
+                        in_position = False
+                        position_side = 0
+                        bars_since_entry = 0
+                        signals[i] = 0.0
+                        continue
+            else:  # Ranging market
+                # Exit when price returns to pivot or opposite level
+                if position_side > 0:  # Long
+                    if price < camarilla_pivot_6h[i]:
+                        in_position = False
+                        position_side = 0
+                        bars_since_entry = 0
+                        signals[i] = 0.0
+                        continue
+                else:  # Short
+                    if price > camarilla_pivot_6h[i]:
+                        in_position = False
+                        position_side = 0
+                        bars_since_entry = 0
+                        signals[i] = 0.0
+                        continue
             
-            # Minimum holding period of 4 bars to reduce churn
-            if bars_since_entry < 4:
+            # Minimum holding period of 2 bars
+            if bars_since_entry < 2:
                 signals[i] = position_side * SIZE
-                continue
-            
-            # Exit on opposite EMA crossover with volume (profit taking)
-            if position_side > 0 and ema_cross_down and volume_spike:
-                in_position = False
-                position_side = 0
-                bars_since_entry = 0
-                signals[i] = 0.0
-                continue
-            elif position_side < 0 and ema_cross_up and volume_spike:
-                in_position = False
-                position_side = 0
-                bars_since_entry = 0
-                signals[i] = 0.0
                 continue
             
             # Hold position
             signals[i] = position_side * SIZE
             continue
         
-        # --- New Position Entry Logic (Only if Flat) ---
-        # Only trade when EMA crossover aligns with BOTH 4h and 1d trends
-        if ema_cross_up:
-            # Long: EMA crossover up AND price above BOTH 4h and 1d EMA(50) AND volume spike
-            if trend_4h_up and trend_1d_up and volume_spike:
+        # --- New Position Entry Logic ---
+        if is_trending:
+            # Trending market: breakout continuation at R4/S4 with volume
+            if price > camarilla_r4_6h[i-1] and vol_spike:  # Break above R4
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            else:
-                signals[i] = 0.0
-        elif ema_cross_down:
-            # Short: EMA crossover down AND price below BOTH 4h and 1d EMA(50) AND volume spike
-            if trend_4h_down and trend_1d_down and volume_spike:
+            elif price < camarilla_s4_6h[i-1] and vol_spike:  # Break below S4
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -160,7 +192,26 @@ def generate_signals(prices):
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
+        elif is_ranging:
+            # Ranging market: fade at R3/S3 levels
+            if price < camarilla_r3_6h[i-1] and price > camarilla_pivot_6h[i-1] and vol_spike:
+                # Near R3 from below - short fade
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = -SIZE
+            elif price > camarilla_s3_6h[i-1] and price < camarilla_pivot_6h[i-1] and vol_spike:
+                # Near S3 from above - long fade
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = SIZE
+            else:
+                signals[i] = 0.0
         else:
+            # Transition regime (ADX between 20-25) - no trade
             signals[i] = 0.0
     
     return signals
