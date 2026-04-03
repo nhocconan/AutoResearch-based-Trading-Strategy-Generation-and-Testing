@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #766: 4h Donchian(20) Breakout + 1d EMA(50) Trend + Volume Spike
-HYPOTHESIS: Donchian breakouts capture momentum, filtered by 1d EMA(50) trend (long only when price > EMA50, short only when price < EMA50) 
-and volume confirmation (>2x average). Uses ATR(14) stoploss. Discrete position sizing 0.25.
-Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #766: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: Donchian(20) breakouts capture strong momentum, filtered by 1d EMA(50) trend direction (bullish when price>EMA, bearish when price<EMA) and volume confirmation (>1.5x average). Long on upper breakout in bullish regime, short on lower breakout in bearish regime. Uses discrete position sizing (0.25) and ATR(14) stoploss. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -27,10 +25,12 @@ def generate_signals(prices):
     
     # Calculate EMA(50) on 1d
     ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    # Align EMA50 to 4h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Trend: 1 = bullish (price > EMA50), -1 = bearish (price < EMA50), 0 = neutral (insufficient data)
+    trend_1d = np.where(close_1d > ema50_1d, 1, np.where(close_1d < ema50_1d, -1, 0))
+    # Align trend to 4h timeframe
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 4h Indicators: Donchian Channel(20) ===
+    # === 4h Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -60,12 +60,12 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = max(20, 20, 14, 50)  # sufficient for Donchian, volume MA, ATR, EMA50
+    warmup = max(20, 20, 14)  # sufficient for Donchian, volume MA, ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema50_1d_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(trend_1d_aligned[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -95,8 +95,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 12 bars (~48h on 4h) to avoid overtrading
-            if bars_since_entry > 12:
+            # Optional: time-based exit after 16 bars (~64h on 4h) to avoid overtrading
+            if bars_since_entry > 16:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -107,19 +107,19 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 2x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Long: Price breaks above Donchian upper AND price > 1d EMA50 (uptrend)
-            if price > donch_upper[i] and price > ema50_1d_aligned[i]:
+            # Long: price breaks above Donchian upper in bullish regime
+            if price > donch_upper[i] and trend_1d_aligned[i] > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Price breaks below Donchian lower AND price < 1d EMA50 (downtrend)
-            elif price < donch_lower[i] and price < ema50_1d_aligned[i]:
+            # Short: price breaks below Donchian lower in bearish regime
+            elif price < donch_lower[i] and trend_1d_aligned[i] < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
