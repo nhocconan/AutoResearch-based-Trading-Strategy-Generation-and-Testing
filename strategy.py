@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #435: 6h Williams %R + 12h SuperTrend + Volume Confirmation
+Experiment #437: 4h Donchian(20) Breakout + HMA Trend + Volume Confirmation + ATR Stoploss
 
-HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h timeframe, 
-filtered by 12h SuperTrend direction and volume confirmation. This combines momentum 
-oscillation with trend following and institutional participation signals. 
-Williams %R is effective in ranging markets (common in 2025 bear/bull transitions) 
-while SuperTrend filters for higher timeframe momentum. Volume confirmation ensures 
-institutional participation at turning points. Targets 12-37 trades/year on 6h timeframe 
-(50-150 total over 4 years) with discrete position sizing to minimize fee drag.
+HYPOTHESIS: Donchian channel breakouts on 4h timeframe, confirmed by 1d HMA trend direction and 
+1d volume spike, capture strong momentum moves in both bull and bear markets. The Donchian 
+structure provides objective breakout levels, HMA filter ensures alignment with higher timeframe 
+trend to avoid counter-trend whipsaws, and volume confirmation increases signal reliability. 
+ATR-based stoploss manages risk. Targets 20-50 trades/year on 4h timeframe (75-200 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_williamsr_12h_supertrend_volume_v1"
-timeframe = "6h"
+name = "mtf_4h_donchian_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,76 +24,56 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for SuperTrend (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
+    # === HTF: 1d data for HMA trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate SuperTrend on 12h
-    if len(df_12h) >= 10:
-        high_12h = df_12h['high'].values
-        low_12h = df_12h['low'].values
-        close_12h = df_12h['close'].values
+    # Calculate HMA(21) on 1d close
+    if len(df_1d) >= 21:
+        close_1d = df_1d['close'].values
+        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        half_len = 21 // 2
+        sqrt_len = int(np.sqrt(21))
         
-        # ATR calculation
-        tr1 = high_12h - low_12h
-        tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-        tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = high_12h[0] - low_12h[0]  # First period
-        atr = pd.Series(tr).ewm(span=10, min_periods=10, adjust=False).mean().values
+        def wma(arr, period):
+            if len(arr) < period:
+                return np.full_like(arr, np.nan)
+            weights = np.arange(1, period + 1)
+            return np.convolve(arr, weights/weights.sum(), mode='valid')
         
-        # SuperTrend calculation
-        hl2 = (high_12h + low_12h) / 2
-        upper_band = hl2 + (3.0 * atr)
-        lower_band = hl2 - (3.0 * atr)
+        wma_half = pd.Series(close_1d).rolling(window=half_len, min_periods=half_len).apply(
+            lambda x: np.dot(x, np.arange(1, half_len+1)) / np.arange(1, half_len+1).sum(), raw=True
+        ).values
+        wma_full = pd.Series(close_1d).rolling(window=21, min_periods=21).apply(
+            lambda x: np.dot(x, np.arange(1, 22)) / np.arange(1, 22).sum(), raw=True
+        ).values
         
-        supertrend = np.zeros(len(close_12h))
-        direction = np.ones(len(close_12h))  # 1 for uptrend, -1 for downtrend
+        hma_input = 2 * wma_half - wma_full
+        hma_21 = pd.Series(hma_input).rolling(window=sqrt_len, min_periods=sqrt_len).apply(
+            lambda x: np.dot(x, np.arange(1, sqrt_len+1)) / np.arange(1, sqrt_len+1).sum(), raw=True
+        ).values
         
-        supertrend[0] = upper_band[0]
-        direction[0] = 1
-        
-        for i in range(1, len(close_12h)):
-            if close_12h[i] > upper_band[i-1]:
-                direction[i] = 1
-            elif close_12h[i] < lower_band[i-1]:
-                direction[i] = -1
-            else:
-                direction[i] = direction[i-1]
-                if direction[i] == -1 and upper_band[i] > upper_band[i-1]:
-                    upper_band[i] = upper_band[i-1]
-                if direction[i] == 1 and lower_band[i] < lower_band[i-1]:
-                    lower_band[i] = lower_band[i-1]
-            
-            if direction[i] == 1:
-                supertrend[i] = lower_band[i]
-            else:
-                supertrend[i] = upper_band[i]
-        
-        # Align SuperTrend direction to 6h
-        supertrend_direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
+        # Pad beginning with NaN
+        hma_21_padded = np.full(n, np.nan)
+        hma_21_padded[20:] = hma_21[:len(hma_21_padded)-20] if len(hma_21) >= len(hma_21_padded)-20 else hma_21
+        hma_21_aligned = align_htf_to_ltf(prices, df_1d, hma_21_padded)
     else:
-        supertrend_direction_aligned = np.ones(n)  # Default to uptrend if insufficient data
+        hma_21_aligned = np.full(n, np.nan)
     
-    # === HTF: 12h data for volume spike (Call ONCE before loop) ===
-    if len(df_12h) >= 20:
-        vol_12h = df_12h['volume'].values
-        vol_ma_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-        vol_ratio_12h = np.zeros(len(vol_12h))
-        vol_ratio_12h[20:] = vol_12h[20:] / vol_ma_20[20:]
-        vol_ratio_12h[:20] = 1.0  # Neutral for warmup
-        vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    # === HTF: 1d data for volume spike confirmation (Call ONCE before loop) ===
+    if len(df_1d) >= 20:
+        vol_1d = df_1d['volume'].values
+        vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+        vol_ratio_1d = np.zeros(len(vol_1d))
+        vol_ratio_1d[20:] = vol_1d[20:] / vol_ma_20[20:]
+        vol_ratio_1d[:20] = 1.0  # Neutral for warmup
+        vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     else:
-        vol_ratio_12h_aligned = np.full(n, 1.0)
+        vol_ratio_1d_aligned = np.full(n, 1.0)
     
-    # === 6h Indicators ===
-    # Williams %R(14)
-    williams_r = np.full(n, np.nan)
-    if n >= 14:
-        highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-        lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-        williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-        # Handle division by zero
-        williams_r[highest_high == lowest_low] = -50
+    # === 4h Indicators ===
+    # Calculate Donchian channels (20-period) on 4h
+    donchian_h = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_l = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -110,17 +88,25 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(williams_r[i]) or np.isnan(supertrend_direction_aligned[i]) or 
-            np.isnan(vol_ratio_12h_aligned[i])):
+        if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
+            np.isnan(hma_21_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Volume Confirmation: Require volume spike (> 1.3x average) ---
-        volume_spike = vol_ratio_12h_aligned[i] > 1.3
+        # --- Trend Filter: HMA direction (rising for long, falling for short) ---
+        if i >= warmup + 1:
+            hma_rising = hma_21_aligned[i] > hma_21_aligned[i-1]
+            hma_falling = hma_21_aligned[i] < hma_21_aligned[i-1]
+        else:
+            hma_rising = hma_21_aligned[i] > hma_21_aligned[i]
+            hma_falling = hma_21_aligned[i] < hma_21_aligned[i]
+        
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio_1d_aligned[i] > 1.5
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
-            # Calculate ATR(14) for stoploss on 6h
+            # Calculate ATR(14) for stoploss
             tr = np.zeros(i+1)
             tr[0] = high[0] - low[0]
             for j in range(1, i+1):
@@ -147,22 +133,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Williams %R conditions
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
-        
-        # Long: Oversold + uptrend on 12h + volume spike
+        # Long: Price breaks above Donchian HMA + volume confirmation
         long_condition = (
-            oversold and 
-            supertrend_direction_aligned[i] > 0 and 
-            volume_spike
+            close[i] > donchian_h[i] and  # Breakout above upper band
+            hma_rising and                 # HMA trending up
+            volume_spike                   # Volume confirmation
         )
         
-        # Short: Overbought + downtrend on 12h + volume spike
+        # Short: Price breaks below Donchian L + volume confirmation
         short_condition = (
-            overbought and 
-            supertrend_direction_aligned[i] < 0 and 
-            volume_spike
+            close[i] < donchian_l[i] and   # Breakdown below lower band
+            hma_falling and                # HMA trending down
+            volume_spike                   # Volume confirmation
         )
         
         if long_condition:
