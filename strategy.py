@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #117: 4h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for continuation) capture high-probability moves. Volume confirmation (>1.5x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years.
+Experiment #114: 1h Donchian(20) breakout + 4h/1d Camarilla pivot + volume confirmation + session filter
+HYPOTHESIS: 1h Donchian breakouts aligned with 4h/1d Camarilla pivot levels capture high-probability intraday moves. 
+Volume confirmation (>1.5x average) filters weak breakouts. Session filter (08-20 UTC) reduces noise trades. 
+4h trend acts as regime filter (price > 4h EMA20 = bull trend, price < 4h EMA20 = bear trend). 
+Discrete position sizing (0.20) minimizes fee churn. Target: 60-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_117_4h_donchian20_1d_camarilla_vol_v1"
-timeframe = "4h"
+name = "exp_114_1h_donchian20_4h_1d_camarilla_vol_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,6 +21,15 @@ def generate_signals(prices):
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
+    
+    # Pre-compute session hours (08-20 UTC) ONCE before loop
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    
+    # === HTF: 4h data for EMA trend filter (Call ONCE before loop) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)  # auto shift(1)
     
     # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
@@ -49,24 +61,24 @@ def generate_signals(prices):
             s3_1d[i] = s3
             s4_1d[i] = s4
     
-    # Align to 4h timeframe
+    # Align to 1h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # === 4h Indicators: Donchian(20) channels ===
+    # === 1h Indicators: Donchian(20) channels ===
     donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: ATR(14) for stoploss ===
-    tr_4h = np.zeros(n)
-    tr_4h[0] = high[0] - low[0]
+    # === 1h Indicators: ATR(14) for stoploss ===
+    tr_1h = np.zeros(n)
+    tr_1h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_4h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr_4h).ewm(span=14, min_periods=14, adjust=False).mean().values
+        tr_1h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr_1h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 1h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
@@ -74,7 +86,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.20
     
     # Position tracking state variables
     in_position = False
@@ -85,9 +97,15 @@ def generate_signals(prices):
     warmup = 60
     
     for i in range(warmup, n):
+        # --- Session Filter: Only trade 08-20 UTC ---
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        
         # --- Data Validity Check ---
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
+        if (not in_session or
+            np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
             np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(ema_4h_aligned[i]) or
             np.isnan(r3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or
             np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i])):
             signals[i] = 0.0
@@ -107,6 +125,10 @@ def generate_signals(prices):
         near_s3 = abs(price - s3_1d_aligned[i]) / price < 0.005
         break_r4 = price > r4_1d_aligned[i]
         break_s4 = price < s4_1d_aligned[i]
+        
+        # --- 4h Trend Filter: EMA20 ---
+        trend_bull = price > ema_4h_aligned[i]
+        trend_bear = price < ema_4h_aligned[i]
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -149,13 +171,19 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        if (breakout_up and volume_spike and (near_r3 or break_r4)) or (break_r4 and volume_spike):
+        # Long: bullish breakout in bull trend OR strong breakout through R4
+        if ((breakout_up and volume_spike and near_r3 and trend_bull) or 
+            (breakout_up and volume_spike and break_r4) or
+            (break_r4 and volume_spike)):
             in_position = True
             position_side = 1
             entry_price = close[i]
             bars_since_entry = 0
             signals[i] = SIZE
-        elif (breakout_down and volume_spike and (near_s3 or break_s4)) or (break_s4 and volume_spike):
+        # Short: bearish breakout in bear trend OR strong breakout through S4
+        elif ((breakout_down and volume_spike and near_s3 and trend_bear) or 
+              (breakout_down and volume_spike and break_s4) or
+              (break_s4 and volume_spike)):
             in_position = True
             position_side = -1
             entry_price = close[i]
