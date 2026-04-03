@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #079: 6h Alligator + Elder Ray (1d) Trend Strategy
-HYPOTHESIS: Combines Williams Alligator (6h) for trend identification with Elder Ray (1d) for bull/bear power confirmation.
-Alligator (jaw/teeth/lips) defines trend direction and strength; Elder Ray (Bull Power/Bear Power) filters entries to only
-take trades where higher timeframe momentum supports the direction. Works in both bull/bear markets by only trading
-in the direction of the 6h Alligator trend with 1d Elder Ray confirmation. Target: 75-150 trades over 4 years (19-37/year).
+Experiment #080: 4h Donchian(20) breakout + 1d HMA(20) trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with daily HMA trend capture momentum moves while avoiding whipsaws. Daily timeframe provides strong trend filter suitable for both bull and bear markets. Volume confirmation (>2.0x average) ensures breakout legitimacy. ATR stoploss (2.0x) reduces churn. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_079_6h_alligator_elder_ray_1d_trend_v1"
-timeframe = "6h"
+name = "exp_080_4h_donchian20_1d_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,139 +19,141 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === Indicators: Williams Alligator (6h) ===
-    def calculate_smma(data, period):
-        """Smoothed Moving Average (SMMA)"""
-        if len(data) < period:
-            return np.full_like(data, np.nan, dtype=np.float64)
-        result = np.full_like(data, np.nan, dtype=np.float64)
-        # First value is SMA
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: SMMA = (PREV_SMMA * (period-1) + CURRENT_DATA) / period
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    jaw = calculate_smma(close, 13)  # Jaw: 13-period SMMA, shifted 8 bars
-    teeth = calculate_smma(close, 8)  # Teeth: 8-period SMMA, shifted 5 bars
-    lips = calculate_smma(close, 5)   # Lips: 5-period SMMA, shifted 3 bars
-    
-    # Apply Alligator shifts (jaw: +8, teeth: +5, lips: +3)
-    jaw_shifted = np.roll(jaw, 8)
-    teeth_shifted = np.roll(teeth, 5)
-    lips_shifted = np.roll(lips, 3)
-    # Set shifted values to NaN where invalid
-    jaw_shifted[:8] = np.nan
-    teeth_shifted[:5] = np.nan
-    lips_shifted[:3] = np.nan
-    
-    # === HTF: 1d Elder Ray for trend confirmation ===
+    # === HTF: 1d data for HMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values.astype(np.float64)
-    low_1d = df_1d['low'].values.astype(np.float64)
-    close_1d = df_1d['close'].values.astype(np.float64)
     
-    # Calculate EMA(13) for Elder Ray
-    def calculate_ema(data, period):
-        if len(data) < period:
-            return np.full_like(data, np.nan, dtype=np.float64)
-        ema = np.full_like(data, np.nan, dtype=np.float64)
-        multiplier = 2 / (period + 1)
-        ema[period-1] = np.mean(data[:period])
-        for i in range(period, len(data)):
-            ema[i] = (data[i] - ema[i-1]) * multiplier + ema[i-1]
-        return ema
+    # Calculate HMA(20) on 1d close
+    def calculate_hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
+        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
+        hma_raw = 2 * wma_half - wma_full
+        hma = pd.Series(hma_raw).ewm(span=sqrt_period, adjust=False).mean().values
+        return hma
     
-    ema_13_1d = calculate_ema(close_1d, 13)
+    hma_1d = calculate_hma(df_1d['close'].values, 20)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high_1d - ema_13_1d
-    bear_power = low_1d - ema_13_1d
+    # === 4h Indicators: Donchian(20) channels ===
+    def calculate_donchian(high, low, period=20):
+        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        return upper, lower
     
-    # Align Elder Ray to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    donch_upper, donch_lower = calculate_donchian(high, low, 20)
+    
+    # === 4h Indicators: ATR(14) for stoploss ===
+    tr_4h = np.zeros(n)
+    tr_4h[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr_4h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr_14 = pd.Series(tr_4h).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # === 4h Indicators: Volume MA(20) for spike detection ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.zeros(n)
+    vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
+    vol_ratio[:20] = 1.0  # Neutral for warmup
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.25  # Position sizing (25% of capital)
     
-    # Position tracking
+    # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
-    bars_since_entry = 0
+    bars_since_entry = 0  # Track bars in position
     
-    warmup = 50  # Warmup for Alligator and Elder Ray stability
+    warmup = 60  # Warmup for HMA stability and Donchian
     
     for i in range(warmup, n):
-        # Skip if any critical values are NaN
-        if (np.isnan(jaw_shifted[i]) or np.isnan(teeth_shifted[i]) or np.isnan(lips_shifted[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i])):
+        # --- Data Validity Check ---
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
+            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # Alligator trend detection:
-        # Uptrend: Lips > Teeth > Jaw (all aligned upward)
-        # Downtrend: Lips < Teeth < Jaw (all aligned downward)
-        lips_val = lips_shifted[i]
-        teeth_val = teeth_shifted[i]
-        jaw_val = jaw_shifted[i]
+        # --- HMA Trend: Determine 1d trend direction ---
+        price = close[i]
+        hma_trend_up = price > hma_1d_aligned[i]  # Above HMA = uptrend
+        hma_trend_down = price < hma_1d_aligned[i]  # Below HMA = downtrend
         
-        is_uptrend = lips_val > teeth_val and teeth_val > jaw_val
-        is_downtrend = lips_val < teeth_val and teeth_val < jaw_val
+        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = vol_ratio[i] > 2.0
         
-        # Elder Ray confirmation:
-        # Bull Power > 0 indicates bullish momentum
-        # Bear Power < 0 indicates bearish momentum
-        bull_confirm = bull_power_aligned[i] > 0
-        bear_confirm = bear_power_aligned[i] < 0
+        # --- Donchian Breakout Conditions ---
+        breakout_up = high[i] > donch_upper[i-1]  # Break above upper channel
+        breakout_down = low[i] < donch_lower[i-1]  # Break below lower channel
         
-        # --- Exit Logic ---
+        # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
             bars_since_entry += 1
             
-            # Exit when Alligator trend reverses or Elder Ray confirmation fails
+            # ATR-based stoploss
             if position_side > 0:  # Long position
-                if not (is_uptrend and bull_confirm):
+                stop_level = entry_price - 2.0 * atr_14[i]
+                if low[i] < stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+                # Exit on opposite Donchian breakout with volume (profit taking)
+                if breakout_down and volume_spike:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                if not (is_downtrend and bear_confirm):
+                stop_level = entry_price + 2.0 * atr_14[i]
+                if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+                # Exit on opposite Donchian breakout with volume (profit taking)
+                if breakout_up and volume_spike:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             
-            # Minimum holding period of 1 bar to prevent whipsaw
-            if bars_since_entry < 1:
-                signals[i] = position_side * SIZE
-                continue
-            
             # Hold position
             signals[i] = position_side * SIZE
             continue
         
-        # --- New Position Entry Logic ---
-        # Long entry: Alligator uptrend AND Elder Ray bullish confirmation
-        if is_uptrend and bull_confirm:
-            in_position = True
-            position_side = 1
-            entry_price = close[i]
-            bars_since_entry = 0
-            signals[i] = SIZE
-        # Short entry: Alligator downtrend AND Elder Ray bearish confirmation
-        elif is_downtrend and bear_confirm:
-            in_position = True
-            position_side = -1
-            entry_price = close[i]
-            bars_since_entry = 0
-            signals[i] = -SIZE
+        # --- New Position Entry Logic (Only if Flat) ---
+        # Only trade when breakout aligns with 1d HMA trend
+        if hma_trend_up:
+            # Long: Donchian breakout up AND volume spike AND price above 1d HMA
+            if breakout_up and volume_spike:
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = SIZE
+            else:
+                signals[i] = 0.0
+        elif hma_trend_down:
+            # Short: Donchian breakout down AND volume spike AND price below 1d HMA
+            if breakout_down and volume_spike:
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = -SIZE
+            else:
+                signals[i] = 0.0
         else:
+            # Exactly at HMA (rare), do not trade
             signals[i] = 0.0
     
     return signals
