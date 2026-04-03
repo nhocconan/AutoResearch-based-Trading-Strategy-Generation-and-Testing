@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #1209: 4h Donchian(20) Breakout + 1d Trend + Volume Confirmation (Optimized)
-HYPOTHESIS: Donchian(20) breakouts on 4h with 1d trend filter and volume confirmation capture intermediate-term trends. 
-Optimized for higher trade frequency by tightening volume confirmation to 2.0x average and adding minimum holding period of 4 bars to reduce whipsaw. 
-Target: 100-250 total trades over 4 years (25-62/year) to balance statistical significance and fee drag.
+Experiment #1211: 6h Donchian(20) Breakout + 1d Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 6h timeframe capture intermediate-term trends with optimal trade frequency (12-37/year). 
+Trend filter from 1d timeframe ensures alignment with higher-timeframe momentum. Volume confirmation (>1.5x average) 
+filters for institutional participation. Designed to work in both bull (breakouts continue) and bear (breakdowns continue) 
+markets by following the 1d trend direction. Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1209_4h_donchian20_1d_trend_vol_v2"
-timeframe = "4h"
+name = "exp_1211_6h_donchian20_1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,16 +30,16 @@ def generate_signals(prices):
     trend_1d[1:] = np.where(close_1d[1:] > close_1d[:-1], 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 4h Indicators: Donchian(20) ===
+    # === 6h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -71,11 +72,6 @@ def generate_signals(prices):
         if in_position:
             bars_since_entry += 1
             
-            # Minimum holding period: 4 bars (16 hours) to reduce whipsaw
-            if bars_since_entry < 4:
-                signals[i] = position_side * SIZE
-                continue
-            
             if position_side > 0:  # Long position
                 # Stoploss: 2.0*ATR below entry
                 stop_level = entry_price - 2.0 * atr[i]
@@ -99,8 +95,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 2.0x average for stricter filter)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
@@ -122,3 +118,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
