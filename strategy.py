@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #1080: 4h Donchian(20) Breakout + HMA Trend + Volume Confirmation + ATR Stoploss
+Experiment #1083: 4h Donchian(20) Breakout + HMA Trend + Volume Confirmation + ATR Stoploss
 HYPOTHESIS: Donchian(20) breakouts capture institutional order flow. Long when price breaks above upper band with HMA(21) uptrend and volume spike (>1.5x avg). Short when price breaks below lower band with HMA(21) downtrend and volume spike. Uses discrete position sizing (0.30) to balance reward/risk. Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1080_4h_donchian20_hma_vol_v1"
+name = "exp_1083_4h_donchian20_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
