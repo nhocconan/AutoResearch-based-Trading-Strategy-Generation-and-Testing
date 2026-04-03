@@ -6,6 +6,7 @@ HYPOTHESIS: The Choppiness Index (CHOP) is the optimal regime filter.
 It identifies strong directional moves (CHOP < 40) where Donchian breakouts are more reliable.
 It avoids ranging markets (CHOP > 61.8) where whipsaws destroy trend strategies.
 This strategy seeks high-probability, trend-following entries confirmed by volume during trending periods.
+The strategy seeks trend continuation (Long/Short) only when the market is clearly trending (low CHOP).
 """
 import numpy as np
 import pandas as pd
@@ -45,6 +46,7 @@ def calculate_choppiness(high, low, close, period=14):
         tr_sum = 0.0
         for j in range(i - period + 1, i + 1):
             # Calculate TR for each bar in the window
+            # Note: We must calculate TR based on the actual OHLC values within the window
             current_tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1])) if j > 0 else high[j] - low[j]
             tr_sum += current_tr
         
