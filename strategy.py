@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #077: 4h Donchian(20) breakout + HMA trend + volume confirmation + ATR stoploss
+Experiment #079: 6h Camarilla pivot + volume confirmation + ADX regime filter
 
-HYPOTHESIS: Donchian channel breakouts on 4h timeframe, confirmed by higher timeframe trend (1d HMA21) 
-and volume spike, provide high-probability entries in both bull and bear markets. The Donchian structure 
-captures momentum bursts, while the 1d HMA filter ensures alignment with the dominant trend. Volume 
-confirmation filters out false breakouts. ATR-based stoploss manages risk. Targets 25-50 trades/year 
-on 4h timeframe (100-200 total over 4 years) to minimize fee drag while capturing strong trending moves.
+HYPOTHESIS: Camarilla pivot levels derived from 1d OHLC provide institutional support/resistance 
+on 6h timeframe. Breakouts above R4 or below S4 with volume confirmation (>1.5x 20-period 6h 
+volume average) and ADX > 25 (trending regime) capture strong momentum moves. Fades at R3/S3 
+with volume divergence provide counter-trend entries in ranging markets (ADX < 20). 
+Uses discrete position sizing (0.25) to limit drawdown and minimize fee churn. Targets 50-150 
+total trades over 4 years (12-37/year) to avoid fee drag while maintaining edge in bull/bear 
+markets through regime-adaptive logic.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian20_hma_vol_v1"
-timeframe = "4h"
+name = "mtf_6h_camarilla_vol_adx_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,54 +26,79 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for HMA trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate HMA(21) on 1d close
-    if len(df_1d) >= 21:
+    # Calculate Camarilla pivot levels from 1d OHLC
+    if len(df_1d) >= 1:
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
         close_1d = df_1d['close'].values
-        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
         
-        def wma(arr, period):
-            if len(arr) < period:
-                return np.full(len(arr), np.nan)
-            weights = np.arange(1, period + 1)
-            return np.convolve(arr, weights/weights.sum(), mode='valid')
+        pivot = (high_1d + low_1d + close_1d) / 3
+        range_1d = high_1d - low_1d
         
-        wma_half = pd.Series(close_1d).rolling(window=half_len, min_periods=half_len).apply(
-            lambda x: np.dot(x, np.arange(1, half_len+1)) / np.arange(1, half_len+1).sum(), raw=True
-        ).values
-        wma_full = pd.Series(close_1d).rolling(window=21, min_periods=21).apply(
-            lambda x: np.dot(x, np.arange(1, 22)) / np.arange(1, 22).sum(), raw=True
-        ).values
+        # Camarilla levels
+        r3 = pivot + range_1d * 1.1 / 2
+        r4 = pivot + range_1d * 1.1
+        s3 = pivot - range_1d * 1.1 / 2
+        s4 = pivot - range_1d * 1.1
         
-        hma_raw = 2 * wma_half - wma_full
-        hma_21 = pd.Series(hma_raw).rolling(window=sqrt_len, min_periods=sqrt_len).apply(
-            lambda x: np.dot(x, np.arange(1, sqrt_len+1)) / np.arange(1, sqrt_len+1).sum(), raw=True
-        ).values
-        
-        # Align to LTF
-        hma_21_aligned = align_htf_to_ltf(prices, df_1d, hma_21)
+        # Align to 6h timeframe
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     else:
-        hma_21_aligned = np.full(n, np.nan)
+        pivot_aligned = np.full(n, np.nan)
+        r3_aligned = np.full(n, np.nan)
+        r4_aligned = np.full(n, np.nan)
+        s3_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
     
-    # === HTF: 1d data for volume spike (Call ONCE before loop) ===
-    if len(df_1d) >= 20:
-        vol_1d = df_1d['volume'].values
-        vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-        vol_ratio_1d = np.zeros(len(vol_1d))
-        vol_ratio_1d[20:] = vol_1d[20:] / vol_ma_20[20:]
-        vol_ratio_1d[:20] = 1.0  # Neutral for warmup
-        vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # === HTF: 1d data for ADX regime filter (Call ONCE before loop) ===
+    if len(df_1d) >= 14:
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
+        close_1d = df_1d['close'].values
+        
+        # True Range
+        tr1 = high_1d[1:] - low_1d[1:]
+        tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+        tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+        tr = np.concatenate([[high_1d[0] - low_1d[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
+        
+        # Directional Movement
+        dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                           np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+        dm_plus = np.concatenate([[0], dm_plus])
+        dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                            np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+        dm_minus = np.concatenate([[0], dm_minus])
+        
+        # Smoothed values
+        atr_1d = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+        dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, min_periods=14, adjust=False).mean().values
+        dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, min_periods=14, adjust=False).mean().values
+        
+        # Directional Indicators
+        di_plus = 100 * dm_plus_smooth / (atr_1d + 1e-10)
+        di_minus = 100 * dm_minus_smooth / (atr_1d + 1e-10)
+        
+        # ADX
+        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+        adx_1d = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
+        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     else:
-        vol_ratio_1d_aligned = np.full(n, 1.0)
+        adx_1d_aligned = np.full(n, np.nan)
     
-    # === LTF: 4h Donchian(20) breakout ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # === 6h Indicators ===
+    # Volume ratio (current vs 20-period average)
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.zeros(n)
+    vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
+    vol_ratio[:20] = 1.0  # Neutral for warmup
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -82,21 +109,20 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     
-    warmup = max(100, lookback)  # Ensure enough data for HTF and indicator calculations
+    warmup = 100  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(hma_21_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Trend Filter: HMA direction ---
-        hma_rising = hma_21_aligned[i] > hma_21_aligned[i-1]
-        hma_falling = hma_21_aligned[i] < hma_21_aligned[i-1]
-        
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio_1d_aligned[i] > 1.8
+        # --- Regime Filters ---
+        adx = adx_1d_aligned[i]
+        trending = adx > 25
+        ranging = adx < 20
+        volume_spike = vol_ratio[i] > 1.5
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -114,8 +140,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at Donchian upper band (trailing)
-                if close[i] >= highest_high[i]:
+                # Take profit at opposite Camarilla level
+                if close[i] >= r3_aligned[i] and entry_price < r3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -127,8 +153,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at Donchian lower band (trailing)
-                if close[i] <= lowest_low[i]:
+                # Take profit at opposite Camarilla level
+                if close[i] <= s3_aligned[i] and entry_price > s3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -139,19 +165,19 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Price breaks above Donchian upper band with HMA up and volume
-        long_condition = (
-            close[i] > highest_high[i] and  # Breakout above upper band
-            hma_rising and                  # HMA trending up
-            volume_spike                    # Volume confirmation
-        )
-        
-        # Short: Price breaks below Donchian lower band with HMA down and volume
-        short_condition = (
-            close[i] < lowest_low[i] and    # Breakdown below lower band
-            hma_falling and                 # HMA trending down
-            volume_spike                    # Volume confirmation
-        )
+        # Regime-adaptive entries
+        if trending and volume_spike:
+            # Trending market: breakout continuation at R4/S4
+            long_condition = close[i] > r4_aligned[i]
+            short_condition = close[i] < s4_aligned[i]
+        elif ranging:
+            # Ranging market: fade at R3/S3
+            long_condition = close[i] < s3_aligned[i] and close[i] > s4_aligned[i]
+            short_condition = close[i] > r3_aligned[i] and close[i] < r4_aligned[i]
+        else:
+            # Weak trend: no entries
+            long_condition = False
+            short_condition = False
         
         if long_condition:
             in_position = True
