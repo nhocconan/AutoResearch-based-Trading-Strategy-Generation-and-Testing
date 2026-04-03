@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #274: 1h Donchian(20) breakout + 4h/1d pivot direction + volume confirmation
-HYPOTHESIS: 1h Donchian breakouts aligned with 4h/1d weekly pivot levels capture intraday momentum in both bull/bear markets. Using 4h/1d for signal direction reduces false breakouts. Volume filter (>1.5x average) ensures participation. Session filter (08-20 UTC) avoids low-liquidity hours. Target: 60-150 total trades over 4 years (15-37/year) on 1h timeframe.
+Experiment #275: 6h Ichimoku Cloud + 1d Weekly Trend Filter + Volume Spike
+HYPOTHESIS: Ichimoku TK cross (Tenkan/Kijun) signals aligned with 1d weekly trend (price above/below weekly Kumo) capture high-probability trend continuation. Volume confirmation (>2.0x average) filters false signals. Works in bull via cloud breakouts, bear via cloud rejections. Target: 75-150 total trades over 4 years (19-38/year). Uses discrete sizing (0.25) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_274_1h_donchian20_4h_1d_pivot_vol_v1"
-timeframe = "1h"
+name = "exp_275_6h_ichimoku_1d_weekly_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,60 +19,63 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h and 1d data (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
+    # === HTF: 1d data for weekly Ichimoku (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # === 4h: Weekly pivot points from prior week ===
-    week_high_4h = df_4h['high'].rolling(window=5, min_periods=5).max().shift(1)
-    week_low_4h = df_4h['low'].rolling(window=5, min_periods=5).min().shift(1)
-    week_close_4h = df_4h['close'].rolling(window=5, min_periods=5).last().shift(1)
+    # Calculate weekly Ichimoku components on 1d data
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = df_1d['high'].rolling(window=9, min_periods=9).max()
+    period9_low = df_1d['low'].rolling(window=9, min_periods=9).min()
+    tenkan_sen = (period9_high + period9_low) / 2.0
     
-    pivot_4h = (week_high_4h + week_low_4h + week_close_4h) / 3.0
-    r1_4h = 2 * pivot_4h - week_low_4h
-    s1_4h = 2 * pivot_4h - week_high_4h
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = df_1d['high'].rolling(window=26, min_periods=26).max()
+    period26_low = df_1d['low'].rolling(window=26, min_periods=26).min()
+    kijun_sen = (period26_high + period26_low) / 2.0
     
-    pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h.values)
-    r1_4h_aligned = align_htf_to_ltf(prices, df_4h, r1_4h.values)
-    s1_4h_aligned = align_htf_to_ltf(prices, df_4h, s1_4h.values)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2.0).shift(26)
     
-    # === 1d: Weekly pivot points from prior week ===
-    week_high_1d = df_1d['high'].rolling(window=5, min_periods=5).max().shift(1)
-    week_low_1d = df_1d['low'].rolling(window=5, min_periods=5).min().shift(1)
-    week_close_1d = df_1d['close'].rolling(window=5, min_periods=5).last().shift(1)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 52 periods ahead
+    period52_high = df_1d['high'].rolling(window=52, min_periods=52).max()
+    period52_low = df_1d['low'].rolling(window=52, min_periods=52).min()
+    senkou_span_b = ((period52_high + period52_low) / 2.0).shift(52)
     
-    pivot_1d = (week_high_1d + week_low_1d + week_close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - week_low_1d
-    s1_1d = 2 * pivot_1d - week_high_1d
+    # Chikou Span (Lagging Span): Close shifted -22 periods (not used for trend filter)
     
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d.values)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d.values)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d.values)
+    # Align Ichimoku components to 6h timeframe
+    tenkan_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen.values)
+    kijun_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen.values)
+    span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a.values)
+    span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b.values)
     
-    # === 1h: Donchian(20) channels ===
-    donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 6h Indicators: Ichimoku TK Cross ===
+    # Tenkan-sen (6h): (9-period high + 9-period low)/2
+    period9_high_6h = pd.Series(high).rolling(window=9, min_periods=9).max()
+    period9_low_6h = pd.Series(low).rolling(window=9, min_periods=9).min()
+    tenkan_6h = (period9_high_6h + period9_low_6h) / 2.0
     
-    # === 1h: ATR(14) for stoploss ===
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
+    # Kijun-sen (6h): (26-period high + 26-period low)/2
+    period26_high_6h = pd.Series(high).rolling(window=26, min_periods=26).max()
+    period26_low_6h = pd.Series(low).rolling(window=26, min_periods=26).min()
+    kijun_6h = (period26_high_6h + period26_low_6h) / 2.0
+    
+    # === 6h Indicators: ATR(14) for stoploss ===
+    tr_6h = np.zeros(n)
+    tr_6h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 1h: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
     vol_ratio[:20] = 1.0
     
-    # === Session filter: 08-20 UTC ===
-    # prices.index is DatetimeIndex, .hour works directly
-    hours = prices.index.hour
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20
+    SIZE = 0.25
     
     # Position tracking state variables
     in_position = False
@@ -80,38 +83,31 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 60  # Enough for 20-period indicators and 5-day weekly pivot
+    warmup = 100  # Enough for Ichimoku calculations (52-period + 26 shift)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
+        if (np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or
             np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(pivot_4h_aligned[i]) or np.isnan(r1_4h_aligned[i]) or
-            np.isnan(s1_4h_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or
-            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i])):
-            signals[i] = 0.0
-            continue
-        
-        # --- Session Filter: Only trade 08-20 UTC ---
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+            np.isnan(tenkan_aligned[i]) or np.isnan(kijun_aligned[i]) or
+            np.isnan(span_a_aligned[i]) or np.isnan(span_b_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio[i] > 1.5
+        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = vol_ratio[i] > 2.0
         
-        # --- Donchian Breakout Conditions ---
-        breakout_up = high[i] > donch_upper[i-1]
-        breakout_down = low[i] < donch_lower[i-1]
+        # --- 6h Ichimoku TK Cross ---
+        tk_cross_up = tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]
+        tk_cross_down = tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]
         
-        # --- Combined Pivot Direction Logic (4h AND 1d agreement) ---
-        # Long bias: price above R1 on BOTH 4h and 1d (strong bullish)
-        # Short bias: price below S1 on BOTH 4h and 1d (strong bearish)
-        long_bias = (price > r1_4h_aligned[i]) and (price > r1_1d_aligned[i])
-        short_bias = (price < s1_4h_aligned[i]) and (price < s1_1d_aligned[i])
+        # --- 1d Weekly Trend Filter: Price relative to Kumo (Cloud) ---
+        # Bullish trend: price above both Senkou Span A and B
+        # Bearish trend: price below both Senkou Span A and B
+        bullish_trend = price > span_a_aligned[i] and price > span_b_aligned[i]
+        bearish_trend = price < span_a_aligned[i] and price < span_b_aligned[i]
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -125,8 +121,8 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on breakout down with volume if bearish bias on either TF
-                if breakout_down and volume_spike and ((price < s1_4h_aligned[i]) or (price < s1_1d_aligned[i])):
+                # Exit on TK cross down with volume if bearish trend
+                if tk_cross_down and volume_spike and bearish_trend:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -140,8 +136,8 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on breakout up with volume if bullish bias on either TF
-                if breakout_up and volume_spike and ((price > r1_4h_aligned[i]) or (price > r1_1d_aligned[i])):
+                # Exit on TK cross up with volume if bullish trend
+                if tk_cross_up and volume_spike and bullish_trend:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -156,17 +152,17 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Require volume spike + breakout conditions + pivot bias alignment on BOTH timeframes
+        # Require volume spike + TK cross + trend alignment
         if volume_spike:
-            # Long: breakout up AND bullish bias on BOTH 4h and 1d
-            if breakout_up and long_bias:
+            # Long: TK cross up AND bullish trend (price above cloud)
+            if tk_cross_up and bullish_trend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: breakout down AND bearish bias on BOTH 4h and 1d
-            elif breakout_down and short_bias:
+            # Short: TK cross down AND bearish trend (price below cloud)
+            elif tk_cross_down and bearish_trend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
