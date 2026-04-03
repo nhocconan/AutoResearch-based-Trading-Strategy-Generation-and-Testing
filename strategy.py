@@ -1,21 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #2155: 6h Donchian(20) breakout + 1w pivot direction + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts with 1-week pivot bias and volume confirmation capture 
-institutional swing trades. Works in bull markets (breakout continuation) and bear 
-markets (fade at weekly extremes) by using pivot levels as dynamic support/resistance.
-Primary: 6h Donchian(20) breakout with volume > 1.5x 20-bar average
-HTF: 1w pivot trend (only trade breakouts in direction of weekly pivot bias)
-Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian touch
-Target: 75-200 total trades over 4 years (19-50/year) - optimized for 6h timeframe
-Designed to avoid overtrading via strict volume confirmation and pivot alignment.
+Experiment #2155: 6h Donchian(20) breakout + 1w Camarilla pivot + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts capture swing momentum with weekly Camarilla pivot levels as 
+institutional support/resistance. Volume confirmation filters false breakouts. Works in bull 
+markets (trend continuation) and bear markets (mean reversion at extreme pivot levels R4/S4).
+Primary: 6h, HTF: 1w for Camarilla pivot calculation, 1d for volume context.
+Target: 75-150 total trades over 4 years (19-37/year) - optimized for 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2155_6h_donchian20_1w_pivot_vol_v1"
+name = "exp_2155_6h_donchian20_1w_camarilla_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -26,28 +23,54 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for Pivot levels (Call ONCE before loop) ===
+    # === HTF: 1w data for Camarilla pivot levels (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot points: P = (H+L+C)/3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H-L), S2 = P - (H-L)
-    # R3 = H + 2*(P-L), S3 = L - 2*(H-P)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
-    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
+    # Calculate weekly Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R4 = Pivot + (Range * 1.1/2)
+    # R3 = Pivot + (Range * 1.1/4)
+    # R2 = Pivot + (Range * 1.1/6)
+    # R1 = Pivot + (Range * 1.1/12)
+    # S1 = Pivot - (Range * 1.1/12)
+    # S2 = Pivot - (Range * 1.1/6)
+    # S3 = Pivot - (Range * 1.1/4)
+    # S4 = Pivot - (Range * 1.1/2)
     
-    # Trend bias from pivots: 
-    # Bullish if price above weekly pivot, bearish if below
-    trend_bias_1w = np.where(close_1w > pivot_1w, 1, -1)
-    trend_bias_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_bias_1w)
+    pivot_1w = np.full_like(close_1w, np.nan)
+    range_1w = np.full_like(close_1w, np.nan)
+    r4_1w = np.full_like(close_1w, np.nan)
+    r3_1w = np.full_like(close_1w, np.nan)
+    s3_1w = np.full_like(close_1w, np.nan)
+    s4_1w = np.full_like(close_1w, np.nan)
+    
+    for i in range(len(close_1w)):
+        if i >= 1:  # Need previous week's data
+            pivot_1w[i] = (high_1w[i-1] + low_1w[i-1] + close_1w[i-1]) / 3.0
+            range_1w[i] = high_1w[i-1] - low_1w[i-1]
+            r4_1w[i] = pivot_1w[i] + (range_1w[i] * 1.1 / 2)
+            r3_1w[i] = pivot_1w[i] + (range_1w[i] * 1.1 / 4)
+            s3_1w[i] = pivot_1w[i] - (range_1w[i] * 1.1 / 4)
+            s4_1w[i] = pivot_1w[i] - (range_1w[i] * 1.1 / 2)
+    
+    # Align Camarilla levels to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    
+    # === HTF: 1d data for volume context (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
+    
+    # 1d volume moving average for context
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     # === 6h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
     # Donchian channels
@@ -56,7 +79,7 @@ def generate_signals(prices):
     donchian_upper = high_ma
     donchian_lower = low_ma
     
-    # Volume MA for confirmation (moderate threshold to balance frequency)
+    # Volume MA for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -86,8 +109,10 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(trend_bias_1w_aligned[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i])):
+            np.isnan(r4_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or
+            np.isnan(s3_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
+            np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -103,8 +128,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price touches lower Donchian (mean reversion)
-                elif price <= donchian_lower[i]:
+                # Exit if price touches S3 Camarilla level (mean reversion)
+                elif price <= s3_1w_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -117,8 +142,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price touches upper Donchian (mean reversion)
-                elif price >= donchian_upper[i]:
+                # Exit if price touches R3 Camarilla level (mean reversion)
+                elif price >= r3_1w_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -127,23 +152,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1w pivot bias for direction filter
-        bias = trend_bias_1w_aligned[i]
+        # Volume confirmation: require volume spike (> 1.5x 6h average) AND above 1d average
+        volume_spike_6h = vol_ratio[i] > 1.5
+        volume_context = volume[i] > vol_ma_1d_aligned[i] * 0.8  # Above 80% of 1d average
         
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
-        
-        if volume_spike:
-            # Long entry: price breaks above upper Donchian AND weekly bias up
-            if bias > 0 and price > donchian_upper[i]:
+        if volume_spike_6h and volume_context:
+            # Long entry: price breaks above upper Donchian AND above S4 (bullish bias)
+            if price > donchian_upper[i] and price > s4_1w_aligned[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below lower Donchian AND weekly bias down
-            elif bias < 0 and price < donchian_lower[i]:
+            # Short entry: price breaks below lower Donchian AND below R4 (bearish bias)
+            elif price < donchian_lower[i] and price < r4_1w_aligned[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
