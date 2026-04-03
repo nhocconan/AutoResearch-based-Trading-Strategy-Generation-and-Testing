@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #1489: 4h Donchian(20) Breakout + 1d Trend + Volume Spike
-HYPOTHESIS: 4h Donchian breakouts capture medium-term swings with 1d trend filter for primary direction. 
-Volume confirmation (>1.5x average) ensures institutional participation. Designed for 19-50 trades/year 
-by using tight entry conditions and 1d trend alignment to avoid whipsaws. Works in bull/bear markets by 
-following 1d trend direction. Uses ATR-based stoploss for risk management.
+Experiment #1493: 4h Donchian(20) Breakout + 12h Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 4h capture medium-term swings with 12h trend filter for direction.
+Volume confirmation (>1.5x average) ensures institutional participation. Designed for 19-50 trades/year
+(75-200 total over 4 years) by using tight entry conditions and 12h trend alignment to avoid whipsaws.
+Works in bull/bear markets by following 12h trend direction. Uses ATR-based stoploss for risk management.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1489_4h_donchian20_1d_trend_vol_v1"
+name = "exp_1493_4h_donchian20_12h_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,21 +23,13 @@ def generate_signals(prices):
     open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    # EMA(50) for 1d trend
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
-    
-    # === HTF: 1w data for stronger trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # EMA(20) for 1w trend
-    ema_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
-    trend_1w = np.where(close_1w > ema_1w, 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # === HTF: 12h data for trend filter (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    # Simple trend: price > previous close = uptrend, < = downtrend
+    trend_12h = np.zeros(len(close_12h))
+    trend_12h[1:] = np.where(close_12h[1:] > close_12h[:-1], 1, -1)
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
     # === 4h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -70,8 +62,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_1d_aligned[i]) or np.isnan(trend_1w_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(trend_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -104,21 +95,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require BOTH 1d and 1w trend alignment for stronger filter
-        trend_aligned = (trend_1d_aligned[i] == trend_1w_aligned[i])
-        
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
-        if trend_aligned and volume_spike:
+        if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
-            if price > donch_high[i] and trend_1d_aligned[i] > 0:  # Uptrend breakout
+            if price > donch_high[i] and trend_12h_aligned[i] > 0:  # Uptrend breakout
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and trend_1d_aligned[i] < 0:  # Downtrend breakdown
+            elif price < donch_low[i] and trend_12h_aligned[i] < 0:  # Downtrend breakdown
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
