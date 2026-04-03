@@ -1,35 +1,47 @@
 #!/usr/bin/env python3
 """
-Experiment #043: 4h Donchian(20) Breakout + 12h HMA Trend + Volume Confirmation
+Experiment #051: 6h Ichimoku Cloud + 1d Trend Filter + Volume Confirmation
 
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h Hull Moving Average trend and 
-volume confirmation (1.5x average volume) capture strong momentum moves with 
-lower trade frequency than 1d trend filters. Uses ATR-based trailing stoploss 
-(2.0x) for risk management. Designed for 25-40 trades/year to minimize fee drag 
-while maintaining statistical significance. Discrete position sizing (0.25) 
-reduces churn from minor signal fluctuations.
+HYPOTHESIS: Ichimoku cloud (Tenkan/Kijun cross + price vs cloud) on 6h timeframe,
+filtered by 1d EMA50 trend and volume confirmation (1.3x average volume),
+captures strong momentum with controlled trade frequency. The cloud acts as
+dynamic support/resistance, reducing whipsaws in sideways markets. Designed for
+50-150 trades over 4 years (12-37/year) with discrete sizing (0.25) to minimize
+fee drag while maintaining statistical significance. Works in bull (trend
+following) and bear (cloud as resistance) regimes.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_12h_hma_volume_v1"
-timeframe = "4h"
+name = "mtf_6h_ichimoku_1d_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
-def calculate_hma(values, period):
-    """Hull Moving Average: WMA(2*WMA(n/2) - WMA(n), sqrt(n))"""
-    n = len(values)
-    if n < period:
-        return np.full(n, np.nan)
-    half = period // 2
-    sqrt_n = int(np.sqrt(period))
+def calculate_ichimoku(high, low, close, tenkan=9, kijun=26, senkou=52):
+    """Calculate Ichimoku components: Tenkan-sen, Kijun-sen, Senkou Span A/B"""
+    n = len(close)
+    if n < senkou:
+        return (np.full(n, np.nan), np.full(n, np.nan), 
+                np.full(n, np.nan), np.full(n, np.nan))
     
-    wma_full = pd.Series(values).ewm(span=period, min_periods=period, adjust=False).mean()
-    wma_half = pd.Series(values).ewm(span=half, min_periods=half, adjust=False).mean()
-    raw_hma = 2 * wma_half - wma_full
-    hma = pd.Series(raw_hma).ewm(span=sqrt_n, min_periods=sqrt_n, adjust=False).mean()
-    return hma.values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high).rolling(window=tenkan, min_periods=tenkan).max() +
+                  pd.Series(low).rolling(window=tenkan, min_periods=tenkan).min()) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high).rolling(window=kijun, min_periods=kijun).max() +
+                 pd.Series(low).rolling(window=kijun, min_periods=kijun).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2).shift(kijun)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_b = ((pd.Series(high).rolling(window=senkou, min_periods=senkou).max() +
+                 pd.Series(low).rolling(window=senkou, min_periods=senkou).min()) / 2).shift(kijun)
+    
+    return (tenkan_sen.values, kijun_sen.values, 
+            senkou_a.values, senkou_b.values)
 
 def calculate_atr(high, low, close, period=14):
     """Average True Range for stoploss calculation."""
@@ -46,21 +58,24 @@ def calculate_atr(high, low, close, period=14):
     return atr
 
 def generate_signals(prices):
-    close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
+    close = prices["close"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h HMA for trend filter (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
-    hma_12h_21 = calculate_hma(df_12h['close'].values, 21)
-    hma_12h_21_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_21)
+    # === HTF: 1d EMA50 for trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_1d_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
-    # === 4h Indicators ===
+    # === 6h Ichimoku Cloud ===
+    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(high, low, close)
+    
+    # === 6h ATR for stoploss ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    
+    # === 6h Volume MA for confirmation ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === Signals Initialization ===
@@ -74,25 +89,37 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 50  # Ensure enough data for HTF and indicator calculations
+    warmup = 60  # Ensure enough data for Ichimoku (52) and HTF
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(atr_14[i]) or np.isnan(dc_upper_20[i]) or np.isnan(dc_lower_20[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(hma_12h_21_aligned[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or 
+            np.isnan(senkou_b[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ma_20[i]) or 
+            np.isnan(ema_1d_50_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- 12h HMA Trend Filter ---
-        trend_bullish = close[i] > hma_12h_21_aligned[i]
-        trend_bearish = close[i] < hma_12h_21_aligned[i]
+        # --- Ichimoku Components ---
+        price = close[i]
+        # Cloud top/bottom (Senkou Span A/B)
+        cloud_top = max(senkou_a[i], senkou_b[i])
+        cloud_bottom = min(senkou_a[i], senkou_b[i])
         
-        # --- Price Channel Breakout ---
-        bullish_breakout = close[i] > dc_upper_20[i]
-        bearish_breakout = close[i] < dc_lower_20[i]
+        # --- Trend Filters ---
+        # 6h: Tenkan > Kijun = bullish momentum
+        momentum_bullish = tenkan[i] > kijun[i]
+        momentum_bearish = tenkan[i] < kijun[i]
+        
+        # 6h: Price vs Cloud
+        price_above_cloud = price > cloud_top
+        price_below_cloud = price < cloud_bottom
+        
+        # 1d: EMA50 trend
+        trend_bullish = price > ema_1d_50_aligned[i]
+        trend_bearish = price < ema_1d_50_aligned[i]
         
         # --- Volume Confirmation ---
-        vol_ok = volume[i] > vol_ma_20[i] * 1.5 if vol_ma_20[i] > 1e-10 else False  # 1.5x volume spike
+        vol_ok = volume[i] > vol_ma_20[i] * 1.3 if vol_ma_20[i] > 1e-10 else False
         
         # --- Position Management (Exit Logic) ---
         stop_hit = False
@@ -108,16 +135,23 @@ def generate_signals(prices):
                 if high[i] > stop_level:
                     stop_hit = True
             
-            # Exit conditions: trend reversal or opposite Donchian touch
-            min_hold = (i - entry_bar) >= 2  # Minimum 2 bars hold (~8h)
+            # Exit conditions: 
+            # 1. Price re-enters cloud (loss of momentum)
+            # 2. Tenkan/Kijun cross reverses
+            # 3. 1d trend reverses (strong filter)
+            min_hold = (i - entry_bar) >= 2  # Minimum 2 bars hold (~12h)
             if min_hold:
                 if position_side > 0:
-                    # Exit long: trend turns bearish OR price touches lower Donchian
-                    if trend_bearish or close[i] <= dc_lower_20[i]:
+                    # Exit long: price in cloud OR bearish cross OR 1d trend turns bearish
+                    if (price > cloud_bottom and price < cloud_top) or \
+                       (tenkan[i] < kijun[i]) or \
+                       (not trend_bullish):
                         stop_hit = True
                 else:  # position_side < 0
-                    # Exit short: trend turns bullish OR price touches upper Donchian
-                    if trend_bullish or close[i] >= dc_upper_20[i]:
+                    # Exit short: price in cloud OR bullish cross OR 1d trend turns bullish
+                    if (price > cloud_bottom and price < cloud_top) or \
+                       (tenkan[i] > kijun[i]) or \
+                       (not trend_bearish):
                         stop_hit = True
             
             if stop_hit:
@@ -131,17 +165,17 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long conditions: 
-        # Breakout above upper Donchian with bullish 12h HMA trend AND volume confirmation
-        if bullish_breakout and trend_bullish and vol_ok:
+        # Long conditions:
+        # Price above cloud + bullish Tenkan/Kijun cross + bullish 1d trend + volume
+        if price_above_cloud and momentum_bullish and trend_bullish and vol_ok:
             in_position = True
             position_side = 1
             entry_bar = i
             highest_since_entry = high[i]
             signals[i] = SIZE
         # Short conditions:
-        # Breakout below lower Donchian with bearish 12h HMA trend AND volume confirmation
-        elif bearish_breakout and trend_bearish and vol_ok:
+        # Price below cloud + bearish Tenkan/Kijun cross + bearish 1d trend + volume
+        elif price_below_cloud and momentum_bearish and trend_bearish and vol_ok:
             in_position = True
             position_side = -1
             entry_bar = i
