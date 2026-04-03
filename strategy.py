@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #1274: 1h Donchian(20) Breakout + 4h Trend + Volume Confirmation + Session Filter
-HYPOTHESIS: Donchian(20) breakouts on 1h timeframe with 4h trend alignment and volume confirmation 
-captures short-to-medium term trends. Session filter (08-20 UTC) reduces noise from low-liquidity periods. 
-Designed to work in both bull and bear markets by following the 4h trend direction. Target: 60-150 total trades 
-over 4 years (15-37/year) to minimize fee drag while maintaining statistical significance.
+HYPOTHESIS: Donchian(20) breakouts on 1h timeframe capture short-to-medium term trends with controlled trade frequency. 
+Trend filter from 4h timeframe ensures alignment with intermediate-term momentum. Volume confirmation (>1.5x average) 
+filters for institutional participation. Session filter (08-20 UTC) reduces noise during low-liquidity periods. 
+Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 4h trend direction. 
+Target: 60-150 total trades over 4 years (15-37/year) to balance opportunity with fee drag.
 """
 
 import numpy as np
@@ -47,7 +48,6 @@ def generate_signals(prices):
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Session filter: 08-20 UTC (pre-compute for efficiency) ===
-    # open_time is already datetime64[ms], so we can use .hour directly
     hours = prices.index.hour
     in_session = (hours >= 8) & (hours <= 20)
     
@@ -71,7 +71,7 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # --- Session check: only trade during 08-20 UTC ---
+        # --- Session Filter: Only trade during active hours ---
         if not in_session[i]:
             signals[i] = 0.0
             continue
