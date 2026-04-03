@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #378: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Confirmation
+Experiment #374: 1h Camarilla Pivot + 4h Volume Spike + 1d Trend Filter
 
-HYPOTHESIS: Donchian channel breakouts on daily timeframe capture strong momentum moves, 
-filtered by weekly HMA trend direction and volume confirmation to avoid false breakouts. 
-This structure works in both bull and bear markets by trading with the higher timeframe 
-trend while using volume to confirm institutional participation. Targets 7-25 trades/year 
-on 1d timeframe (30-100 total over 4 years) to minimize fee drag while capturing 
-high-probability trend continuation moves.
+HYPOTHESIS: Camarilla pivot levels (S3/R3 for mean reversion, R3/S4 for breakout) on 1h timeframe,
+combined with 4h volume spike confirmation and 1d trend filter (price > EMA50), creates a
+robust strategy for 1h timeframe that works in both bull and bear markets. Uses higher timeframes
+(4h/1d) for signal direction and regime filtering, while 1h provides precise entry timing.
+Targets 15-37 trades/year (60-150 total over 4 years) to minimize fee drag while capturing
+high-probability mean reversions and breakouts at key Camarilla levels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "mtf_1h_camarilla_vol_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,44 +25,65 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
+    # === HTF: 4h data for volume spike (Call ONCE before loop) ===
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate HMA(21) on 1w close
-    if len(df_1w) >= 21:
-        close_1w = df_1w['close'].values
-        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        wma_half = pd.Series(close_1w).rolling(window=half_len, min_periods=half_len).mean().values
-        wma_full = pd.Series(close_1w).rolling(window=21, min_periods=21).mean().values
-        raw_hma = 2 * wma_half - wma_full
-        hma_21 = pd.Series(raw_hma).rolling(window=sqrt_len, min_periods=sqrt_len).mean().values
-        hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
+    # Calculate volume ratio (current vs 20-period average) on 4h
+    if len(df_4h) >= 20:
+        vol_4h = df_4h['volume'].values
+        vol_ma_20 = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+        vol_ratio_4h = np.zeros(len(vol_4h))
+        vol_ratio_4h[20:] = vol_4h[20:] / vol_ma_20[20:]
+        vol_ratio_4h[:20] = 1.0  # Neutral for warmup
+        vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
     else:
-        hma_21_aligned = np.full(n, np.nan)
+        vol_ratio_4h_aligned = np.full(n, 1.0)
     
-    # === 1d Indicators ===
-    # Calculate Donchian channels (20-period) on 1d
-    donchian_period = 20
-    upper_channel = np.full(n, np.nan)
-    lower_channel = np.full(n, np.nan)
+    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
     
-    if n >= donchian_period:
-        # Use rolling max/min for Donchian channels
-        upper_channel[donchian_period-1:] = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values[donchian_period-1:]
-        lower_channel[donchian_period-1:] = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values[donchian_period-1:]
+    # Calculate EMA(50) on 1d close
+    if len(df_1d) >= 50:
+        close_1d = df_1d['close'].values
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    else:
+        ema_50_1d_aligned = np.full(n, np.nan)
     
-    # Calculate volume ratio (current vs 20-period average) on 1d
-    vol_ratio_1d = np.full(n, np.nan)
-    if n >= 20:
-        vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-        vol_ratio_1d[20:] = volume[20:] / vol_ma_20[20:]
-        vol_ratio_1d[:20] = 1.0  # Neutral for warmup
+    # === 1h Indicators: Calculate Camarilla pivot levels ===
+    # Need to map each 1h bar to the prior 1d bar's OHLC for Camarilla calculation
+    camarilla_s3 = np.full(n, np.nan)
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_r3_s4 = np.full(n, np.nan)  # Midpoint between R3 and S4
+    
+    # Pre-compute prior 1d OHLC for each 1h bar
+    for i in range(n):
+        current_time = prices.iloc[i]['open_time']
+        # Find the most recent completed 1d bar before current 1h bar
+        prior_1d_bars = df_1d[df_1d['open_time'] < current_time]
+        if len(prior_1d_bars) > 0:
+            prev_day = prior_1d_bars.iloc[-1]
+            ph = prev_day['high']
+            pl = prev_day['low']
+            pc = prev_day['close']
+            
+            # Camarilla formulas
+            range_ = ph - pl
+            camarilla_s3[i] = pc - range_ * 1.1 / 4
+            camarilla_r3[i] = pc + range_ * 1.1 / 4
+            camarilla_r3_s4[i] = camarilla_r3[i] + (camarilla_r3[i] - camarilla_s3[i]) * 1.1 / 2  # R3 + 1.1/2 * range
+        else:
+            camarilla_s3[i] = np.nan
+            camarilla_r3[i] = np.nan
+            camarilla_r3_s4[i] = np.nan
+    
+    # === Session filter: 08-20 UTC ===
+    # open_time is already datetime64[ms], access via index
+    hours = prices.index.hour  # Pre-compute before loop
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # Discrete position sizing (25% of capital)
+    SIZE = 0.20  # Discrete position sizing (20% of capital)
     
     # Position tracking state variables
     in_position = False
@@ -72,22 +93,25 @@ def generate_signals(prices):
     warmup = 100  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
-        # --- Data Validity Check ---
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(hma_21_aligned[i]) or np.isnan(vol_ratio_1d[i])):
+        # --- Session Filter: Only trade 08-20 UTC ---
+        hour = hours[i]
+        if not (8 <= hour <= 20):
             signals[i] = 0.0
             continue
         
-        # --- Trend Filter: HMA direction (rising for long, falling for short) ---
-        if i >= warmup + 1:
-            hma_rising = hma_21_aligned[i] > hma_21_aligned[i-1]
-            hma_falling = hma_21_aligned[i] < hma_21_aligned[i-1]
-        else:
-            hma_rising = False
-            hma_falling = False
+        # --- Data Validity Check ---
+        if (np.isnan(camarilla_s3[i]) or np.isnan(camarilla_r3[i]) or 
+            np.isnan(camarilla_r3_s4[i]) or np.isnan(vol_ratio_4h_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i])):
+            signals[i] = 0.0
+            continue
+        
+        # --- Regime Filter: Only trade in trending markets ---
+        price_above_1d_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_1d_ema = close[i] < ema_50_1d_aligned[i]
         
         # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio_1d[i] > 1.5
+        volume_spike = vol_ratio_4h_aligned[i] > 1.5
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -105,8 +129,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Exit if price crosses below Donchian lower (trend exhaustion)
-                if close[i] < lower_channel[i]:
+                # Take profit at Camarilla R3 (strong resistance) or S3 (strong support)
+                if close[i] >= camarilla_r3[i] or close[i] <= camarilla_s3[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -118,8 +142,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Exit if price crosses above Donchian upper (trend exhaustion)
-                if close[i] > upper_channel[i]:
+                # Take profit at Camarilla R3 (strong resistance) or S3 (strong support)
+                if close[i] >= camarilla_r3[i] or close[i] <= camarilla_s3[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -130,18 +154,16 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Price breaks above Donchian upper with HMA rising and volume spike
+        # Long: Price at S3 (mean reversion) OR break above R3 with volume
         long_condition = (
-            close[i] > upper_channel[i] and 
-            hma_rising and 
-            volume_spike
+            (close[i] <= camarilla_s3[i] * 1.001 and price_above_1d_ema) or  # S3 mean reversion in uptrend
+            (close[i] > camarilla_r3[i] and volume_spike and price_above_1d_ema)  # Breakout with volume
         )
         
-        # Short: Price breaks below Donchian lower with HMA falling and volume spike
+        # Short: Price at R3 (mean reversion) OR break below S3 with volume
         short_condition = (
-            close[i] < lower_channel[i] and 
-            hma_falling and 
-            volume_spike
+            (close[i] >= camarilla_r3[i] * 0.999 and price_below_1d_ema) or  # R3 mean reversion in downtrend
+            (close[i] < camarilla_s3[i] and volume_spike and price_below_1d_ema)  # Breakdown with volume
         )
         
         if long_condition:
