@@ -105,26 +105,20 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         # Require both 4h and 1d trend alignment
-        trend_following = trend_4h_aligned[i] and trend_1d_aligned[i]
+        trend_following = (trend_4h_aligned[i] == 1) and (trend_1d_aligned[i] == 1)
         
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
         # Session filter: only trade during active hours
         if trend_following and volume_spike and in_session:
-            # Breakout: price breaks above upper band OR below lower band
-            if price > donch_high[i] and trend_4h_aligned[i] > 0 and trend_1d_aligned[i] > 0:  # Uptrend breakout
+            # Breakout: price breaks above upper band
+            if price > donch_high[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and trend_4h_aligned[i] < 0 and trend_1d_aligned[i] < 0:  # Downtrend breakdown
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
             else:
                 signals[i] = 0.0
         else:
