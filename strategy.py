@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #106: 4h Donchian(20) Breakout + 1d Volume Spike + ATR Stoploss
+Experiment #125: 12h Donchian Breakout + 1d Volume Confirmation + ATR Stoploss
 
-HYPOTHESIS: Donchian channel breakouts on 4h timeframe, confirmed by 1d volume spikes (>2x average), 
-provide high-probability entries in both bull and bear markets. The 4h timeframe minimizes fee drag 
-while capturing significant moves. Volume confirmation ensures institutional participation, reducing 
-false breakouts. ATR-based stoploss manages risk. Targets 20-50 trades/year on 4h timeframe 
-(80-200 total over 4 years) to stay within optimal trade frequency range.
+HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture medium-term trends, confirmed by 1d volume spikes (>2x average) to ensure institutional participation. ATR-based stoploss (2.5x) manages risk. This strategy targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while participating in both bull and bear markets. The 12h timeframe reduces noise and overtrading common in lower timeframes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian20_1d_vol_breakout_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian_vol_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,17 +34,35 @@ def generate_signals(prices):
     else:
         vol_ratio_1d_aligned = np.full(n, 1.0)
     
-    # === 4h Indicators ===
-    # Calculate Donchian channels (20-period) on 4h
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # === 12h Indicators ===
+    # Calculate Donchian(20) channels on 12h using historical data
+    # We need to map each 12h bar to the prior completed 12h bar's Donchian
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    donchian_base = np.full(n, np.nan)  # Midpoint for filtering
     
-    for i in range(lookback - 1, n):
-        window_high = high[i - lookback + 1:i + 1]
-        window_low = low[i - lookback + 1:i + 1]
-        highest_high[i] = np.max(window_high)
-        lowest_low[i] = np.min(window_low)
+    # Pre-compute 12h OHLC arrays for Donchian calculation
+    # Create a DataFrame with 12h-aligned timestamps for rolling calculation
+    # We'll use the prices data but calculate Donchian on 12h bars
+    # Approach: calculate on 12h data then align back
+    
+    # Get 12h data for indicator calculation (separate from volume HTF)
+    df_12h_ind = get_htf_data(prices, '12h')
+    if len(df_12h_ind) >= 20:
+        high_12h = df_12h_ind['high'].values
+        low_12h = df_12h_ind['low'].values
+        # Donchian(20): highest high and lowest low of past 20 periods
+        dh_20 = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+        dl_20 = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+        db_20 = (dh_20 + dl_20) / 2.0  # Midpoint
+        # Align back to 12h timeframe
+        donchian_high_aligned = align_htf_to_ltf(prices, df_12h_ind, dh_20)
+        donchian_low_aligned = align_htf_to_ltf(prices, df_12h_ind, dl_20)
+        donchian_base_aligned = align_htf_to_ltf(prices, df_12h_ind, db_20)
+    else:
+        donchian_high_aligned = np.full(n, np.nan)
+        donchian_low_aligned = np.full(n, np.nan)
+        donchian_base_aligned = np.full(n, np.nan)
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -59,18 +73,18 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     
-    warmup = max(lookback, 20) + 10  # Ensure enough data for indicators
+    warmup = 100  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ratio_1d_aligned[i])):
+        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
+            np.isnan(donchian_base_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
-            # Calculate ATR(14) for stoploss
+            # Calculate ATR(14) for stoploss using available data up to i
             tr = np.zeros(i+1)
             tr[0] = high[0] - low[0]
             for j in range(1, i+1):
@@ -97,16 +111,16 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Price breaks above Donchian upper band with volume confirmation
+        # Long: Price breaks above Donchian(20) high with volume confirmation
         long_condition = (
-            close[i] > highest_high[i] and  # Breakout above upper band
-            vol_ratio_1d_aligned[i] > 2.0   # Volume spike (>2x average)
+            close[i] > donchian_high_aligned[i] and  # Breakout above upper band
+            vol_ratio_1d_aligned[i] > 2.0            # Volume spike (>2x average)
         )
         
-        # Short: Price breaks below Donchian lower band with volume confirmation
+        # Short: Price breaks below Donchian(20) low with volume confirmation
         short_condition = (
-            close[i] < lowest_low[i] and   # Breakdown below lower band
-            vol_ratio_1d_aligned[i] > 2.0   # Volume spike (>2x average)
+            close[i] < donchian_low_aligned[i] and   # Breakdown below lower band
+            vol_ratio_1d_aligned[i] > 2.0            # Volume spike (>2x average)
         )
         
         if long_condition:
