@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #362: 12h Donchian(20) breakout + HMA trend + volume confirmation + ATR stoploss
+Experiment #364: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
 
-HYPOTHESIS: Donchian(20) breakouts on 12h timeframe, filtered by HMA(21) trend direction on 1d, 
-confirmed by 1w volume spike (>2.0x average), with ATR-based stoploss creates a robust strategy 
-that captures strong trending moves while minimizing false breakouts. Targets 12-37 trades/year 
-on 12h timeframe (50-150 total over 4 years) to minimize fee drag. Works in both bull and bear 
-markets by using HTF trend filter and volume confirmation to ensure institutional participation.
+HYPOTHESIS: Daily Donchian(20) breakouts capture medium-term trends, while 1-week HMA(21) 
+filters for alignment with higher timeframe direction. Volume confirmation (>1.5x 20-day avg) 
+ensures institutional participation. This combination works in both bull and bear markets by 
+trading breakouts in the direction of the weekly trend. Targets 20-40 trades/year on 1d 
+timeframe (80-160 total over 4 years) to minimize fee drag while capturing high-probability 
+breakouts with trend alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_hma_vol_v1"
-timeframe = "12h"
+name = "donchian_1d_vol_1w_trend_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,13 +25,13 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for HMA trend filter (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
+    # === HTF: 1w data for HMA trend filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate HMA(21) on 1d close
-    if len(df_1d) >= 21:
-        close_1d = df_1d['close'].values
-        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    # Calculate HMA(21) on 1w close
+    if len(df_1w) >= 21:
+        close_1w = df_1w['close'].values
+        # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n)
         half_len = 21 // 2
         sqrt_len = int(np.sqrt(21))
         
@@ -40,41 +41,37 @@ def generate_signals(prices):
             weights = np.arange(1, window + 1)
             return np.convolve(values, weights/weights.sum(), mode='valid')
         
-        wma_half = np.full_like(close_1d, np.nan)
-        wma_full = np.full_like(close_1d, np.nan)
-        
-        if len(close_1d) >= half_len:
-            wma_half[half_len-1:] = wma(close_1d, half_len)
-        if len(close_1d) >= 21:
-            wma_full[20:] = wma(close_1d, 21)
-        
-        raw_hma = 2 * wma_half - wma_full
-        hma_21 = np.full_like(raw_hma, np.nan)
-        if len(raw_hma) >= sqrt_len:
-            hma_21[sqrt_len-1:] = wma(raw_hma[sqrt_len-1:], sqrt_len)
-        
-        hma_21_aligned = align_htf_to_ltf(prices, df_1d, hma_21)
+        wma_half = wma(close_1w, half_len)
+        wma_full = wma(close_1w, 21)
+        if len(wma_half) > 0 and len(wma_full) > 0:
+            wma_2x_sub = 2 * wma_half - wma_full[-len(wma_half):]
+            hma_21 = wma(wma_2x_sub, sqrt_len)
+            # Pad to match original length
+            hma_21_padded = np.full(len(close_1w), np.nan)
+            hma_21_padded[half_len:-sqrt_len+1 if sqrt_len>1 else None] = hma_21
+            hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21_padded)
+        else:
+            hma_21_aligned = np.full(n, np.nan)
     else:
         hma_21_aligned = np.full(n, np.nan)
     
-    # === HTF: 1w data for volume confirmation (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
+    # === 1d Indicators ===
+    # Donchian(20) channels
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    if n >= 20:
+        high_series = pd.Series(high)
+        low_series = pd.Series(low)
+        donchian_high[20:] = high_series.rolling(window=20, min_periods=20).max().values[20:]
+        donchian_low[20:] = low_series.rolling(window=20, min_periods=20).min().values[20:]
     
-    # Calculate volume ratio (current vs 20-period average) on 1w
-    if len(df_1w) >= 20:
-        vol_1w = df_1w['volume'].values
-        vol_ma_20 = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
-        vol_ratio_1w = np.zeros(len(vol_1w))
-        vol_ratio_1w[20:] = vol_1w[20:] / vol_ma_20[20:]
-        vol_ratio_1w[:20] = 1.0  # Neutral for warmup
-        vol_ratio_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ratio_1w)
-    else:
-        vol_ratio_1w_aligned = np.full(n, 1.0)
-    
-    # === 12h Indicators ===
-    # Calculate Donchian(20) channels on 12h
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume ratio (current vs 20-day average)
+    vol_ratio = np.full(n, np.nan)
+    if n >= 20:
+        vol_series = pd.Series(volume)
+        vol_ma_20 = vol_series.rolling(window=20, min_periods=20).mean().values
+        vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
+        vol_ratio[:20] = 1.0  # Neutral for warmup
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -89,24 +86,21 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or 
-            np.isnan(hma_21_aligned[i]) or np.isnan(vol_ratio_1w_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(hma_21_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Trend Filter: HMA direction ---
-        # Need previous HMA value to determine slope
-        if i == warmup:
-            # Need to get previous HMA from aligned array
-            prev_hma = hma_21_aligned[i-1] if i > 0 else hma_21_aligned[i]
-            hma_rising = hma_21_aligned[i] > prev_hma
-            hma_falling = hma_21_aligned[i] < prev_hma
-        else:
+        # --- Trend Filter: HMA direction (rising for long, falling for short) ---
+        if i >= warmup + 1:
             hma_rising = hma_21_aligned[i] > hma_21_aligned[i-1]
             hma_falling = hma_21_aligned[i] < hma_21_aligned[i-1]
+        else:
+            hma_rising = False
+            hma_falling = False
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio_1w_aligned[i] > 2.0
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio[i] > 1.5
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -124,9 +118,21 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
+                # Exit on Donchian low break (trailing stop)
+                if close[i] < donchian_low[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
             else:  # Short position
                 stop_level = entry_price + 2.5 * atr_14
                 if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+                # Exit on Donchian high break (trailing stop)
+                if close[i] > donchian_high[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -137,18 +143,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Price breaks above Donchian upper band with HTF uptrend and volume spike
+        # Long: Donchian high breakout + rising HMA + volume spike
         long_condition = (
-            close[i] > highest_20[i] and  # Breakout above upper band
-            hma_rising and                # HTF uptrend
-            volume_spike                  # Volume confirmation
+            close[i] > donchian_high[i] and  # Breakout above upper band
+            hma_rising and                   # Weekly trend up
+            volume_spike                     # Volume confirmation
         )
         
-        # Short: Price breaks below Donchian lower band with HTF downtrend and volume spike
+        # Short: Donchian low breakdown + falling HMA + volume spike
         short_condition = (
-            close[i] < lowest_20[i] and   # Breakdown below lower band
-            hma_falling and               # HTF downtrend
-            volume_spike                  # Volume confirmation
+            close[i] < donchian_low[i] and   # Breakdown below lower band
+            hma_falling and                  # Weekly trend down
+            volume_spike                     # Volume confirmation
         )
         
         if long_condition:
