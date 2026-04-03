@@ -1,0 +1,220 @@
+# Strategy: exp_191_6h_camarilla_pivot_volume_1d_regime_v1
+
+## Train Results
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| BTCUSDT | -0.218 | +6.7% | -22.4% | 105 | FAIL |
+| ETHUSDT | -0.195 | +1.9% | -33.2% | 83 | FAIL |
+| SOLUSDT | 0.457 | +67.6% | -30.3% | 84 | PASS |
+
+## Test Results (2025+)
+| Symbol | Sharpe | Return | Max DD | Trades | Status |
+|--------|--------|--------|--------|--------|--------|
+| SOLUSDT | 0.780 | +23.1% | -10.5% | 24 | PASS |
+
+## Code
+```python
+#!/usr/bin/env python3
+"""
+Experiment #191: 6h Camarilla Pivot + Volume Spike + 1d Regime Filter
+HYPOTHESIS: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) on 6h combined with 1d trend filter and volume confirmation captures institutional order flow. Works in bull/bear regimes by aligning with higher timeframe direction and using volume spikes to confirm institutional participation. Target: 75-200 total trades over 4 years.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "exp_191_6h_camarilla_pivot_volume_1d_regime_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    close = prices["close"].values.astype(np.float64)
+    high = prices["high"].values.astype(np.float64)
+    low = prices["low"].values.astype(np.float64)
+    volume = prices["volume"].values.astype(np.float64)
+    n = len(close)
+    
+    # === HTF: 1d data for regime filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate EMA50 on 1d close for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_up_1d = close_1d > ema50_1d
+    trend_down_1d = close_1d < ema50_1d
+    
+    # Align to 6h timeframe
+    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
+    trend_down_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_down_1d)
+    
+    # === 6h Indicators: ATR(14) for stoploss ===
+    tr_6h = np.zeros(n)
+    tr_6h[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # === 6h Indicators: Volume MA(20) for spike detection ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.zeros(n)
+    vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
+    vol_ratio[:20] = 1.0
+    
+    # === 6h Indicators: Camarilla Pivot Levels from previous bar ===
+    # Camarilla levels based on previous bar's OHLC
+    camarilla_r4 = np.zeros(n)
+    camarilla_r3 = np.zeros(n)
+    camarilla_s3 = np.zeros(n)
+    camarilla_s4 = np.zeros(n)
+    camarilla_pivot = np.zeros(n)
+    
+    for i in range(1, n):
+        # Previous bar's OHLC
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
+        
+        # Pivot point
+        camarilla_pivot[i] = (prev_high + prev_low + prev_close) / 3.0
+        
+        # Range
+        range_ = prev_high - prev_low
+        
+        # Camarilla levels
+        camarilla_r4[i] = camarilla_pivot[i] + range_ * 1.1 / 2.0
+        camarilla_r3[i] = camarilla_pivot[i] + range_ * 1.1 / 4.0
+        camarilla_s3[i] = camarilla_pivot[i] - range_ * 1.1 / 4.0
+        camarilla_s4[i] = camarilla_pivot[i] - range_ * 1.1 / 2.0
+    
+    # For first bar, use current values (will be overwritten quickly)
+    camarilla_r4[0] = camarilla_r3[0] = camarilla_pivot[0] = camarilla_s3[0] = camarilla_s4[0] = close[0]
+    
+    # === Signals Initialization ===
+    signals = np.zeros(n)
+    SIZE = 0.25
+    
+    # Position tracking state variables
+    in_position = False
+    position_side = 0
+    entry_price = 0.0
+    bars_since_entry = 0
+    
+    warmup = 50
+    
+    for i in range(warmup, n):
+        # --- Data Validity Check ---
+        if (np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(trend_up_1d_aligned[i]) or np.isnan(trend_down_1d_aligned[i]) or
+            np.isnan(camarilla_r4[i]) or np.isnan(camarilla_s4[i])):
+            signals[i] = 0.0
+            continue
+        
+        price = close[i]
+        
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
+        volume_spike = vol_ratio[i] > 1.8
+        
+        # --- Exit Logic (ATR-based stoploss) ---
+        if in_position:
+            bars_since_entry += 1
+            
+            if position_side > 0:  # Long position
+                stop_level = entry_price - 2.0 * atr_14[i]
+                if low[i] < stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+                # Exit if price reaches R3 (take profit) or R4 breaks with volume (continuation)
+                if price >= camarilla_r3[i] and volume_spike:
+                    # Take partial profit at R3, continue if breaks R4
+                    if price >= camarilla_r4[i]:
+                        # Continue the trend
+                        signals[i] = SIZE
+                    else:
+                        # Take profit at R3
+                        in_position = False
+                        position_side = 0
+                        bars_since_entry = 0
+                        signals[i] = 0.0
+                        continue
+            else:  # Short position
+                stop_level = entry_price + 2.0 * atr_14[i]
+                if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+                # Exit if price reaches S3 (take profit) or S4 breaks with volume (continuation)
+                if price <= camarilla_s3[i] and volume_spike:
+                    # Take partial profit at S3, continue if breaks S4
+                    if price <= camarilla_s4[i]:
+                        # Continue the trend
+                        signals[i] = -SIZE
+                    else:
+                        # Take profit at S3
+                        in_position = False
+                        position_side = 0
+                        bars_since_entry = 0
+                        signals[i] = 0.0
+                        continue
+            
+            if bars_since_entry < 2:
+                signals[i] = position_side * SIZE
+                continue
+            
+            signals[i] = position_side * SIZE
+            continue
+        
+        # --- New Position Entry Logic (Only if Flat) ---
+        # Mean reversion at R3/S3 with volume spike and 1d trend alignment
+        # Long: Price rejects R3 (comes back below) in uptrend with volume
+        if (price < camarilla_r3[i] and 
+            close[i-1] >= camarilla_r3[i-1] and  # Was at or above R3 previous bar
+            trend_up_1d_aligned[i] and 
+            volume_spike):
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = SIZE
+        # Short: Price rejects S3 (goes back above) in downtrend with volume
+        elif (price > camarilla_s3[i] and 
+              close[i-1] <= camarilla_s3[i-1] and  # Was at or below S3 previous bar
+              trend_down_1d_aligned[i] and 
+              volume_spike):
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = -SIZE
+        # Breakout continuation at R4/S4 with volume spike and 1d trend alignment
+        # Long: Price breaks above R4 with volume in uptrend
+        elif (price > camarilla_r4[i] and 
+              trend_up_1d_aligned[i] and 
+              volume_spike):
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = SIZE
+        # Short: Price breaks below S4 with volume in downtrend
+        elif (price < camarilla_s4[i] and 
+              trend_down_1d_aligned[i] and 
+              volume_spike):
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = -SIZE
+        else:
+            signals[i] = 0.0
+    
+    return signals
+```
+
+## Last Updated
+2026-04-03 13:48
