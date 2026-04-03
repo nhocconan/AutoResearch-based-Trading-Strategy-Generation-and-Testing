@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #921: 4h Donchian(20) + 1d HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: Donchian breakouts on 4h capture momentum, filtered by 1d HMA trend direction 
-and volume confirmation (>1.8x average). Long when price breaks above Donchian upper 
-AND 1d HMA rising AND volume spike. Short when price breaks below Donchian lower 
-AND 1d HMA falling AND volume spike. Uses discrete position sizing (0.28) to balance 
-risk and reward. Target: 100-200 total trades over 4 years (25-50/year).
+Experiment #922: 12h Donchian(20) + 1d HMA Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: Donchian breakouts on 12h capture medium-term momentum, filtered by 1d HMA trend direction 
+and volume confirmation (>1.8x average). Works in bull via trend continuation and in bear via 
+mean-reversion bounces off channel extremes. Discrete sizing (0.25) controls drawdown. 
+Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_921_4h_donchian20_1d_hma_vol_v1"
-timeframe = "4h"
+name = "exp_922_12h_donchian20_1d_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -42,10 +41,10 @@ def generate_signals(prices):
     hma_trend_1d = np.zeros_like(hma_1d)
     hma_trend_1d[1:] = np.where(hma_1d[1:] > hma_1d[:-1], 1, 
                                  np.where(hma_1d[1:] < hma_1d[:-1], -1, 0))
-    # Align trend to 4h timeframe
+    # Align trend to 12h timeframe
     hma_trend_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_trend_1d)
     
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: Donchian Channel (20) ===
     def donchian_channel(high, low, period):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -53,12 +52,12 @@ def generate_signals(prices):
     
     upper_20, lower_20 = donchian_channel(high, low, 20)
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -67,7 +66,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.28  # 28% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -110,8 +109,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 5 bars (~20h on 4h) to avoid overtrading
-            if bars_since_entry > 5:
+            # Optional: time-based exit after 4 bars (~48h on 12h) to avoid overtrading
+            if bars_since_entry > 4:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
