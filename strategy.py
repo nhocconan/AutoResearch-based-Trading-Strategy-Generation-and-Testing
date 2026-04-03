@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #556: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts on 12h timeframe aligned with daily EMA50 trend and volume spikes capture strong momentum while minimizing trades. Daily EMA50 provides structural trend filter that works in both bull and bear markets. Volume confirmation ensures participation. ATR-based stoploss manages risk. Targets 50-150 total trades over 4 years by using tight entry conditions on 12h timeframe.
+HYPOTHESIS: Donchian breakouts on 12h timeframe aligned with daily EMA50 trend and volume spikes capture strong momentum with lower trade frequency. Daily EMA50 provides structural trend filter that works in both bull and bear markets by filtering breakouts against the intermediate-term trend. Volume confirmation (>1.5x average) ensures participation. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 50-150 total trades over 4 years by using tight entry conditions (breakout + EMA trend + volume) on 12h timeframe.
 """
 
 import numpy as np
