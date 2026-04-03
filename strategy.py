@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #2240: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 4h Donchian breakouts with daily trend filter capture swing momentum while limiting trades.
-- Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average (moderate threshold)
+Experiment #2241: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: 4h Donchian breakouts with 1d trend filter capture intermediate-term momentum while avoiding noise.
+- Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average
 - HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
-- Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian touch
-- Target: 75-200 total trades over 4 years (19-50/year) - optimized for 4h timeframe
-- Works in bull (trend following) and bear (mean reversion at extremes) markets via Donchian mean reversion exit
+- Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
+- Target: 75-200 total trades over 4 years (19-50/year) - proven range for 4h strategies
+- Designed to work in bull (trend following) and bear (mean reversion at channel extremes) markets
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2240_4h_donchian20_1d_hma_vol_v1"
+name = "exp_2241_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,7 +29,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate 1d HMA(21): Hull Moving Average
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
     half_len = 21 // 2
     sqrt_len = int(np.sqrt(21))
     
@@ -66,7 +65,7 @@ def generate_signals(prices):
     donchian_upper = high_ma
     donchian_lower = low_ma
     
-    # Volume MA for confirmation (moderate threshold to balance trades)
+    # Volume MA for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -82,7 +81,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size - balances risk and return
+    SIZE = 0.25  # 25% position size - conservative for risk management
     
     # Position tracking state variables
     in_position = False
@@ -140,7 +139,7 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average - moderate threshold)
+        # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
@@ -166,3 +165,4 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+</file>
