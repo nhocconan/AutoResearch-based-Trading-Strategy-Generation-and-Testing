@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Experiment #873: 4h Donchian(20) breakout + 12h HMA(21) trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts on 4h capture medium-term momentum, filtered by 12h HMA trend direction
-to align with higher timeframe momentum. Volume confirmation (>2.0x average) ensures breakout validity.
-ATR-based stoploss (2.0x ATR) manages risk. Works in bull/bear markets: in bull trends, 12h HMA rising
-filters for longs; in bear trends, 12h HMA falling filters for shorts. Discrete position sizing (0.25)
-minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #873: 4h Donchian(20) + 12h HMA Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: Donchian breakouts on 4h capture momentum, filtered by 12h HMA trend direction 
+and volume confirmation (>2.0x average). Long when price breaks above Donchian upper 
+AND 12h HMA rising AND volume spike. Short when price breaks below Donchian lower 
+AND 12h HMA falling AND volume spike. Works in bull/bear markets: in bull trends, 
+12h HMA rising filters for longs; in bear trends, 12h HMA falling filters for shorts. 
+Uses discrete position sizing (0.30). Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -67,7 +68,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.30  # 30% position size
     
     # Position tracking state variables
     in_position = False
@@ -110,8 +111,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~24h on 4h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 3 bars (~12h on 4h) to avoid overtrading
+            if bars_since_entry > 3:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
