@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #035: 6h Donchian Breakout + Weekly Pivot Direction + Volume Confirmation
+Experiment #020: 4h Donchian(20) breakout + 1d volume confirmation + ATR stoploss
 
-HYPOTHESIS: Donchian(20) breakouts on 6h timeframe, filtered by weekly pivot direction (price > weekly pivot = long bias, < = short bias) and confirmed by 1d volume spike (>2x average), captures high-probability trend continuation moves. Weekly pivot provides structural bias from higher timeframe, Donchian breaks capture momentum, and volume filter ensures institutional participation. Designed for low turnover (target: 12-37 trades/year) to minimize fee drag while working in both bull (breakout longs) and bear (breakdown shorts) markets.
+HYPOTHESIS: Donchian channel breakouts on 4h timeframe, confirmed by 1d volume spikes (>2x average), 
+with ATR-based stoploss (2.5x ATR) and discrete position sizing (0.30) captures strong momentum moves 
+while minimizing false breakouts. Targets 75-200 total trades over 4 years (19-50/year) to avoid 
+fee drag. Works in both bull (breakouts up) and bear (breakdowns down) markets via symmetric long/short logic.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_donchian_breakout_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "mtf_4h_donchian20_1d_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,7 +23,7 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for volume spike confirmation (Call ONCE before loop) ===
+    # === HTF: 1d data for volume confirmation (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate volume ratio (current vs 20-period average) on 1d
@@ -34,61 +37,39 @@ def generate_signals(prices):
     else:
         vol_ratio_1d_aligned = np.full(n, 1.0)
     
-    # === HTF: 1w data for weekly pivot (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly pivot points: P = (H+L+C)/3
-    if len(df_1w) >= 1:
-        high_1w = df_1w['high'].values
-        low_1w = df_1w['low'].values
-        close_1w = df_1w['close'].values
-        pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-        pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    else:
-        pivot_1w_aligned = np.full(n, np.nan)
-    
-    # === 6h Indicators ===
-    # Calculate Donchian(20) channels
-    donchian_period = 20
+    # === 4h Indicators ===
+    # Donchian Channel (20-period) - using prior completed bars only
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
-    if n >= donchian_period:
-        # Use pandas rolling for efficiency
-        high_series = pd.Series(high)
-        low_series = pd.Series(low)
-        donchian_high = high_series.rolling(window=donchian_period, min_periods=donchian_period).max().values
-        donchian_low = low_series.rolling(window=donchian_period, min_periods=donchian_period).min().values
+    for i in range(20, n):
+        # Use prior 20 completed 4h bars (shifted by 1 for no look-ahead)
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # Discrete position sizing (25% of capital)
+    SIZE = 0.30  # Discrete position sizing (30% of capital)
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    warmup = max(100, donchian_period)  # Ensure enough data for indicators
+    warmup = 50  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(pivot_1w_aligned[i])):
+            np.isnan(vol_ratio_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Directional Filter: Weekly pivot bias ---
-        # Price above weekly pivot = long bias, below = short bias
-        long_bias = close[i] > pivot_1w_aligned[i]
-        short_bias = close[i] < pivot_1w_aligned[i]
-        
-        # --- Volume Confirmation: Require significant volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio_1d_aligned[i] > 2.0
-        
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
-            # Calculate ATR(14) for stoploss
+            # Calculate ATR(14) for stoploss using only historical data
             tr = np.zeros(i+1)
             tr[0] = high[0] - low[0]
             for j in range(1, i+1):
@@ -96,27 +77,21 @@ def generate_signals(prices):
             atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().iloc[-1]
             
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.5 * atr_14
+                # Update highest since entry
+                if close[i] > highest_since_entry:
+                    highest_since_entry = close[i]
+                stop_level = highest_since_entry - 2.5 * atr_14
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Exit on Donchian low break (trailing stop) or opposite Donchian break
-                if close[i] <= donchian_low[i] or close[i] >= donchian_high[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
             else:  # Short position
-                stop_level = entry_price + 2.5 * atr_14
+                # Update lowest since entry
+                if close[i] < lowest_since_entry:
+                    lowest_since_entry = close[i]
+                stop_level = lowest_since_entry + 2.5 * atr_14
                 if high[i] > stop_level:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
-                # Exit on Donchian high break (trailing stop) or opposite Donchian break
-                if close[i] >= donchian_high[i] or close[i] <= donchian_low[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -127,29 +102,31 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Donchian high breakout with volume spike and long bias
+        # Long: Price breaks above Donchian high with volume confirmation
         long_condition = (
-            close[i] > donchian_high[i] and  # Breakout above Donchian high
-            volume_spike and                 # Volume confirmation
-            long_bias                        # Weekly pivot bias long
+            close[i] > donchian_high[i] and 
+            vol_ratio_1d_aligned[i] > 2.0  # Volume spike > 2x average
         )
         
-        # Short: Donchian low breakdown with volume spike and short bias
+        # Short: Price breaks below Donchian low with volume confirmation
         short_condition = (
-            close[i] < donchian_low[i] and   # Breakdown below Donchian low
-            volume_spike and                 # Volume confirmation
-            short_bias                       # Weekly pivot bias short
+            close[i] < donchian_low[i] and 
+            vol_ratio_1d_aligned[i] > 2.0  # Volume spike > 2x average
         )
         
         if long_condition:
             in_position = True
             position_side = 1
             entry_price = close[i]
+            highest_since_entry = close[i]
+            lowest_since_entry = close[i]
             signals[i] = SIZE
         elif short_condition:
             in_position = True
             position_side = -1
             entry_price = close[i]
+            highest_since_entry = close[i]
+            lowest_since_entry = close[i]
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
