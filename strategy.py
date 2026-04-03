@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #488: 12h Donchian(20) breakout + 1w EMA(50) trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1w EMA(50) trend capture major trend momentum with lower trade frequency suitable for 12h timeframe. Volume confirmation (>1.5x average) filters weak breakouts. Designed to work in both bull and bear markets by requiring strong trend alignment and using discrete position sizing (0.25) to manage drawdown. Target: 50-150 trades over 4 years.
+HYPOTHESIS: 12h Donchian breakouts aligned with 1w EMA(50) trend capture major trend momentum while avoiding counter-trend whipsaws. Volume confirmation (>1.5x average) filters weak breakouts. Target: 50-150 total trades over 4 years (12-37/year) by using discrete sizing (0.25) and strict entry conditions. Works in bull markets (trend-aligned breakouts) and avoids bear market traps by requiring strong weekly trend alignment. Uses ATR(14) stoploss (2.0) to manage drawdown.
 """
 
 import numpy as np
