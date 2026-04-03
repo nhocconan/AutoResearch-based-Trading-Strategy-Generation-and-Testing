@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Experiment #751: 6h Camarilla Pivot Breakout + Volume Confirmation + ADX Trend Filter
-HYPOTHESIS: Camarilla pivot levels from 1d provide institutional support/resistance. 
-Breakouts above R4 or below S4 with volume confirmation (>1.5x average) and ADX>25 
-indicate strong institutional participation. Works in bull/bear markets: long on R4 breakout, 
-short on S4 breakdown. Target: 75-150 total trades over 4 years (19-37/year).
+Experiment #751: 6h Camarilla Pivot + Volume Spike + ADX Filter
+HYPOTHESIS: 6h Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) 
+combined with volume confirmation (>1.5x average) and ADX regime filter (ADX>25 for breakout, 
+ADX<20 for mean reversion) captures institutional activity with proper HTF alignment. 
+Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear markets: 
+mean reversion in range (ADX<20) at R3/S3, breakout continuation in trend (ADX>25) at R4/S4.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -29,23 +31,29 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Camarilla pivot levels for 1d
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    range_1d = high_1d - low_1d
-    # Camarilla levels
-    r4_1d = close_1d + range_1d * 1.1 / 2
-    r3_1d = close_1d + range_1d * 1.1 / 4
-    s3_1d = close_1d - range_1d * 1.1 / 4
-    s4_1d = close_1d - range_1d * 1.1 / 2
+    # Camarilla: P = (H+L+C)/3, Range = H-L
+    camarilla_pivot = (high_1d + low_1d + close_1d) / 3.0
+    camarilla_range = high_1d - low_1d
+    # Resistance levels: R3 = C + Range*1.1/2, R4 = C + Range*1.1
+    # Support levels: S3 = C - Range*1.1/2, S4 = C - Range*1.1
+    r3 = close_1d + camarilla_range * 1.1 / 2.0
+    r4 = close_1d + camarilla_range * 1.1
+    s3 = close_1d - camarilla_range * 1.1 / 2.0
+    s4 = close_1d - camarilla_range * 1.1
     
     # Align Camarilla levels to 6h timeframe
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # === 6h Indicators: ADX(14) for trend strength ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.ones(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    
+    # === 6h Indicators: ADX(14) for regime filter ===
     # True Range
     tr = np.zeros(n)
     for i in range(1, n):
@@ -56,28 +64,30 @@ def generate_signals(prices):
     dm_plus = np.zeros(n)
     dm_minus = np.zeros(n)
     for i in range(1, n):
-        up_move = high[i] - high[i-1]
-        down_move = low[i-1] - low[i]
-        dm_plus[i] = up_move if up_move > down_move and up_move > 0 else 0
-        dm_minus[i] = down_move if down_move > up_move and down_move > 0 else 0
+        high_diff = high[i] - high[i-1]
+        low_diff = low[i-1] - low[i]
+        if high_diff > low_diff and high_diff > 0:
+            dm_plus[i] = high_diff
+        else:
+            dm_plus[i] = 0
+        if low_diff > high_diff and low_diff > 0:
+            dm_minus[i] = low_diff
+        else:
+            dm_minus[i] = 0
     
-    # Smoothed TR, DM+, DM-
-    tr_smooth = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, min_periods=14, adjust=False).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # Smoothed values
+    tr_ma = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    dm_plus_ma = pd.Series(dm_plus).ewm(span=14, min_periods=14, adjust=False).mean().values
+    dm_minus_ma = pd.Series(dm_minus).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / (tr_smooth + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (tr_smooth + 1e-10)
+    # Directional Indicators
+    di_plus = 100 * dm_plus_ma / tr_ma
+    di_minus = 100 * dm_minus_ma / tr_ma
     
     # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    dx = np.zeros(n)
+    dx[14:] = 100 * np.abs(di_plus[14:] - di_minus[14:]) / (di_plus[14:] + di_minus[14:])
     adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # === 6h Indicators: Volume MA(20) for spike detection ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -93,24 +103,23 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(adx[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic: ATR-based stoploss (using ADX as volatility proxy) ---
+        # --- Exit Logic: ATR-based stoploss (using 1.5*ATR for tighter stops) ---
         if in_position:
             bars_since_entry += 1
             
-            # Volatility estimate: use ADX-derived ATR approximation
-            atr_approx = (high[i] - low[i]) * (adx[i] / 25.0)  # scale by ADX
-            if atr_approx < 0.001 * price:  # minimum volatility floor
-                atr_approx = 0.01 * price
+            # Calculate ATR for stoploss
+            atr_val = tr_ma[i]  # Using TR MA as proxy for ATR
             
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.0 * atr_approx
+                stop_level = entry_price - 1.5 * atr_val
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -118,7 +127,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_level = entry_price + 2.0 * atr_approx
+                stop_level = entry_price + 1.5 * atr_val
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -126,8 +135,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 8 bars (~16d on 6h) to avoid overtrading
-            if bars_since_entry > 8:
+            # Optional: time-based exit after 4 bars (~24h on 6h) to avoid overtrading
+            if bars_since_entry > 4:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -141,25 +150,46 @@ def generate_signals(prices):
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
-        # Trend filter: ADX > 25 indicates strong trend
-        strong_trend = adx[i] > 25
-        
-        if volume_spike and strong_trend:
-            # Long: price breaks above R4 (strong bullish breakout)
-            if high[i] > r4_1d_aligned[i]:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            # Short: price breaks below S4 (strong bearish breakdown)
-            elif low[i] < s4_1d_aligned[i]:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
+        if volume_spike:
+            # Regime filter: ADX > 25 = trending (breakout), ADX < 20 = ranging (mean reversion)
+            if adx[i] > 25:
+                # Trending regime: breakout continuation at R4/S4
+                if high[i] > r4_aligned[i]:
+                    # Breakout above R4 -> long
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
+                elif low[i] < s4_aligned[i]:
+                    # Breakdown below S4 -> short
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
+                else:
+                    signals[i] = 0.0
+            elif adx[i] < 20:
+                # Ranging regime: mean reversion at R3/S3
+                if low[i] <= s3_aligned[i] and close[i] > s3_aligned[i]:
+                    # Bounce off S3 -> long
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
+                elif high[i] >= r3_aligned[i] and close[i] < r3_aligned[i]:
+                    # Rejection at R3 -> short
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
+                else:
+                    signals[i] = 0.0
             else:
+                # ADX between 20-25: transition regime, no trade
                 signals[i] = 0.0
         else:
             signals[i] = 0.0
