@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #1520: 4h Donchian(20) Breakout + 1d Trend + Volume Confirmation + ATR Stoploss
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d trend (EMA50) and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. Using 4h timeframe with tight entry conditions targets 75-200 total trades over 4 years (19-50/year). ATR-based stoploss limits drawdown. Position size fixed at 0.25 to balance risk and return.
+Experiment #1520: 4h Donchian(20) Breakout + 1d Trend + Volume + ATR Stoploss
+HYPOTHESIS: 4h Donchian breakouts with 1d EMA(50) trend alignment and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. Position size fixed at 0.25 to balance return and drawdown. Target: 100-200 total trades over 4 years (25-50/year) by using tight entry conditions with multi-timeframe confluence.
 """
 
 import numpy as np
@@ -20,7 +20,7 @@ def generate_signals(prices):
     open_time = prices["open_time"].values
     n = len(close)
     
-    # Pre-compute session hours for filter (optional, can remove if too restrictive)
+    # Pre-compute session hours for filter (optional, can remove if not needed)
     hours = pd.DatetimeIndex(open_time).hour
     
     # === HTF: 1d data for trend filter (Call ONCE before loop) ===
@@ -68,7 +68,7 @@ def generate_signals(prices):
         
         price = close[i]
         hour = hours[i]
-        in_session = (8 <= hour <= 20)  # UTC 08-20 session filter (can be removed if too restrictive)
+        in_session = (8 <= hour <= 20)  # UTC 08-20 session filter (optional)
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -98,12 +98,12 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         # Require 1d trend alignment
-        trend_following = trend_1d_aligned[i] != 0  # Should always be true, but keeping for clarity
+        trend_following = trend_1d_aligned[i] != 0  # Should always be true, but safe
         
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
-        # Session filter: only trade during active hours (optional)
+        # Session filter: only trade during active hours (can remove to increase trades)
         if trend_following and volume_spike and in_session:
             # Breakout: price breaks above upper band OR below lower band
             if price > donch_high[i] and trend_1d_aligned[i] > 0:  # Uptrend breakout
