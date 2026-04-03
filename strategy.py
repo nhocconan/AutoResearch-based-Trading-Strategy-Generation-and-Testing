@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #300: 6h Elder Ray Index + 1d ADX Regime + Volume Confirmation
+Experiment #300: 4h Donchian(20) Breakout + Daily Camarilla Pivot + Volume Spike
 
-HYPOTHESIS: Elder Ray (Bull/Bear Power) measures bull/bear strength relative to EMA13. 
-Combined with 1d ADX regime filter (ADX>25 = trending, ADX<20 = ranging) and volume 
-confirmation (1.5x average), this strategy captures strong momentum in trending markets 
-while avoiding false signals in ranging markets. Designed for 6h timeframe targeting 
-12-37 trades/year (50-150 over 4 years). Works in both bull/bear by only taking signals 
-in direction of higher timeframe trend and power.
+HYPOTHESIS: 4h Donchian breakouts aligned with daily Camarilla pivot levels (R4/S4) capture 
+strong momentum with institutional participation. Daily pivot provides structural support/resistance, 
+reducing false breakouts. Volume confirmation (2.0x average) ensures follow-through. 
+Designed for 4h timeframe to target 19-50 trades/year (75-200 over 4 years).
+Works in both bull and bear markets by only taking breakouts in direction of daily pivot bias.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_elder_ray_1d_adx_regime_v1"
-timeframe = "6h"
+name = "mtf_4h_donchian_daily_pivot_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,63 +24,46 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for ADX regime (Call ONCE before loop) ===
+    # === HTF: 1d data for daily Camarilla pivot calculation (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    if len(df_1d) >= 30:
-        # Calculate ADX(14) on daily data
-        # True Range
-        tr = np.maximum(df_1d['high'].values - df_1d['low'].values,
-                        np.maximum(np.abs(df_1d['high'].values - np.roll(df_1d['close'].values, 1)),
-                                   np.abs(df_1d['low'].values - np.roll(df_1d['close'].values, 1))))
-        tr[0] = df_1d['high'].values[0] - df_1d['low'].values[0]
+    # Calculate daily Camarilla pivot levels from prior day's OHLC
+    if len(df_1d) >= 2:
+        # Prior completed day's high, low, close
+        daily_high = pd.Series(df_1d['high'].values).shift(1).values
+        daily_low = pd.Series(df_1d['low'].values).shift(1).values
+        daily_close = pd.Series(df_1d['close'].values).shift(1).values
         
-        # Directional Movement
-        up_move = df_1d['high'].values - np.roll(df_1d['high'].values, 1)
-        down_move = np.roll(df_1d['low'].values, 1) - df_1d['low'].values
+        # Camarilla pivot levels
+        daily_range = daily_high - daily_low
+        # R4 = Close + Range * 1.1/2
+        r4 = daily_close + daily_range * 1.1 / 2
+        # S4 = Close - Range * 1.1/2
+        s4 = daily_close - daily_range * 1.1 / 2
         
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        # Align to 4h timeframe
+        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
         
-        # Smooth TR, +DM, -DM with Wilder's smoothing (alpha = 1/period)
-        def wilder_smooth(data, period):
-            result = np.full_like(data, np.nan)
-            if len(data) >= period:
-                result[period-1] = np.mean(data[:period])
-                for i in range(period, len(data)):
-                    result[i] = (result[i-1] * (period-1) + data[i]) / period
-            return result
-        
-        atr_1d = wilder_smooth(tr, 14)
-        plus_di_1d = 100 * wilder_smooth(plus_dm, 14) / atr_1d
-        minus_di_1d = 100 * wilder_smooth(minus_dm, 14) / atr_1d
-        dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-        adx_1d = wilder_smooth(dx_1d, 14)
-        
-        # Align ADX to 6h timeframe
-        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-        
-        # Regime: 1 = trending (ADX>25), 0 = ranging (ADX<20), -1 = transitional
-        adx_regime = np.where(adx_1d_aligned > 25, 1, 
-                             np.where(adx_1d_aligned < 20, 0, -1))
+        # Daily bias: 1 if price > midpoint (bullish), -1 if price < midpoint (bearish)
+        daily_midpoint = (r4_aligned + s4_aligned) / 2
+        daily_bias = np.where(close[:len(r4_aligned)] > daily_midpoint, 1, -1)
     else:
-        adx_1d_aligned = np.full(n, np.nan)
-        adx_regime = np.full(n, -1)  # default to transitional
+        r4_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
+        daily_bias = np.full(n, 0)
     
-    # === 6h Indicators ===
-    # EMA13 for Elder Ray
-    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
+    # === 4h Indicators ===
     # ATR(14) for stoploss
-    tr_6h = np.maximum(high - low,
-                       np.maximum(np.abs(high - np.roll(close, 1)),
-                                  np.abs(low - np.roll(close, 1))))
-    tr_6h[0] = high[0] - low[0]
-    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # Donchian Channel(20) - shift(1) to avoid look-ahead
+    dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
     # Volume MA(20) for confirmation
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -101,23 +83,23 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(ema13[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ma_20[i]) or 
-            np.isnan(adx_1d_aligned[i]) if i < len(adx_1d_aligned) else True or
-            i >= len(adx_regime)):
+        if (np.isnan(atr_14[i]) or np.isnan(dc_upper_20[i]) or np.isnan(dc_lower_20[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(daily_bias[i])):
             signals[i] = 0.0
             continue
         
-        # --- Elder Ray Signals ---
-        # Strong bull power: bullish momentum
-        strong_bull = bull_power[i] > 0 and bull_power[i] > np.abs(bear_power[i])
-        # Strong bear power: bearish momentum
-        strong_bear = bear_power[i] < 0 and np.abs(bear_power[i]) > bull_power[i]
+        # --- Price Channel Breakout ---
+        bullish_breakout = close[i] > dc_upper_20[i]
+        bearish_breakout = close[i] < dc_lower_20[i]
         
         # --- Volume Confirmation ---
-        vol_ok = volume[i] > vol_ma_20[i] * 1.5 if vol_ma_20[i] > 1e-10 else False  # 1.5x volume
+        vol_ok = volume[i] > vol_ma_20[i] * 2.0 if vol_ma_20[i] > 1e-10 else False  # 2.0x volume spike
         
-        # --- Regime Filter: Only trade in trending markets (ADX>25) ---
-        regime_ok = adx_regime[i] == 1  # Only trending regime
+        # --- Daily Pivot Levels and Bias ---
+        # Only trade breakouts that align with daily bias AND break beyond R4/S4
+        bullish_aligned = bullish_breakout and daily_bias[i] > 0 and close[i] > r4_aligned[i]
+        bearish_aligned = bearish_breakout and daily_bias[i] < 0 and close[i] < s4_aligned[i]
         
         # --- Position Management (Exit Logic) ---
         stop_hit = False
@@ -133,16 +115,16 @@ def generate_signals(prices):
                 if high[i] > stop_level:
                     stop_hit = True
             
-            # Exit conditions: power reversal or regime change to ranging
-            min_hold = (i - entry_bar) >= 3  # Minimum 3 bars hold (~18h)
+            # Exit conditions: trend reversal or opposite Donchian touch
+            min_hold = (i - entry_bar) >= 3  # Minimum 3 bars hold (~12h)
             if min_hold:
                 if position_side > 0:
-                    # Exit long: bear power becomes stronger OR regime turns ranging
-                    if bear_power[i] > 0 or adx_regime[i] == 0:
+                    # Exit long: price touches lower Donchian OR daily bias turns bearish
+                    if close[i] <= dc_lower_20[i] or daily_bias[i] < 0:
                         stop_hit = True
                 else:  # position_side < 0
-                    # Exit short: bull power becomes stronger OR regime turns ranging
-                    if bull_power[i] < 0 or adx_regime[i] == 0:
+                    # Exit short: price touches upper Donchian OR daily bias turns bullish
+                    if close[i] >= dc_upper_20[i] or daily_bias[i] > 0:
                         stop_hit = True
             
             if stop_hit:
@@ -157,16 +139,16 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic (Only if Flat) ---
         # Long conditions: 
-        # Strong bull power + volume confirmation + trending regime
-        if strong_bull and vol_ok and regime_ok:
+        # Breakout above upper Donchian with volume confirmation, daily bias bullish, and price > R4
+        if bullish_aligned and vol_ok:
             in_position = True
             position_side = 1
             entry_bar = i
             highest_since_entry = high[i]
             signals[i] = SIZE
         # Short conditions:
-        # Strong bear power + volume confirmation + trending regime
-        elif strong_bear and vol_ok and regime_ok:
+        # Breakout below lower Donchian with volume confirmation, daily bias bearish, and price < S4
+        elif bearish_aligned and vol_ok:
             in_position = True
             position_side = -1
             entry_bar = i
@@ -176,3 +158,167 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #300: 4h Donchian(20) Breakout + Daily Camarilla Pivot + Volume Spike
+
+HYPOTHESIS: 4h Donchian breakouts aligned with daily Camarilla pivot levels (R4/S4) capture 
+strong momentum with institutional participation. Daily pivot provides structural support/resistance, 
+reducing false breakouts. Volume confirmation (2.0x average) ensures follow-through. 
+Designed for 4h timeframe to target 19-50 trades/year (75-200 over 4 years).
+Works in both bull and bear markets by only taking breakouts in direction of daily pivot bias.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "mtf_4h_donchian_daily_pivot_volume_v1"
+timeframe = "4h"
+leverage = 1.0
+
+def generate_signals(prices):
+    close = prices["close"].values.astype(np.float64)
+    high = prices["high"].values.astype(np.float64)
+    low = prices["low"].values.astype(np.float64)
+    volume = prices["volume"].values.astype(np.float64)
+    n = len(close)
+    
+    # === HTF: 1d data for daily Camarilla pivot calculation (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate daily Camarilla pivot levels from prior day's OHLC
+    if len(df_1d) >= 2:
+        # Prior completed day's high, low, close
+        daily_high = pd.Series(df_1d['high'].values).shift(1).values
+        daily_low = pd.Series(df_1d['low'].values).shift(1).values
+        daily_close = pd.Series(df_1d['close'].values).shift(1).values
+        
+        # Camarilla pivot levels
+        daily_range = daily_high - daily_low
+        # R4 = Close + Range * 1.1/2
+        r4 = daily_close + daily_range * 1.1 / 2
+        # S4 = Close - Range * 1.1/2
+        s4 = daily_close - daily_range * 1.1 / 2
+        
+        # Align to 4h timeframe
+        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+        
+        # Daily bias: 1 if price > midpoint (bullish), -1 if price < midpoint (bearish)
+        daily_midpoint = (r4_aligned + s4_aligned) / 2
+        daily_bias = np.where(close[:len(r4_aligned)] > daily_midpoint, 1, -1)
+    else:
+        r4_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
+        daily_bias = np.full(n, 0)
+    
+    # === 4h Indicators ===
+    # ATR(14) for stoploss
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # Donchian Channel(20) - shift(1) to avoid look-ahead
+    dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    
+    # Volume MA(20) for confirmation
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # === Signals Initialization ===
+    signals = np.zeros(n)
+    SIZE = 0.25  # Discrete position sizing (25% of capital)
+    
+    # Position tracking state variables
+    in_position = False
+    position_side = 0
+    entry_bar = -1
+    highest_since_entry = 0.0
+    lowest_since_entry = float('inf')
+    
+    warmup = 100  # Ensure enough data for HTF and indicator calculations
+    
+    for i in range(warmup, n):
+        # --- Data Validity Check ---
+        if (np.isnan(atr_14[i]) or np.isnan(dc_upper_20[i]) or np.isnan(dc_lower_20[i]) or 
+            np.isnan(vol_ma_20[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(daily_bias[i])):
+            signals[i] = 0.0
+            continue
+        
+        # --- Price Channel Breakout ---
+        bullish_breakout = close[i] > dc_upper_20[i]
+        bearish_breakout = close[i] < dc_lower_20[i]
+        
+        # --- Volume Confirmation ---
+        vol_ok = volume[i] > vol_ma_20[i] * 2.0 if vol_ma_20[i] > 1e-10 else False  # 2.0x volume spike
+        
+        # --- Daily Pivot Levels and Bias ---
+        # Only trade breakouts that align with daily bias AND break beyond R4/S4
+        bullish_aligned = bullish_breakout and daily_bias[i] > 0 and close[i] > r4_aligned[i]
+        bearish_aligned = bearish_breakout and daily_bias[i] < 0 and close[i] < s4_aligned[i]
+        
+        # --- Position Management (Exit Logic) ---
+        stop_hit = False
+        
+        if in_position:
+            # ATR-based trailing stoploss
+            if position_side > 0:
+                stop_level = highest_since_entry - 2.5 * atr_14[i]
+                if low[i] < stop_level:
+                    stop_hit = True
+            else:  # Short position
+                stop_level = lowest_since_entry + 2.5 * atr_14[i]
+                if high[i] > stop_level:
+                    stop_hit = True
+            
+            # Exit conditions: trend reversal or opposite Donchian touch
+            min_hold = (i - entry_bar) >= 3  # Minimum 3 bars hold (~12h)
+            if min_hold:
+                if position_side > 0:
+                    # Exit long: price touches lower Donchian OR daily bias turns bearish
+                    if close[i] <= dc_lower_20[i] or daily_bias[i] < 0:
+                        stop_hit = True
+                else:  # position_side < 0
+                    # Exit short: price touches upper Donchian OR daily bias turns bullish
+                    if close[i] >= dc_upper_20[i] or daily_bias[i] > 0:
+                        stop_hit = True
+            
+            if stop_hit:
+                signals[i] = 0.0
+                in_position = False
+                position_side = 0
+                highest_since_entry = 0.0
+                lowest_since_entry = float('inf')
+            else:
+                signals[i] = position_side * SIZE
+            continue
+        
+        # --- New Position Entry Logic (Only if Flat) ---
+        # Long conditions: 
+        # Breakout above upper Donchian with volume confirmation, daily bias bullish, and price > R4
+        if bullish_aligned and vol_ok:
+            in_position = True
+            position_side = 1
+            entry_bar = i
+            highest_since_entry = high[i]
+            signals[i] = SIZE
+        # Short conditions:
+        # Breakout below lower Donchian with volume confirmation, daily bias bearish, and price < S4
+        elif bearish_aligned and vol_ok:
+            in_position = True
+            position_side = -1
+            entry_bar = i
+            lowest_since_entry = low[i]
+            signals[i] = -SIZE
+        else:
+            signals[i] = 0.0
+    
+    return signals
+
+</think>
