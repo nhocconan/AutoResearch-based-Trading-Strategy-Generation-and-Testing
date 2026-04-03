@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #487: 6h Donchian(20) breakout + 1d/1w Camarilla pivot + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with weekly pivot structure capture major trend moves. 
-1d Camarilla levels (R3/S3 for mean reversion, R4/S4 for breakout) provide confluence. 
-Volume confirmation filters weak breakouts. Works in bull markets (breakout continuation) 
-and bear markets (mean reversion at extreme levels). Discrete sizing (0.25) manages drawdown.
-Target: 75-200 trades over 4 years.
+Experiment #487: 6h Donchian(20) breakout + 1d ATR-based volatility filter + volume confirmation
+HYPOTHESIS: Donchian breakouts on 6h timeframe filtered by 1d ATR ratio (current/20-period average) to distinguish high-momentum breakouts from low-volatility false signals. Volume confirmation (>1.5x average) ensures participation. Works in bull markets (strong breakouts with expansion) and bear markets (sharp breakdowns with panic volume). Uses discrete sizing (0.25) and ATR(14) stoploss (2.0) for risk control. Target 50-150 trades over 4 years by requiring confluence of 3 filters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_487_6h_donchian20_1d_camarilla_vol_v1"
+name = "exp_487_6h_donchian20_1d_atr_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,35 +19,26 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
+    # === HTF: 1d data for ATR-based volatility filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    high_1d = pd.Series(df_1d['high'].values)
+    low_1d = pd.Series(df_1d['low'].values)
+    close_1d = pd.Series(df_1d['close'].values)
     
-    # Calculate Camarilla pivot levels for 1d
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate True Range and ATR(20) on 1d
+    tr_1d = np.zeros(len(close_1d))
+    for i in range(1, len(close_1d)):
+        tr_1d[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr_1d).ewm(span=20, min_periods=20, adjust=False).mean().values
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    # ATR ratio: current ATR / 20-period average ATR (>1.0 = expanding volatility)
+    atr_ratio_1d = np.ones(len(atr_1d))  # default 1.0 for warmup
+    valid_ma = ~np.isnan(atr_ma_1d) & (atr_ma_1d > 0)
+    atr_ratio_1d[valid_ma] = atr_1d[valid_ma] / atr_ma_1d[valid_ma]
     
-    # Camarilla levels: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4)
-    # S3 = C - ((H-L) * 1.1/4), S4 = C - ((H-L) * 1.1/2)
-    camarilla_r4_1d = close_1d + (range_1d * 1.1 / 2.0)
-    camarilla_r3_1d = close_1d + (range_1d * 1.1 / 4.0)
-    camarilla_s3_1d = close_1d - (range_1d * 1.1 / 4.0)
-    camarilla_s4_1d = close_1d - (range_1d * 1.1 / 2.0)
-    
-    # Align Camarilla levels to 6h timeframe (shifted by 1 for completed 1d bar only)
-    camarilla_r4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4_1d)
-    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
-    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
-    camarilla_s4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4_1d)
-    
-    # === HTF: 1w data for weekly trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = pd.Series(df_1w['close'].values)
-    ema_1w = close_1w.ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align ATR ratio to 6h timeframe (shifted by 1 for completed 1d bar only)
+    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
     
     # === 6h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
@@ -79,30 +66,27 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 200  # sufficient for EMA(50) weekly + other indicators
+    warmup = 60  # sufficient for 20-period indicators + HTF warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(camarilla_r4_1d_aligned[i]) or
-            np.isnan(camarilla_r3_1d_aligned[i]) or np.isnan(camarilla_s3_1d_aligned[i]) or
-            np.isnan(camarilla_s4_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr_ratio_1d_aligned[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.6x average) ---
-        volume_spike = vol_ratio[i] > 1.6
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio[i] > 1.5
+        
+        # --- Volatility Filter: Require expanding 1d ATR ratio (> 1.2) ---
+        volatility_expanding = atr_ratio_1d_aligned[i] > 1.2
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
-        
-        # --- Weekly EMA Trend Filter ---
-        weekly_uptrend = price > ema_1w_aligned[i]
-        weekly_downtrend = price < ema_1w_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -139,30 +123,16 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        if volume_spike:
-            # Long: Donchian breakout up + above weekly EMA + price > R3 (strong momentum)
-            if breakout_up and weekly_uptrend and price > camarilla_r3_1d_aligned[i]:
+        if volume_spike and volatility_expanding:
+            # Long: Donchian breakout up + volatility expanding
+            if breakout_up:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + below weekly EMA + price < S3 (strong momentum)
-            elif breakout_down and weekly_downtrend and price < camarilla_s3_1d_aligned[i]:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
-            # Long mean reversion: price < S4 (extreme oversold) + weekly uptrend
-            elif price < camarilla_s4_1d_aligned[i] and weekly_uptrend:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            # Short mean reversion: price > R4 (extreme overbought) + weekly downtrend
-            elif price > camarilla_r4_1d_aligned[i] and weekly_downtrend:
+            # Short: Donchian breakout down + volatility expanding
+            elif breakout_down:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -174,3 +144,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
