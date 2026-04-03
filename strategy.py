@@ -1,16 +1,50 @@
 #!/usr/bin/env python3
 """
-Experiment #1065: 12h Camarilla Pivot + Volume Spike + Chop Regime Filter
-HYPOTHESIS: Camarilla pivot levels from 1d act as intraday support/resistance. Long when price touches L3 with volume spike and choppy market (CHOP>61.8). Short when price touches H3 with volume spike and choppy market. Uses discrete position sizing (0.25) to minimize fee churn. Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+Experiment #1065: 12h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 12h capture institutional order flow with lower frequency. 
+Long when price breaks above upper band with 1d HMA(21) uptrend and volume spike (>1.5x avg). 
+Short when price breaks below lower band with 1d HMA(21) downtrend and volume spike. 
+Uses discrete position sizing (0.25) to minimize fee churn. Target: 75-150 total trades over 4 years (19-37/year) on 12h timeframe.
+Works in bull (breakouts) and bear (breakdowns) markets via symmetric logic.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1065_12h_camarilla_vol_chop_v1"
+name = "exp_1065_12h_donchian20_1d_hma_vol_v1"
 timeframe = "12h"
 leverage = 1.0
+
+def calculate_hma(close, period):
+    """Calculate Hull Moving Average"""
+    if len(close) < period:
+        return np.full_like(close, np.nan)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    # WMA for half period
+    wma_half = np.zeros_like(close)
+    for i in range(half_period, len(close)):
+        weights = np.arange(1, half_period + 1)
+        wma_half[i] = np.dot(close[i - half_period + 1:i + 1], weights) / weights.sum()
+    
+    # WMA for full period
+    wma_full = np.zeros_like(close)
+    for i in range(period, len(close)):
+        weights = np.arange(1, period + 1)
+        wma_full[i] = np.dot(close[i - period + 1:i + 1], weights) / weights.sum()
+    
+    # Raw HMA: 2*WMA(half) - WMA(full)
+    raw_hma = 2 * wma_half - wma_full
+    
+    # Final WMA of raw HMA with sqrt_period
+    hma = np.zeros_like(close)
+    for i in range(sqrt_period, len(close)):
+        weights = np.arange(1, sqrt_period + 1)
+        hma[i] = np.dot(raw_hma[i - sqrt_period + 1:i + 1], weights) / weights.sum()
+    
+    return hma
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
@@ -19,42 +53,27 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
+    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    hma_1d = calculate_hma(close_1d, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate Camarilla levels for 1d: based on previous day's range
-    # L3 = close - (high - low) * 1.1/4
-    # H3 = close + (high - low) * 1.1/4
-    range_1d = high_1d - low_1d
-    camarilla_l3 = close_1d - range_1d * 1.1 / 4
-    camarilla_h3 = close_1d + range_1d * 1.1 / 4
-    
-    # Align to 12h timeframe (shifted by 1 for completed bars only)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    # === 12h Indicators: Donchian(20) ===
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: Choppiness Index (CHOP) regime filter ===
-    # CHOP = 100 * log10(sum(ATR) / (max(high)-min(low))) / log10(n)
-    # CHOP > 61.8 = ranging market (good for mean reversion at pivots)
-    # CHOP < 38.2 = trending market
-    atr = np.zeros(n)
+    # === 12h Indicators: ATR(14) for stoploss ===
+    tr = np.zeros(n)
     for i in range(1, n):
-        atr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr[0] = high[0] - low[0]
-    atr_sum = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-    max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = np.full(n, np.nan)
-    denominator = max_high - min_low
-    chop[14:] = 100 * np.log10(atr_sum[14:] / denominator[14:]) / np.log10(14)
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -66,22 +85,43 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for volume MA and chop
+    warmup = 20  # sufficient for Donchian and volume MA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(chop[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(hma_1d_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic: time-based exit after 4 bars (~2d on 12h) to avoid overtrading ---
+        # --- Exit Logic: ATR-based stoploss ---
         if in_position:
             bars_since_entry += 1
             
-            if bars_since_entry > 4:
+            if position_side > 0:  # Long position
+                # Stoploss: 2.0*ATR below entry
+                stop_level = entry_price - 2.0 * atr[i]
+                if low[i] < stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+            else:  # Short position
+                # Stoploss: 2.0*ATR above entry
+                stop_level = entry_price + 2.0 * atr[i]
+                if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+            
+            # Optional: time-based exit after 6 bars (~3d on 12h) to avoid overtrading
+            if bars_since_entry > 6:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -95,19 +135,19 @@ def generate_signals(prices):
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
-        # Regime filter: choppy market (CHOP > 61.8) for mean reversion at pivots
-        choppy_market = chop[i] > 61.8
-        
-        if volume_spike and choppy_market:
-            # Touch L3 (support) with volume spike in choppy market -> long
-            if low[i] <= camarilla_l3_aligned[i] * 1.001:  # small tolerance for touch
+        if volume_spike:
+            # 1d HMA trend filter
+            hma_1d_uptrend = hma_1d_aligned[i] > hma_1d_aligned[i-1] if i > 0 else False
+            hma_1d_downtrend = hma_1d_aligned[i] < hma_1d_aligned[i-1] if i > 0 else False
+            
+            # Breakout continuation: price breaks above upper band OR below lower band
+            if price > donch_high[i] and hma_1d_uptrend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Touch H3 (resistance) with volume spike in choppy market -> short
-            elif high[i] >= camarilla_h3_aligned[i] * 0.999:  # small tolerance for touch
+            elif price < donch_low[i] and hma_1d_downtrend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -119,7 +159,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-if __name__ == "__main__":
-    # For testing only - remove in production
-    pass
