@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #234: 1h Volume-Weighted RSI + 4h EMA Trend + 1d Choppiness Regime
+Experiment #248: 12h Donchian(20) Breakout + 1w HMA Trend + Volume Spike + ATR Stoploss
 
-HYPOTHESIS: Combining volume-weighted RSI on 1h for overextension reversal signals with 4h EMA trend alignment and 1d choppiness regime filter creates a robust mean-reversion strategy that works in both bull and bear markets. The 4h EMA provides medium-term trend direction, the 1d chop filter avoids ranging markets where mean reversion fails, and volume-weighted RSI identifies exhaustion points with institutional participation. Targets 15-37 trades/year on 1h timeframe (60-150 total over 4 years) to minimize fee drag while capturing high-probability reversals at trend extremes.
+HYPOTHESIS: Combining 12h Donchian channel breakouts with 1-week HMA trend alignment and volume confirmation creates a robust trend-following strategy. The 1-week HMA filters for primary trend direction, Donchian(20) captures intermediate-term breakouts, and volume spike confirms institutional participation. Targets 12-37 trades/year on 12h timeframe (50-150 total over 4 years) to minimize fee drag while capturing major trend moves in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_vwrsi_ema_chop_v1"
-timeframe = "1h"
+name = "mtf_12h_donchian_hma_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,128 +20,85 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h data for EMA trend (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
+    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate EMA(50) on 4h close
-    if len(df_4h) >= 50:
-        close_4h = df_4h['close'].values
-        ema_50_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    else:
-        ema_50_4h_aligned = np.full(n, np.nan)
-    
-    # === HTF: 1d data for choppiness regime (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Choppiness Index(14) on 1d data
-    if len(df_1d) >= 14:
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        close_1d = df_1d['close'].values
+    # Calculate HMA(21) on 1w close
+    if len(df_1w) >= 21:
+        close_1w = df_1w['close'].values
+        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+        half_len = 21 // 2
+        sqrt_len = int(np.sqrt(21))
         
-        # True Range
-        tr_1d = np.zeros(len(close_1d))
-        tr_1d[0] = high_1d[0] - low_1d[0]
-        for i in range(1, len(close_1d)):
-            tr_1d[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+        def wma(arr, period):
+            if len(arr) < period:
+                return np.full_like(arr, np.nan)
+            weights = np.arange(1, period + 1)
+            return np.convolve(arr, weights, mode='valid') / weights.sum()
         
-        # Sum of TR over 14 periods
-        sum_tr_14 = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-        
-        # Highest high and lowest low over 14 periods
-        max_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-        min_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-        
-        # Choppiness Index = 100 * log10(sum_tr_14 / (max_high_14 - min_low_14)) / log10(14)
-        chop_1d = np.full(len(close_1d), np.nan)
-        valid = (sum_tr_14 > 0) & (max_high_14 > min_low_14) & ~(np.isnan(sum_tr_14) | np.isnan(max_high_14) | np.isnan(min_low_14))
-        chop_1d[valid] = 100 * np.log10(sum_tr_14[valid] / (max_high_14[valid] - min_low_14[valid])) / np.log10(14)
-        
-        # Align to 1h timeframe
-        chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    else:
-        chop_1d_aligned = np.full(n, np.nan)
-    
-    # === 1h Indicators ===
-    # Volume-Weighted RSI(14)
-    def vwma(series, period):
-        """Volume Weighted Moving Average"""
-        if len(series) < period:
-            return np.full_like(series, np.nan)
-        weights = np.arange(1, period + 1)
-        return np.convolve(series, weights, mode='valid') / weights.sum()
-    
-    # Calculate typical price and volume-weighted changes
-    typical_price = (high + low + close) / 3.0
-    price_change = np.diff(typical_price, prepend=typical_price[0])
-    
-    # Separate gains and losses
-    gains = np.where(price_change > 0, price_change, 0.0)
-    losses = np.where(price_change < 0, -price_change, 0.0)
-    
-    # Volume-weighted gains and losses
-    vol_gains = gains * volume
-    vol_losses = losses * volume
-    
-    # Calculate VW-RSI using Wilder's smoothing (similar to RSI but volume-weighted)
-    avg_vol_gain = np.zeros(n)
-    avg_vol_loss = np.zeros(n)
-    
-    # Initialize first values
-    if n > 0:
-        avg_vol_gain[13] = np.nansum(vol_gains[1:14]) / 14 if np.any(~np.isnan(vol_gains[1:14])) else 0
-        avg_vol_loss[13] = np.nansum(vol_losses[1:14]) / 14 if np.any(~np.isnan(vol_losses[1:14])) else 0
-    
-    # Wilder's smoothing
-    for i in range(14, n):
-        avg_vol_gain[i] = (avg_vol_gain[i-1] * 13 + vol_gains[i]) / 14
-        avg_vol_loss[i] = (avg_vol_loss[i-1] * 13 + vol_losses[i]) / 14
-    
-    # Calculate VW-RSI
-    vwrsi = np.zeros(n)
-    for i in range(13, n):
-        if avg_vol_loss[i] != 0:
-            rs = avg_vol_gain[i] / avg_vol_loss[i]
-            vwrsi[i] = 100 - (100 / (1 + rs))
+        wma_half = wma(close_1w, half_len)
+        wma_full = wma(close_1w, 21)
+        if len(wma_half) > 0 and len(wma_full) > 0:
+            hma_input = 2 * wma_half[-len(wma_full):] - wma_full
+            hma_1w = wma(hma_input, sqrt_len)
+            # Pad beginning with NaN
+            hma_1w_full = np.full(len(close_1w), np.nan)
+            hma_1w_full[21 - 1:] = hma_1w  # Adjust for WMA padding
+            hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_full)
         else:
-            vwrsi[i] = 100 if avg_vol_gain[i] > 0 else 50
+            hma_1w_aligned = np.full(n, np.nan)
+    else:
+        hma_1w_aligned = np.full(n, np.nan)
     
-    # For first 13 periods, set to 50 (neutral)
-    vwrsi[:13] = 50
+    # === 12h Indicators ===
+    # Donchian Channel(20)
+    donchian_period = 20
+    highest_high = np.zeros(n)
+    lowest_low = np.zeros(n)
+    
+    for i in range(n):
+        start_idx = max(0, i - donchian_period + 1)
+        highest_high[i] = np.max(high[start_idx:i+1])
+        lowest_low[i] = np.min(low[start_idx:i+1])
+    
+    donchian_upper = highest_high
+    donchian_lower = lowest_low
+    
+    # Volume Spike Detection (Volume > 2.0 * 20-period average)
+    vol_ma_20 = np.zeros(n)
+    for i in range(n):
+        if i >= 19:  # min_periods=20
+            vol_ma_20[i] = np.mean(volume[i-19:i+1])
+        else:
+            vol_ma_20[i] = np.nan
+    volume_spike = volume > (2.0 * vol_ma_20)
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # Discrete position sizing (20% of capital)
+    SIZE = 0.25  # Discrete position sizing (25% of capital)
     
     # Position tracking state variables
     in_position = False
     position_side = 0
+    entry_price = 0.0
+    entry_bar = 0
     
     warmup = 100  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(vwrsi[i]) or np.isnan(ema_50_4h_aligned[i]) or np.isnan(chop_1d_aligned[i])):
+        if (np.isnan(hma_1w_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # --- Regime Filter: Avoid choppy markets (Choppiness > 61.8 = ranging) ---
-        # Only trade when market is trending (Choppiness < 38.2) or moderate (38.2-61.8)
-        # Avoid strong ranging regimes where mean reversion fails
-        if chop_1d_aligned[i] > 61.8:
-            signals[i] = 0.0
-            continue
+        # --- Trend Filter: 1w HMA ---
+        price_above_hma = close[i] > hma_1w_aligned[i]
+        price_below_hma = close[i] < hma_1w_aligned[i]
         
-        # --- Price Trend Alignment ---
-        price_above_ema = close[i] > ema_50_4h_aligned[i]
-        price_below_ema = close[i] < ema_50_4h_aligned[i]
-        
-        # --- Volume-Weighted RSI Signals ---
-        # Oversold: VWRSI < 30 (with volume confirmation suggests institutional accumulation)
-        # Overbought: VWRSI > 70 (with volume confirmation suggests institutional distribution)
-        oversold = vwrsi[i] < 30
-        overbought = vwrsi[i] > 70
+        # --- Breakout Conditions ---
+        breakout_up = close[i] > donchian_upper[i-1]  # Break above previous period's upper band
+        breakout_down = close[i] < donchian_lower[i-1]  # Break below previous period's lower band
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -150,30 +107,22 @@ def generate_signals(prices):
             tr[0] = high[0] - low[0]
             for j in range(1, i+1):
                 tr[j] = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-            atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().iloc[-1]
+            atr_14 = np.zeros(i+1)
+            atr_14[0] = tr[0]
+            for j in range(1, i+1):
+                atr_14[j] = (atr_14[j-1] * 13 + tr[j]) / 14  # Wilder's smoothing
+            atr_value = atr_14[i]
             
             if position_side > 0:  # Long position
-                stop_level = close[entry_bar] - 2.0 * atr_14
+                stop_level = entry_price - 2.5 * atr_value
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at VWRSI > 50 (mean reversion complete)
-                if vwrsi[i] > 50:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
             else:  # Short position
-                stop_level = close[entry_bar] + 2.0 * atr_14
+                stop_level = entry_price + 2.5 * atr_value
                 if high[i] > stop_level:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
-                # Take profit at VWRSI < 50 (mean reversion complete)
-                if vwrsi[i] < 50:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -184,16 +133,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Oversold VWRSI with price above 4h EMA (bullish alignment)
-        if oversold and price_above_ema:
+        # Long: Breakout above Donchian upper with price above 1w HMA and volume spike
+        if breakout_up and price_above_hma and volume_spike[i]:
             in_position = True
             position_side = 1
+            entry_price = close[i]
             entry_bar = i
             signals[i] = SIZE
-        # Short: Overbought VWRSI with price below 4h EMA (bearish alignment)
-        elif overbought and price_below_ema:
+        # Short: Breakout below Donchian lower with price below 1w HMA and volume spike
+        elif breakout_down and price_below_hma and volume_spike[i]:
             in_position = True
             position_side = -1
+            entry_price = close[i]
             entry_bar = i
             signals[i] = -SIZE
         else:
