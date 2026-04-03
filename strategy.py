@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #567: 6h Donchian(20) breakout + 1d pivot direction + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h timeframe aligned with daily pivot bias (above/below pivot) and volume confirmation capture momentum with controlled trade frequency. Daily pivot provides structural bias filter that adapts to both bull and bear markets by using the previous day's price action. Volume confirmation (>1.5x average) ensures participation. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 75-200 total trades over 4 years by using tight entry conditions (breakout + pivot bias + volume).
+HYPOTHESIS: Donchian breakouts on 6h timeframe aligned with daily pivot levels (R1/S1 for continuation, R2/S2 for reversal) and volume confirmation capture institutional flow. Daily pivot levels provide structural support/resistance that works in both bull and bear markets by identifying key price levels where price reacts. Volume confirmation (>1.8x average) ensures participation and reduces false breakouts. Targets 75-150 total trades over 4 years by using tight entry conditions (breakout + pivot alignment + volume) on 6h timeframe.
 """
 
 import numpy as np
@@ -19,20 +19,26 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for pivot calculation (Call ONCE before loop) ===
+    # === HTF: 1d data for pivot points (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points (standard: P = (H+L+C)/3)
-    if len(close_1d) >= 1:
-        pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    else:
-        pivot_1d = np.full(len(close_1d), np.nan)
+    # Calculate daily pivot points: P = (H+L+C)/3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate support and resistance levels
+    r1_1d = 2 * pivot_1d - low_1d
+    s1_1d = 2 * pivot_1d - high_1d
+    r2_1d = pivot_1d + (high_1d - low_1d)
+    s2_1d = pivot_1d - (high_1d - low_1d)
     
-    # Align daily pivot to 6h timeframe
+    # Align pivot levels to 6h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     
     # === 6h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
@@ -72,18 +78,18 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio[i] > 1.5
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
+        volume_spike = vol_ratio[i] > 1.8
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- Daily Pivot Bias Filter ---
-        # Bullish bias: price above daily pivot
-        bullish_bias = price > pivot_1d_aligned[i]
-        # Bearish bias: price below daily pivot
-        bearish_bias = price < pivot_1d_aligned[i]
+        # --- Pivot Alignment Logic ---
+        # Bullish alignment: price above daily pivot and R1
+        bullish_alignment = price > pivot_1d_aligned[i] and price > r1_1d_aligned[i]
+        # Bearish alignment: price below daily pivot and S1
+        bearish_alignment = price < pivot_1d_aligned[i] and price < s1_1d_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -108,8 +114,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 4 bars (~1 day on 6h) to avoid overtrading
-            if bars_since_entry > 4:
+            # Optional: time-based exit after 8 bars (~2 days on 6h) to avoid overtrading
+            if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -121,15 +127,15 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + bullish daily pivot bias
-            if breakout_up and bullish_bias:
+            # Long: Donchian breakout up + bullish pivot alignment
+            if breakout_up and bullish_alignment:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + bearish daily pivot bias
-            elif breakout_down and bearish_bias:
+            # Short: Donchian breakout down + bearish pivot alignment
+            elif breakout_down and bearish_alignment:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
