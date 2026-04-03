@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #068: 12h Donchian(20) breakout + 1w EMA(21) trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Price breaking 12h Donchian(20) channels with 1w EMA(21) trend alignment and volume spike (>1.5x) captures medium-term momentum with fewer trades than daily HTF. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0*ATR). Designed to work in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend) by requiring trend alignment. Target: 75-150 total trades over 4 years (19-37/year) to balance opportunity and fee drag.
+Experiment #070: 1d Donchian(20) breakout + 1w EMA(21) trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Daily Donchian breakouts with weekly EMA trend alignment and volume confirmation capture medium-term momentum with low trade frequency (<25/year). Weekly EMA provides robust trend filter resistant to daily noise. ATR stoploss manages risk. Designed for both bull/bear markets via trend alignment. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_068_12h_donchian20_1w_ema_vol_v1"
-timeframe = "12h"
+name = "exp_070_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,16 +26,16 @@ def generate_signals(prices):
     ema_1w = pd.Series(df_1w['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # === 12h Indicators: Donchian Channel (20) ===
+    # === 1d Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 1d Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)  # default to 1.0 for warmup period
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -100,8 +100,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 4 bars (~48h on 12h) to avoid overtrading
-            if bars_since_entry > 4:
+            # Optional: time-based exit after 15 bars (~15d on 1d) to avoid overtrading
+            if bars_since_entry > 15:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
