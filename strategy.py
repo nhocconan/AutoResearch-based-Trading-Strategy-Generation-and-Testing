@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #607: 6h Donchian(20) breakout + 1d pivot direction + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts on 6h aligned with 1d pivot levels (R1/S1) capture institutional flow with lower trade frequency than 4h. 
-Pivot levels act as dynamic support/resistance where breakouts with volume confirmation indicate strong momentum. 
-Volume (>1.5x average) filters false breakouts. ATR-based stoploss (2.0) manages risk. Discrete sizing (0.25) limits drawdown.
-Targets 75-200 total trades over 4 years by requiring confluence of breakout, pivot alignment, and volume.
-Works in bull/bear: pivots adapt to price structure, volume confirms institutional participation.
+Experiment #607: 6h Donchian(20) breakout + 1d pivot direction + volume confirmation
+HYPOTHESIS: Combining 6h Donchian breakouts with 1d pivot levels (R3/S3 for mean reversion, R4/S4 for continuation) 
+and volume confirmation captures institutional participation in both trending and ranging markets. 
+Pivot levels provide structural support/resistance that works in bull/bear regimes. 
+Target: 75-150 total trades over 4 years via tight entry conditions.
 """
 
 import numpy as np
@@ -29,26 +28,20 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate classic pivot points on 1d timeframe
-    if len(close_1d) >= 1:
-        pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-        r1_1d = 2 * pivot_1d - low_1d
-        s1_1d = 2 * pivot_1d - high_1d
-        r2_1d = pivot_1d + (high_1d - low_1d)
-        s2_1d = pivot_1d - (high_1d - low_1d)
-    else:
-        pivot_1d = np.full(len(close_1d), np.nan)
-        r1_1d = np.full(len(close_1d), np.nan)
-        s1_1d = np.full(len(close_1d), np.nan)
-        r2_1d = np.full(len(close_1d), np.nan)
-        s2_1d = np.full(len(close_1d), np.nan)
+    # Calculate Camarilla pivot levels for 1d
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r3 = pivot + range_1d * 1.1 / 2.0
+    s3 = pivot - range_1d * 1.1 / 2.0
+    r4 = pivot + range_1d * 1.1
+    s4 = pivot - range_1d * 1.1
     
     # Align pivot levels to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # === 6h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
@@ -76,39 +69,45 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for Donchian and volume MA
+    warmup = 50  # sufficient for Donchian and EMA calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(pivot_1d_aligned[i]) or
-            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(pivot_aligned[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio[i] > 1.5
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
+        volume_spike = vol_ratio[i] > 1.8
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- Pivot Alignment Filter ---
-        # Bullish alignment: price above daily S1 (support holds)
-        bullish_align = price > s1_1d_aligned[i]
-        # Bearish alignment: price below daily R1 (resistance holds)
-        bearish_align = price < r1_1d_aligned[i]
+        # --- Pivot-Based Direction Filter ---
+        # In range: between S3 and R3 -> mean reversion at extremes
+        # Trending: beyond R3/S3 -> continuation at R4/S4 breakouts
+        in_range = (price > s3_aligned[i]) and (price < r3_aligned[i])
+        
+        # Mean reversion logic: fade at S3/R3 when in range
+        mean_rev_long = in_range and (price <= s3_aligned[i] * 1.002)  # near S3
+        mean_rev_short = in_range and (price >= r3_aligned[i] * 0.998)  # near R3
+        
+        # Continuation logic: breakout beyond R4/S4 when trending
+        cont_long = (price > r4_aligned[i]) and breakout_up
+        cont_short = (price < s4_aligned[i]) and breakout_down
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.0*ATR below entry
-                stop_level = entry_price - 2.0 * atr[i]
+                # Stoploss: 2.5*ATR below entry
+                stop_level = entry_price - 2.5 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -116,8 +115,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                # Stoploss: 2.0*ATR above entry
-                stop_level = entry_price + 2.0 * atr[i]
+                # Stoploss: 2.5*ATR above entry
+                stop_level = entry_price + 2.5 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -138,15 +137,15 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + price above daily S1 (bullish pivot alignment)
-            if breakout_up and bullish_align:
+            # Long: mean reversion near S3 OR continuation breakout above R4
+            if mean_rev_long or cont_long:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + price below daily R1 (bearish pivot alignment)
-            elif breakout_down and bearish_align:
+            # Short: mean reversion near R3 OR continuation breakdown below S4
+            elif mean_rev_short or cont_short:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
