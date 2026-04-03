@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #1922: 12h Donchian(20) breakout + 1d trend filter + volume confirmation
-HYPOTHESIS: Donchian channel breakouts on 12h timeframe capture medium-term trends. 
-Filtering with 1d EMA(50) trend and volume spikes (>1.5x 20-period average) reduces false breakouts.
-ATR-based stoploss (2.5x ATR(14)) manages risk. Target: 50-150 total trades over 4 years.
-Works in bull/bear markets by following institutional trend on 1d while using 12h for precise entries.
+Experiment #1922: 12h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation
+HYPOTHESIS: 12h Donchian(20) breakouts capture medium-term trends. 
+Filter with 1d EMA(50) trend and volume spike (>1.5x 20-period average) to avoid false breakouts.
+Works in bull markets by riding uptrends and bear markets by shorting downtrends.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1922_12h_donchian20_1d_trend_vol_v1"
+name = "exp_1922_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -22,35 +22,30 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # 1d trend filter: EMA(50)
+    # 1d EMA(50) trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_50_1d, 1, -1)
+    trend_1d = np.where(close_1d > ema_50_1d, 1, -1)  # 1 = uptrend, -1 = downtrend
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 12h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
-    # Donchian channels: upper = max(high, 20), lower = min(low, 20)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # === 12h Indicators: Donchian(20) channels ===
+    # Donchian upper = max(high, lookback=20)
+    # Donchian lower = min(low, lookback=20)
+    lookback = 20
+    dc_upper = np.full(n, np.nan)
+    dc_lower = np.full(n, np.nan)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    for i in range(lookback, n):
+        dc_upper[i] = np.max(high[i-lookback:i])
+        dc_lower[i] = np.min(low[i-lookback:i])
+    
+    # Volume MA(20) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
-    
-    # ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -60,56 +55,70 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for Donchian(20), EMA(50), ATR(14)
+    warmup = 50  # sufficient for Donchian(20) and EMA(50)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or
+            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic ---
+        # --- Exit Logic: ATR-based stoploss (2*ATR) ---
         if in_position:
             bars_since_entry += 1
             
-            # Update highest/lowest since entry for trailing stop (optional)
-            if position_side > 0:  # Long
-                highest_since_entry = max(highest_since_entry, high[i])
-            else:  # Short
-                lowest_since_entry = min(lowest_since_entry, low[i])
+            # Calculate ATR(14) for dynamic stoploss
+            if i >= 14:
+                tr1 = high[i] - low[i]
+                tr2 = abs(high[i] - close[i-1])
+                tr3 = abs(low[i] - close[i-1])
+                tr = max(tr1, tr2, tr3)
+                # Simple ATR approximation using recent TR
+                atr_approx = np.mean([
+                    max(high[i-13] - low[i-13], abs(high[i-13] - close[i-14]), abs(low[i-13] - close[i-14])),
+                    max(high[i-12] - low[i-12], abs(high[i-12] - close[i-13]), abs(low[i-12] - close[i-13])),
+                    max(high[i-11] - low[i-11], abs(high[i-11] - close[i-12]), abs(low[i-11] - close[i-12])),
+                    max(high[i-10] - low[i-10], abs(high[i-10] - close[i-11]), abs(low[i-10] - close[i-11])),
+                    max(high[i-9] - low[i-9], abs(high[i-9] - close[i-10]), abs(low[i-9] - close[i-10])),
+                    max(high[i-8] - low[i-8], abs(high[i-8] - close[i-9]), abs(low[i-8] - close[i-9])),
+                    max(high[i-7] - low[i-7], abs(high[i-7] - close[i-8]), abs(low[i-7] - close[i-8])),
+                    max(high[i-6] - low[i-6], abs(high[i-6] - close[i-7]), abs(low[i-6] - close[i-7])),
+                    max(high[i-5] - low[i-5], abs(high[i-5] - close[i-6]), abs(low[i-5] - close[i-6])),
+                    max(high[i-4] - low[i-4], abs(high[i-4] - close[i-5]), abs(low[i-4] - close[i-5])),
+                    max(high[i-3] - low[i-3], abs(high[i-3] - close[i-4]), abs(low[i-3] - close[i-4])),
+                    max(high[i-2] - low[i-2], abs(high[i-2] - close[i-3]), abs(low[i-2] - close[i-3])),
+                    max(high[i-1] - low[i-1], abs(high[i-1] - close[i-2]), abs(low[i-1] - close[i-2])),
+                    tr
+                ]) / 14
+            else:
+                atr_approx = 0.0
             
-            # ATR-based stoploss: 2.5 * ATR against position
-            stoploss_hit = False
+            exit_signal = False
+            
             if position_side > 0:  # Long position
-                if price <= entry_price - 2.5 * atr[i]:
-                    stoploss_hit = True
+                # Stoploss: price drops 2*ATR below entry
+                if price < entry_price - 2.0 * atr_approx:
+                    exit_signal = True
+                # Optional: take profit at 3*ATR profit
+                elif price > entry_price + 3.0 * atr_approx:
+                    exit_signal = True
             else:  # Short position
-                if price >= entry_price + 2.5 * atr[i]:
-                    stoploss_hit = True
+                # Stoploss: price rises 2*ATR above entry
+                if price > entry_price + 2.0 * atr_approx:
+                    exit_signal = True
+                # Optional: take profit at 3*ATR profit
+                elif price < entry_price - 3.0 * atr_approx:
+                    exit_signal = True
             
-            # Additional exit: Donchian opposite break (mean reversion tendency)
-            donchian_exit = False
-            if position_side > 0:  # Long
-                if price <= donchian_lower[i]:
-                    donchian_exit = True
-            else:  # Short
-                if price >= donchian_upper[i]:
-                    donchian_exit = True
-            
-            if stoploss_hit or donchian_exit:
+            if exit_signal:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
-                highest_since_entry = 0.0
-                lowest_since_entry = 0.0
                 signals[i] = 0.0
             else:
                 signals[i] = position_side * SIZE
@@ -124,21 +133,17 @@ def generate_signals(prices):
         
         if volume_spike:
             # Long entry: price breaks above Donchian upper AND 1d trend up
-            if trend_bias > 0 and price > donchian_upper[i]:
+            if trend_bias > 0 and price > dc_upper[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
             # Short entry: price breaks below Donchian lower AND 1d trend down
-            elif trend_bias < 0 and price < donchian_lower[i]:
+            elif trend_bias < 0 and price < dc_lower[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
                 bars_since_entry = 0
                 signals[i] = -SIZE
             else:
