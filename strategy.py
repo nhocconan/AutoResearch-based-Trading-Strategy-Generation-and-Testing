@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #1918: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian channel breakouts capture institutional momentum. 
-Weekly HMA(21) filter ensures trades align with major trend, reducing whipsaws in ranging markets.
-Volume confirmation (>1.5x 20-day average) adds conviction to breakouts.
-ATR-based stoploss (2.5x ATR(14)) manages risk. Designed for low trade frequency (~50-80/4 years) 
-to minimize fee drag while maintaining profitability in both bull and bear regimes.
+Experiment #1919: 6h Williams %R + 1d Camarilla Pivot Reversal + Volume Spike
+HYPOTHESIS: Williams %R identifies overbought/oversold conditions on 6h, while 1d Camarilla levels (R3/S3 for mean reversion, R4/S4 for breakout) provide institutional support/resistance. Strategy: Enter on 6h Williams %R extreme (<10 for long, >90 for short) only when price is near 1d Camarilla R3/S3 levels (mean reversion zone) with volume confirmation (>1.5x average). Exit when Williams %R returns to neutral range (40-60) or opposite Camarilla level is touched. Works in ranging markets by fading extremes at institutional levels. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1918_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_1919_6h_williamsr_1d_camarilla_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,51 +19,40 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate Weekly HMA(21): HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    def wma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        weights = np.arange(1, period + 1)
-        return np.convolve(arr, weights / weights.sum(), mode='valid')
+    # Calculate 1d Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R4 = C + Range * 1.1/2
+    # R3 = C + Range * 1.1/4
+    # S3 = C - Range * 1.1/4
+    # S4 = C - Range * 1.1/2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r4_1d = close_1d + range_1d * 1.1 / 2.0
+    r3_1d = close_1d + range_1d * 1.1 / 4.0
+    s3_1d = close_1d - range_1d * 1.1 / 4.0
+    s4_1d = close_1d - range_1d * 1.1 / 2.0
     
-    def hma(arr, period):
-        half = period // 2
-        sqrt_n = int(np.sqrt(period))
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        wma_half = wma(arr, half)
-        wma_full = wma(arr, period)
-        # Pad to original length
-        wma_half_padded = np.concatenate([np.full(len(arr) - len(wma_half), np.nan), wma_half])
-        wma_full_padded = np.concatenate([np.full(len(arr) - len(wma_full), np.nan), wma_full])
-        raw_hma = 2 * wma_half_padded - wma_full_padded
-        hma_values = wma(raw_hma, sqrt_n)
-        # Pad final result
-        return np.concatenate([np.full(len(arr) - len(hma_values), np.nan), hma_values])
+    # Align 1d levels to 6h timeframe (shifted by 1 for completed bars only)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    hma_21_1w = hma(close_1w, 21)
-    hma_21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_21_1w)
+    # === 6h Indicators: Williams %R(14) and Volume MA(20) ===
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.full(n, np.nan)
+    williams_r[14:] = ((highest_high[14:] - close[14:]) / (highest_high[14:] - lowest_low[14:])) * -100
     
-    # === 1d Indicators: Donchian(20), ATR(14), Volume MA(20) ===
-    # Donchian channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # ATR(14) for stoploss and position sizing
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = np.nan
-    tr2[0] = np.nan
-    tr3[0] = np.nan
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # Volume confirmation
+    # Volume MA(20) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -80,16 +65,14 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    stop_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for Donchian(20), ATR(14), volume MA
+    warmup = 20  # sufficient for Williams %R(14) and volume MA(20)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(atr[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(hma_21_1w_aligned[i])):
+        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(williams_r[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -99,56 +82,50 @@ def generate_signals(prices):
         if in_position:
             bars_since_entry += 1
             
-            # Stoploss hit
-            if position_side > 0:  # Long
-                if price <= stop_price:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-            else:  # Short
-                if price >= stop_price:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
+            # Exit conditions
+            exit_signal = False
             
-            # Time-based exit: max 20 days holding period
-            if bars_since_entry >= 20:
+            if position_side > 0:  # Long position
+                # Exit if Williams %R returns to neutral range (40-60)
+                if williams_r[i] >= -40 and williams_r[i] <= -60:
+                    exit_signal = True
+                # Exit if price touches S4 (strong downside break)
+                elif price <= s4_1d_aligned[i]:
+                    exit_signal = True
+            else:  # Short position
+                # Exit if Williams %R returns to neutral range (40-60)
+                if williams_r[i] >= -40 and williams_r[i] <= -60:
+                    exit_signal = True
+                # Exit if price touches R4 (strong upside break)
+                elif price >= r4_1d_aligned[i]:
+                    exit_signal = True
+            
+            if exit_signal:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
                 signals[i] = 0.0
-                continue
-            
-            signals[i] = position_side * SIZE
+            else:
+                signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic ---
-        # Trend filter: price above/below weekly HMA
-        trend_up = price > hma_21_1w_aligned[i]
-        trend_down = price < hma_21_1w_aligned[i]
-        
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Long entry: price breaks above Donchian high AND weekly trend up
-            if trend_up and price > donchian_high[i]:
+            # Long entry: Williams %R oversold (<-90) AND price near S3 (support for mean reversion)
+            if williams_r[i] < -90 and price >= s3_1d_aligned[i] * 0.995 and price <= s3_1d_aligned[i] * 1.005:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
-                stop_price = entry_price - 2.5 * atr[i]  # 2.5x ATR stoploss
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low AND weekly trend down
-            elif trend_down and price < donchian_low[i]:
+            # Short entry: Williams %R overbought (>-10) AND price near R3 (resistance for mean reversion)
+            elif williams_r[i] > -10 and price >= r3_1d_aligned[i] * 0.995 and price <= r3_1d_aligned[i] * 1.005:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
-                stop_price = entry_price + 2.5 * atr[i]  # 2.5x ATR stoploss
                 bars_since_entry = 0
                 signals[i] = -SIZE
             else:
