@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #123: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation
+Experiment #133: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts aligned with 12h HMA(21) trend direction capture high-probability moves. Volume confirmation (>1.5x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_123_4h_donchian20_12h_hma_vol_v1"
+name = "exp_133_4h_donchian20_12h_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,20 +22,21 @@ def generate_signals(prices):
     # === HTF: 12h data for HMA(21) trend (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate HMA(21) on 12h
-    def calculate_hma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
+    # Calculate HMA(21) for 12h
+    def calculate_hma(series, period):
+        if len(series) < period:
+            return np.full_like(series, np.nan)
         half = period // 2
         sqrt = int(np.sqrt(period))
-        wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean().values
-        wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean().values
-        raw = 2 * wma2 - wma1
-        hma = pd.Series(raw).ewm(span=sqrt, adjust=False).mean().values
-        return hma
+        wma_half = pd.Series(series).ewm(span=half, adjust=False).mean().values
+        wma_full = pd.Series(series).ewm(span=period, adjust=False).mean().values
+        hma = 2 * wma_half - wma_full
+        hma_final = pd.Series(hma).ewm(span=sqrt, adjust=False).mean().values
+        return hma_final
     
-    hma_12h = calculate_hma(df_12h['close'].values, 21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    close_12h = df_12h['close'].values
+    hma_21_12h = calculate_hma(close_12h, 21)
+    hma_21_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_21_12h)
     
     # === 4h Indicators: Donchian(20) channels ===
     donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -70,7 +71,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
             np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(hma_12h_aligned[i])):
+            np.isnan(hma_21_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -83,10 +84,9 @@ def generate_signals(prices):
         breakout_up = high[i] > donch_upper[i-1]
         breakout_down = low[i] < donch_lower[i-1]
         
-        # --- HMA Trend Condition (12h) ---
-        # For long: price > HMA; for short: price < HMA
-        price_above_hma = price > hma_12h_aligned[i]
-        price_below_hma = price < hma_12h_aligned[i]
+        # --- HMA Trend Condition ---
+        hma_trend_up = price > hma_21_12h_aligned[i]
+        hma_trend_down = price < hma_21_12h_aligned[i]
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -100,9 +100,21 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
+                if not hma_trend_up and volume_spike:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
             else:  # Short position
                 stop_level = entry_price + 2.0 * atr_14[i]
                 if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+                if not hma_trend_down and volume_spike:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -117,13 +129,13 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        if breakout_up and volume_spike and price_above_hma:
+        if breakout_up and volume_spike and hma_trend_up:
             in_position = True
             position_side = 1
             entry_price = close[i]
             bars_since_entry = 0
             signals[i] = SIZE
-        elif breakout_down and volume_spike and price_below_hma:
+        elif breakout_down and volume_spike and hma_trend_down:
             in_position = True
             position_side = -1
             entry_price = close[i]
