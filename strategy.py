@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
 """
 Experiment #2004: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Daily Donchian breakouts capture institutional order flow on higher timeframe.
-- Primary: 1d Donchian(20) breakout with volume > 1.5x 20-bar average
-- HTF: 1w HMA(21) trend filter (only trade in direction of weekly trend)
-- Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
-- Works in bull/bear markets by following weekly institutional trend with precise daily entries.
+HYPOTHESIS: Daily Donchian breakouts capture swing momentum. Weekly HMA filter ensures alignment with institutional trend.
+Volume spike confirms conviction. ATR stoploss manages risk. Works in bull/bear by following weekly trend.
 Target: 30-100 total trades over 4 years (7-25/year).
 """
 
