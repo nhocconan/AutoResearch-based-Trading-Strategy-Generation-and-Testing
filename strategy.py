@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #1438: 1d Donchian(20) Breakout + 1w Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 1d timeframe capture primary trends with low trade frequency (target: 30-100 total over 4 years). 
-Trend filter from 1w timeframe ensures alignment with higher-timeframe momentum, reducing false breakouts in sideways markets. 
-Volume confirmation (>1.5x average) filters for institutional participation. 
-Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 1w trend direction. 
-Uses ATR-based stoploss for risk management. Target: 50-150 total trades over 4 years (12-38/year).
+Experiment #1439: 6h Camarilla Pivot Reversal + 12h Trend Filter + Volume Confirmation
+HYPOTHESIS: Camarilla pivot levels (R3/S3, R4/S4) act as intraday support/resistance on 6h timeframe. 
+In ranging markets (CHOP > 50), price tends to reverse at R3/S3 levels. In trending markets (CHOP < 50), 
+breaks of R4/S4 indicate continuation. 12h trend filter ensures alignment with higher timeframe momentum. 
+Volume confirmation (>1.5x average) filters for meaningful participation. Designed for low trade frequency 
+(50-150 total over 4 years) with discrete position sizing to minimize fee impact. Works in both bull and bear 
+markets by adapting to regime via choppiness index.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1438_1d_donchian20_1w_trend_vol_v1"
-timeframe = "1d"
+name = "exp_1439_6h_camarilla_pivot_12h_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,24 +24,63 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === HTF: 12h data for trend filter (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     # Simple trend: price > previous close = uptrend, < = downtrend
-    trend_1w = np.zeros(len(close_1w))
-    trend_1w[1:] = np.where(close_1w[1:] > close_1w[:-1], 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    trend_12h = np.zeros(len(close_12h))
+    trend_12h[1:] = np.where(close_12h[1:] > close_12h[:-1], 1, -1)
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
-    # === 1d Indicators: Donchian(20) ===
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === HTF: 1d data for choppiness regime filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # True Range for 1d
+    tr_1d = np.zeros(len(close_1d))
+    for i in range(1, len(close_1d)):
+        tr_1d[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # Choppiness Index: CHOP = 100 * log10(sum(ATR) / (max(high) - min(low))) / log10(period)
+    # Simplified: use rolling ATR sum and range
+    atr_sum_1d = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    max_high_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    min_low_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    range_1d = max_high_1d - min_low_1d
+    chop_1d = np.zeros(len(close_1d))
+    mask = range_1d > 0
+    chop_1d[mask] = 100 * np.log10(atr_sum_1d[mask] / range_1d[mask]) / np.log10(14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # === 6h Indicators: Camarilla Pivot Levels from previous bar ===
+    # Camarilla: based on previous bar's OHLC
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = close[0]  # avoid NaN on first bar
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
+    
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_bar = prev_high - prev_low
+    
+    # Resistance levels
+    r3 = pivot + (range_bar * 1.1 / 4)
+    r4 = pivot + (range_bar * 1.1 / 2)
+    # Support levels
+    s3 = pivot - (range_bar * 1.1 / 4)
+    s4 = pivot - (range_bar * 1.1 / 2)
+    
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -57,13 +97,13 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for Donchian and volume MA
+    warmup = 20  # sufficient for volume MA and ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(trend_12h_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
+            np.isnan(r3[i]) or np.isnan(r4[i]) or np.isnan(s3[i]) or np.isnan(s4[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -100,21 +140,41 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Breakout: price breaks above upper band OR below lower band
-            if price > donch_high[i] and trend_1w_aligned[i] > 0:  # 1w uptrend
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            elif price < donch_low[i] and trend_1w_aligned[i] < 0:  # 1w downtrend
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
+            # Regime filter: CHOP > 50 = ranging (mean revert), CHOP < 50 = trending (breakout)
+            is_ranging = chop_1d_aligned[i] > 50
+            
+            if is_ranging:
+                # Ranging market: fade at R3/S3 levels
+                if price <= r3[i] and trend_12h_aligned[i] > 0:  # Pullback to R3 in uptrend -> long
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
+                elif price >= s3[i] and trend_12h_aligned[i] < 0:  # Pullback to S3 in downtrend -> short
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
+                else:
+                    signals[i] = 0.0
             else:
-                signals[i] = 0.0
+                # Trending market: breakout continuation at R4/S4 levels
+                if price >= r4[i] and trend_12h_aligned[i] > 0:  # Break above R4 in uptrend -> long
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
+                elif price <= s4[i] and trend_12h_aligned[i] < 0:  # Break below S4 in downtrend -> short
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
+                else:
+                    signals[i] = 0.0
         else:
             signals[i] = 0.0
     
