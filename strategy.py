@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #526: 4h Donchian(20) breakout + 1d HTF EMA21 + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts aligned with 1d EMA21 trend and volume spikes capture strong momentum. The 1d HTF provides long-term trend filter that works in both bull and bear markets by reducing false breakouts. Volume confirmation (>1.5x average) filters weak breakouts. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 75-200 total trades over 4 years by using tight entry conditions (trend + breakout + volume).
+Experiment #526: 4h Donchian(20) breakout + 1d HTF EMA50 + volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian breakouts aligned with daily EMA50 trend and volume spikes capture strong momentum with lower trade frequency than 12h HTF. The daily HTF provides longer-term trend filter that works in both bull and bear markets by reducing false breakouts. Volume confirmation (>1.5x average) filters weak breakouts. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 75-200 total trades over 4 years by using tight entry conditions (trend + breakout + volume).
 """
 
 import numpy as np
@@ -19,11 +19,11 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA21 trend (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA50 trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema21_1d = pd.Series(close_1d).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema21_1d_aligned = align_htf_to_ltf(prices, df_1d, ema21_1d)
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # === 4h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
@@ -56,7 +56,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema21_1d_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(ema50_1d_aligned[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -70,11 +70,11 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- HTF Trend Filter: 1d EMA21 ---
-        # Bullish: price above EMA21
-        bullish_trend = price > ema21_1d_aligned[i]
-        # Bearish: price below EMA21
-        bearish_trend = price < ema21_1d_aligned[i]
+        # --- HTF Trend Filter: 1d EMA50 ---
+        # Bullish: price above EMA50
+        bullish_trend = price > ema50_1d_aligned[i]
+        # Bearish: price below EMA50
+        bearish_trend = price < ema50_1d_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
