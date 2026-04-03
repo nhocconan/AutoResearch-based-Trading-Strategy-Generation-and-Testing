@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #044: 4h Donchian(20) breakout + 1d ATR regime filter + volume spike
-HYPOTHESIS: Donchian breakouts on 4h combined with 1d ATR-based volatility regime filter (low ATR = range, high ATR = trend) 
-and volume confirmation (>1.8x average) captures strong momentum while filtering choppy markets. 
-ATR stoploss (2.0x) and minimum holding period (2 bars) reduce churn. Targets 75-200 trades over 4 years.
-Works in bull/bear markets by using ATR regime to adapt to volatility conditions.
+Experiment #046: 4h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 4h aligned with 1d HMA trend capture momentum with structural support/resistance. 
+Volume confirmation (>1.5x average) filters false breakouts. ATR stoploss (2.0x) and minimum holding period (2 bars) 
+reduce churn. Using 1d HTF provides strong trend filter for both bull/bear markets while 4h Donchian gives precise 
+entry/exit. Target: 75-200 trades over 4 years (discrete sizing 0.25 to minimize fee churn).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_044_4h_donchian20_1d_atr_regime_vol_v1"
+name = "exp_046_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,29 +22,23 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for ATR regime filter (Call ONCE before loop) ===
+    # === HTF: 1d data for HMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate ATR(14) on 1d for regime filter
-    def calculate_atr(high, low, close, period=14):
-        if len(high) < period:
-            return np.full_like(high, np.nan)
-        tr = np.zeros(len(high))
-        tr[0] = high[0] - low[0]
-        for i in range(1, len(high)):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-        return atr
+    # Calculate HMA(21) on 1d close
+    def calculate_hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
+        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
+        hma_raw = 2 * wma_half - wma_full
+        hma = pd.Series(hma_raw).ewm(span=sqrt_period, adjust=False).mean().values
+        return hma
     
-    atr_1d = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # Calculate ATR ratio (current ATR / 50-period MA ATR) for regime detection
-    atr_ma_50 = pd.Series(atr_1d_aligned).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = np.zeros(n)
-    valid_idx = (~np.isnan(atr_1d_aligned)) & (~np.isnan(atr_ma_50)) & (atr_ma_50 > 0)
-    atr_ratio[valid_idx] = atr_1d_aligned[valid_idx] / atr_ma_50[valid_idx]
-    atr_ratio[~valid_idx] = 1.0  # Neutral for invalid
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
     # === 4h Indicators: Donchian(20) channels ===
     def calculate_donchian(high, low, period=20):
@@ -78,23 +72,22 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 50  # Warmup for Donchian and ATR stability
+    warmup = 50  # Warmup for HMA stability
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
-            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr_ratio[i])):
+        if (np.isnan(hma_1d_aligned[i]) or np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
+            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
+        # --- HMA Trend: Determine 1d trend direction ---
         price = close[i]
+        hma_trend_up = price > hma_1d_aligned[i]  # Above HMA = uptrend
+        hma_trend_down = price < hma_1d_aligned[i]  # Below HMA = downtrend
         
-        # --- ATR Regime Filter: Only trade in trending volatility (ATR ratio > 1.2) ---
-        vol_regime_trending = atr_ratio[i] > 1.2
-        
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio[i] > 1.5
         
         # --- Donchian Breakout Conditions ---
         breakout_up = high[i] > donch_upper[i-1]  # Break above upper channel
@@ -146,15 +139,20 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Only trade when: volatility regime is trending AND volume spike AND Donchian breakout
-        if vol_regime_trending and volume_spike:
-            if breakout_up:
+        # Only trade when breakout aligns with 1d HMA trend
+        if hma_trend_up:
+            # Long: Donchian breakout up AND volume spike AND price above 1d HMA
+            if breakout_up and volume_spike:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif breakout_down:
+            else:
+                signals[i] = 0.0
+        elif hma_trend_down:
+            # Short: Donchian breakout down AND volume spike AND price below 1d HMA
+            if breakout_down and volume_spike:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -163,6 +161,9 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:
+            # Exactly at HMA (rare), do not trade
             signals[i] = 0.0
     
     return signals
+
+</think>
