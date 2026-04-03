@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #2007: 6h Donchian(20) breakout + 1d Camarilla pivot continuation + volume confirmation
-HYPOTHESIS: Donchian breakouts at 6h capture institutional flows, filtered by 1d Camarilla pivot levels (R4/S4 breakout = continuation, R3/S3 fade) and volume spike. Works in bull/bear by following pivot-defined structure with precise entries. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #2008: 12h Donchian(20) breakout + 1w HMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian channel breakouts on 12h capture swing moves with institutional participation.
+- Primary: 12h Donchian(20) breakout with volume > 1.5x 20-bar average
+- HTF: 1w HMA(21) trend filter (only trade in direction of higher timeframe trend)
+- Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
+- Works in bull/bear markets by following 1w institutional trend with precise 12h entries.
+Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2007_6h_donchian20_1d_camarilla_vol_v1"
-timeframe = "6h"
+name = "exp_2008_12h_donchian20_1w_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,34 +24,42 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R4 = C + Range * 1.1/2
-    # R3 = C + Range * 1.1/4
-    # S3 = C - Range * 1.1/4
-    # S4 = C - Range * 1.1/2
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r4_1d = close_1d + range_1d * 1.1 / 2.0
-    r3_1d = close_1d + range_1d * 1.1 / 4.0
-    s3_1d = close_1d - range_1d * 1.1 / 4.0
-    s4_1d = close_1d - range_1d * 1.1 / 2.0
+    # Calculate 1w HMA(21): Hull Moving Average
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
     
-    # Align HTF arrays to LTF with shift(1) for completed bars only
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    def wma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        weights = np.arange(1, period + 1)
+        return np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
     
-    # === 6h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
+    # Calculate WMA for close_1w
+    wma_full = np.array([np.nan] * len(close_1w))
+    wma_half = np.array([np.nan] * len(close_1w))
+    
+    for i in range(20, len(close_1w)):  # 21-1 = 20 for WMA(21)
+        wma_full[i] = np.mean(close_1w[i-20:i+1] * np.arange(1, 22))
+    for i in range(half_len-1, len(close_1w)):
+        wma_half[i] = np.mean(close_1w[i-half_len+1:i+1] * np.arange(1, half_len+1))
+    
+    # HMA = WMA(2*WMA_half - WMA_full, sqrt_len)
+    wma_diff = 2 * wma_half - wma_full
+    hma_1w = np.array([np.nan] * len(close_1w))
+    for i in range(sqrt_len-1, len(close_1w)):
+        if i >= half_len-1 and not np.isnan(wma_diff[i]):
+            hma_1w[i] = np.mean(wma_diff[i-sqrt_len+1:i+1] * np.arange(1, sqrt_len+1))
+    
+    # Trend: 1 if close > HMA, -1 otherwise
+    trend_1w = np.where(close_1w > hma_1w, 1, -1)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    
+    # === 12h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
     # Donchian channels
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -83,9 +96,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(pivot_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or
-            np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(s4_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -126,33 +137,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
+        # Require 1w trend alignment for bias filter
+        trend_bias = trend_1w_aligned[i]
+        
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Determine pivot-based bias from 1d Camarilla levels
-            # Price above R4: strong bullish breakout bias
-            # Price below S4: strong bearish breakout bias
-            # Price between R3 and S3: neutral/mean-reversion bias (fade extremes)
-            if price > r4_1d_aligned[i]:
-                pivot_bias = 1  # strong bullish
-            elif price < s4_1d_aligned[i]:
-                pivot_bias = -1  # strong bearish
-            elif price > r3_1d_aligned[i] and price < s3_1d_aligned[i]:
-                pivot_bias = 0  # neutral zone
-            else:
-                pivot_bias = 0  # between R4/R3 or S3/S4 - wait for breakout
-            
-            # Long entry: price breaks above upper Donchian AND pivot bias bullish/neutral
-            if (pivot_bias >= 0) and price > donchian_upper[i]:
+            # Long entry: price breaks above upper Donchian AND 1w trend up
+            if trend_bias > 0 and price > donchian_upper[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below lower Donchian AND pivot bias bearish/neutral
-            elif (pivot_bias <= 0) and price < donchian_lower[i]:
+            # Short entry: price breaks below lower Donchian AND 1w trend down
+            elif trend_bias < 0 and price < donchian_lower[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
