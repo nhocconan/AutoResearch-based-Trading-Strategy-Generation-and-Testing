@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #896: 12h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts capture medium-term momentum, filtered by daily EMA(50) 
-trend direction and volume spike (>1.8x average). In bull markets: breakouts above EMA(50) 
-continue uptrend. In bear markets: breakouts below EMA(50) continue downtrend. 
-Volume confirmation reduces false breakouts. Uses discrete sizing (0.25) to limit fee churn. 
-Target: 50-150 total trades over 4 years (12-37/year).
+Experiment #896: 12h Donchian(20) + 1d HMA Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: Donchian breakouts on 12h capture medium-term momentum, filtered by 1d HMA trend direction 
+and volume confirmation (>1.8x average). Works in bull (breakouts with trend) and bear (mean reversion fails 
+due to trend filter). Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_896_12h_donchian20_1d_ema_vol_v1"
+name = "exp_896_12h_donchian20_1d_hma_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -23,15 +21,27 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA(50) trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for HMA trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on daily
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate HMA(21) on 1d
+    def calculate_hma(arr, period):
+        half = int(period / 2)
+        sqrt = int(np.sqrt(period))
+        wma1 = pd.Series(arr).ewm(span=half, min_periods=half, adjust=False).mean().values
+        wma2 = pd.Series(arr).ewm(span=period, min_periods=period, adjust=False).mean().values
+        raw_hma = 2 * wma1 - wma2
+        hma = pd.Series(raw_hma).ewm(span=sqrt, min_periods=sqrt, adjust=False).mean().values
+        return hma
     
-    # Align EMA(50) to 12h timeframe
-    ema_50_12h = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    hma_1d = calculate_hma(close_1d, 21)
+    # Trend: 1 = rising (hma > previous hma), -1 = falling (hma < previous hma), 0 = flat
+    hma_trend_1d = np.zeros_like(hma_1d)
+    hma_trend_1d[1:] = np.where(hma_1d[1:] > hma_1d[:-1], 1, 
+                                 np.where(hma_1d[1:] < hma_1d[:-1], -1, 0))
+    # Align trend to 12h timeframe
+    hma_trend_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_trend_1d)
     
     # === 12h Indicators: Donchian Channel (20) ===
     def donchian_channel(high, low, period):
@@ -63,12 +73,13 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = max(20, 20, 50)  # sufficient for Donchian, volume MA, EMA
+    warmup = max(20, 20)  # sufficient for Donchian, volume MA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(upper_20[i]) or np.isnan(lower_20[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema_50_12h[i]) or np.isnan(atr[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(hma_trend_1d_aligned[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -79,8 +90,8 @@ def generate_signals(prices):
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.5*ATR below entry (wider for 12h)
-                stop_level = entry_price - 2.5 * atr[i]
+                # Stoploss: 2.0*ATR below entry
+                stop_level = entry_price - 2.0 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -88,8 +99,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                # Stoploss: 2.5*ATR above entry
-                stop_level = entry_price + 2.5 * atr[i]
+                # Stoploss: 2.0*ATR above entry
+                stop_level = entry_price + 2.0 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -97,8 +108,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~72h on 12h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 3 bars (~36h on 12h) to avoid overtrading
+            if bars_since_entry > 3:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -113,15 +124,15 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Long breakout: price breaks above 12h Donchian upper AND above daily EMA(50)
-            if price > upper_20[i] and price > ema_50_12h[i]:
+            # Long: price breaks above Donchian upper AND 1d HMA rising
+            if price > upper_20[i] and hma_trend_1d_aligned[i] > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short breakout: price breaks below 12h Donchian lower AND below daily EMA(50)
-            elif price < lower_20[i] and price < ema_50_12h[i]:
+            # Short: price breaks below Donchian lower AND 1d HMA falling
+            elif price < lower_20[i] and hma_trend_1d_aligned[i] < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
