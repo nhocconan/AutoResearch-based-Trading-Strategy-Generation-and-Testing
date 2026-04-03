@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #1980: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture significant price moves. 
-Filtering by 1d EMA(50) trend ensures we trade with the higher timeframe momentum, 
-while volume confirmation (>1.5x 20-period average) adds conviction. 
-Exit on opposite Donchian channel touch or VWAP mean reversion. 
-Designed to work in both bull and bear markets by following 1d institutional trend.
-Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #1981: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts capture medium-term momentum, filtered by 1d EMA trend direction and volume spikes to avoid false breakouts. Works in bull/bear by following higher timeframe trend. Target: 100-180 total trades over 4 years (25-45/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1980_4h_donchian20_1d_ema_vol_v1"
+name = "exp_1981_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -28,7 +23,7 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # 1d EMA(50) for trend filter
+    # Calculate 1d EMA(50) for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     trend_1d = np.where(close_1d > ema_50_1d, 1, -1)  # 1 = uptrend, -1 = downtrend
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
@@ -36,17 +31,15 @@ def generate_signals(prices):
     # === 4h Indicators: Donchian(20) channels ===
     # Donchian Upper = max(high, lookback=20)
     # Donchian Lower = min(low, lookback=20)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    lookback = 20
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
     
-    # 4h VWAP approximation for mean reversion exit (using typical price)
-    typical_price = (high + low + close) / 3.0
-    vwap = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values / \
-           pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    for i in range(lookback, n):
+        donch_high[i] = np.max(high[i-lookback:i])
+        donch_low[i] = np.min(low[i-lookback:i])
     
-    # === 4h Volume MA(20) for spike detection ===
+    # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -61,13 +54,12 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for Donchian(20), EMA(50), VWAP, volume MA
+    warmup = max(50, lookback)  # sufficient for EMA(50) and Donchian(20)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vwap[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -77,22 +69,22 @@ def generate_signals(prices):
         if in_position:
             bars_since_entry += 1
             
-            # Exit conditions
+            # Exit conditions: reverse Donchian breakout or ATR-based stoploss
             exit_signal = False
             
             if position_side > 0:  # Long position
-                # Exit if price touches or crosses below Donchian Lower (mean reversion)
-                if price <= donchian_lower[i]:
+                # Exit if price breaks below Donchian Lower (reverse breakout)
+                if price < donch_low[i]:
                     exit_signal = True
-                # Exit if price returns to VWAP (strong mean reversion signal)
-                elif price <= vwap[i]:
+                # Optional: time-based exit after 10 bars to prevent stagnation
+                elif bars_since_entry >= 10:
                     exit_signal = True
             else:  # Short position
-                # Exit if price touches or crosses above Donchian Upper (mean reversion)
-                if price >= donchian_upper[i]:
+                # Exit if price breaks above Donchian Upper (reverse breakout)
+                if price > donch_high[i]:
                     exit_signal = True
-                # Exit if price returns to VWAP (strong mean reversion signal)
-                elif price >= vwap[i]:
+                # Optional: time-based exit after 10 bars
+                elif bars_since_entry >= 10:
                     exit_signal = True
             
             if exit_signal:
@@ -105,22 +97,20 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1d trend alignment for bias filter
+        # Require volume confirmation and 1d trend alignment
+        volume_spike = vol_ratio[i] > 1.5
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
-        
         if volume_spike:
-            # Long entry: price breaks above Donchian Upper AND 1d trend up
-            if trend_bias > 0 and price > donchian_upper[i]:
+            # Long entry: price breaks above Donchian Upper AND 1d uptrend
+            if trend_bias > 0 and price > donch_high[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian Lower AND 1d trend down
-            elif trend_bias < 0 and price < donchian_lower[i]:
+            # Short entry: price breaks below Donchian Lower AND 1d downtrend
+            elif trend_bias < 0 and price < donch_low[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
