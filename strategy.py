@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #134: 1h Supertrend(10,3) + 4h EMA(21) trend filter + 1d Camarilla pivot mean reversion
-HYPOTHESIS: In 1h timeframe, use 4h EMA21 for trend direction (bull/bear) and 1d Camarilla pivots for mean-reversion entries. Only take longs in 4h uptrend near S3/S4 and shorts in 4h downtrend near R3/R4. Volume confirmation (>1.5x average) filters weak signals. Supertrend(10,3) on 1h provides precise entry timing and automatic stoploss. Discrete size 0.20 minimizes fee churn. Target: 60-150 total trades over 4 years.
+Experiment #143: 4h Donchian(20) breakout + 12h Camarilla pivot + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for continuation) capture high-probability moves in both bull and bear markets. Volume confirmation (>1.5x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_134_1h_supertrend_4h_ema21_1d_camarilla_v1"
-timeframe = "1h"
+name = "exp_143_4h_donchian20_12h_camarilla_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,14 +19,10 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h EMA21 for trend filter (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # === HTF: 12h data for Camarilla pivot levels (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
     
-    # === HTF: 1d Camarilla pivot levels (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    
+    # Calculate Camarilla pivot levels for 12h
     def calculate_camarilla(high, low, close):
         pt = (high + low + close) / 3.0
         rng = high - low
@@ -36,90 +32,64 @@ def generate_signals(prices):
         s4 = pt - rng * 1.1 / 2
         return r3, r4, s3, s4
     
-    r3_1d = np.full(len(df_1d), np.nan)
-    r4_1d = np.full(len(df_1d), np.nan)
-    s3_1d = np.full(len(df_1d), np.nan)
-    s4_1d = np.full(len(df_1d), np.nan)
+    r3_12h = np.full(len(df_12h), np.nan)
+    r4_12h = np.full(len(df_12h), np.nan)
+    s3_12h = np.full(len(df_12h), np.nan)
+    s4_12h = np.full(len(df_12h), np.nan)
     
-    for i in range(len(df_1d)):
+    for i in range(len(df_12h)):
         if i >= 0:
             r3, r4, s3, s4 = calculate_camarilla(
-                df_1d['high'].values[i],
-                df_1d['low'].values[i],
-                df_1d['close'].values[i]
+                df_12h['high'].values[i],
+                df_12h['low'].values[i],
+                df_12h['close'].values[i]
             )
-            r3_1d[i] = r3
-            r4_1d[i] = r4
-            s3_1d[i] = s3
-            s4_1d[i] = s4
+            r3_12h[i] = r3
+            r4_12h[i] = r4
+            s3_12h[i] = s3
+            s4_12h[i] = s4
     
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Align to 4h timeframe
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
     
-    # === 1h Indicators: Supertrend(10,3) for entry timing and stoploss ===
-    # ATR(10)
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
+    # === 4h Indicators: Donchian(20) channels ===
+    donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === 4h Indicators: ATR(14) for stoploss ===
+    tr_4h = np.zeros(n)
+    tr_4h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr = pd.Series(tr).ewm(span=10, min_periods=10, adjust=False).mean().values
+        tr_4h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr_4h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # Supertrend calculation
-    hl2 = (high + low) / 2
-    upper_band = hl2 + 3.0 * atr
-    lower_band = hl2 - 3.0 * atr
-    
-    supertrend = np.zeros(n)
-    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upper_band[0]
-    direction[0] = 1
-    
-    for i in range(1, n):
-        if close[i] > supertrend[i-1]:
-            direction[i] = 1
-        else:
-            direction[i] = -1
-        
-        if direction[i] == 1:
-            supertrend[i] = max(lower_band[i], supertrend[i-1])
-        else:
-            supertrend[i] = min(upper_band[i], supertrend[i-1])
-    
-    # === 1h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
     vol_ratio[:20] = 1.0
     
-    # === Session filter: 08-20 UTC ===
-    hours = prices.index.hour  # open_time is already datetime64[ms]
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20
+    SIZE = 0.25
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
+    bars_since_entry = 0
     
-    warmup = 100
+    warmup = 60
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(supertrend[i]) or
-            np.isnan(direction[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(r3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i])):
-            signals[i] = 0.0
-            continue
-        
-        # --- Session Filter: Only trade 08-20 UTC ---
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
+            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(r3_12h_aligned[i]) or np.isnan(r4_12h_aligned[i]) or
+            np.isnan(s3_12h_aligned[i]) or np.isnan(s4_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -128,50 +98,68 @@ def generate_signals(prices):
         # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
         volume_spike = vol_ratio[i] > 1.5
         
-        # --- Trend Filter: 4h EMA21 ---
-        uptrend_4h = price > ema_4h_aligned[i]
-        downtrend_4h = price < ema_4h_aligned[i]
+        # --- Donchian Breakout Conditions ---
+        breakout_up = high[i] > donch_upper[i-1]
+        breakout_down = low[i] < donch_lower[i-1]
         
         # --- Camarilla Pivot Conditions ---
-        near_s3 = abs(price - s3_1d_aligned[i]) / price < 0.005
-        near_s4 = abs(price - s4_1d_aligned[i]) / price < 0.005
-        near_r3 = abs(price - r3_1d_aligned[i]) / price < 0.005
-        near_r4 = abs(price - r4_1d_aligned[i]) / price < 0.005
+        near_r3 = abs(price - r3_12h_aligned[i]) / price < 0.005
+        near_s3 = abs(price - s3_12h_aligned[i]) / price < 0.005
+        break_r4 = price > r4_12h_aligned[i]
+        break_s4 = price < s4_12h_aligned[i]
         
-        # --- Supertrend Conditions ---
-        supertrend_bull = direction[i] == 1 and price > supertrend[i]
-        supertrend_bear = direction[i] == -1 and price < supertrend[i]
-        
-        # --- Exit Logic: Supertrend reversal ---
+        # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
+            bars_since_entry += 1
+            
             if position_side > 0:  # Long position
-                if direction[i] == -1:  # Supertrend turned bearish
+                stop_level = entry_price - 2.0 * atr_14[i]
+                if low[i] < stop_level:
                     in_position = False
                     position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+                if break_s4 and volume_spike:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                if direction[i] == 1:  # Supertrend turned bullish
+                stop_level = entry_price + 2.0 * atr_14[i]
+                if high[i] > stop_level:
                     in_position = False
                     position_side = 0
+                    bars_since_entry = 0
                     signals[i] = 0.0
                     continue
+                if break_r4 and volume_spike:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+            
+            if bars_since_entry < 2:
+                signals[i] = position_side * SIZE
+                continue
             
             signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: 4h uptrend + near S3/S4 + Supertrend bull + volume spike
-        if (uptrend_4h and (near_s3 or near_s4) and supertrend_bull and volume_spike):
+        if (breakout_up and volume_spike and (near_r3 or break_r4)) or (break_r4 and volume_spike):
             in_position = True
             position_side = 1
             entry_price = close[i]
+            bars_since_entry = 0
             signals[i] = SIZE
-        # Short: 4h downtrend + near R3/R4 + Supertrend bear + volume spike
-        elif (downtrend_4h and (near_r3 or near_r4) and supertrend_bear and volume_spike):
+        elif (breakout_down and volume_spike and (near_s3 or break_s4)) or (break_s4 and volume_spike):
             in_position = True
             position_side = -1
             entry_price = close[i]
+            bars_since_entry = 0
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
