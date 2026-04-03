@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #126: 4h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for continuation) capture high-probability moves. Volume confirmation (>1.5x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years.
+Experiment #127: 6h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts aligned with 1d Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for continuation) capture high-probability moves. Volume confirmation (>1.5x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_126_4h_donchian20_1d_camarilla_vol_v1"
-timeframe = "4h"
+name = "exp_127_6h_donchian20_1d_camarilla_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -49,24 +49,24 @@ def generate_signals(prices):
             s3_1d[i] = s3
             s4_1d[i] = s4
     
-    # Align to 4h timeframe
+    # Align to 6h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # === 4h Indicators: Donchian(20) channels ===
+    # === 6h Indicators: Donchian(20) channels ===
     donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: ATR(14) for stoploss ===
-    tr_4h = np.zeros(n)
-    tr_4h[0] = high[0] - low[0]
+    # === 6h Indicators: ATR(14) for stoploss ===
+    tr_6h = np.zeros(n)
+    tr_6h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_4h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr_4h).ewm(span=14, min_periods=14, adjust=False).mean().values
+        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
