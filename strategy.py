@@ -5,7 +5,7 @@ HYPOTHESIS: Donchian breakouts capture momentum, filtered by 1d HMA trend direct
 and volume confirmation (>2.0x average). Long when price breaks above Donchian upper 
 AND 1d HMA rising AND volume spike. Short when price breaks below Donchian lower 
 AND 1d HMA falling AND volume spike. Works in bull/bear markets: in bull trends, 
-1d HMA rising filters for longs; in bear trends, 1d HMA falling filters for shorts. 
+HMA rising filters for longs; in bear trends, HMA falling filters for shorts. 
 Uses discrete position sizing (0.25). Target: 75-200 total trades over 4 years (19-50/year).
 """
 
