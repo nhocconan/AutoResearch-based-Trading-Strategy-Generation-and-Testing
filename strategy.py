@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #020: 4h Donchian(20) breakout + 1d HMA(50) trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Price breaking 4h Donchian(20) channels with 1d HMA(50) trend alignment and volume spike (>1.8x) captures momentum with lower frequency. Discrete sizing (0.25) and ATR(14) stoploss (2.5x) manage risk. Target: 75-200 total trades over 4 years (19-50/year) for statistical validity and low fee drag.
+Experiment #021: 4h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation
+HYPOTHESIS: Price breaking 4h Donchian(20) channels with 1d HMA(21) trend alignment and volume spike (>1.5x) captures momentum with controlled frequency. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0) to manage risk. Target: 75-200 total trades over 4 years (19-50/year) for statistical validity and low fee drag. This version uses 1d HTF trend instead of 12h to reduce noise and improve signal quality.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_020_4h_donchian20_1d_hma50_vol_v1"
+name = "exp_021_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,7 +22,7 @@ def generate_signals(prices):
     # === HTF: 1d data for HMA trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate HMA(50) on 1d close
+    # Calculate HMA(21) on 1d close
     def hma(series, period):
         if len(series) < period:
             return np.full_like(series, np.nan)
@@ -34,7 +34,7 @@ def generate_signals(prices):
         hma_vals = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
         return hma_vals.values
     
-    hma_1d = hma(df_1d['close'].values, 50)
+    hma_1d = hma(df_1d['close'].values, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
     # === 4h Indicators: Donchian Channel (20) ===
@@ -64,7 +64,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 100  # sufficient for 50-period HTF + 20-period LTF indicators
+    warmup = 60  # sufficient for 20-period indicators + HTF warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -76,8 +76,8 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio[i] > 1.5
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
@@ -94,8 +94,8 @@ def generate_signals(prices):
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.5*ATR below entry
-                stop_level = entry_price - 2.5 * atr[i]
+                # Stoploss: 2.0*ATR below entry
+                stop_level = entry_price - 2.0 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -103,8 +103,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                # Stoploss: 2.5*ATR above entry
-                stop_level = entry_price + 2.5 * atr[i]
+                # Stoploss: 2.0*ATR above entry
+                stop_level = entry_price + 2.0 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -112,8 +112,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~24h on 4h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 8 bars (~32h on 4h) to avoid overtrading
+            if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
