@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #004: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Spike + ATR Stoploss
+Experiment #006: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Confirmation + ATR Stoploss
 
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly trend (HMA) and confirmed by volume spikes
-capture strong momentum moves in both bull and bear markets. The 1d timeframe reduces trade frequency
-to minimize fee drag while the weekly trend filter avoids counter-trend whipsaws. ATR-based stops
-manage risk during volatile periods. Target: 15-25 trades/year.
+HYPOTHESIS: Combining a price channel breakout (Donchian 20) with HTF trend confirmation (1d HMA) 
+and volume spike creates a high-probability entry signal. The strategy only trades in the direction 
+of the 1d trend, reducing whipsaws in ranging markets. ATR-based trailing stoploss manages risk. 
+Designed to capture medium-term trends in both bull and bear markets with controlled trade frequency 
+(~19-50 trades/year) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_1w_hma_volume_v1"
-timeframe = "1d"
+name = "mtf_4h_donchian_1d_hma_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -57,12 +58,12 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w HMA for trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # === HTF: 1d HMA for trend (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # === 1d Indicators ===
+    # === 4h Indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
@@ -70,7 +71,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # Discrete position sizing (25% of capital)
+    SIZE = 0.30  # Discrete position sizing (30% of capital)
     
     # Position tracking state variables
     in_position = False
@@ -83,13 +84,13 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if np.isnan(atr_14[i]) or np.isnan(hma_1w_aligned[i]) or np.isnan(dc_upper_20[i]) or np.isnan(dc_lower_20[i]) or np.isnan(vol_ma_20[i]):
+        if np.isnan(atr_14[i]) or np.isnan(hma_1d_aligned[i]) or np.isnan(dc_upper_20[i]) or np.isnan(dc_lower_20[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         # --- HTF Trend Check ---
-        htf_bullish = close[i] > hma_1w_aligned[i]
-        htf_bearish = close[i] < hma_1w_aligned[i]
+        htf_bullish = close[i] > hma_1d_aligned[i]
+        htf_bearish = close[i] < hma_1d_aligned[i]
         
         # --- Price Channel Breakout ---
         bullish_breakout = close[i] > dc_upper_20[i]
@@ -113,7 +114,7 @@ def generate_signals(prices):
                     stop_hit = True
             
             # Trend reversal exit (only after minimum hold to avoid premature exits)
-            min_hold = (i - entry_bar) >= 3
+            min_hold = (i - entry_bar) >= 4
             if min_hold:
                 if position_side > 0 and htf_bearish:
                     stop_hit = True
