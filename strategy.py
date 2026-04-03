@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #058: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts with weekly EMA trend alignment and volume spikes capture strong momentum while minimizing false signals. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0) for risk management. Target: 30-100 total trades over 4 years (7-25/year) to avoid overtrading and fee drag. Works in both bull (breakouts with uptrend) and bear (breakdowns with downtrend) markets by requiring weekly trend alignment.
+Experiment #048: 12h Donchian(20) breakout + 1w EMA trend + volume confirmation
+HYPOTHESIS: Price breaking 12h Donchian(20) channels with 1-week EMA(50) trend alignment and volume spike (>2.0x) captures strong momentum while minimizing false breakouts. Uses discrete sizing (0.25) and ATR(14) stoploss (2.5) to manage risk. Target: 50-150 total trades over 4 years (12-37/year) for statistical validity and low fee drift. Works in both bull (breakouts with trend) and bear (short breakdowns with trend) markets by requiring HTF trend alignment. The 1w EMA filter is slower and more reliable than shorter period averages, reducing whipsaw.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_058_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_048_12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,17 +26,17 @@ def generate_signals(prices):
     ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # === 1d Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     vol_ratio[:20] = 1.0
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -65,8 +65,8 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = vol_ratio[i] > 2.0
         
         # --- Trend Filter: 1w EMA alignment ---
         # Uptrend: price above 1w EMA
@@ -83,8 +83,8 @@ def generate_signals(prices):
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.0*ATR below entry
-                stop_level = entry_price - 2.0 * atr[i]
+                # Stoploss: 2.5*ATR below entry
+                stop_level = entry_price - 2.5 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -92,8 +92,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                # Stoploss: 2.0*ATR above entry
-                stop_level = entry_price + 2.0 * atr[i]
+                # Stoploss: 2.5*ATR above entry
+                stop_level = entry_price + 2.5 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -101,8 +101,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 25 bars (~25 days) to avoid overtrading
-            if bars_since_entry > 25:
+            # Optional: time-based exit after 12 bars (~144h on 12h) to avoid overtrading
+            if bars_since_entry > 12:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
