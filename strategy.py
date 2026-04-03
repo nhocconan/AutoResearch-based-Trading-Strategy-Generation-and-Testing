@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Experiment #2133: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 4h Donchian breakouts with 12h HMA trend filter capture swing momentum while minimizing trades.
-- Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average (balanced frequency)
-- HTF: 12h HMA(21) trend filter (only trade in direction of higher timeframe trend)
+Experiment #2134: 1h Donchian(20) breakout + 4h EMA200 + 1d volume confirmation + ATR stoploss
+HYPOTHESIS: 1h Donchian breakouts capture short-term momentum with 4h EMA200 trend filter and 1d volume confirmation.
+- Primary: 1h Donchian(20) breakout with volume > 1.5x 20-bar 1d average (strict to limit trades)
+- HTF: 4h EMA200 trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
-- Target: 75-200 total trades over 4 years (19-50/year) - optimized for 4h timeframe
+- Session filter: 08-20 UTC to reduce noise trades
+- Target: 60-150 total trades over 4 years (15-37/year) - optimized for 1h timeframe
 - Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets
 """
 
@@ -13,8 +14,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2133_4h_donchian20_12h_hma_vol_v1"
-timeframe = "4h"
+name = "exp_2134_1h_donchian20_4h_ema200_1d_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,51 +25,29 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for HMA trend (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # === HTF: 4h data for EMA200 trend (Call ONCE before loop) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate 12h HMA(21): Hull Moving Average
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
+    # Calculate 4h EMA200
+    ema_4h = pd.Series(close_4h).ewm(span=200, min_periods=200, adjust=False).mean().values
+    trend_4h = np.where(close_4h > ema_4h, 1, -1)
+    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
     
-    def wma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        weights = np.arange(1, period + 1)
-        return np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
+    # === HTF: 1d data for volume MA (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
     
-    # Calculate WMA for close_12h
-    wma_full = np.array([np.nan] * len(close_12h))
-    wma_half = np.array([np.nan] * len(close_12h))
+    # Calculate 1d volume MA(20)
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    for i in range(20, len(close_12h)):
-        wma_full[i] = np.mean(close_12h[i-20:i+1] * np.arange(1, 22))
-    for i in range(half_len-1, len(close_12h)):
-        wma_half[i] = np.mean(close_12h[i-half_len+1:i+1] * np.arange(1, half_len+1))
-    
-    # HMA = WMA(2*WMA_half - WMA_full, sqrt_len)
-    wma_diff = 2 * wma_half - wma_full
-    hma_12h = np.array([np.nan] * len(close_12h))
-    for i in range(sqrt_len-1, len(close_12h)):
-        if i >= half_len-1 and not np.isnan(wma_diff[i]):
-            hma_12h[i] = np.mean(wma_diff[i-sqrt_len+1:i+1] * np.arange(1, sqrt_len+1))
-    
-    # Trend: 1 if close > HMA, -1 otherwise
-    trend_12h = np.where(close_12h > hma_12h, 1, -1)
-    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
-    
-    # === 4h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
+    # === 1h Indicators: Donchian(20), ATR(14) ===
     # Donchian channels
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_upper = high_ma
     donchian_lower = low_ma
-    
-    # Volume MA for spike detection
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -79,9 +58,14 @@ def generate_signals(prices):
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
+    # === Session filter: 08-20 UTC ===
+    # open_time is already datetime64[ms], convert to get hour
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.20  # 20% position size - conservative for risk management
     
     # Position tracking state variables
     in_position = False
@@ -90,13 +74,18 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 50  # sufficient for all indicators
+    warmup = 200  # sufficient for EMA200
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(trend_12h_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(trend_4h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or
             np.isnan(atr[i])):
+            signals[i] = 0.0
+            continue
+        
+        # --- Session Filter ---
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
@@ -136,14 +125,14 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 12h trend alignment for bias filter
-        trend_bias = trend_12h_aligned[i]
+        # Require 4h trend alignment for bias filter
+        trend_bias = trend_4h_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 1.5x 1d average)
+        volume_spike = volume[i] > 1.5 * vol_ma_1d_aligned[i]
         
         if volume_spike:
-            # Long entry: price breaks above upper Donchian AND 12h trend up
+            # Long entry: price breaks above upper Donchian AND 4h trend up
             if trend_bias > 0 and price > donchian_upper[i]:
                 in_position = True
                 position_side = 1
@@ -151,7 +140,7 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below lower Donchian AND 12h trend down
+            # Short entry: price breaks below lower Donchian AND 4h trend down
             elif trend_bias < 0 and price < donchian_lower[i]:
                 in_position = True
                 position_side = -1
@@ -165,4 +154,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-</exp_2133_4h_donchian20_12h_hma_vol_v1>
