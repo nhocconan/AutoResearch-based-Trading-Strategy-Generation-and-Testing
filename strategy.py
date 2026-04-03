@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Experiment #676: 12h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation + ATR stoploss
-HYPOTHESIS: 12h Donchian breakouts filtered by 1d EMA50 capture medium-term momentum while reducing noise.
-Volume confirmation (>2.0x average) ensures breakout validity. Designed for 12h timeframe to achieve
-50-150 total trades over 4 years (12-37/year). Uses tighter volume threshold and ATR-based stops (2.0x)
-to control trade frequency. Works in bull/bear markets via 1d trend filter: only long when price > 1d EMA50,
-only short when price < 1d EMA50. Uses discrete position sizing (0.25) to minimize fee churn.
+Experiment #676: 12h Donchian(20) breakout + 1d trend filter (EMA50) + volume confirmation + ATR stoploss
+HYPOTHESIS: 12h Donchian breakouts filtered by 1d EMA50 capture medium-term momentum while reducing noise. 
+Volume confirmation (>2.0x average) ensures breakout validity. Designed for 12h timeframe to achieve 
+75-150 total trades over 4 years (19-37/year). Uses tighter volume threshold and ATR-based stops 
+(2.0x) to control trade frequency. Works in bull/bear markets via 1d trend filter: only long when 
+price > 1d EMA50, only short when price < 1d EMA50. Uses discrete position sizing (0.25) to minimize 
+fee churn. Based on proven winning formula: price channel breakout + volume + regime filter.
 """
 
 import numpy as np
