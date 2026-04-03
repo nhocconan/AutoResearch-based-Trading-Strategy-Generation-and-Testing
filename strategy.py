@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #162: 12h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for continuation) capture high-probability moves in both bull and bear markets. Volume confirmation (>1.5x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) minimizes fee churn. Target: 75-150 total trades over 4 years.
+Experiment #152: 12h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for continuation) capture high-probability moves in both bull and bear markets. Volume confirmation (>1.5x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_162_12h_donchian20_1d_camarilla_vol_v1"
+name = "exp_152_12h_donchian20_1d_camarilla_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -23,9 +23,9 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate Camarilla pivot levels for 1d
-    def calculate_camarilla(high, low, close):
-        pt = (high + low + close) / 3.0
-        rng = high - low
+    def calculate_camarilla(high_val, low_val, close_val):
+        pt = (high_val + low_val + close_val) / 3.0
+        rng = high_val - low_val
         r3 = pt + rng * 1.1 / 4
         r4 = pt + rng * 1.1 / 2
         s3 = pt - rng * 1.1 / 4
@@ -38,16 +38,15 @@ def generate_signals(prices):
     s4_1d = np.full(len(df_1d), np.nan)
     
     for i in range(len(df_1d)):
-        if i >= 0:
-            r3, r4, s3, s4 = calculate_camarilla(
-                df_1d['high'].values[i],
-                df_1d['low'].values[i],
-                df_1d['close'].values[i]
-            )
-            r3_1d[i] = r3
-            r4_1d[i] = r4
-            s3_1d[i] = s3
-            s4_1d[i] = s4
+        r3, r4, s3, s4 = calculate_camarilla(
+            df_1d['high'].values[i],
+            df_1d['low'].values[i],
+            df_1d['close'].values[i]
+        )
+        r3_1d[i] = r3
+        r4_1d[i] = r4
+        s3_1d[i] = s3
+        s4_1d[i] = s4
     
     # Align to 12h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
