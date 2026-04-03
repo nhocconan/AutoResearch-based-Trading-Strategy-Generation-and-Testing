@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #810: 1d Donchian(20) + 1w HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: Donchian breakouts on daily timeframe capture momentum, filtered by weekly HMA trend direction 
-and volume confirmation (>2.0x average). Long when price breaks above Donchian upper 
-AND weekly HMA rising AND volume spike. Short when price breaks below Donchian lower 
-AND weekly HMA falling AND volume spike. Works in bull/bear markets: in bull trends, 
-weekly HMA rising filters for longs; in bear trends, weekly HMA falling filters for shorts. 
-Uses discrete position sizing (0.25). Target: 30-100 total trades over 4 years (7-25/year).
+HYPOTHESIS: Donchian breakouts on daily timeframe capture major trends, filtered by 1-week HMA trend direction 
+and volume confirmation (>1.8x average). Long when price breaks above Donchian upper AND 1w HMA rising 
+AND volume spike. Short when price breaks below Donchian lower AND 1w HMA falling AND volume spike. 
+Works in bull/bear markets: in bull trends, 1w HMA rising filters for longs; in bear trends, 1w HMA falling 
+filters for shorts. Uses discrete position sizing (0.25) to minimize fee churn. Target: 75-200 total trades 
+over 4 years (19-50/year) with ATR-based risk management.
 """
 
 import numpy as np
@@ -111,8 +111,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 15 bars (~15d on 1d) to avoid overtrading
-            if bars_since_entry > 15:
+            # Optional: time-based exit after 10 bars (~10 days on 1d) to avoid overtrading
+            if bars_since_entry > 10:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -123,18 +123,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Long: price breaks above Donchian upper AND weekly HMA rising
+            # Long: price breaks above Donchian upper AND 1w HMA rising
             if price > upper_20[i] and hma_trend_1w_aligned[i] > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: price breaks below Donchian lower AND weekly HMA falling
+            # Short: price breaks below Donchian lower AND 1w HMA falling
             elif price < lower_20[i] and hma_trend_1w_aligned[i] < 0:
                 in_position = True
                 position_side = -1
