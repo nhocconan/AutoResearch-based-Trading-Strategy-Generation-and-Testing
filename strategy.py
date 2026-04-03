@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #030: 1d Donchian(20) breakout + 1w trend filter + volume confirmation
-HYPOTHESIS: Price breaking 1d Donchian(20) channels with 1w EMA(50) trend alignment and volume spike (>1.8x) captures momentum with low frequency suitable for daily timeframe. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0) to manage risk. Target: 30-100 total trades over 4 years (7-25/year) for statistical validity and low fee drift. Works in both bull (breakouts with trend) and bear (short breakdowns with trend) markets by following the weekly trend direction.
+Experiment #034: 1h RSI(14) mean reversion + 4h/1d trend filter + volume confirmation + session filter
+HYPOTHESIS: In ranging markets (common in 2025 BTC/ETH), price reverts to the mean after extreme RSI readings. 
+We use 4h EMA(50) and 1d EMA(200) for trend alignment (only trade pullbacks in trend direction) and 
+volume confirmation to avoid false signals. Session filter (08-20 UTC) reduces noise. 
+Target: 60-150 total trades over 4 years (15-37/year) with discrete sizing (0.20).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_030_1d_donchian20_1w_vol_v1"
-timeframe = "1d"
+name = "exp_034_1h_rsi14_meanrev_4h_ema50_1d_ema200_vol_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,114 +22,107 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for EMA trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
+    # === HTF: 4h EMA(50) for intermediate trend (Call ONCE before loop) ===
+    df_4h = get_htf_data(prices, '4h')
+    ema_50_4h = pd.Series(df_4h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_50_4h)
     
-    # Calculate EMA(50) on 1w close
-    ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # === HTF: 1d EMA(200) for long-term trend (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # === 1d Indicators: Donchian Channel (20) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # === 1h Indicators: RSI(14) for mean reversion ===
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    gain_ma = pd.Series(gain).ewm(span=14, min_periods=14, adjust=False).mean().values
+    loss_ma = pd.Series(loss).ewm(span=14, min_periods=14, adjust=False).mean().values
+    rs = np.divide(gain_ma, loss_ma, out=np.zeros_like(gain_ma), where=loss_ma!=0)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 1h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
-    vol_ratio[:20] = 1.0
+    valid_start = 20
+    vol_ratio[valid_start:] = volume[valid_start:] / vol_ma[valid_start:]
+    vol_ratio[:valid_start] = 1.0
     
-    # === 1d Indicators: ATR(14) for stoploss ===
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # === Session filter: 08-20 UTC (pre-compute hours array) ===
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.20
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
-    bars_since_entry = 0
     
-    warmup = 60  # sufficient for 20-period indicators + HTF warmup
+    warmup = 200  # sufficient for 1d EMA200 calculation
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema_1w_aligned[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(rsi[i]) or np.isnan(ema_50_4h_aligned[i]) or 
+            np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+            signals[i] = 0.0
+            continue
+        
+        # --- Session Filter: Only trade 08-20 UTC ---
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Trend Alignment: Only trade pullbacks in trend direction ---
+        # Bullish trend: price above both 4h EMA50 and 1d EMA200
+        bullish_trend = price > ema_50_4h_aligned[i] and price > ema_200_1d_aligned[i]
+        # Bearish trend: price below both 4h EMA50 and 1d EMA200
+        bearish_trend = price < ema_50_4h_aligned[i] and price < ema_200_1d_aligned[i]
         
-        # --- Donchian Breakout Conditions ---
-        breakout_up = price > highest_high[i]
-        breakout_down = price < lowest_low[i]
+        # --- Volume Confirmation: Require volume spike (> 1.3x average) ---
+        volume_spike = vol_ratio[i] > 1.3
         
-        # --- Trend Filter: 1w EMA alignment ---
-        # Uptrend: price above 1w EMA
-        # Downtrend: price below 1w EMA
-        uptrend = price > ema_1w_aligned[i]
-        downtrend = price < ema_1w_aligned[i]
+        # --- Mean Reversion Entry: Extreme RSI readings ---
+        # Long: RSI < 30 (oversold) in bullish trend
+        # Short: RSI > 70 (overbought) in bearish trend
+        rsi_oversold = rsi[i] < 30
+        rsi_overbought = rsi[i] > 70
         
-        # --- Exit Logic: ATR-based stoploss ---
+        # --- Exit Logic: Mean reversion to midpoint (RSI 50) ---
         if in_position:
-            bars_since_entry += 1
-            
             if position_side > 0:  # Long position
-                # Stoploss: 2.0*ATR below entry
-                stop_level = entry_price - 2.0 * atr[i]
-                if low[i] < stop_level:
+                # Exit when RSI returns to 50 (mean reversion complete)
+                if rsi[i] >= 50:
                     in_position = False
                     position_side = 0
-                    bars_since_entry = 0
                     signals[i] = 0.0
-                    continue
+                else:
+                    signals[i] = SIZE
             else:  # Short position
-                # Stoploss: 2.0*ATR above entry
-                stop_level = entry_price + 2.0 * atr[i]
-                if high[i] > stop_level:
+                # Exit when RSI returns to 50 (mean reversion complete)
+                if rsi[i] <= 50:
                     in_position = False
                     position_side = 0
-                    bars_since_entry = 0
                     signals[i] = 0.0
-                    continue
-            
-            # Optional: time-based exit after 15 bars (~15d on 1d) to avoid overtrading
-            if bars_since_entry > 15:
-                in_position = False
-                position_side = 0
-                bars_since_entry = 0
-                signals[i] = 0.0
-                continue
-            
-            signals[i] = position_side * SIZE
+                else:
+                    signals[i] = -SIZE
             continue
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: breakout above upper channel AND uptrend
-            if breakout_up and uptrend:
+            # Long: oversold RSI AND bullish trend alignment
+            if rsi_oversold and bullish_trend:
                 in_position = True
                 position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: breakout below lower channel AND downtrend
-            elif breakout_down and downtrend:
+            # Short: overbought RSI AND bearish trend alignment
+            elif rsi_overbought and bearish_trend:
                 in_position = True
                 position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
