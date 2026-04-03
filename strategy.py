@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #545: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts on 12h timeframe aligned with daily EMA50 trend and volume spikes capture strong momentum with lower trade frequency suitable for 12h chart. Daily EMA50 provides structural trend filter that works in both bull and bear markets by filtering breakouts against the intermediate-term trend. Volume confirmation (>1.5x average) ensures participation. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 50-150 total trades over 4 years by using tight entry conditions (breakout + EMA trend + volume) on 12h timeframe.
+Experiment #545: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian breakouts on 12h timeframe aligned with daily EMA trend (from 1d HTF) and volume spikes capture strong momentum with low trade frequency. Daily EMA provides structural trend filter that works in both bull and bear markets by filtering breakouts against intermediate-term trend. Volume confirmation (>1.5x average) ensures participation. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 50-150 total trades over 4 years by using tight entry conditions (breakout + EMA trend + volume).
 """
 
 import numpy as np
@@ -19,11 +19,11 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA50 trend (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on daily timeframe
+    # Calculate EMA50 on daily timeframe (more responsive than EMA200 for 12h)
     if len(close_1d) >= 50:
         ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     else:
@@ -139,5 +139,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
