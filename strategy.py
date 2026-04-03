@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #1144: 1d Donchian(20) Breakout + 1w Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on daily timeframe capture major swing moves. 
-Trend filter from weekly timeframe prevents counter-trend entries. Volume confirmation (>1.5x avg) ensures institutional participation.
-Designed for both bull and bear markets: in bull markets, breakouts continue upward; in bear markets, breakdowns continue downward.
-Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
+HYPOTHESIS: Donchian(20) breakouts on 1d timeframe capture swing moves with lower frequency.
+Trend filter from 1w timeframe prevents counter-trend entries. Volume confirmation (>1.3x avg) ensures participation.
+Designed for 1d timeframe to target 30-100 trades over 4 years (7-25/year). Uses ATR-based stoploss (2.5x) and discrete sizing (0.25).
+Should work in both bull (breakouts continue) and bear (breakdowns continue) markets by aligning with weekly trend.
 """
 
 import numpy as np
@@ -25,7 +25,7 @@ def generate_signals(prices):
     # === HTF: 1w data for trend filter (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    # Simple trend: price > previous close = uptrend, < = downtrend
+    # Weekly trend: price > previous weekly close = uptrend, < = downtrend
     trend_1w = np.zeros(len(close_1w))
     trend_1w[1:] = np.where(close_1w[1:] > close_1w[:-1], 1, -1)
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
@@ -73,8 +73,8 @@ def generate_signals(prices):
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.0*ATR below entry
-                stop_level = entry_price - 2.0 * atr[i]
+                # Stoploss: 2.5*ATR below entry
+                stop_level = entry_price - 2.5 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -82,8 +82,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                # Stoploss: 2.0*ATR above entry
-                stop_level = entry_price + 2.0 * atr[i]
+                # Stoploss: 2.5*ATR above entry
+                stop_level = entry_price + 2.5 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -95,8 +95,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 1.3x average)
+        volume_spike = vol_ratio[i] > 1.3
         
         if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
@@ -118,3 +118,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
