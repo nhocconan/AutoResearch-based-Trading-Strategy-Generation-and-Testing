@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #1760: 4h Donchian(20) Breakout + 1d HMA Trend + Volume + ATR Stoploss
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d HMA trend and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 1d timeframe filters out noise from shorter-term fluctuations, while the 4h Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 75-200 total trades over 4 years (19-50/year) by using tight entry conditions and multi-timeframe confluence.
+Experiment #1762: 12h Donchian(20) Breakout + 1d HMA Trend + Volume + ATR Stoploss
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d HMA trend and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 1d timeframe filters out noise from shorter-term fluctuations, while the 12h Donchian provides clear breakout levels with lower frequency to minimize fee drag. Position size fixed at 0.25 to balance return and drawdown. Target: 50-150 total trades over 4 years (12-37/year) by using tight entry conditions and multi-timeframe confluence.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1760_4h_donchian20_1d_hma_vol_v1"
-timeframe = "4h"
+name = "exp_1762_12h_donchian20_1d_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,6 +17,7 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
+    open_time = prices["open_time"].values
     n = len(close)
     
     # === HTF: 1d data for trend filter (Call ONCE before loop) ===
@@ -35,16 +36,16 @@ def generate_signals(prices):
     trend_1d = np.where(close_1d > hma_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 4h Indicators: Donchian(20) ===
+    # === 12h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
