@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #1892: 12h Donchian(20) Breakout + Volume Spike + ADX Regime Filter (Revised)
+Experiment #1892: 12h Donchian(20) Breakout + Volume Spike + ADX Regime Filter
 HYPOTHESIS: Donchian channel breakouts capture strong momentum moves. Combined with 1d trend filter (EMA50), volume confirmation (>2x average), and ADX regime filter (ADX>25 = trending), this strategy enters in the direction of the breakout only when aligned with higher timeframe trend and sufficient momentum. Works in both bull and bear markets by following the 1d trend. Target: 50-150 total trades over 4 years (12-37/year) with discrete position sizing of 0.25.
-REVISION: Increased Donchian period to 25 to reduce trade frequency and added minimum holding period of 3 bars to prevent whipsaw.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1892_12h_donchian25_1d_ema_vol_adx_v1"
+name = "exp_1892_12h_donchian20_1d_ema_vol_adx_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -29,11 +28,11 @@ def generate_signals(prices):
     trend_1d = np.where(close_1d > ema_50_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 12h Indicators: Donchian Channel (25) ===
-    # Upper band = highest high of last 25 periods
-    # Lower band = lowest low of last 25 periods
-    highest_high = pd.Series(high).rolling(window=25, min_periods=25).max().values
-    lowest_low = pd.Series(low).rolling(window=25, min_periods=25).min().values
+    # === 12h Indicators: Donchian Channel (20) ===
+    # Upper band = highest high of last 20 periods
+    # Lower band = lowest low of last 20 periods
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # === 12h Indicators: ADX(14) for regime filter ===
     # True Range
@@ -79,7 +78,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for EMA(50) and Donchian(25)
+    warmup = 50  # sufficient for EMA(50) and Donchian(20)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -95,16 +94,11 @@ def generate_signals(prices):
         if in_position:
             bars_since_entry += 1
             
-            # Minimum holding period: 3 bars (~1.5 days for 12h)
-            if bars_since_entry < 3:
-                signals[i] = position_side * SIZE
-                continue
-            
             # Exit conditions
             exit_signal = False
             
             if position_side > 0:  # Long position
-                # Exit if price breaks below Donchian lower band (25)
+                # Exit if price breaks below Donchian lower band (20)
                 if price < lowest_low[i]:
                     exit_signal = True
                 # Exit if ADX weakens (trend ending)
@@ -114,7 +108,7 @@ def generate_signals(prices):
                 elif trend_1d_aligned[i] < 0:
                     exit_signal = True
             else:  # Short position
-                # Exit if price breaks above Donchian upper band (25)
+                # Exit if price breaks above Donchian upper band (20)
                 if price > highest_high[i]:
                     exit_signal = True
                 # Exit if ADX weakens (trend ending)
@@ -144,14 +138,14 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if trending and volume_spike:
-            # Long entry: price breaks above Donchian upper band (25) AND 1d trend up
+            # Long entry: price breaks above Donchian upper band (20) AND 1d trend up
             if trend_bias > 0 and price > highest_high[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian lower band (25) AND 1d trend down
+            # Short entry: price breaks below Donchian lower band (20) AND 1d trend down
             elif trend_bias < 0 and price < lowest_low[i]:
                 in_position = True
                 position_side = -1
