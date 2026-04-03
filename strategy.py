@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #1939: 6h Donchian Breakout + 12h Volume Regime + 1d ATR Filter
-HYPOTHESIS: Donchian(20) breakouts on 6h timeframe capture momentum bursts. 
-Filtered by 12h volume regime (high volume = institutional participation) and 
-1d ATR normalization to avoid breakouts during low volatility periods. 
-Works in bull/bear markets by only taking breakouts with volume confirmation 
-and avoiding choppy conditions. Target: 75-150 total trades over 4 years.
+Experiment #1939: 6h Elder Ray + 12h Regime Filter + Volume Spike
+HYPOTHESIS: Elder Ray (Bull/Bear Power) identifies institutional buying/selling pressure. 
+Combined with 12h ADX regime filter (trending vs ranging) and volume confirmation to avoid false signals.
+In trending markets (ADX>25): follow Elder Ray direction. In ranging markets (ADX<20): fade extreme readings.
+Target: 75-150 total trades over 4 years with strict entry conditions to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1939_6h_donchian20_12h_volreg_1d_atr_v1"
+name = "exp_1939_6h_elder_ray_12h_regime_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,90 +22,93 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for volume regime (Call ONCE before loop) ===
+    # === HTF: 12h data for regime filter (ADX) ===
     df_12h = get_htf_data(prices, '12h')
-    vol_12h = df_12h['volume'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Volume regime: ratio of current volume to 24-period MA (48h lookback)
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=24, min_periods=24).mean().values
-    vol_ratio_12h = np.ones(len(vol_12h))
-    vol_ratio_12h[24:] = vol_12h[24:] / vol_ma_12h[24:]
-    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    # Calculate 12h ADX(14) for regime detection
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])
+        
+        # Directional Movement
+        up_move = high[1:] - high[:-1]
+        down_move = low[:-1] - low[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        plus_dm = np.concatenate([[0.0], plus_dm])
+        minus_dm = np.concatenate([[0.0], minus_dm])
+        
+        # Smoothed values
+        atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+        plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
+        minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
+        
+        # ADX
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+        return adx
     
-    # === HTF: 1d data for ATR filter (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
-    # True Range calculation
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr1[0] = 0  # First bar has no previous close
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # === 6h Indicators: Elder Ray (Bull/Bear Power) and EMA ===
+    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    bull_power = high - ema_13
+    bear_power = low - ema_13
     
-    # ATR(14) on 1d
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
-    
-    # === 6h Indicators: Donchian(20) channels ===
-    # Donchian upper = highest high of past 20 bars
-    # Donchian lower = lowest low of past 20 bars
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # Volume confirmation: 6h volume spike
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.ones(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === Signals Initialization ===
     signals = np.zeros(n)
     SIZE = 0.25  # 25% position size
     
-    # Position tracking state variables
+    # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for Donchian(20), ATR(14), and volume MA
+    warmup = 50  # sufficient for EMA(13), volume MA, and ADX
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(vol_ratio_12h_aligned[i]) or np.isnan(atr_1d_aligned[i])):
+        if (np.isnan(adx_12h_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_ratio[i]) or np.isnan(ema_13[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic: ATR-based trailing stop ---
+        # --- Exit Logic ---
         if in_position:
             bars_since_entry += 1
             
-            # Calculate dynamic stop loss based on ATR
-            atr_val = atr_1d_aligned[i]
-            if atr_val <= 0:  # Avoid division by zero
-                atr_val = 0.001 * price  # Fallback to 0.1% of price
-            
+            # Exit conditions: Elder Ray divergence or adverse move
             exit_signal = False
             
             if position_side > 0:  # Long position
-                # Trailing stop: highest high since entry minus 2*ATR
-                # We approximate by using current Donchian lower as dynamic support
-                if price <= donchian_lower[i]:
+                # Exit if Bear Power turns positive (selling pressure)
+                if bear_power[i] > 0:
                     exit_signal = True
-                # Also exit if price drops more than 2*ATR from entry
-                elif price < entry_price - 2.0 * atr_val:
+                # Exit if price closes below EMA(13)
+                elif price < ema_13[i]:
                     exit_signal = True
             else:  # Short position
-                # Trailing stop: lowest low since entry plus 2*ATR
-                # We approximate by using current Donchian upper as dynamic resistance
-                if price >= donchian_upper[i]:
+                # Exit if Bull Power turns negative (buying pressure)
+                if bull_power[i] < 0:
                     exit_signal = True
-                # Also exit if price rises more than 2*ATR from entry
-                elif price > entry_price + 2.0 * atr_val:
+                # Exit if price closes above EMA(13)
+                elif price > ema_13[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -119,30 +121,48 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume regime filter: require elevated volume (> 1.3x average)
-        volume_regime = vol_ratio_12h_aligned[i] > 1.3
+        # Regime filter: ADX > 25 = trending, ADX < 20 = ranging
+        adx_val = adx_12h_aligned[i]
         
-        # ATR filter: require sufficient volatility (avoid breakouts in choppy low-vol periods)
-        # Normalize ATR by price to get percentage volatility
-        vol_percent = atr_1d_aligned[i] / price if price > 0 else 0
-        sufficient_vol = vol_percent > 0.01  # At least 1% daily volatility
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
-        if volume_regime and sufficient_vol:
-            # Long entry: price breaks above Donchian upper channel
-            if price > donchian_upper[i]:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            # Short entry: price breaks below Donchian lower channel
-            elif price < donchian_lower[i]:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
-            else:
+        if volume_spike:
+            if adx_val > 25:  # Trending market - follow Elder Ray
+                # Long: Bull Power > 0 and rising (increasing buying pressure)
+                if bull_power[i] > 0 and bull_power[i] > bull_power[i-1]:
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
+                # Short: Bear Power < 0 and falling (increasing selling pressure)
+                elif bear_power[i] < 0 and bear_power[i] < bear_power[i-1]:
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
+                else:
+                    signals[i] = 0.0
+            elif adx_val < 20:  # Ranging market - fade extreme readings
+                # Long: Bear Power extremely negative (oversold) and turning up
+                if bear_power[i] < np.percentile(bear_power[max(0, i-100):i+1], 5) and bear_power[i] > bear_power[i-1]:
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
+                # Short: Bull Power extremely positive (overbought) and turning down
+                elif bull_power[i] > np.percentile(bull_power[max(0, i-100):i+1], 95) and bull_power[i] < bull_power[i-1]:
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
+                else:
+                    signals[i] = 0.0
+            else:  # Transition regime (ADX 20-25) - no trades
                 signals[i] = 0.0
         else:
             signals[i] = 0.0
