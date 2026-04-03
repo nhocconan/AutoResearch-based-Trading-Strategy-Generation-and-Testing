@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #342: 12h Donchian(20) Breakout + 1d EMA50 Trend + Volume Spike + ATR Stoploss
+Experiment #206: 4h Donchian(20) Breakout + 1d Trend + Volume Spike + ATR Stoploss
 
-HYPOTHESIS: 12h Donchian channel breakouts filtered by 1-day EMA50 trend and volume spikes (>2.0x average)
-capture strong momentum with reduced false breakouts. The 12h timeframe targets 12-37 trades/year (50-150 total)
-to minimize fee drag. Works in bull markets (breakouts with volume in uptrend) and bear markets
+HYPOTHESIS: 4h Donchian channel breakouts filtered by 1-day EMA50 trend and volume spikes (>2.0x average) 
+capture strong momentum with reduced false breakouts. The 4h timeframe targets 19-50 trades/year (75-200 total) 
+to minimize fee drag. Works in bull markets (breakouts with volume in uptrend) and bear markets 
 (failed breaks reverse sharply in downtrend). Uses ATR-based stoploss for risk management.
 """
 
@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_342_12h_donchian_1d_trend_volume_v1"
-timeframe = "12h"
+name = "exp_206_4h_donchian_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,7 +30,7 @@ def generate_signals(prices):
     ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # === 12h Indicators: Donchian Channel (20) ===
+    # === 4h Indicators: Donchian Channel (20) ===
     donchian_h = np.full(n, np.nan)
     donchian_l = np.full(n, np.nan)
     donchian_m = np.full(n, np.nan)
@@ -40,7 +40,7 @@ def generate_signals(prices):
         donchian_l[i] = np.min(low[i-20:i])
         donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
@@ -48,7 +48,7 @@ def generate_signals(prices):
     
     atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
