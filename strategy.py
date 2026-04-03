@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #149: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike + Choppiness Filter
+Experiment #150: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Spike
 
-HYPOTHESIS: Adding a choppiness regime filter (CHOP > 61.8 = ranging) to the Donchian breakout strategy 
-reduces false signals in sideways markets while maintaining capture of strong trending moves. 
-The 1d HMA(21) provides trend bias, volume spike (>2.0x) confirms momentum, and ATR-based stoploss 
-manages risk. Targets 19-50 trades/year to minimize fee drag. Works in bull markets (breakouts with 
-volume in trending regimes) and bear markets (failed breaks reverse from HMA levels in ranging regimes).
+HYPOTHESIS: 1d Donchian breakouts filtered by 1w HMA(21) trend direction (price > HMA = bullish bias, 
+price < HMA = bearish bias) and volume spikes (>2.0x average) capture strong momentum moves with 
+reduced false breakouts. The 1w HMA provides a stable trend filter from higher timeframe, more reliable 
+than shorter MA for avoiding whipsaws. Targets 7-25 trades/year (30-100 total over 4 years) to minimize 
+fee drag while capturing significant moves. Works in bull markets (breakouts with volume) and bear markets 
+(failed breaks reverse sharply from HMA levels). Uses ATR-based stoploss for risk management.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_149_4h_donchian_1d_hma_volume_chop_v1"
-timeframe = "4h"
+name = "exp_150_1d_donchian_1w_hma_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,10 +25,10 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for HMA(21) trend (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
+    # === HTF: 1w data for HMA(21) trend (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate HMA(21) on 1d close
+    # Calculate HMA(21) on 1w close
     def hma(series, period):
         """Hull Moving Average"""
         half_period = period // 2
@@ -38,38 +39,10 @@ def generate_signals(prices):
         hma_result = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
         return hma_result.values
     
-    hma_1d = hma(df_1d['close'].values, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w = hma(df_1w['close'].values, 21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # === HTF: 1d data for Choppiness Index (14) ===
-    def choppiness_index(high, low, close, period):
-        """Choppiness Index: high values = ranging, low values = trending"""
-        atr_sum = np.zeros_like(close)
-        tr = np.zeros(n)
-        for i in range(1, n):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        tr[0] = high[0] - low[0]
-        for i in range(period, n):
-            atr_sum[i] = np.sum(tr[i-period+1:i+1])
-        
-        max_high = np.zeros_like(close)
-        min_low = np.zeros_like(close)
-        for i in range(period-1, n):
-            max_high[i] = np.max(high[i-period+1:i+1])
-            min_low[i] = np.min(low[i-period+1:i+1])
-        
-        chop = np.full(n, 50.0)
-        for i in range(period-1, n):
-            if atr_sum[i] > 0 and (max_high[i] - min_low[i]) > 0:
-                chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(period)
-            else:
-                chop[i] = 50.0
-        return chop
-    
-    chop_1d = choppiness_index(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 1d Indicators: Donchian Channel (20) ===
     donchian_h = np.full(n, np.nan)
     donchian_l = np.full(n, np.nan)
     donchian_m = np.full(n, np.nan)
@@ -79,7 +52,7 @@ def generate_signals(prices):
         donchian_l[i] = np.min(low[i-20:i])
         donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
@@ -87,7 +60,7 @@ def generate_signals(prices):
     
     atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 1d Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
@@ -103,23 +76,19 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 50  # Ensure enough data for HTF HMA/CHOP, ATR, and Donchian
+    warmup = 50  # Ensure enough data for HTF HMA, ATR, and Donchian
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
-            np.isnan(hma_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or 
-            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(hma_1w_aligned[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- Regime Filter: Only trade when NOT choppy (CHOP <= 61.8 = trending) ---
-        # In ranging markets (CHOP > 61.8), we avoid breakout trades to reduce false signals
-        not_choppy = chop_1d_aligned[i] <= 61.8
-        
         # --- HMA Trend Filter: Price > HMA = bullish bias, Price < HMA = bearish bias ---
-        price_above_hma = close[i] > hma_1d_aligned[i]
-        price_below_hma = close[i] < hma_1d_aligned[i]
+        price_above_hma = close[i] > hma_1w_aligned[i]
+        price_below_hma = close[i] < hma_1w_aligned[i]
         
         # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
         volume_spike = vol_ratio[i] > 2.0
@@ -174,11 +143,11 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Donchian breakout up + volume spike + price above 1d HMA + NOT choppy
-        long_condition = breakout_up and volume_spike and price_above_hma and not_choppy
+        # Long: Donchian breakout up + volume spike + price above 1w HMA
+        long_condition = breakout_up and volume_spike and price_above_hma
         
-        # Short: Donchian breakout down + volume spike + price below 1d HMA + NOT choppy
-        short_condition = breakout_down and volume_spike and price_below_hma and not_choppy
+        # Short: Donchian breakout down + volume spike + price below 1w HMA
+        short_condition = breakout_down and volume_spike and price_below_hma
         
         if long_condition:
             in_position = True
@@ -196,3 +165,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
