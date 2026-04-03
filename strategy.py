@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #1773: 4h Donchian(20) Breakout + 12h HMA Trend + Volume + ATR Stoploss
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h HMA trend and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 12h timeframe filters out noise from shorter-term fluctuations while providing timely trend direction, while the 4h Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 75-200 total trades over 4 years (19-50/year) by using tight entry conditions and multi-timeframe confluence.
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h HMA trend and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 12h timeframe filters noise while remaining responsive to trend changes, reducing false breakouts. Position size fixed at 0.25 to balance return and drawdown. Target: 75-200 total trades over 4 years (19-50/year) by using tight entry conditions and multi-timeframe confluence.
 """
 
 import numpy as np
@@ -27,10 +27,10 @@ def generate_signals(prices):
     def hull_moving_average(arr, period):
         half_period = period // 2
         sqrt_period = int(np.sqrt(period))
-        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False, min_periods=half_period).mean().values
-        wma_full = pd.Series(arr).ewm(span=period, adjust=False, min_periods=period).mean().values
+        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
+        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
         raw_hma = 2 * wma_half - wma_full
-        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False, min_periods=sqrt_period).mean().values
+        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
         return hma
     hma_12h = hull_moving_average(close_12h, 21)
     trend_12h = np.where(close_12h > hma_12h, 1, -1)
@@ -126,3 +126,4 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+</trend_12h_aligned>
