@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #481: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend capture medium-term momentum with controlled trade frequency (target: 75-200 total trades over 4 years). Volume confirmation (>1.5x average) ensures breakout validity. Designed to work in bull markets (breakouts with trend) and avoid whipsaws in bear/range regimes via trend filter. Uses proven structure from top performers (exp_141/146/149) with improved HTF alignment to 1d for better regime detection.
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend capture medium-term momentum. Volume confirmation (>1.5x average) ensures breakout validity. Discrete position sizing (0.25) balances return and risk. Designed to work in bull markets (breakouts with trend) and avoid whipsaws in bear/range regimes via trend filter. Uses proven structure from top performers (exp_141/146/149) with improved HTF alignment.
 """
 
 import numpy as np
@@ -45,7 +45,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.25
     
     # Position tracking state variables
     in_position = False
