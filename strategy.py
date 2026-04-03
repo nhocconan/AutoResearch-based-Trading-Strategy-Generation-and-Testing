@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #573: 4h Donchian(20) breakout + 12h EMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts aligned with 12h EMA50 trend capture strong momentum while filtering counter-trend noise. 12h EMA provides intermediate-term trend filter that works in both bull and bear markets. Volume confirmation (>1.8x average) ensures institutional participation. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 75-200 total trades over 4 years by using tight entry conditions.
+Experiment #573: 4h Donchian(20) breakout + 12h EMA50 trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian breakouts aligned with 12h EMA50 trend capture medium-term momentum with lower trade frequency than 1d. 
+12h EMA50 provides a balanced trend filter that adapts to both bull and bear markets by reducing whipsaw. Volume confirmation (>1.8x average) ensures institutional participation. 
+ATR-based stoploss (2.5) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 75-200 total trades over 4 years by using tight entry conditions (breakout + EMA trend + volume spike).
 """
 
 import numpy as np
@@ -88,8 +90,8 @@ def generate_signals(prices):
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.0*ATR below entry
-                stop_level = entry_price - 2.0 * atr[i]
+                # Stoploss: 2.5*ATR below entry
+                stop_level = entry_price - 2.5 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -97,8 +99,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                # Stoploss: 2.0*ATR above entry
-                stop_level = entry_price + 2.0 * atr[i]
+                # Stoploss: 2.5*ATR above entry
+                stop_level = entry_price + 2.5 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -106,8 +108,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~1 day on 4h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 8 bars (~1.33 days on 4h) to avoid overtrading
+            if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -139,5 +141,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
