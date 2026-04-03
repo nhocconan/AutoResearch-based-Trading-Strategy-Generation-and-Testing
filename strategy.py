@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #129: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend and volume confirmation (>1.5x) capture medium-term momentum with controlled trade frequency. The 1d EMA provides structural bias from higher timeframe, reducing false breakouts. Volume confirmation ensures institutional participation. Works in bull/bear via EMA trend filter and ATR-based stops. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #124: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
+HYPOTHESIS: 1d Donchian breakouts aligned with 1w HMA(21) trend and volume confirmation (>1.5x) capture medium-term momentum with low trade frequency. The 1w HMA provides a strong trend filter, reducing whipsaws. Volume confirmation ensures institutional participation. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_129_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_124_1d_donchian20_1w_hma_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,22 +19,28 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA(50) trend (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = pd.Series(df_1d['close'].values)
-    ema_50_1d = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_trend_1d = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # === HTF: 1w data for HMA(21) trend (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = pd.Series(df_1w['close'].values)
+    # HMA(21) = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
+    wma_half = close_1w.rolling(window=half_len, min_periods=half_len).mean()
+    wma_full = close_1w.rolling(window=21, min_periods=21).mean()
+    raw_hma = 2 * wma_half - wma_full
+    hma_21_1w = raw_hma.rolling(window=sqrt_len, min_periods=sqrt_len).mean().values
+    hma_trend_1w = align_htf_to_ltf(prices, df_1w, hma_21_1w)
     
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 1d Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 1d Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)  # default to 1.0 for warmup period
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -56,7 +62,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema_trend_1d[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(hma_trend_1w[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -70,9 +76,9 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- 1d EMA Trend: from 1d data ---
-        bullish_trend = close[i] > ema_trend_1d[i]
-        bearish_trend = close[i] < ema_trend_1d[i]
+        # --- 1w HMA Trend: from 1w data ---
+        bullish_trend = close[i] > hma_trend_1w[i]
+        bearish_trend = close[i] < hma_trend_1w[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -97,8 +103,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 8 bars (~32h on 4h) to avoid overtrading
-            if bars_since_entry > 8:
+            # Optional: time-based exit after 10 bars (~10 days on 1d) to avoid overtrading
+            if bars_since_entry > 10:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -110,14 +116,14 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: breakout above upper channel AND bullish 1d trend
+            # Long: breakout above upper channel AND bullish 1w trend
             if breakout_up and bullish_trend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: breakout below lower channel AND bearish 1d trend
+            # Short: breakout below lower channel AND bearish 1w trend
             elif breakout_down and bearish_trend:
                 in_position = True
                 position_side = -1
