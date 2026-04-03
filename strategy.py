@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #606: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts aligned with 1d EMA50 trend capture medium-term momentum with lower trade frequency than 1h. 
-1d EMA50 provides a robust trend filter that adapts to both bull and bear markets by reducing whipsaw. Volume confirmation (>1.8x average) ensures institutional participation. 
-ATR-based stoploss (2.5) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 75-200 total trades over 4 years by using tight entry conditions (breakout + EMA trend + volume spike).
+Experiment #607: 6h Donchian(20) breakout + 1d pivot direction + volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian breakouts on 6h aligned with 1d pivot levels (R1/S1) capture institutional flow with lower trade frequency than 4h. 
+Pivot levels act as dynamic support/resistance where breakouts with volume confirmation indicate strong momentum. 
+Volume (>1.5x average) filters false breakouts. ATR-based stoploss (2.0) manages risk. Discrete sizing (0.25) limits drawdown.
+Targets 75-200 total trades over 4 years by requiring confluence of breakout, pivot alignment, and volume.
+Works in bull/bear: pivots adapt to price structure, volume confirms institutional participation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_606_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_607_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,29 +23,43 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA50 trend (Call ONCE before loop) ===
+    # === HTF: 1d data for pivot points (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 1d timeframe
-    if len(close_1d) >= 50:
-        ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate classic pivot points on 1d timeframe
+    if len(close_1d) >= 1:
+        pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+        r1_1d = 2 * pivot_1d - low_1d
+        s1_1d = 2 * pivot_1d - high_1d
+        r2_1d = pivot_1d + (high_1d - low_1d)
+        s2_1d = pivot_1d - (high_1d - low_1d)
     else:
-        ema_1d = np.full(len(close_1d), np.nan)
+        pivot_1d = np.full(len(close_1d), np.nan)
+        r1_1d = np.full(len(close_1d), np.nan)
+        s1_1d = np.full(len(close_1d), np.nan)
+        r2_1d = np.full(len(close_1d), np.nan)
+        s2_1d = np.full(len(close_1d), np.nan)
     
-    # Align EMA50 to 4h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align pivot levels to 6h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
     
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 6h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)  # default to 1.0 for warmup period
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -60,38 +76,39 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for EMA50 calculation
+    warmup = 50  # sufficient for Donchian and volume MA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(pivot_1d_aligned[i]) or
+            np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio[i] > 1.5
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- 1d EMA50 Trend Filter ---
-        # Bullish trend: price above 1d EMA50
-        bullish_trend = price > ema_1d_aligned[i]
-        # Bearish trend: price below 1d EMA50
-        bearish_trend = price < ema_1d_aligned[i]
+        # --- Pivot Alignment Filter ---
+        # Bullish alignment: price above daily S1 (support holds)
+        bullish_align = price > s1_1d_aligned[i]
+        # Bearish alignment: price below daily R1 (resistance holds)
+        bearish_align = price < r1_1d_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.5*ATR below entry
-                stop_level = entry_price - 2.5 * atr[i]
+                # Stoploss: 2.0*ATR below entry
+                stop_level = entry_price - 2.0 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -99,8 +116,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                # Stoploss: 2.5*ATR above entry
-                stop_level = entry_price + 2.5 * atr[i]
+                # Stoploss: 2.0*ATR above entry
+                stop_level = entry_price + 2.0 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -108,8 +125,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 8 bars (~1.33 days on 4h) to avoid overtrading
-            if bars_since_entry > 8:
+            # Optional: time-based exit after 12 bars (~3 days on 6h) to avoid overtrading
+            if bars_since_entry > 12:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -121,15 +138,15 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + bullish 1d EMA50 trend
-            if breakout_up and bullish_trend:
+            # Long: Donchian breakout up + price above daily S1 (bullish pivot alignment)
+            if breakout_up and bullish_align:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + bearish 1d EMA50 trend
-            elif breakout_down and bearish_trend:
+            # Short: Donchian breakout down + price below daily R1 (bearish pivot alignment)
+            elif breakout_down and bearish_align:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
