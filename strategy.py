@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #272: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 12h aligned with 1d HMA(21) direction capture high-probability trends. Volume confirmation (>2.0x average) filters weak breakouts. Uses ATR(14) stoploss and discrete sizing (0.25) to minimize fee drag. Works in bull markets via breakout continuation and in bear markets via mean reversion at opposite channel edge. Target: 50-150 total trades over 4 years (12-37/year).
+Experiment #265: 12h Donchian(20) breakout + 1d trend direction (HMA21) + volume confirmation
+HYPOTHESIS: Donchian breakouts on 12h aligned with 1d HMA21 trend capture high-probability trend continuation moves. Volume confirmation (>1.5x average) filters weak breakouts. Uses discrete sizing (0.25) to minimize fee drag. Target: 75-150 total trades over 4 years (19-37/year). Works in both bull (trend continuation) and bear (trend continuation down) markets by following 1d HMA direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_272_12h_donchian20_1d_hma_vol_v1"
+name = "exp_265_12h_donchian20_1d_hma21_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -19,22 +19,26 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for HMA(21) trend (Call ONCE before loop) ===
+    # === HTF: 1d data for HMA21 trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values.astype(np.float64)
     
-    # Calculate HMA(21) on 1d close
-    def hma(series, period):
-        if len(series) < period:
-            return np.full_like(series, np.nan)
-        half = period // 2
-        sqrt = int(np.sqrt(period))
-        wma_half = pd.Series(series).ewm(span=half, adjust=False).mean()
-        wma_full = pd.Series(series).ewm(span=period, adjust=False).mean()
-        raw = 2 * wma_half - wma_full
-        hma_vals = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
-        return hma_vals.values
+    # Calculate HMA(21) on 1d: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    half_len = 11  # 21//2
+    sqrt_len = 4   # int(sqrt(21))
     
-    hma_21 = hma(df_1d['close'].values, 21)
+    def wma(arr, period):
+        if period <= 0:
+            return np.full_like(arr, np.nan)
+        weights = np.arange(1, period + 1, dtype=np.float64)
+        return np.convolve(arr, weights[::-1], mode='same') / weights.sum()
+    
+    wma_half = wma(close_1d, half_len)
+    wma_full = wma(close_1d, 21)
+    raw_hma = 2 * wma_half - wma_full
+    hma_21 = wma(raw_hma, sqrt_len)
+    
+    # Align HMA21 to 12h timeframe
     hma_21_aligned = align_htf_to_ltf(prices, df_1d, hma_21)
     
     # === 12h Indicators: Donchian(20) channels ===
@@ -76,16 +80,16 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio[i] > 1.5
         
         # --- Donchian Breakout Conditions ---
         breakout_up = high[i] > donch_upper[i-1]
         breakout_down = low[i] < donch_lower[i-1]
         
-        # --- HMA Trend Logic ---
-        # Long bias: price above HMA(21) (bullish)
-        # Short bias: price below HMA(21) (bearish)
+        # --- Trend Direction Logic from 1d HMA21 ---
+        # Long bias: price above HMA21 (bullish trend)
+        # Short bias: price below HMA21 (bearish trend)
         long_bias = price > hma_21_aligned[i]
         short_bias = price < hma_21_aligned[i]
         
@@ -132,16 +136,16 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Require volume spike + breakout conditions + HMA bias alignment
+        # Require volume spike + breakout conditions + trend bias alignment
         if volume_spike:
-            # Long: breakout up AND bullish bias (above HMA)
+            # Long: breakout up AND bullish bias (above HMA21)
             if breakout_up and long_bias:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: breakout down AND bearish bias (below HMA)
+            # Short: breakout down AND bearish bias (below HMA21)
             elif breakout_down and short_bias:
                 in_position = True
                 position_side = -1
@@ -154,3 +158,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
