@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #089: 4h Donchian(20) breakout + 1d/1w HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 4h Donchian breakouts aligned with both daily and weekly HMA trends capture strong momentum moves while avoiding counter-trend whipsaws. Volume confirmation (>2.0x average) ensures breakout legitimacy. ATR stoploss (2.5x) and minimum holding period (4 bars) reduce churn. Target: 75-200 total trades over 4 years.
+Experiment #078: 1d Donchian(20) breakout + 1w HMA(20) trend + volume confirmation
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA trend capture major momentum moves while avoiding whipsaws. Weekly timeframe provides strong trend filter suitable for both bull and bear markets. Volume confirmation (>2.0x average) ensures breakout legitimacy. ATR stoploss (2.0x) and minimum holding period (3 days) reduce churn. Target: 50-120 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_089_4h_donchian20_1d_1w_hma_vol_v1"
-timeframe = "4h"
+name = "exp_078_1d_donchian20_1w_hma_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,10 +19,10 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for HMA trend (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
+    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate HMA(20) on 1d close
+    # Calculate HMA(20) on 1w close
     def calculate_hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -34,15 +34,10 @@ def generate_signals(prices):
         hma = pd.Series(hma_raw).ewm(span=sqrt_period, adjust=False).mean().values
         return hma
     
-    hma_1d = calculate_hma(df_1d['close'].values, 20)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
-    
-    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
     hma_1w = calculate_hma(df_1w['close'].values, 20)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # === 4h Indicators: Donchian(20) channels ===
+    # === 1d Indicators: Donchian(20) channels ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -50,15 +45,15 @@ def generate_signals(prices):
     
     donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
-    # === 4h Indicators: ATR(14) for stoploss ===
-    tr_4h = np.zeros(n)
-    tr_4h[0] = high[0] - low[0]
+    # === 1d Indicators: ATR(14) for stoploss ===
+    tr_1d = np.zeros(n)
+    tr_1d[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_4h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr_1d[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    atr_14 = pd.Series(tr_4h).ewm(span=14, min_periods=14, adjust=False).mean().values
+    atr_14 = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 1d Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
@@ -78,17 +73,15 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(hma_1d_aligned[i]) or np.isnan(hma_1w_aligned[i]) or np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
+        if (np.isnan(hma_1w_aligned[i]) or np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
             np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- HMA Trend: Determine 1d and 1w trend direction (BOTH must align) ---
+        # --- HMA Trend: Determine 1w trend direction ---
         price = close[i]
-        hma_1d_trend_up = price > hma_1d_aligned[i]  # Above 1d HMA = uptrend
-        hma_1d_trend_down = price < hma_1d_aligned[i]  # Below 1d HMA = downtrend
-        hma_1w_trend_up = price > hma_1w_aligned[i]  # Above 1w HMA = uptrend
-        hma_1w_trend_down = price < hma_1w_aligned[i]  # Below 1w HMA = downtrend
+        hma_trend_up = price > hma_1w_aligned[i]  # Above HMA = uptrend
+        hma_trend_down = price < hma_1w_aligned[i]  # Below HMA = downtrend
         
         # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
         volume_spike = vol_ratio[i] > 2.0
@@ -103,7 +96,7 @@ def generate_signals(prices):
             
             # ATR-based stoploss
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.5 * atr_14[i]
+                stop_level = entry_price - 2.0 * atr_14[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -118,7 +111,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_level = entry_price + 2.5 * atr_14[i]
+                stop_level = entry_price + 2.0 * atr_14[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -133,8 +126,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Minimum holding period of 4 bars to reduce churn
-            if bars_since_entry < 4:
+            # Minimum holding period of 3 bars to reduce churn
+            if bars_since_entry < 3:
                 signals[i] = position_side * SIZE
                 continue
             
@@ -143,9 +136,9 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Only trade when breakout aligns with BOTH 1d AND 1w HMA trend
-        if hma_1d_trend_up and hma_1w_trend_up:
-            # Long: Donchian breakout up AND volume spike AND price above BOTH 1d and 1w HMA
+        # Only trade when breakout aligns with 1w HMA trend
+        if hma_trend_up:
+            # Long: Donchian breakout up AND volume spike AND price above 1w HMA
             if breakout_up and volume_spike:
                 in_position = True
                 position_side = 1
@@ -154,8 +147,8 @@ def generate_signals(prices):
                 signals[i] = SIZE
             else:
                 signals[i] = 0.0
-        elif hma_1d_trend_down and hma_1w_trend_down:
-            # Short: Donchian breakout down AND volume spike AND price below BOTH 1d and 1w HMA
+        elif hma_trend_down:
+            # Short: Donchian breakout down AND volume spike AND price below 1w HMA
             if breakout_down and volume_spike:
                 in_position = True
                 position_side = -1
@@ -165,9 +158,30 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:
-            # Trends don't align (mixed or neutral), do not trade
+            # Exactly at HMA (rare), do not trade
             signals[i] = 0.0
     
     return signals
-
-</think>
+            continue
+        
+        # --- New Position Entry Logic ---
+        # Long entry: Williams %R < -80 (oversold) + strong uptrend + volume confirmation
+        if williams_r[i] < -80 and strong_trend and vol_confirm:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            entry_atr = atr[i]
+            bars_since_entry = 0
+            signals[i] = SIZE
+        # Short entry: Williams %R > -20 (overbought) + strong downtrend + volume confirmation
+        elif williams_r[i] > -20 and strong_trend and vol_confirm:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            entry_atr = atr[i]
+            bars_since_entry = 0
+            signals[i] = -SIZE
+        else:
+            signals[i] = 0.0
+    
+    return signals
