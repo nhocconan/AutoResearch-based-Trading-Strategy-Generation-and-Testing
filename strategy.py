@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #2073: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts with 12h trend filter capture medium-term institutional moves.
-- Primary: 4h Donchian(20) breakout with volume > 1.3x 20-bar average
-- HTF: 12h HMA(21) trend filter (only trade in direction of higher timeframe trend)
-- Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
-- Works in bull/bear markets by following 12h institutional trend with precise 4h entries.
-Target: 75-200 total trades over 4 years (19-50/year).
+HYPOTHESIS: Donchian breakouts capture institutional order flow with 12h trend filter for multi-timeframe alignment. 
+Volume spike confirms participation. ATR stoploss manages risk. Designed for 75-200 trades over 4 years.
+Works in bull/bear by following 12h institutional trend with precise 4h entries.
 """
 
 import numpy as np
@@ -42,7 +39,7 @@ def generate_signals(prices):
     wma_full = np.array([np.nan] * len(close_12h))
     wma_half = np.array([np.nan] * len(close_12h))
     
-    for i in range(20, len(close_12h)):
+    for i in range(20, len(close_12h)):  # 21-1 = 20 for WMA(21)
         wma_full[i] = np.mean(close_12h[i-20:i+1] * np.arange(1, 22))
     for i in range(half_len-1, len(close_12h)):
         wma_half[i] = np.mean(close_12h[i-half_len+1:i+1] * np.arange(1, half_len+1))
@@ -139,8 +136,8 @@ def generate_signals(prices):
         # Require 12h trend alignment for bias filter
         trend_bias = trend_12h_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.3x average)
-        volume_spike = vol_ratio[i] > 1.3
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
             # Long entry: price breaks above upper Donchian AND 12h trend up
