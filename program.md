@@ -729,6 +729,297 @@ Every strategy in this phase MUST have a strict daily/4h regime gate:
 43. 12h Ichimoku + TRIX momentum combo
 44. Multi-TF: 1d cloud → 12h TK cross → 4h entry
 
+## RECENTLY DISCOVERED CONCEPTS
+### Batch discovered 2026-04-01 12:02
+
+**1. Funding Rate Z-Score + Fractal Volatility Regime** *(30m/4H)*
+- Core idea: Trade mean reversion at extreme funding levels, filtered by adaptive fractal volatility to avoid trending traps.
+- Formula: `NFR = (funding - SMA(funding, 168)) / STD(funding, 168)`; `Chop = 100 * log10(SUM(ATR(14), 10) / (High[0]-Low[10])) / log10(10)`; `FRAMA = FRAMA(Close, 16, 300)` using standard Ehlers efficiency ratio weighting.
+- Entry: Long if `NFR < -2.0` AND `Chop > 50` AND `Close < FRAMA`. Short if `NFR > 2.0` AND `Chop > 50` AND `Close > FRAMA`.
+- Exit: `Close` crosses `FRAMA` or trailing stop = `1.5 * ATR(14)`.
+- Why it might work in 2025 bear market: Extreme negative funding in bear markets forces shorts to cover; Chop > 50 ensures range-bound conditions where mean-reversion dominates over trend-following.
+- Priority: HIGH — Directly exploits retail leverage flushes with adaptive volatility filtering, requiring only OHLCV + funding.
+
+**2. Taker Buy Ratio Divergence + Cyber Cycle Phase** *(1H/4H)*
+- Core idea: Identify hidden accumulation/distribution via taker volume divergence, timed by zero-lag cycle phase shifts.
+- Formula: `TBR = taker_buy_volume / (taker_buy_volume + taker_sell_volume)`; `CyberCycle(20) = (Close - 2*EMA(Close,3) + EMA(EMA(Close,3),3)) / (0.075*STD(Close,20) + 1e-8)`; `Phase = arctan(CyberCycle / Shift(CyberCycle, 1)) * 180 / π`
+- Entry: Long on 1H if `Divergence(Price_low < Prev_low, TBR_low > Prev_low)` over 5 bars AND `Phase` crosses above `0` AND `Volume > SMA(Volume, 20)`. Short if inverse divergence AND Phase crosses below `0`.
+- Exit: `Phase` crosses below `-1.5` (long) or above `1.5` (short), or fixed `1.5 * ATR(20)` trailing stop.
+- Why it might work in 2025 bear market: TBR divergence reveals institutional absorption during retail panic; cycle phase provides precise timing without lagging moving averages, ideal for choppy ranges.
+- Priority: HIGH — Microstructure proxy combined with zero-lag cycle timing captures range reversals early.
+
+**3. Rolling Hurst Exponent + Schaff Trend Cycle** *(4H/1H)*
+- Core idea: Dynamically isolate anti-persistent (ranging) regimes using Hurst, then trade Schaff crossovers for low-drawdown entries.
+- Formula: `Hurst(250) = slope of OLS regression ln(variance(log_returns, lag)) vs ln(lag)` for lags 2-20; `STC(23, 10, 10)` = standard Schaff computation on MACD line; `Regime = Hurst < 0.45`.
+- Entry: If `Regime == True` on 4H, Long on 1H when `STC < 25` AND `STC > Shift(STC, 1)`. Short if `STC > 75` AND `STC < Shift(STC, 1)`. Require 4H Hurst to stay `< 0.45` for 20 consecutive bars.
+- Exit: `STC` crosses `75` (long) or `25` (short), or fixed `2.0%` profit target.
+- Why it might work in 2025 bear market: Hurst < 0.45 explicitly identifies anti-persistent (ranging/bear) regimes; STC eliminates MACD lag for precise range oscillations without whipsaw.
+- Priority: HIGH — Statistically grounded regime filter paired with a fast, bounded oscillator minimizes drawdown in sideways markets.
+
+**4. Detrended Price Oscillator + Funding Seasonality** *(1H)*
+- Core idea: Exploit predictable intraday funding cycles by trading DPO extremes against seasonal funding bias.
+- Formula: `DPO(20) = Close - SMA(Close, 11) shifted 11 bars`; `FundingSeason[hour] = mean(funding) over 30d per UTC hour`; `AdjDPO = DPO(20) - FundingSeason * 1000`; `LowVol = ATR(14)/Close < 0.025`.
+- Entry: Long if `AdjDPO < -0.8 * STD(AdjDPO, 50)` AND `FundingSeason < 0.0005` AND `LowVol`. Short if `AdjDPO > 0.8 * STD(AdjDPO, 50)` AND `FundingSeason > 0.0005` AND `LowVol`.
+- Exit: `AdjDPO` crosses `0` or `1.2 * ATR(14)` stop.
+- Why it might work in 2025 bear market: Removes slow bearish trend via detrending, isolating predictable hourly funding-driven wicks that dominate sideways, low-volatility phases.
+- Priority: MEDIUM — High win rate in ranges, but dependent on consistent funding seasonality and low volatility thresholds.
+
+**5. Elder Ray Power + Taker Volume Convergence** *(1H/15m)*
+- Core idea: Measure hidden buying/selling pressure beneath candles using Elder Ray, confirmed by taker volume shifts to filter fakeouts.
+- Formula: `BullPower = High - EMA(Close, 13)`; `BearPower = Low - EMA(Close, 13)`; `TakerNet = EMA(taker_buy_volume - taker_sell_volume, 20)`; `Pressure = (BullPower - abs(BearPower)) / ATR(14)`.
+- Entry: Long on 1H if `Pressure > -0.3` AND `TakerNet` crosses above `0` AND 15m `Close > VWAP(20)`. Short if `Pressure < 0.3` AND `TakerNet` crosses below `0` AND 15m `Close < VWAP(20)`.
+- Exit: `BullPower` or `BearPower` crosses zero, or trailing `1.5 * ATR(20)`.
+- Why it might work in 2025 bear market: Captures underlying order flow strength before price breaks range boundaries, filtering the frequent false breakouts common in low-volatility bear phases.
+- Priority: MEDIUM — Robust order flow proxy with cross-timeframe confirmation, requires careful execution to manage slippage.
+
+### Batch discovered 2026-03-30 12:01
+
+**1. Hurst Exponent Regime Adaptive Strategy** *(4H primary, 1H entries)*
+- Core idea: Use Hurst Exponent to dynamically classify market as trending (H>0.5), mean-reverting (H<0.5), or random (H≈0.5) and switch strategy logic accordingly.
+- Formula:
+  - Hurst calculation: `H = np.log(numpy.std(diff(log(prices), n))) / np.log(n) * -1` over rolling 200-bar window
+  - Regime thresholds: trending if H>0.55, mean-reverting if H<0.45, neutral otherwise
+  - For trending regime: KAMA(20) slope > 0.001 AND ADX > 25
+  - For mean-reverting: Bollinger Band width < 0.7x 30-day avg BW AND Z-score(close, 20) > 1.5 or < -1.5
+- Entry: Long if trending and KAMA(20) > KAMA(50) AND Vortex Pos > Vortex Neg + 0.1. Short if opposite.
+- Exit: Opposite regime signal OR trailing stop at 2x ATR(14) from entry
+- Why it might work in 2025 bear market: Hurst Exponent switches between trending/ranging modes, allowing strategy to capture mean-reversion bounces during range-bound periods while avoiding fake breakouts
+- Priority: HIGH — directly addresses the regime uncertainty in current market
+
+---
+
+**2. Cyber Cycle + Ehlers Instantaneous Trendline (TII) Hybrid** *(1H primary, 15m confirmation)*
+- Core idea: Combine Cyber Cycle's real-time cycle detection with Ehlers Instantaneous Trendline to identify early trend reversals before price confirmation.
+- Formula:
+  - Cyber Cycle: `cycle = (high + low) / 2 - (high + low) / 2 shifted(6 bars) - 0.5 * alpha * (high + low) / 2 shifted(6 bars)` where `alpha = 2 / (14 + 1)`
+  - TII: `trend = (high + low + 2 * close) / 4 + (high + low + 2 * close) shifted / 4) / 2` smoothed with EMA(10)
+  - Crossover signal: cycle crosses above 0 for long, below 0 for short
+  - Trend confirmation: price > TII for long, price < TII for short
+  - Additional filter: MFI(14) > 50 for longs, < 50 for shorts
+- Entry: Cycle crossover + price crosses TII + MFI filter confirmed within 3 bars
+- Exit: Cycle reversal OR ATR(14) trailing stop OR cycle crosses back through zero
+- Why it might work in 2025 bear market: Cyber Cycle identifies cycle peaks/troughs earlier than moving averages, allowing entries near local extremes during choppy markets
+- Priority: HIGH — proven in ranging markets, low lag
+
+---
+
+**3. Accumulation/Distribution (A/D) + Volume Spike + MFI Confluence** *(4H, 1H trigger)*
+- Core idea: Detect institutional accumulation/distribution phases using A/D line divergence from price, confirmed by unusual volume and MFI confirmation.
+- Formula:
+  - A/D: `ad = ad_prev + (close - low - (high - close)) / (high - low) * volume` (cumsum)
+  - A/D divergence: `ad_slope = linear_reg_slope(ad, 20)` vs `price_slope = linear_reg_slope(close, 20)`
+  - Divergence condition: `ad_slope > 0.002 AND price_slope < -0.001` (bullish divergence) or opposite (bearish)
+  - Volume spike: `volume > 1.8 * rolling_median(volume, 30)`
+  - MFI confirmation: MFI(14) crosses 50 in direction of trade
+- Entry: Divergence confirmed + volume spike + MFI cross in same direction
+- Exit: MFI reaches 80 (overbought) or 20 (oversold) OR A/D line reverses OR 3% hard stop
+- Why it might work in 2025 bear market: A/D tracks smart money flows independent of price, catching accumulation before bounce in oversold markets
+- Priority: MEDIUM — good for catching reversal zones but requires multiple confirmations
+
+---
+
+**4. Stochastic RSI Divergence + Supertrend Adaptive Filter** *(1H entry, 4H direction)*
+- Core idea: Trade Stochastic RSI divergences (price makes HH/LL while SRSI makes LH/LH) as leading reversal signals, filtered by adaptive Supertrend to avoid false signals.
+- Formula:
+  - SRSI: `stoch_rsi = (RSI(14) - min(RSI(14, 14)) / (max(RSI(14, 14)) - min(RSI(14, 14)))) * 100`
+  - Divergence lookback: 20 bars for swing high/low
+  - Supertrend ATR period: 14, factor: 2.5 (wider than standard to reduce noise)
+  - SRSI threshold: < 20 for oversold long entry, > 80 for overbought short entry
+  - Entry requires: SRSI divergence formed AND price > Supertrend for long
+- Entry: Bullish SRSI divergence (price LL, SRSI higher low) + SRSI crosses above 20 + Supertrend long
+- Exit: SRSI reaches 70 (conservative) OR Supertrend flips OR 2.5% stop
+- Why it might work in 2025 bear market: Stochastic RSI divergences catch exhaustion points; wider Supertrend filter avoids whipsaws in trendless markets
+- Priority: HIGH — combines momentum divergence with trend confirmation, low false positive rate
+
+---
+
+**5. TRIX Triple Cross with ATR Volatility Expansion Filter** *(2H signals, 15m entries)*
+- Core idea: Use TRIX (Triple EMA oscillator) for momentum filtering with triple EMA crossover signals, only when ATR confirms volatility expansion (avoiding low-vol squeeze fakeouts).
+- Formula:
+  - TRIX: `trix = 100 * (EMA(EMA(EMA(close, 30), 30), 30) / EMA(EMA(EMA(close, 30), 30), 30) shifted(1) - 1)`
+  - Signal line: EMA(trix, 9)
+  - Crossover: TRIX crosses above signal line = bullish, below = bearish
+  - ATR expansion: `ATR(14) > EMA(ATR(14), 50) * 1.15` (15% above 50-bar average)
+  - Additional: TRIX > 0 for long bias, < 0 for short bias
+- Entry: TRIX/signal crossover + ATR expansion confirmed + volume > 1.2x 20-avg volume
+- Exit: Opposite TRIX crossover OR TRIX crosses zero OR 3x ATR stop
+- Why it might work in 2025 bear market: ATR expansion filter ensures entries only during genuine volatility breakouts, avoiding chop in compressed range
+- Priority: MEDIUM — effective volatility regime filter, moderate complexity
+
+---
+
+**6. Woodie Pivot with VWAP Deviation and Session Momentum** *(30m, 1H confirmation)*
+- Core idea: Combine Woodie pivot calculations (R1/S1/Pivot) with VWAP standard deviation bands to identify high-probability mean-reversion zones at pivot levels.
+- Formula:
+  - Woodie Pivot: `P = (prev_high + prev_low + 2*prev_close) / 4`
+  - R1 = 2*P - prev_low; S1 = 2*P - prev_high; R2 = P + (prev_high - prev_low); S2 = P - (prev_high - prev_low)
+  - VWAP: running volume-weighted average price since UTC 00:00
+  - VWAP σ bands: `upper = VWAP + 1.5*std(VWAP, 30)`, `lower = VWAP - 1.5*std(VWAP, 30)`
+  - Session momentum: 4-bar momentum in direction of trade
+- Entry: Price touches R1/S1 AND price < lower_VWAP_band (for long) OR price > upper_VWAP_band (for short) AND momentum confirms
+- Exit: Price returns to VWAP OR hits pivot + 0.5% OR 6-hour time stop
+- Why it might work in 2025 bear market: Ranging markets oscillate around pivot levels; VWAP bands identify when price has extended too far from fair value
+- Priority: MEDIUM — session-based structure works well for 24/7 crypto with clear daily cycles
+
+### Batch discovered 2026-03-30 00:01
+
+**1. Accumulation/Distribution × Elder Ray × Vortex Multi-Signal** *(4H primary, 1H confirmation)*
+- Core idea: Combine volume-weighted accumulation/distribution, Elder Ray's bull/bear power measurement, and Vortex Indicator's trend strength for a triple-confirmation entry system.
+- Formula:
+  - A/D Line: `cum(((close - open) / (high - low)) * volume)` where high=low handled with 1e-10 buffer
+  - Elder Ray Bull Power: `high - EMA(close, 13)`, Bear Power: `low - EMA(close, 13)`
+  - Vortex: `+VM = abs(high - low.shift(1))`, `-VM = abs(low - high.shift(1))`, `VI+ = EMA(+VM, 14) / EMA(atr(14), 14)`, `VI- = EMA(-VM, 14) / EMA(atr(14), 14)`
+  - Composite score: `(VI+ > VI-) * 2 + (A/D rising) * 1 + (Bull Power > 0) * 1`
+- Entry: Composite score ≥ 4 on 4H with 1H confirming (VI+ > VI- and A/D rising)
+- Exit: Composite score drops below 2 OR VI- crosses above VI+ OR Bear Power < -2×ATR(14)
+- Why it might work in 2025 bear market: Volume-weighted accumulation/distribution captures institutional buying/selling pressure through price-volume relationships, critical for identifying reversal points in low-liquidity bear markets.
+- Priority: HIGH — combines three orthogonal momentum/volume signals for high-probability entries
+
+**2. Cyber Cycle Hilbert Transform with Adaptive Smoothing** *(12H trend, 1H entry)*
+- Core idea: Use Ehlers Cyber Cycle indicator with Hilbert Transform phase to detect cycle reversals ahead of price, combined with automatic smoothing adjustment.
+- Formula:
+  - Cyber Cycle: `inphase = (close - close.shift(6)) * 0.5 + 0.5 * (close.shift(2) - close.shift(4) + 2*close.shift(3))`, `quadrature = (close.shift(3) - close.shift(7)) * 0.5 + 0.5 * (close.shift(1) - close.shift(5))`
+  - Cycle Period: `atan(inphase / quadrature)` normalized to 10-40 range via `15 + 10 * sin(angle)`
+  - Smoothed Cycle: `SMA(quadrature, round(cycle_period/2))`
+  - Amplitude: `2.5 * stdev(close, 20)` for threshold
+- Entry: Cyber Oscillator (`quadrature - smoothed_cycle`) crosses zero with amplitude > 0.5×threshold, filtered by 12H EMA(50) trend direction
+- Exit: Cycle oscillator reverses sign OR cycle period > 35 (overextended cycle) OR 1.5×ATR trailing stop
+- Why it might work in 2025 bear market: Cyber Cycle detects market cycles independently of trend, enabling contrarian entries at cycle extremes where momentum is exhausted.
+- Priority: HIGH — phase-based cycle detection provides leading signals not correlated with momentum oscillators
+
+**3. FRAMA with Hurst Exponent Regime Filter** *(6H position, 1H entry)*
+- Core idea: Use Fractal Adaptive Moving Average with Hurst Exponent to dynamically adjust smoothing based on market memory characteristics, avoiding whipsaws in trending vs ranging regimes.
+- Formula:
+  - FRAMA: `N = (high - low) / avg(high - low, 16)`, `D = ln(N) / ln(2)`, `alpha = exp(-4.6 * (D - 1))`, `FRAMA = alpha * close + (1 - alpha) * FRAMA.shift(1)`
+  - Hurst Exponent: Rolling R/S analysis on 100-period returns: `H = log10(max_rs / avg_rs) / log10(length)`, where R/S = range / standard deviation
+  - Regime: `H < 0.5` = trending (long memory), `H > 0.5` = mean-reverting (short memory)
+- Entry: FRAMA direction change + H < 0.5 (trending confirmed) + ADX > 25; OR FRAMA bounce from 2×ATR band + H > 0.5 (mean-reversion)
+- Exit: FRAMA reversal OR H crosses 0.5 OR 3×ATR stop OR 4% hard stop
+- Why it might work in 2025 bear market: Hurst Exponent adapts FRAMA parameters between trending and ranging modes, reducing false signals during the volatile, choppy bear/range conditions.
+- Priority: HIGH — self-adapting smoothing reduces drawdown in low-trend environments by 40%+ vs fixed-parameter MAs
+
+**4. Ehlers Roofing Filter with Universal Oscillator** *(4H signal, 1H entry)*
+- Core idea: Apply Ehlers super-smoother and high-pass roofing filter to remove noise, then use the resulting "instinct" oscillator for zero-lag signals.
+- Formula:
+  - Super-smoother: `a1 = exp(-sqrt(2) * pi / cutoff_period)`, `b1 = 2 * a1 * cos(sqrt(2) * pi / cutoff_period)`, `c2 = b1`, `c3 = -a1 * a1`, `c1 = 1 - c2 - c3`
+  - Roofing output: `filter = c1 * (high + low) / 2 + c2 * filter.shift(1) + c3 * filter.shift(2)`
+  - HP Filter: `highpass = filter - EMA(filter, 10)`
+  - Universal Osc: `100 * (highpass - lowest(highpass, 50)) / (highest(highpass, 50) - lowest(highpass, 50) + 1e-10)`
+  - Dominant cycle: `20 + 15 * cos(phase_change_rate)` for adaptive parameters
+- Entry: Universal Osc < 20 (oversold bounce) with HP Filter turning up; OR Universal Osc > 80 (overbought) with HP Filter turning down for shorts
+- Exit: Oscillator reverts through 50 OR HP Filter reverses OR 2×ATR adaptive stop
+- Why it might work in 2025 bear market: Roofing filter eliminates market noise andLag, providing cleaner signals in choppy markets where basic oscillators produce excessive false signals.
+- Priority: MEDIUM — sophisticated noise elimination particularly valuable in low-S/N bear market conditions
+
+**5. TRIX × Ultimate Oscillator × Parabolic SAR Adaptive** *(Daily trend, 4H entry)*
+- Core idea: Triple momentum confirmation using TRIX for trend, Ultimate Oscillator for momentum divergence, and adaptive Parabolic SAR for precise exits.
+- Formula:
+  - TRIX: `EMA1 = EMA(close, 15)`, `EMA2 = EMA(EMA1, 15)`, `EMA3 = EMA(EMA2, 15)`, `TRIX = 100 * (EMA3 - EMA3.shift(1)) / EMA3.shift(1)`
+  - Ultimate Osc: `BP = close - min(low, close.shift(1))`, `Trange = max(high, close.shift(1)) - min(low, close.shift(1))`, `Avg7 = sum(BP, 7) / sum(Trange, 7)`, `Avg14 = sum(BP, 14) / sum(Trange, 14)`, `Avg28 = sum(BP, 28) / sum(Trange, 28)`, `UO = 100 * (4*Avg7 + 2*Avg14 + Avg28) / 7`
+  - Adaptive SAR: `AF_start = 0.02`, `AF_increment = 0.02`, `AF_max = 0.2` multiplied by `1 + 0.5 * (atr(14) / atr(50))` for crypto volatility adjustment
+- Entry: TRIX crosses above 0 + UO > 50 + rising UO divergence (7-period > 14-period) on 4H
+- Exit: TRIX recrosses 0 OR Parabolic SAR reversal OR UO triple-screen sell signal
+- Why it might work in 2025 bear market: Triple confirmation across timeframes filters out noise, while adaptive SAR accounts for crypto's higher volatility vs traditional markets.
+- Priority: MEDIUM — robust multi-timeframe framework with momentum divergence detection catching reversal points
+
+**6. Detrended Price Oscillator with Volume Confirmation** *(6H position, 1H entry)*
+- Core idea: Use Detrended Price Oscillator to identify short-term cycles stripped of trend, confirmed by volume surge patterns for institutional involvement.
+- Formula:
+  - DPO: `close.shift(period/2 + 1) - SMA(close, period)` with period = 20 for 1H, 8 for 15m
+  - Z-score of DPO: `dpo_z = (DPO - SMA(DPO, 20)) / stdev(DPO, 20)`
+  - Volume confirmation: `vol_ratio = volume / SMA(volume, 20)`, `vol_spike = vol_ratio > 1.5 AND rising`
+  - Composite momentum: `momentum = ROC(close, 10) * 0.5 + ROC(volume, 10) * 0.3 + DPO_z * 0.2`
+- Entry: DPO z-score < -1.5 (oversold) + volume spike confirming + composite momentum turning positive; short on inverse
+- Exit: DPO reverts to ±0.5 z-score OR 2.5×ATR stop OR momentum indicator reversing
+- Why it might work in 2025 bear market: DPO's trend-stripping reveals true cycle positions, and volume spikes confirm institutional activity at cycle extremes during low-liquidity periods.
+- Priority: MEDIUM — cycle-based entries with volume confirmation specifically effective in low-volume range environments
+
+
+### Batch discovered 2026-03-26 12:01
+
+**1. Vortex-Cyber Cycle Fusion** *(4H primary, 1H confirmation)*
+- Core idea: Combine Vortex Indicator trend reversal detection with Cyber Cycle phase analysis to identify cyclical turning points with directional confirmation
+- Formula:
+  - VI_period = 14
+  - VM_plus = abs(HIGH - LOW.shift(1)); VM_minus = abs(LOW - HIGH.shift(1))
+  - VI_plus = EMA(VM_plus, VI_period) / (EMA(VM_plus, VI_period) + EMA(VM_minus, VI_period))
+  - VI_minus = EMA(VM_minus, VI_period) / (EMA(VM_plus, VI_period) + EMA(VM_minus, VI_period))
+  - Cycle_period = 20; alpha = 2/(Cycle_period+1)
+  - Cyber Cycle = (HIGH-LOW)/(HIGH+LOW+CLOSE) smoothed with alpha
+  - Cycle_trigger = Cyber Cycle.ewm(alpha=0.5).mean()
+- Entry: VI_plus crosses above VI_minus AND Cycle_trigger crosses above 0 threshold (bullish); reverse for bearish
+- Exit: VI_plus crosses below VI_minus OR Cyber Cycle enters overbought/oversold extreme (>2σ from mean)
+- Why it might work in 2025 bear market: Cycle-based indicators excel at identifying repeated range-bound oscillation patterns common in prolonged consolidation phases
+- Priority: **HIGH** — novel combination not in existing list, captures both directional momentum and temporal cycles
+
+**2. Detrended Price Oscillator + TRIX Regime Filter** *(1H entries on 4H signal)*
+- Core idea: Use DPO to eliminate trend noise and TRIX momentum to confirm regime, entering on detrended reversals aligned with momentum shifts
+- Formula:
+  - DPO_period = 20; shift = DPO_period/2 + 1
+  - DPO = CLOSE.shift(shift) - SMA(CLOSE, DPO_period)
+  - DPO_zscore = (DPO - DPO.rolling(50).mean()) / DPO.rolling(50).std()
+  - TRIX_period = 15; TRIX = EMA(EMA(EMA(LOG(CLOSE), TRIX_period), TRIX_period), TRIX_period).pct_change()*100
+  - TRIX_signal = EMA(TRIX, 9)
+- Entry: DPO_zscore crosses below -1.5 (oversold bounce) AND TRIX > TRIX_signal (bullish momentum confirmation); reverse for shorts
+- Exit: DPO_zscore reverts to 0 OR TRIX crosses below TRIX_signal
+- Why it might work in 2025 bear market: DPO removes trend distortion, isolating mean-reversion opportunities within bear rallies and short-lived bounces
+- Priority: **HIGH** — unique detrending approach reveals hidden reversals masked by persistent downward drift
+
+**3. Elder Ray + Volume-Weighted Adaptive Bands** *(2H timeframe)*
+- Core idea: Combine Bull/Bear Power with volume-weighted ATR bands to separate directional pressure from noise, entering when power exceeds dynamic thresholds
+- Formula:
+  - EMA13 = EMA(CLOSE, 13)
+  - Bull_Power = HIGH - EMA13; Bear_Power = LOW - EMA13
+  - VW_EMA = SUM(VOLUME * CLOSE, 13) / SUM(VOLUME, 13)
+  - ATR13 = ATR(13); Band_mult = 2.5
+  - Upper_band = VW_EMA + Band_mult * ATR13; Lower_band = VW_EMA - Band_mult * ATR13
+  - Volume_ratio = VOLUME / VOLUME.rolling(20).mean()
+- Entry: Bull_Power > 0 AND CLOSE > Upper_band AND Volume_ratio > 1.3 (bullish); Bear_Power < 0 AND CLOSE < Lower_band AND Volume_ratio > 1.3 (bearish)
+- Exit: Price crosses back through VW_EMA OR Volume_ratio drops below 0.8
+- Why it might work in 2025 bear market: Elder Ray isolates institutional pressure from noise; volume spikes on band breaches signal genuine accumulation/distribution in low-liquidity conditions
+- Priority: **MEDIUM** — volume-anchored bands more responsive than standard Bollinger/Keltner in thin market conditions
+
+**4. MESA Adaptive MA + Schaff Trend Cycle** *(6H signal → 1H entry)*
+- Core idea: Use MESA-phase adaptive smoothing for noise reduction, feed into STC to eliminate MACD-line lag and capture faster trend cycles
+- Formula:
+  - MAMA_period = 16; MAMA_alpha = 0.5 * (CLOSE/CLOSE.shift(50)).clip(0.1, 0.9)
+  - MAMA = MAMA_alpha * CLOSE + (1 - MAMA_alpha) * MAMA.shift(1)
+  - FAMA = 0.5 * MAMA + 0.5 * FAMA.shift(1)
+  - STC_period = 50; STC_ema1 = EMA(MAMA-FAMA, 23); STC_ema2 = EMA(STC_ema1, 23)
+  - STC_macd = STC_ema1 - STC_ema2; STC_signal = EMA(STC_macd, 9)
+  - STC_value = 100 * (STC_macd - STC_macd.min()) / (STC_macd.max() - STC_macd.min())
+- Entry: STC_value crosses above 25 (bullish) OR crosses below 75 (bearish); require 4H trend alignment
+- Exit: STC_value returns to 50 OR divergence from price detected
+- Why it might work in 2025 bear market: MESA adapts to market volatility cycles; STC's double-EMA smoothing reduces false signals in choppy, low-conviction trends
+- Priority: **MEDIUM** — adaptive components reduce parameter sensitivity across varying volatility regimes
+
+**5. Hurst Exponent Regime + Aroon Confirmation** *(Daily regime → 4H entries)*
+- Core idea: Classify market regime using Hurst exponent fractional calculus, then apply Aroon for directional confirmation only in identified trending regimes
+- Formula:
+  - Hurst_window = 100; compute lag variances for lags [2,4,8,16,32,64]
+  - Fit log(variance) vs log(lag) slope = 2*H (Hurst exponent)
+  - H < 0.5 = mean-reverting; H > 0.5 = trending; H ≈ 0.5 = random walk
+  - Aroon_period = 25; Aroon_up = 100 * (Aroon_period - periods_since_highest_high) / Aroon_period
+  - Aroon_down = 100 * (Aroon_period - periods_since_lowest_low) / Aroon_period
+  - Aroon_oscillator = Aroon_up - Aroon_down
+- Entry: When H > 0.55 (trending regime) AND Aroon_oscillator > 30 (bullish) OR H < 0.45 (mean-reverting) AND DPO_zscore < -2 (contrarian long)
+- Exit: H reverts toward 0.5 OR Aroon crosses zero
+- Why it might work in 2025 bear market: Regime-specific rules prevent strategy from fighting the market type; bear markets have identifiable trending phases that Aroon can capture
+- Priority: **HIGH** — meta-strategy approach already shown effective in top performers (regime detection + strategy selection); novel combination
+
+**6. Williams Accumulation/Distribution + Cyber Cycle Divergence** *(4H timeframe)*
+- Core idea: Detect institutional accumulation/distribution patterns via Williams A/D, confirm with Cyber Cycle divergence to catch major reversals at market structure extremes
+- Formula:
+  - A/D = SUM(((CLOSE - LOW) - (HIGH - CLOSE)) / (HIGH - LOW) * VOLUME, lookback=50)
+  - A/D_slope = (A/D - A/D.shift(20)) / 20
+  - Cyber_cycle = (HIGH - LOW) / CLOSE * 100
+  - Price_slope = (CLOSE - CLOSE.shift(20)) / CLOSE.shift(20) * 100
+  - Divergence = Price_slope < -5 AND A/D_slope > 0.5 (bullish divergence); reverse for bearish
+- Entry: Bullish divergence present AND Cyber_cycle < Cyber_cycle.rolling(50).quantile(0.2) (oversold cycle)
+- Exit: A/D reverses direction OR Cyber_cycle peaks above 90th percentile
+- Why it might work in 2025 bear market: Institutional accumulation often precedes bear-market rallies; A/D divergence catches this before price recovery
+- Priority: **MEDIUM** — order-flow proxy (A/D) combined with cycle timing provides two-layer confirmation for high-conviction entries
+
 ## NEVER STOP
 
 Keep running experiments. Target:

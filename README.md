@@ -34,7 +34,7 @@ The AI does NOT:
 program.md          ← Research protocol & strategy knowledge base (human-written)
     ↓
 agent_research.py   ← Main loop: LLM generates → validate → backtest → keep/discard
-    ↓                  Uses: llm_client.py (OpenAI/Anthropic/Gemini)
+    ↓                  Uses: llm_client.py (official Ollama Cloud/local, optional other providers)
 strategy.py         ← THE ONLY FILE THE LLM EDITS (mutable)
     ↓
 backtest.py         ← Honest simulation engine (IMMUTABLE)
@@ -53,6 +53,15 @@ See [Architecture Details](docs/architecture.md) for the full breakdown.
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env  # Add your LLM API key
+
+# Primary: official Ollama Cloud
+# Set OLLAMA_API_KEY in .env
+#
+# Optional: local Ollama override
+# curl -fsSL https://ollama.com/install.sh | sh
+# ollama pull gemma4:e2b
+# export OLLAMA_BASE_URL=http://127.0.0.1:11434/api/chat
+# export OLLAMA_MODEL=gemma4:e2b
 
 # 2. Download data (Binance historical, ~571MB)
 python prepare.py
@@ -160,20 +169,32 @@ See [program.md](program.md) for the full research protocol and experiment phase
 
 ## LLM Providers
 
-Supports any OpenAI-compatible API, Anthropic, or Google Gemini. Configure in `.env`:
+Primary setup uses official Ollama for both cloud and local execution. Configure in `.env`:
 
 ```bash
-# OpenAI-compatible (e.g., Alibaba DashScope, vLLM, OpenRouter)
-OPENAI_API_KEY=your-key
-OPENAI_BASE_URL=https://your-endpoint/v1
-OPENAI_MODEL=your-model
+# Official Ollama Cloud
+OLLAMA_API_KEY=your-key
+OLLAMA_BASE_URL=https://ollama.com/api/chat
+OLLAMA_MODEL=nemotron-3-super
+OLLAMA_ANALYSIS_MODEL=glm-5
 
-# Anthropic
-ANTHROPIC_API_KEY=sk-ant-...
-
-# Google Gemini
-GEMINI_API_KEY=AI...
+# Optional local override
+# OLLAMA_BASE_URL=http://127.0.0.1:11434/api/chat
+# OLLAMA_MODEL=gemma4:e2b
 ```
+
+Recommended cloud models for this repo from current benchmarks:
+- `nemotron-3-super`: fastest valid large-prompt code generation
+- `glm-5`: strongest review/reasoning model in our pipeline-analysis benchmark
+- `qwen3-coder-next`: slower but coding-focused fallback
+- `gemma3:27b`: working Google-family fallback on cloud
+
+`gemma4` is currently a local Ollama option here. The Ollama Cloud API did not expose it in our tests, even though the local library page exists.
+
+Suggested model split:
+- `OLLAMA_MODEL=nemotron-3-super` for `agent_research.py`
+- `OLLAMA_ANALYSIS_MODEL=glm-5` for `auto_concept_research.py` and `auto_process_review.py`
+- Optional `OLLAMA_CONVERT_MODEL=qwen3-coder-next` for Pine-to-Python conversion tools
 
 ## License
 

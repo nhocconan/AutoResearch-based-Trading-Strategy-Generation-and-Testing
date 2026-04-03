@@ -61,8 +61,8 @@ research:
   baseline: "sma_crossover"
 
 # --- LLM API Settings ---
-# Supports OpenAI-compatible, Anthropic, Google Gemini, and Ollama Cloud
-# Set via environment variables or override here
+# Official Ollama is the primary path for both cloud and local models.
+# Cloud can be selected via OLLAMA_BASE_URL=https://ollama.com/api/chat.
 llm:
   # Default provider: openai | anthropic | gemini | ollama
   default_provider: "ollama"
@@ -70,17 +70,27 @@ llm:
   providers:
     ollama:
       api_key_env: "OLLAMA_API_KEY"
+      base_url_env: "OLLAMA_BASE_URL"
+      model_env: "OLLAMA_MODEL"
       base_url: "https://ollama.com/api/chat"
-      model: "minimax-m2.7"
+      model: "nemotron-3-super"
+      fallback_models:
+        - "qwen3-coder-next"
+        - "gemma3:27b"
       max_tokens: 8192
-      temperature: 0.7
+      timeout: 600
+      temperature: 0.6
+      options:
+        num_ctx: 32768
+        top_p: 0.95
+        top_k: 64
 
     openai:
       api_key_env: "OPENAI_API_KEY"
-      base_url_env: "OPENAI_BASE_URL"     # For custom endpoints (e.g. DashScope, vLLM)
-      model_env: "OPENAI_MODEL"           # Override model via env var
-      base_url: null                        # Fallback if OPENAI_BASE_URL not set
-      model: "qwen3-235b-a22b"            # Default model (overridden by OPENAI_MODEL env)
+      base_url_env: "OPENAI_BASE_URL"       # For custom OpenAI-compatible endpoints
+      model_env: "OPENAI_MODEL"
+      base_url: null
+      model: "gpt-4.1-mini"
       max_tokens: 8192
       temperature: 0.7
 

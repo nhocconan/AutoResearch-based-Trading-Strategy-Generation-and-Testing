@@ -26,6 +26,50 @@ else
     pip install -r requirements.txt
 fi
 
+DEFAULT_PROVIDER=$(awk -F'"' '/default_provider:/ {print $2; exit}' config.yaml)
+OLLAMA_URL="${OLLAMA_BASE_URL:-$(awk -F'"' '/base_url:/ && in_ollama {print $2; exit} /ollama:/ {in_ollama=1}' config.yaml)}"
+OLLAMA_API_ROOT="${OLLAMA_URL%/api/chat}"
+export OLLAMA_HOME="${OLLAMA_HOME:-$(pwd)/.ollama}"
+
+ensure_local_ollama() {
+    if [ "${DEFAULT_PROVIDER:-}" != "ollama" ]; then
+        return 0
+    fi
+
+    case "${OLLAMA_API_ROOT:-}" in
+        http://127.0.0.1:*|http://localhost:*|http://[::1]:*)
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+
+    if ! command -v ollama >/dev/null 2>&1; then
+        echo "ERROR: default provider is ollama but 'ollama' is not installed."
+        exit 1
+    fi
+
+    if curl -fsS "${OLLAMA_API_ROOT}/api/tags" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    mkdir -p logs
+    mkdir -p "${OLLAMA_HOME}"
+    echo "=== Starting local Ollama ==="
+    nohup ollama serve >> logs/ollama-server.log 2>&1 &
+
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 1
+        if curl -fsS "${OLLAMA_API_ROOT}/api/tags" >/dev/null 2>&1; then
+            echo "Ollama is ready at ${OLLAMA_API_ROOT}"
+            return 0
+        fi
+    done
+
+    echo "ERROR: Ollama did not become ready at ${OLLAMA_API_ROOT}"
+    exit 1
+}
+
 PYTHON="$(which python3)"
 
 case "${1:-run}" in
@@ -45,6 +89,21 @@ case "${1:-run}" in
 
     --status|-s)
         echo "=== Process Status ==="
+        echo ""
+        echo "LLM provider:"
+        echo "  Default: ${DEFAULT_PROVIDER:-unknown}"
+        if [ "${DEFAULT_PROVIDER:-}" = "ollama" ]; then
+            if command -v ollama >/dev/null 2>&1; then
+                echo "  Binary: $(command -v ollama)"
+            else
+                echo "  Binary: not installed"
+            fi
+            if curl -fsS "${OLLAMA_API_ROOT}/api/tags" >/dev/null 2>&1; then
+                echo "  Ollama API: up (${OLLAMA_API_ROOT})"
+            else
+                echo "  Ollama API: down (${OLLAMA_API_ROOT})"
+            fi
+        fi
         echo ""
         echo "Research loop:"
         ps aux | grep "agent_research" | grep -v grep || echo "  Not running"
@@ -125,6 +184,7 @@ case "${1:-run}" in
 
     --all|-a)
         echo "=== Full setup: prepare + dashboard + research ==="
+        ensure_local_ollama
         # Check data
         if [ ! -d data/processed/klines ]; then
             echo "Downloading data..."
@@ -147,6 +207,7 @@ case "${1:-run}" in
 
     --run|run)
         MAX="${2:-999999}"
+        ensure_local_ollama
         # Start dashboard if not running
         if ! pgrep -f "dashboard.py" > /dev/null 2>&1; then
             $PYTHON dashboard.py &
