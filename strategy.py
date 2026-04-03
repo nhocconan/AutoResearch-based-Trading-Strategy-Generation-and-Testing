@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-Experiment #877: 4h Donchian(20) breakout + 1d HMA(21) trend filter + volume spike (>2.0x) + ATR(14) stoploss
-HYPOTHESIS: Donchian breakouts capture momentum; 1d HMA filters trend direction to avoid counter-trend trades; volume spike confirms institutional interest. Works in bull/bear: in bull trends, HMA rising filters for longs; in bear trends, HMA falling filters for shorts. Discrete sizing 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #877: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: Donchian(20) breakouts on 4h capture intermediate-term momentum, filtered by 
+1d HMA(21) trend direction for bias and volume confirmation (>1.8x average) for conviction. 
+Long when price breaks above Donchian upper AND 1d HMA rising AND volume spike. 
+Short when price breaks below Donchian lower AND 1d HMA falling AND volume spike. 
+Uses ATR(14) stoploss (2.0x) and discrete position sizing (0.25) to minimize fee churn. 
+Target: 100-180 total trades over 4 years (25-45/year) within winning range.
 """
 
 import numpy as np
@@ -106,8 +111,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 3 bars (~12h on 4h) to avoid overtrading
-            if bars_since_entry > 3:
+            # Optional: time-based exit after 4 bars (~16h on 4h) to avoid overtrading
+            if bars_since_entry > 4:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -118,8 +123,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
             # Long: price breaks above Donchian upper AND 1d HMA rising
