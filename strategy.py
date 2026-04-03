@@ -52,8 +52,8 @@ def generate_signals(prices):
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     # Smoothed +DM, -DM, ATR
     tr_ma = pd.Series(atr1w).ewm(span=14, min_periods=14, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, min_period=14, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, min_period=14, adjust=False).mean().values
     # +DI and -DI
     plus_di = 100 * plus_dm_smooth / tr_ma
     minus_di = 100 * minus_dm_smooth / tr_ma
