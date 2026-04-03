@@ -1,19 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #220: 4h Donchian Breakout + Volume + ATR Stoploss
+Experiment #221: 4h Donchian Breakout + Volume Spike + ATR Stoploss
 
-HYPOTHESIS: Donchian(20) breakouts on 4h with volume confirmation and ATR-based
-stoploss capture strong trending moves while minimizing whipsaw. Using 1d timeframe
-for trend filter (price > EMA200) ensures we only trade in the direction of the
-higher timeframe trend. This structure works in both bull (breakouts continue) and
-bear (failed reversals at channels) markets. Target: 75-200 trades over 4 years.
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe with volume confirmation
+capture sustained momentum moves. In bull markets, upward breakouts continue;
+in bear markets, downward breakouts capture crash moves. Volume filter ensures
+breakouts have conviction. ATR-based stoploss limits drawdown. Target: 20-50
+trades/year (80-200 total over 4 years) to minimize fee drag and improve
+test generalization. Uses 1d EMA200 as trend filter to avoid counter-trend
+breakouts in strong opposing trends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_220_4h_donchian_breakout_volume_v1"
+name = "exp_221_4h_donchian_breakout_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,25 +26,25 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA200 trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d EMA200 for trend filter
     ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
     ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # === 4h Indicators: Donchian channels (20-period) ===
-    # Calculate rolling max/min for Donchian channels
+    # === 4h Indicators: Donchian Channels (20-period) ===
+    # Rolling highest high and lowest low over 20 periods
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: ATR(14) for stoploss and volume filter ===
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
+    # === 4h Indicators: ATR(14) for stoploss ===
+    tr_4h = np.zeros(n)
+    tr_4h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr_4h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    atr_14 = pd.Series(tr_4h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,7 +62,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 100  # Warmup for 4h indicators stability
+    warmup = 100  # Warmup for Donchian and 1d indicators stability
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -70,17 +72,17 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # --- 1d Trend Filter ---
-        price = close[i]
-        trend_up = price > ema200_1d_aligned[i]
-        trend_down = price < ema200_1d_aligned[i]
+        # --- Trend Filter: 1d EMA200 ---
+        price_above_ema200 = close[i] > ema200_1d_aligned[i]
+        price_below_ema200 = close[i] < ema200_1d_aligned[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio[i] > 1.5
         
-        # --- Donchian Levels ---
+        # --- Donchian Breakout Levels ---
         upper_channel = highest_high[i]
         lower_channel = lowest_low[i]
+        price = close[i]
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -104,23 +106,9 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry < 3:
+            # Minimum holding period of 2 bars to reduce churn
+            if bars_since_entry < 2:
                 signals[i] = position_side * SIZE
-                continue
-            
-            # Exit on opposite Donchian touch (trailing stop)
-            if position_side > 0 and price < lowest_low[i]:
-                in_position = False
-                position_side = 0
-                bars_since_entry = 0
-                signals[i] = 0.0
-                continue
-            elif position_side < 0 and price > highest_high[i]:
-                in_position = False
-                position_side = 0
-                bars_since_entry = 0
-                signals[i] = 0.0
                 continue
             
             # Hold position
@@ -128,11 +116,11 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long breakout: Price > Upper Donchian + volume spike + 1d trend up
-        long_breakout = (price > upper_channel) and volume_spike and trend_up
+        # Long breakout: Price > upper Donchian channel + volume spike + price > 1d EMA200
+        long_breakout = (price > upper_channel) and volume_spike and price_above_ema200
         
-        # Short breakout: Price < Lower Donchian + volume spike + 1d trend down
-        short_breakout = (price < lower_channel) and volume_spike and trend_down
+        # Short breakout: Price < lower Donchian channel + volume spike + price < 1d EMA200
+        short_breakout = (price < lower_channel) and volume_spike and price_below_ema200
         
         if long_breakout:
             in_position = True
