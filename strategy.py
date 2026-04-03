@@ -2,7 +2,7 @@
 """
 Experiment #1993: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation + ATR stoploss
 HYPOTHESIS: Donchian channel breakouts capture institutional order flow. 
-- Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average
+- Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average  
 - HTF: 12h HMA(21) trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
 - Works in bull/bear markets by following 12h institutional trend with precise 4h entries.
