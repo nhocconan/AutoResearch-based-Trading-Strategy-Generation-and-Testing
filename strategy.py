@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #120: 4h Donchian(20) breakout + 1d Camarilla pivot levels + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) with volume confirmation capture institutional order flow. Works in bull/bear via pivot structure that adapts to volatility. Uses discrete sizing (0.25) and ATR stoploss (2.0*ATR). Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #114: 1h Donchian(20) breakout + 4h/1d HMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: 1h Donchian breakouts in direction of 4h/1d HMA trend with volume confirmation capture medium-term momentum while minimizing overtrading. Uses discrete sizing (0.20), session filter (08-20 UTC), and ATR stoploss (2.0*ATR). Target: 75-150 total trades over 4 years (19-37/year) on 1h timeframe. Works in bull/bear via multi-timeframe trend filter and volatility-based stops.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_120_4h_donchian20_1d_camarilla_vol_v1"
-timeframe = "4h"
+name = "exp_114_1h_donchian20_4h_1d_hma_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,48 +19,52 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
+    # === HTF: 4h data for HMA(21) trend (Call ONCE before loop) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = pd.Series(df_4h['close'].values)
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
+    wma_half = close_4h.ewm(span=half_len, adjust=False).mean()
+    wma_full = close_4h.ewm(span=21, adjust=False).mean()
+    raw_hma = 2 * wma_half - wma_full
+    hma_4h = raw_hma.ewm(span=sqrt_len, adjust=False).mean()
+    hma_4h_values = hma_4h.values
+    daily_trend_4h = np.where(close_4h > hma_4h_values, 1, -1)
+    hma_trend_4h_aligned = align_htf_to_ltf(prices, df_4h, daily_trend_4h)
+    
+    # === HTF: 1d data for HMA(21) trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    # Calculate Camarilla levels from previous 1d bar (OHLC)
-    prev_close_1d = df_1d['close'].shift(1).values  # previous bar close
-    prev_high_1d = df_1d['high'].shift(1).values
-    prev_low_1d = df_1d['low'].shift(1).values
+    close_1d = pd.Series(df_1d['close'].values)
+    wma_half_1d = close_1d.ewm(span=half_len, adjust=False).mean()
+    wma_full_1d = close_1d.ewm(span=21, adjust=False).mean()
+    raw_hma_1d = 2 * wma_half_1d - wma_full_1d
+    hma_1d = raw_hma_1d.ewm(span=sqrt_len, adjust=False).mean()
+    hma_1d_values = hma_1d.values
+    daily_trend_1d = np.where(close_1d > hma_1d_values, 1, -1)
+    hma_trend_1d_aligned = align_htf_to_ltf(prices, df_1d, daily_trend_1d)
     
-    # Typical price for pivot calculation
-    typical_price = (prev_high_1d + prev_low_1d + prev_close_1d) / 3.0
-    range_1d = prev_high_1d - prev_low_1d
-    
-    # Camarilla levels
-    r3 = typical_price + range_1d * 1.1 / 4
-    s3 = typical_price - range_1d * 1.1 / 4
-    r4 = typical_price + range_1d * 1.1 / 2
-    s4 = typical_price - range_1d * 1.1 / 2
-    
-    # Align to 4h timeframe (shifted by 1 for completed bar)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 1h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 1h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)  # default to 1.0 for warmup period
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 1h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
+    # === Session filter: 08-20 UTC ===
+    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.20
     
     # Position tracking state variables
     in_position = False
@@ -73,8 +77,15 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(hma_trend_4h_aligned[i]) or
+            np.isnan(hma_trend_1d_aligned[i]) or np.isnan(atr[i])):
+            signals[i] = 0.0
+            continue
+        
+        # --- Session Filter: Only trade 08-20 UTC ---
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)
+        if not in_session:
             signals[i] = 0.0
             continue
         
@@ -87,13 +98,9 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- Camarilla Logic ---
-        # Near R3/S3: mean reversion (fade)
-        # Near R4/S4: breakout continuation
-        near_r3 = abs(price - r3_aligned[i]) / price < 0.005  # within 0.5%
-        near_s3 = abs(price - s3_aligned[i]) / price < 0.005
-        near_r4 = abs(price - r4_aligned[i]) / price < 0.005
-        near_s4 = abs(price - s4_aligned[i]) / price < 0.005
+        # --- Multi-Timeframe Trend: Require both 4h and 1d bullish/bearish ---
+        bullish_trend = (hma_trend_4h_aligned[i] > 0) and (hma_trend_1d_aligned[i] > 0)
+        bearish_trend = (hma_trend_4h_aligned[i] < 0) and (hma_trend_1d_aligned[i] < 0)
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -118,8 +125,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~24h on 4h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 12 bars (~12h on 1h) to avoid overtrading
+            if bars_since_entry > 12:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -130,58 +137,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        if volume_spike:
-            # Long logic
-            if breakout_up:
-                # If near R4, strong breakout continuation
-                if near_r4:
-                    in_position = True
-                    position_side = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                    signals[i] = SIZE
-                # If near R3, mean reversion fade (only if not breaking out strongly)
-                elif near_r3 and not breakout_up:
-                    # Actually, if we're near R3 and price is below R3, look for bounce
-                    if price < r3_aligned[i]:
-                        in_position = True
-                        position_side = 1
-                        entry_price = close[i]
-                        bars_since_entry = 0
-                        signals[i] = SIZE
-                # Regular breakout above Donchian with volume
-                elif breakout_up:
-                    in_position = True
-                    position_side = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                    signals[i] = SIZE
-            
-            # Short logic
-            elif breakout_down:
-                # If near S4, strong breakout continuation
-                if near_s4:
-                    in_position = True
-                    position_side = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                    signals[i] = -SIZE
-                # If near S3, mean reversion fade (only if not breaking down strongly)
-                elif near_s3 and not breakout_down:
-                    # Actually, if we're near S3 and price is above S3, look for bounce down
-                    if price > s3_aligned[i]:
-                        in_position = True
-                        position_side = -1
-                        entry_price = close[i]
-                        bars_since_entry = 0
-                        signals[i] = -SIZE
-                # Regular breakdown below Donchian with volume
-                elif breakout_down:
-                    in_position = True
-                    position_side = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                    signals[i] = -SIZE
+        if volume_spike and in_session:
+            # Long: breakout above upper channel AND bullish 4h/1d trend
+            if breakout_up and bullish_trend:
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = SIZE
+            # Short: breakout below lower channel AND bearish 4h/1d trend
+            elif breakout_down and bearish_trend:
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = -SIZE
             else:
                 signals[i] = 0.0
         else:
