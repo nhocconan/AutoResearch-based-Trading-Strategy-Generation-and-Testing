@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #1780: 4h Donchian(20) Breakout + 1d HMA Trend + Volume + ATR Stoploss
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d HMA trend and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 1d timeframe filters out noise from shorter-term fluctuations, while the 4h Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 75-200 total trades over 4 years (19-50/year) by using tight entry conditions and multi-timeframe confluence.
+Experiment #1781: 4h Donchian(20) Breakout + 1d EMA Trend + Volume + ATR Stoploss
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA trend and volume confirmation capture medium-term swings in both bull and bear markets. The 1d EMA provides a smooth trend filter, while the 4h Donchian offers clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 75-200 total trades over 4 years (19-50/year) by using tight entry conditions and multi-timeframe confluence.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1780_4h_donchian20_1d_hma_vol_v1"
+name = "exp_1781_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,17 +22,9 @@ def generate_signals(prices):
     # === HTF: 1d data for trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    # HMA(21): Hull Moving Average
-    def hull_moving_average(arr, period):
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
-        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
-        raw_hma = 2 * wma_half - wma_full
-        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
-        return hma
-    hma_1d = hull_moving_average(close_1d, 21)
-    trend_1d = np.where(close_1d > hma_1d, 1, -1)
+    # EMA(50) for trend
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     # === 4h Indicators: Donchian(20) ===
