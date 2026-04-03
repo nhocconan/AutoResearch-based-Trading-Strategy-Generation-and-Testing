@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #047: 6h Williams %R(14) + 1d Elder Ray + Volume Spike
-HYPOTHESIS: Williams %R identifies overbought/oversold extremes on 6h, while 1d Elder Ray (Bull/Bear Power) confirms the higher-timeframe trend direction. Volume spike (>2.0x average) filters false signals. This combination works in both bull and bear markets by taking counter-trend reversals aligned with the 1d trend's momentum exhaustion. Target: 75-150 trades over 4 years.
+Experiment #051: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+HYPOTHESIS: Combining 6h Donchian breakouts with 1d weekly pivot levels (R3/S3 for fading, R4/S4 for breakout continuation) and volume confirmation captures institutional order flow at key weekly levels. Weekly pivots act as smart money reference points where price often accelerates after testing or breaks through. Volume spike confirms participation. Designed to work in both bull/bear markets by adapting to weekly structure. Targeting 75-200 trades over 4 years for statistical validity and fee efficiency.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_047_6h_williamsr14_1d_elder_ray_volume_v1"
+name = "exp_051_6h_donchian20_1d_weekly_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -19,29 +19,48 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Elder Ray (Call ONCE before loop) ===
+    # === HTF: 1d data for weekly pivot levels (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Elder Ray on 1d: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-    def calculate_ema(arr, period):
-        return pd.Series(arr).ewm(span=period, min_periods=period, adjust=False).mean().values
+    # === Calculate weekly pivot points from prior week's OHLC ===
+    # Need weekly OHLC - resample 1d to weekly using actual Binance weekly logic via shifting
+    # Since we don't have weekly data directly, we'll approximate using prior 5 trading days
+    # Weekly high = max(high of prior 5 days), weekly low = min(low of prior 5 days), weekly close = close of prior 5th day
+    # We'll use rolling window of 5 days on 1d data
+    if len(df_1d) >= 5:
+        weekly_high = pd.Series(df_1d['high'].values).rolling(window=5, min_periods=5).max().values
+        weekly_low = pd.Series(df_1d['low'].values).rolling(window=5, min_periods=5).min().values
+        weekly_close = pd.Series(df_1d['close'].values).rolling(window=5, min_periods=5).apply(lambda x: x[-1]).values  # last close in window
+        weekly_open = pd.Series(df_1d['open'].values).rolling(window=5, min_periods=5).apply(lambda x: x[0]).values  # first open in window
+        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+        weekly_range = weekly_high - weekly_low
+        # Camarilla-like weekly levels: R3, S3, R4, S4
+        r3 = weekly_pivot + weekly_range * 1.1
+        s3 = weekly_pivot - weekly_range * 1.1
+        r4 = weekly_pivot + weekly_range * 1.3
+        s4 = weekly_pivot - weekly_range * 1.3
+    else:
+        # Not enough data for weekly calc
+        weekly_pivot = np.full(len(df_1d), np.nan)
+        r3 = np.full(len(df_1d), np.nan)
+        s3 = np.full(len(df_1d), np.nan)
+        r4 = np.full(len(df_1d), np.nan)
+        s4 = np.full(len(df_1d), np.nan)
     
-    ema_13 = calculate_ema(df_1d['close'].values, 13)
-    bull_power = df_1d['high'].values - ema_13
-    bear_power = df_1d['low'].values - ema_13
+    # Align weekly levels to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Align Elder Ray to 6h
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
+    # === 6h Indicators: Donchian(20) channels ===
+    def calculate_donchian(high, low, period=20):
+        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        return upper, lower
     
-    # === 6h Indicators: Williams %R(14) ===
-    def calculate_williams_r(high, low, close, period=14):
-        highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-        return wr
-    
-    williams_r = calculate_williams_r(high, low, close, 14)
+    donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
     # === 6h Indicators: ATR(14) for stoploss ===
     tr_6h = np.zeros(n)
@@ -67,29 +86,31 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 50  # Warmup for indicator stability
+    warmup = 60  # Warmup for Donchian and weekly stability
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(williams_r[i]) or np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
             np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- Williams %R Conditions ---
-        wr_oversold = williams_r[i] < -80  # Oversold
-        wr_overbought = williams_r[i] > -20  # Overbought
+        price = close[i]
         
-        # --- Elder Ray Trend: Determine 1d trend direction ---
-        bull_power_val = bull_power_aligned[i]
-        bear_power_val = bear_power_aligned[i]
-        # Bullish trend when Bull Power > 0 and rising (or Bear Power < 0)
-        bullish_trend = bull_power_val > 0 and (i == warmup or bull_power_val > bull_power_aligned[i-1])
-        # Bearish trend when Bear Power < 0 and falling (or Bull Power < 0)
-        bearish_trend = bear_power_val < 0 and (i == warmup or bear_power_val < bear_power_aligned[i-1])
+        # --- Weekly Pivot Context ---
+        # Determine if we're in weekly accumulation/distribution zone
+        near_s3 = abs(price - s3_aligned[i]) / s3_aligned[i] < 0.005  # Within 0.5% of S3
+        near_r3 = abs(price - r3_aligned[i]) / r3_aligned[i] < 0.005  # Within 0.5% of R3
+        breakout_r4 = price > r4_aligned[i]  # Break above R4
+        breakdown_s4 = price < s4_aligned[i]  # Break below S4
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
+        volume_spike = vol_ratio[i] > 1.8
+        
+        # --- Donchian Breakout Conditions ---
+        breakout_up = high[i] > donch_upper[i-1]  # Break above upper channel
+        breakout_down = low[i] < donch_lower[i-1]  # Break below lower channel
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -104,8 +125,8 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on Williams %R reversal (overbought) with volume (profit taking)
-                if wr_overbought and volume_spike:
+                # Take profit at weekly R3/S3 test
+                if position_side > 0 and near_r3 and volume_spike:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -119,16 +140,16 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on Williams %R reversal (oversold) with volume (profit taking)
-                if wr_oversold and volume_spike:
+                # Take profit at weekly S3/R3 test
+                if position_side < 0 and near_s3 and volume_spike:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             
-            # Minimum holding period of 2 bars to reduce churn
-            if bars_since_entry < 2:
+            # Minimum holding period of 4 bars to reduce churn (6h bars = 1 day)
+            if bars_since_entry < 4:
                 signals[i] = position_side * SIZE
                 continue
             
@@ -137,15 +158,31 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Williams %R oversold AND 1d bullish trend AND volume spike
-        if wr_oversold and bullish_trend and volume_spike:
+        # Fade at weekly S3/R3 with volume spike and Donchian breakout confirmation
+        if near_s3 and breakout_up and volume_spike:
+            # Long: price at S3 weekly support, breaking Donchian up with volume
             in_position = True
             position_side = 1
             entry_price = close[i]
             bars_since_entry = 0
             signals[i] = SIZE
-        # Short: Williams %R overbought AND 1d bearish trend AND volume spike
-        elif wr_overbought and bearish_trend and volume_spike:
+        elif near_r3 and breakout_down and volume_spike:
+            # Short: price at R3 weekly resistance, breaking Donchian down with volume
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = -SIZE
+        # Breakout continuation at weekly R4/S4 with volume
+        elif breakout_r4 and volume_spike:
+            # Long: break above weekly R4 with volume
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = SIZE
+        elif breakdown_s4 and volume_spike:
+            # Short: break below weekly S4 with volume
             in_position = True
             position_side = -1
             entry_price = close[i]
