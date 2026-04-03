@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #100: 4h Donchian(20) breakout + 1d HMA trend + 1w volume confirmation + ATR stoploss
+Experiment #101: 4h Donchian(20) breakout + 1d HMA trend + 1w volume spike
 
 HYPOTHESIS: Donchian(20) breakouts on 4h timeframe, filtered by 1d HMA(21) trend and 1w volume 
-spike (>1.8x average), capture medium-term momentum while avoiding false breakouts. 
-1d HMA ensures alignment with higher timeframe direction, 1w volume confirms institutional 
-participation, and ATR-based stoploss manages risk. Targets 19-50 trades/year on 4h timeframe 
-(75-200 total over 4 years) to minimize fee drag while maintaining edge in both bull and bear 
-markets. Uses discrete position sizing (0.25) to minimize fee churn.
+confirmation (>1.8x average), capture medium-term momentum while avoiding false breakouts. 
+Targets 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
@@ -57,7 +54,7 @@ def generate_signals(prices):
         vol_ratio_1w_aligned = np.full(n, 1.0)
     
     # === 4h Indicators ===
-    # Donchian(20) channels - vectorized calculation
+    # Donchian(20) channels - vectorized
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
