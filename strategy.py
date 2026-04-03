@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #007: 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
+Experiment #009: 4h Donchian(20) Breakout + 1d Trend + Volume Spike + Choppiness Filter
 
-HYPOTHESIS: Combining 6h Donchian breakouts with weekly pivot levels (derived from 1w data) 
-and volume confirmation creates a high-probability entry signal. The strategy trades 
-breakouts above weekly R4 or below S4 with 1w trend alignment, minimizing false breakouts. 
-Designed to capture both trending and mean-reverting moves in BTC/ETH/SOL with controlled 
-trade frequency (~12-37/year) to minimize fee drag. Weekly pivot provides stronger 
-structure than daily for 6h timeframe.
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe, when aligned with 1d trend (price above/below 1d EMA50),
+confirmed by volume spikes (>1.5x 20-bar MA), and filtered by choppiness regime (CHOP > 38.2 = trending),
+capture strong trending moves in both bull and bear markets. Uses ATR-based trailing stop (2.5x ATR).
+Designed for low trade frequency (~19-50/year) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_donchian_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "mtf_4h_donchian_1d_trend_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
@@ -31,6 +29,32 @@ def calculate_atr(high, low, close, period=14):
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
+def calculate_choppiness(high, low, close, period=14):
+    """Choppiness Index: values > 61.8 = ranging, < 38.2 = trending."""
+    n = len(close)
+    if n < period:
+        return np.full(n, 50.0)
+    
+    atr_sum = np.zeros(n)
+    tr = np.zeros(n)
+    for i in range(n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    for i in range(period-1, n):
+        atr_sum[i] = np.sum(tr[i-period+1:i+1])
+    
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    
+    chop = np.full(n, 50.0)
+    for i in range(period-1, n):
+        if atr_sum[i] > 0 and highest_high[i] > lowest_low[i]:
+            chop[i] = 100 * np.log10(atr_sum[i] / (highest_high[i] - lowest_low[i])) / np.log10(period)
+        else:
+            chop[i] = 50.0
+    
+    return chop
+
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
@@ -38,29 +62,20 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w OHLC for Weekly Pivot calculation (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    # Previous week's OHLC for current week's Weekly Pivot levels
-    prev_close = df_1w['close'].shift(1).values
-    prev_high = df_1w['high'].shift(1).values
-    prev_low = df_1w['low'].shift(1).values
-    prev_range = prev_high - prev_low
+    # === HTF: 1d EMA for trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Weekly Pivot levels (based on previous week)
-    weekly_r4 = prev_close + 1.5 * prev_range
-    weekly_r3 = prev_close + 1.125 * prev_range
-    weekly_s3 = prev_close - 1.125 * prev_range
-    weekly_s4 = prev_close - 1.5 * prev_range
-    weekly_pivot = (prev_high + prev_low + prev_close) / 3.0
+    # === HTF: 1d Choppiness for regime filter (Call ONCE before loop) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    chop_1d = calculate_choppiness(high_1d, low_1d, close_1d, period=14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
-    # Align HTF arrays to LTF (6h) with shift(1) for completed bars only
-    weekly_r4_aligned = align_htf_to_ltf(prices, df_1w, weekly_r4)
-    weekly_r3_aligned = align_htf_to_ltf(prices, df_1w, weekly_r3)
-    weekly_s3_aligned = align_htf_to_ltf(prices, df_1w, weekly_s3)
-    weekly_s4_aligned = align_htf_to_ltf(prices, df_1w, weekly_s4)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    
-    # === 6h Indicators ===
+    # === 4h Indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
     dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
@@ -77,27 +92,25 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 50  # Ensure enough data for HTF and indicator calculations
+    warmup = 60  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(atr_14[i]) or np.isnan(dc_upper_20[i]) or np.isnan(dc_lower_20[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(weekly_r4_aligned[i]) or np.isnan(weekly_r3_aligned[i]) or
-            np.isnan(weekly_s3_aligned[i]) or np.isnan(weekly_s4_aligned[i]) or np.isnan(weekly_pivot_aligned[i])):
+            np.isnan(vol_ma_20[i]) or np.isnan(ema_50_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         # --- Price Levels ---
-        weekly_r4 = weekly_r4_aligned[i]
-        weekly_r3 = weekly_r3_aligned[i]
-        weekly_s3 = weekly_s3_aligned[i]
-        weekly_s4 = weekly_s4_aligned[i]
-        weekly_pivot = weekly_pivot_aligned[i]
+        ema_50_1d = ema_50_1d_aligned[i]
+        chop_1d_val = chop_1d_aligned[i]
         
-        # --- 1w Trend Filter (using price vs Weekly pivot) ---
-        # Bullish 1w trend: price above pivot, Bearish: price below pivot
-        trend_bullish = close[i] > weekly_pivot
-        trend_bearish = close[i] < weekly_pivot
+        # --- 1d Trend Filter ---
+        trend_bullish = close[i] > ema_50_1d
+        trend_bearish = close[i] < ema_50_1d
+        
+        # --- Regime Filter: Only trade in trending markets (CHOP < 38.2) ---
+        trending_market = chop_1d_val < 38.2
         
         # --- Price Channel Breakout ---
         bullish_breakout = close[i] > dc_upper_20[i]
@@ -120,16 +133,16 @@ def generate_signals(prices):
                 if high[i] > stop_level:
                     stop_hit = True
             
-            # Exit conditions: trend reversal or opposite Weekly level touch
-            min_hold = (i - entry_bar) >= 2  # Minimum 2 bars hold (~12h)
+            # Exit conditions: trend reversal OR choppy regime
+            min_hold = (i - entry_bar) >= 2  # Minimum 2 bars hold (~8h)
             if min_hold:
                 if position_side > 0:
-                    # Exit long: trend turns bearish OR price touches S3 (mean reversion)
-                    if trend_bearish or close[i] <= weekly_s3:
+                    # Exit long: trend turns bearish OR market becomes choppy
+                    if trend_bearish or not trending_market:
                         stop_hit = True
                 else:  # position_side < 0
-                    # Exit short: trend turns bullish OR price touches R3 (mean reversion)
-                    if trend_bullish or close[i] >= weekly_r3:
+                    # Exit short: trend turns bullish OR market becomes choppy
+                    if trend_bullish or not trending_market:
                         stop_hit = True
             
             if stop_hit:
@@ -143,21 +156,15 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long conditions: 
-        # 1. Breakout above R4 with bullish 1w trend AND volume confirmation
-        # 2. Mean reversion at S3 with weak/no 1w trend (price <= S3 and near pivot)
-        if (bullish_breakout and trend_bullish and vol_ok) or \
-           (close[i] <= weekly_s3 and abs(close[i] - weekly_pivot) < 0.5 * (weekly_pivot - weekly_s3) and not trend_bearish):
+        # Long conditions: Breakout above DC upper with bullish 1d trend AND volume confirmation AND trending market
+        if bullish_breakout and trend_bullish and vol_ok and trending_market:
             in_position = True
             position_side = 1
             entry_bar = i
             highest_since_entry = high[i]
             signals[i] = SIZE
-        # Short conditions:
-        # 1. Breakout below S4 with bearish 1w trend AND volume confirmation
-        # 2. Mean reversion at R3 with weak/no 1w trend (price >= R3 and near pivot)
-        elif (bearish_breakout and trend_bearish and vol_ok) or \
-             (close[i] >= weekly_r3 and abs(close[i] - weekly_pivot) < 0.5 * (weekly_r3 - weekly_pivot) and not trend_bullish):
+        # Short conditions: Breakout below DC lower with bearish 1d trend AND volume confirmation AND trending market
+        elif bearish_breakout and trend_bearish and vol_ok and trending_market:
             in_position = True
             position_side = -1
             entry_bar = i
