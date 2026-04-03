@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #153: 4h Donchian(20) breakout + 12h HMA(21) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h HMA trend direction capture institutional momentum while avoiding counter-trend whipsaws. Volume confirmation (>1.5x average) ensures breakout validity. Discrete position sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year) to balance statistical significance with fee drag.
+Experiment #153: 4h Donchian(20) breakout + 12h EMA(34) trend + volume confirmation + ATR stoploss
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA(34) trend and volume confirmation (>1.5x) capture medium-term momentum with controlled trade frequency. The 12h EMA provides structural bias from higher timeframe, reducing false breakouts. Volume confirmation ensures institutional participation. Works in bull/bear via EMA trend filter and ATR-based stops. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_153_4h_donchian20_12h_hma21_vol_v1"
+name = "exp_153_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,25 +19,11 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for HMA(21) trend (Call ONCE before loop) ===
+    # === HTF: 12h data for EMA(34) trend (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = pd.Series(df_12h['close'].values)
-    
-    # Calculate HMA(21) on 12h: HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
-    
-    def wma(series, period):
-        weights = np.arange(1, period + 1)
-        return series.rolling(period).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
-    
-    wma_half = wma(close_12h, half_len)
-    wma_full = wma(close_12h, 21)
-    raw_hma = 2 * wma_half - wma_full
-    hma_12h = wma(raw_hma, sqrt_len).values
-    
-    # Align HMA trend to 4h timeframe (shifted by 1 for completed 12h bar only)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    ema_34_12h = close_12h.ewm(span=34, min_periods=34, adjust=False).mean().values
+    ema_trend_12h = align_htf_to_ltf(prices, df_12h, ema_34_12h)
     
     # === 4h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
@@ -57,7 +43,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Position tracking state variables
     in_position = False
@@ -70,7 +56,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(hma_12h_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(ema_trend_12h[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -84,11 +70,9 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- 12h HMA Trend Filter ---
-        # For long: price above HMA (uptrend)
-        # For short: price below HMA (downtrend)
-        hma_uptrend = price > hma_12h_aligned[i]
-        hma_downtrend = price < hma_12h_aligned[i]
+        # --- 12h EMA Trend: from 12h data ---
+        bullish_trend = close[i] > ema_trend_12h[i]
+        bearish_trend = close[i] < ema_trend_12h[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -126,15 +110,15 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + 12h HMA uptrend
-            if breakout_up and hma_uptrend:
+            # Long: breakout above upper channel AND bullish 12h trend
+            if breakout_up and bullish_trend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + 12h HMA downtrend
-            elif breakout_down and hma_downtrend:
+            # Short: breakout below lower channel AND bearish 12h trend
+            elif breakout_down and bearish_trend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
