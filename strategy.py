@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #1431: 6h Williams %R + 1d Trend + Volume Spike
-HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h timeframe. 
-Entries occur when %R crosses above -50 from below (bullish momentum) or below -50 from above (bearish momentum) 
-in alignment with 1d trend direction (price > previous close = uptrend, < = downtrend). 
-Volume confirmation (>2.0x average) filters for institutional participation. 
-Designed to capture momentum swings in both bull and bear markets by following 1d trend. 
+Experiment #1432: 12h Donchian(20) Breakout + 1d Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture intermediate-term trends with low trade frequency (target: 50-150 total over 4 years). 
+Trend filter from 1d timeframe ensures alignment with higher-timeframe momentum. Volume confirmation (>1.8x average) filters for institutional participation. 
+Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 1d trend direction. 
 Uses ATR-based stoploss for risk management. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
@@ -13,8 +11,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1431_6h_williamsr_1d_trend_vol_v1"
-timeframe = "6h"
+name = "exp_1432_12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,21 +30,16 @@ def generate_signals(prices):
     trend_1d[1:] = np.where(close_1d[1:] > close_1d[:-1], 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 6h Indicators: Williams %R(14) ===
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.full(n, -50.0)  # default to neutral
-    # Avoid division by zero
-    denom = highest_high - lowest_low
-    mask = denom != 0
-    williams_r[mask] = -100 * (highest_high[mask] - close[mask]) / denom[mask]
+    # === 12h Indicators: Donchian(20) ===
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -63,13 +56,13 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for Williams %R and volume MA
+    warmup = 20  # sufficient for Donchian and volume MA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
             np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(williams_r[i])):
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -102,21 +95,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Williams %R signals: crossing above/below -50
-        williams_cross_up = williams_r[i] > -50 and williams_r[i-1] <= -50
-        williams_cross_down = williams_r[i] < -50 and williams_r[i-1] >= -50
-        
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            if williams_cross_up and trend_1d_aligned[i] > 0:  # Bullish cross in 1d uptrend
+            # Breakout: price breaks above upper band OR below lower band
+            if price > donch_high[i] and trend_1d_aligned[i] > 0:  # 1d uptrend
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif williams_cross_down and trend_1d_aligned[i] < 0:  # Bearish cross in 1d downtrend
+            elif price < donch_low[i] and trend_1d_aligned[i] < 0:  # 1d downtrend
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -128,3 +118,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
