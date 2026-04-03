@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #463: 4h Donchian(20) breakout + 12h EMA(20) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA(20) trend capture medium-term momentum while avoiding noise. Volume confirmation (>1.5x average) ensures breakout validity. Using 4h timeframe with 12h HTF targets 75-200 total trades over 4 years. Discrete position sizing (0.25) minimizes fee churn. Works in bull (breakouts with trend) and bear (mean reversion via tight stops) via trend filter and ATR-based risk management.
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA(20) trend capture medium-term momentum while avoiding noise. Volume confirmation (>1.5x average) ensures breakout validity. Using 4h timeframe with 12h HTF balances trade frequency (target: 75-200 total trades over 4 years) with statistical significance. Discrete position sizing (0.25) minimizes fee churn. Designed to work in both bull (breakouts with trend) and bear (mean reversion at extremes) markets via trend filter.
 """
 
 import numpy as np
@@ -134,4 +134,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-</devnull>
