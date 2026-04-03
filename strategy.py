@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #2166: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 4h Donchian breakouts capture medium-term momentum with 1d trend filter.
-- Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average (balanced frequency)
-- HTF: 1d HMA(21) trend filter (only trade in direction of daily trend)
+HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture swing momentum with daily trend filter.
+- Primary: 4h Donchian(20) breakout with volume > 1.8x 20-bar average (strict to limit trades)
+- HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
-- Target: 75-200 total trades over 4 years (19-50/year) - proven range for 4h strategies
-- Works in bull markets (trend following) and bear markets (mean reversion at extremes)
+- Target: 75-200 total trades over 4 years (19-50/year) - optimized for 4h timeframe
+- Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets
 """
 
 import numpy as np
@@ -29,6 +29,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate 1d HMA(21): Hull Moving Average
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
     half_len = 21 // 2
     sqrt_len = int(np.sqrt(21))
     
@@ -42,7 +43,7 @@ def generate_signals(prices):
     wma_full = np.array([np.nan] * len(close_1d))
     wma_half = np.array([np.nan] * len(close_1d))
     
-    for i in range(20, len(close_1d)):
+    for i in range(20, len(close_1d)):  # 21-1 = 20 for WMA(21)
         wma_full[i] = np.mean(close_1d[i-20:i+1] * np.arange(1, 22))
     for i in range(half_len-1, len(close_1d)):
         wma_half[i] = np.mean(close_1d[i-half_len+1:i+1] * np.arange(1, half_len+1))
@@ -65,7 +66,7 @@ def generate_signals(prices):
     donchian_upper = high_ma
     donchian_lower = low_ma
     
-    # Volume MA for spike detection (balanced threshold)
+    # Volume MA for spike detection (strict threshold to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -81,7 +82,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.25  # 25% position size - conservative for risk management
     
     # Position tracking state variables
     in_position = False
@@ -139,8 +140,8 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average - balanced frequency)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 1.8x average - strict to limit trades)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
             # Long entry: price breaks above upper Donchian AND 1d trend up
