@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #651: 6h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 1d Camarilla pivot levels (R3/S3 for fade, R4/S4 for breakout) capture institutional order flow with volume confirmation. Works in bull/bear by using pivot levels as dynamic support/resistance that adapt to volatility. Target: 50-150 total trades over 4 years (12-37/year) with Sharpe > 0 on test.
+Experiment #651: 6h Donchian(20) breakout + 1d EMA alignment + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts aligned with daily EMA(50) trend capture institutional participation with low overtrading risk. 
+Volume confirmation ensures breakout validity. Designed for 6h to hit 50-150 total trades over 4 years (12-37/year).
+Uses 1d EMA for bull/bear agnostic trend filter and ATR-based stoploss for risk control.
+Target: 12-37 trades/year per symbol with Sharpe > 0 on test.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_651_6h_donchian20_1d_camarilla_vol_v1"
+name = "exp_651_6h_donchian20_1d_ema_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -19,31 +22,13 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d Camarilla pivot levels
-    # Pivot = (H + L + C) / 3
-    # Range = H - L
-    # R3 = Pivot + Range * 1.1/2
-    # S3 = Pivot - Range * 1.1/2
-    # R4 = Pivot + Range * 1.1
-    # S4 = Pivot - Range * 1.1
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r3_1d = pivot_1d + range_1d * 1.1 / 2.0
-    s3_1d = pivot_1d - range_1d * 1.1 / 2.0
-    r4_1d = pivot_1d + range_1d * 1.1
-    s4_1d = pivot_1d - range_1d * 1.1
-    
-    # Align HTF levels to LTF (6h)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Calculate 1d EMA(50) for trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # === 6h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
@@ -71,33 +56,30 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for Donchian and volume calculations
+    warmup = 50  # sufficient for 1d EMA(50) and Donchian calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(r3_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or
-            np.isnan(s4_1d_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 1.7x average) ---
+        volume_spike = vol_ratio[i] > 1.7
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- Camarilla Pivot Logic ---
-        # Fade at R3/S3 (price touches extreme and reverses)
-        # Breakout continuation at R4/S4 (price breaks extreme with momentum)
-        near_r3 = abs(price - r3_1d_aligned[i]) / price < 0.005  # within 0.5%
-        near_s3 = abs(price - s3_1d_aligned[i]) / price < 0.005
-        break_r4 = price > r4_1d_aligned[i]
-        break_s4 = price < s4_1d_aligned[i]
+        # --- EMA Trend Filter ---
+        # In uptrend: price > EMA(50)
+        # In downtrend: price < EMA(50)
+        uptrend = price > ema_1d_aligned[i]
+        downtrend = price < ema_1d_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -135,15 +117,15 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + (fade at S3 OR breakout at R4)
-            if breakout_up and (near_s3 or break_r4):
+            # Long: Donchian breakout up + uptrend
+            if breakout_up and uptrend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + (fade at R3 OR breakout at S4)
-            elif breakout_down and (near_r3 or break_s4):
+            # Short: Donchian breakout down + downtrend
+            elif breakout_down and downtrend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
