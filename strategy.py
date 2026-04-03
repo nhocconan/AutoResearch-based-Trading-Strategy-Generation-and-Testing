@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #011: 6h Camarilla Pivot + Volume Spike + Regime Filter
+Experiment #012: 12h Camarilla Pivot + Volume Spike + Choppiness Regime Filter
 
-HYPOTHESIS: Camarilla pivot levels derived from 1d candles provide institutional support/resistance. 
-At L3/H3 levels with volume spike (>1.5x mean), we fade the move (mean reversion). 
-At L4/H4 levels with volume spike, we breakout in direction of move (continuation). 
-Regime filter uses 1d ADX(14) to avoid whipsaw: only trade when ADX > 20 (trending) OR ADX < 20 (ranging) 
-with appropriate logic. This adaptive approach works in both bull and bear markets by aligning 
-with institutional order flow at key levels. Target: 75-150 trades over 4 years.
+HYPOTHESIS: Camarilla pivot levels (H3/L3) from 1d timeframe act as strong support/resistance 
+on 12h chart. Long when price breaks above H3 with volume spike (>2.0x average) in trending 
+market (choppiness index < 38.2). Short when price breaks below L3 with volume spike in 
+trending market. Uses ATR-based stoploss (2.5x) and discrete position sizing (0.25). 
+Designed for 12h timeframe to achieve 50-150 trades over 4 years with low fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_011_6h_camarilla_pivot_vol_regime_v1"
-timeframe = "6h"
+name = "exp_012_12h_camarilla_pivot_vol_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,61 +24,52 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivot levels and ADX ===
+    # === HTF: 1d data for Camarilla pivot levels ===
     df_1d = get_htf_data(prices, '1d')
-    # Typical Price for 1d
-    tp_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    # Camarilla calculation uses previous day's range
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Typical price for pivot calculation
+    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    # Camarilla pivot levels
+    pivot = typical_price.rolling(window=1, min_periods=1).mean().values  # same as typical_price
+    range_ = df_1d['high'] - df_1d['low']
+    h3 = pivot + 1.1 * range_ / 2
+    l3 = pivot - 1.1 * range_ / 2
+    h3_aligned = align_htf_to_ltf(prices, df_1d, h3.values)
+    l3_aligned = align_htf_to_ltf(prices, df_1d, l3.values)
     
-    # Previous day's values (shift by 1)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = prev_low[0] = prev_close[0] = np.nan  # First value invalid
+    # === HTF: 1w data for trend filter (EMA50) ===
+    df_1w = get_htf_data(prices, '1w')
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Camarilla levels
-    camarilla_h5 = prev_close + 1.1 * (prev_high - prev_low) / 2
-    camarilla_h4 = prev_close + 1.1 * (prev_high - prev_low) * 1.5 / 4
-    camarilla_h3 = prev_close + 1.1 * (prev_high - prev_low) * 1.25 / 4
-    camarilla_l3 = prev_close - 1.1 * (prev_high - prev_low) * 1.25 / 4
-    camarilla_l4 = prev_close - 1.1 * (prev_high - prev_low) * 1.5 / 4
-    camarilla_l5 = prev_close - 1.1 * (prev_high - prev_low) / 2
+    # === 12h Indicators: ATR(14) for stoploss ===
+    tr_12h = np.zeros(n)
+    tr_12h[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr_12h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr_12h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # ADX calculation
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0) if (high[i] - high[i-1]) > (low[i-1] - low[i]) else 0
-            minus_dm[i] = max(low[i-1] - low[i], 0) if (low[i-1] - low[i]) > (high[i] - high[i-1]) else 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Wilder's smoothing
-        atr = pd.Series(tr).ewm(alpha=1/period, adjust=False).mean().values
-        plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr
-        minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
-        return adx
-    
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    
-    # Align HTF data to 6h timeframe
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
     vol_ratio[:20] = 1.0
+    
+    # === 12h Indicators: Choppiness Index (CHOP) for regime filter ===
+    def true_range(high, low, close_prev):
+        return np.maximum(high - low, np.maximum(abs(high - close_prev), abs(low - close_prev)))
+    
+    tr_chop = np.zeros(n)
+    tr_chop[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr_chop[i] = true_range(high[i], low[i], close[i-1])
+    
+    atr_sum_14 = pd.Series(tr_chop).rolling(window=14, min_periods=14).sum().values
+    hh_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    ll_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = np.zeros(n)
+    denominator = hh_14 - ll_14
+    chop[14:] = 100 * np.log10(atr_sum_14[14:] / denominator[14:]) / np.log10(14)
+    chop[:14] = 50.0  # neutral value for warmup
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -91,70 +81,64 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # Warmup for 1d indicator stability
+    warmup = 50  # Warmup for 1w EMA50 stability
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_h4_aligned[i]) or
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(atr_14[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Regime Filter: ADX > 20 = trending, ADX < 20 = ranging ---
-        adx_val = adx_1d_aligned[i]
-        is_trending = adx_val > 20
-        is_ranging = adx_val < 20
+        # --- Regime Filter: Trending market only (CHOP < 38.2) ---
+        trending_regime = chop[i] < 38.2
         
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio[i] > 1.5
+        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = vol_ratio[i] > 2.0
         
-        # --- Camarilla Logic ---
-        # Fade at H3/L3 (mean reversion in ranging markets)
-        fade_long = is_ranging and volume_spike and (price <= camarilla_l3_aligned[i])
-        fade_short = is_ranging and volume_spike and (price >= camarilla_h3_aligned[i])
+        # --- Camarilla Breakout Conditions ---
+        breakout_up = high[i] > h3_aligned[i-1]   # Break above H3
+        breakout_down = low[i] < l3_aligned[i-1]  # Break below L3
         
-        # Breakout continuation at H4/L4 (trend continuation in trending markets)
-        breakout_long = is_trending and volume_spike and (price >= camarilla_h4_aligned[i])
-        breakout_short = is_trending and volume_spike and (price <= camarilla_l4_aligned[i])
-        
-        # --- Exit Logic: Opposite signal or volume drought ---
+        # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
             bars_since_entry += 1
             
-            # Exit conditions
-            exit_long = (position_side > 0) and (
-                fade_short or breakout_short or  # Opposite signal
-                (bars_since_entry >= 4)          # Time-based exit
-            )
-            exit_short = (position_side < 0) and (
-                fade_long or breakout_long or    # Opposite signal
-                (bars_since_entry >= 4)          # Time-based exit
-            )
-            
-            if exit_long or exit_short:
-                in_position = False
-                position_side = 0
-                bars_since_entry = 0
-                signals[i] = 0.0
-                continue
+            # ATR-based stoploss
+            if position_side > 0:  # Long position
+                stop_level = entry_price - 2.5 * atr_14[i]
+                if low[i] < stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+            else:  # Short position
+                stop_level = entry_price + 2.5 * atr_14[i]
+                if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
             
             # Hold position
             signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Fade at L3 OR Breakout at H4
-        if fade_long or breakout_long:
+        # Long: Trending regime + price > EMA50(1w) + breakout above H3 + volume spike
+        if trending_regime and price > ema50_1w_aligned[i] and breakout_up and volume_spike:
             in_position = True
             position_side = 1
             entry_price = close[i]
             bars_since_entry = 0
             signals[i] = SIZE
-        # Short: Fade at H3 OR Breakout at L4
-        elif fade_short or breakout_short:
+        # Short: Trending regime + price < EMA50(1w) + breakout below L3 + volume spike
+        elif trending_regime and price < ema50_1w_aligned[i] and breakout_down and volume_spike:
             in_position = True
             position_side = -1
             entry_price = close[i]
