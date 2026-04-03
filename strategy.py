@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #1995: 6h Donchian(20) breakout + 1w pivot direction + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts capture swing moves. Weekly pivot provides institutional bias (only trade breakouts in pivot direction). Volume confirmation filters false breakouts. Works in bull/bear by following weekly structure.
+Experiment #1995: 6h Donchian(20) breakout + 1w Camarilla pivot + volume confirmation
+HYPOTHESIS: Donchian breakouts capture institutional order flow. 
+- Primary: 6h Donchian(20) breakout with volume > 1.5x 20-bar average  
+- HTF: 1w Camarilla pivot levels (R4/S4 for breakout continuation, R3/S3 for mean reversion)
+- Only trade breakouts in direction of weekly pivot bias (above/below pivot point)
+- Works in bull/bear by following weekly structure with precise 6h entries
 Target: 75-200 total trades over 4 years (19-50/year).
 """
 
@@ -9,7 +13,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1995_6h_donchian20_1w_pivot_vol_v1"
+name = "exp_1995_6h_donchian20_1w_camarilla_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -20,26 +24,27 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for weekly pivot (Call ONCE before loop) ===
+    # === HTF: 1w data for Camarilla pivot levels (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot points (standard formula)
+    # Calculate weekly Camarilla pivot levels
     # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    # Range = H - L
+    # R4 = C + Range * 1.1/2
+    # R3 = C + Range * 1.1/4
+    # S3 = C - Range * 1.1/4
+    # S4 = C - Range * 1.1/2
     pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
-    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
+    range_1w = high_1w - low_1w
+    r4_1w = close_1w + range_1w * 1.1 / 2.0
+    r3_1w = close_1w + range_1w * 1.1 / 4.0
+    s3_1w = close_1w - range_1w * 1.1 / 4.0
+    s4_1w = close_1w - range_1w * 1.1 / 2.0
     
-    # Weekly bias: 1 if close > pivot (bullish), -1 if close < pivot (bearish)
+    # Bias: 1 if price > pivot (bullish bias), -1 if price < pivot (bearish bias)
     weekly_bias = np.where(close_1w > pivot_1w, 1, -1)
     weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias)
     
@@ -97,8 +102,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price touches lower Donchian (mean reversion)
-                elif price <= donchian_lower[i]:
+                # Exit if price touches weekly S3 (mean reversion in bullish bias)
+                elif weekly_bias_aligned[i] > 0 and price <= s3_1w_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -111,8 +116,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price touches upper Donchian (mean reversion)
-                elif price >= donchian_upper[i]:
+                # Exit if price touches weekly R3 (mean reversion in bearish bias)
+                elif weekly_bias_aligned[i] < 0 and price >= r3_1w_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -122,22 +127,22 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         # Require weekly bias alignment for directional filter
-        bias = weekly_bias_aligned[i]
+        weekly_bias = weekly_bias_aligned[i]
         
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Long entry: price breaks above upper Donchian AND weekly bias up
-            if bias > 0 and price > donchian_upper[i]:
+            # Long entry: price breaks above upper Donchian AND weekly bullish bias
+            if weekly_bias > 0 and price > donchian_upper[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below lower Donchian AND weekly bias down
-            elif bias < 0 and price < donchian_lower[i]:
+            # Short entry: price breaks below lower Donchian AND weekly bearish bias
+            elif weekly_bias < 0 and price < donchian_lower[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
