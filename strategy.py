@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #686: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts filtered by 1d EMA trend direction capture strong momentum moves. 
-Volume confirmation (>2.0x average) ensures breakout validity. Designed for 4h timeframe to achieve 
-75-200 total trades over 4 years (19-50/year). Works in bull/bear markets: long when price > EMA50 
-and breaks Donchian high, short when price < EMA50 and breaks Donchian low.
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend direction capture institutional order flow. 
+Volume confirmation (>2.0x average) ensures breakout validity. Uses discrete position sizing (0.25) 
+to minimize fee churn. Works in bull/bear markets via 1d EMA filter: long when price > EMA50 and 
+breaks Donchian high, short when price < EMA50 and breaks Donchian low. Target: 75-200 total trades 
+over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -58,7 +59,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 60  # sufficient for EMA(50) and Donchian calculations
+    warmup = 50  # sufficient for Donchian and EMA calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -100,8 +101,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 8 bars (~32h on 4h) to avoid overtrading
-            if bars_since_entry > 8:
+            # Optional: time-based exit after 4 bars (~16h on 4h) to avoid overtrading
+            if bars_since_entry > 4:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -133,5 +134,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
