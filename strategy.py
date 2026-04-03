@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #229: 4h Donchian(20) Breakout + 1d HTF Trend + Volume Spike
+Experiment #223: 4h Donchian(20) Breakout + 12h HTF Trend + Volume Confirmation + ATR Stoploss
 
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 trend capture medium-term momentum. 
-Volume confirmation (2.0x average) ensures institutional participation. 
-Target: 25-40 trades/year on 4h timeframe to minimize fee drag while capturing significant moves.
-Uses discrete position sizing (0.25) and ATR-based trailing stop (2.5x) for risk control.
-Works in both bull and bear markets by only taking breakouts in the direction of the 1d trend.
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA20 trend capture medium-term momentum with lower lag than 1d.
+Volume confirmation (1.8x average) filters false breakouts. ATR-based trailing stop (2.0x) manages risk.
+Target: 25-35 trades/year on 4h timeframe to minimize fee drag while capturing significant moves in both bull and bear markets.
+Discrete position sizing (0.25) reduces churn. Uses 12h HTF for better alignment with 4h primary timeframe.
 """
 
 import numpy as np
@@ -24,16 +23,16 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA50 trend (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
+    # === HTF: 12h data for EMA20 trend (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
     
-    if len(df_1d) >= 50:
-        # Calculate EMA(50) on 1d close
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    if len(df_12h) >= 20:
+        # Calculate EMA(20) on 12h close
+        ema_12h = pd.Series(df_12h['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
         # Align to 4h timeframe
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+        ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
         # Trend: 1 if close > EMA, -1 if close < EMA
-        htf_trend = np.where(close[:len(ema_1d_aligned)] > ema_1d_aligned, 1, -1)
+        htf_trend = np.where(close[:len(ema_12h_aligned)] > ema_12h_aligned, 1, -1)
     else:
         htf_trend = np.full(n, 0)  # Neutral if insufficient data
     
@@ -77,11 +76,11 @@ def generate_signals(prices):
         bearish_breakout = close[i] < dc_lower_20[i]
         
         # --- Volume Confirmation ---
-        vol_ok = volume[i] > vol_ma_20[i] * 2.0 if vol_ma_20[i] > 1e-10 else False  # 2.0x volume spike
+        vol_ok = volume[i] > vol_ma_20[i] * 1.8 if vol_ma_20[i] > 1e-10 else False  # 1.8x volume spike
         
-        # --- Trend Filter from 1d EMA50 ---
-        trend_ok_long = htf_trend[i] > 0   # 1d trend bullish
-        trend_ok_short = htf_trend[i] < 0  # 1d trend bearish
+        # --- Trend Filter from 12h EMA20 ---
+        trend_ok_long = htf_trend[i] > 0   # 12h trend bullish
+        trend_ok_short = htf_trend[i] < 0  # 12h trend bearish
         
         # --- Position Management (Exit Logic) ---
         stop_hit = False
@@ -89,23 +88,23 @@ def generate_signals(prices):
         if in_position:
             # ATR-based trailing stoploss
             if position_side > 0:
-                stop_level = highest_since_entry - 2.5 * atr_14[i]
+                stop_level = highest_since_entry - 2.0 * atr_14[i]
                 if low[i] < stop_level:
                     stop_hit = True
             else:  # Short position
-                stop_level = lowest_since_entry + 2.5 * atr_14[i]
+                stop_level = lowest_since_entry + 2.0 * atr_14[i]
                 if high[i] > stop_level:
                     stop_hit = True
             
             # Exit conditions: trend reversal or opposite Donchian touch
-            min_hold = (i - entry_bar) >= 3  # Minimum 3 bars hold (~12h)
+            min_hold = (i - entry_bar) >= 2  # Minimum 2 bars hold (~8h)
             if min_hold:
                 if position_side > 0:
-                    # Exit long: price touches lower Donchian OR 1d trend turns bearish
+                    # Exit long: price touches lower Donchian OR 12h trend turns bearish
                     if close[i] <= dc_lower_20[i] or htf_trend[i] < 0:
                         stop_hit = True
                 else:  # position_side < 0
-                    # Exit short: price touches upper Donchian OR 1d trend turns bullish
+                    # Exit short: price touches upper Donchian OR 12h trend turns bullish
                     if close[i] >= dc_upper_20[i] or htf_trend[i] > 0:
                         stop_hit = True
             
@@ -121,7 +120,7 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic (Only if Flat) ---
         # Long conditions: 
-        # Breakout above upper Donchian with volume confirmation and bullish 1d trend
+        # Breakout above upper Donchian with volume confirmation and bullish 12h trend
         if bullish_breakout and vol_ok and trend_ok_long:
             in_position = True
             position_side = 1
@@ -129,7 +128,7 @@ def generate_signals(prices):
             highest_since_entry = high[i]
             signals[i] = SIZE
         # Short conditions:
-        # Breakout below lower Donchian with volume confirmation and bearish 1d trend
+        # Breakout below lower Donchian with volume confirmation and bearish 12h trend
         elif bearish_breakout and vol_ok and trend_ok_short:
             in_position = True
             position_side = -1
