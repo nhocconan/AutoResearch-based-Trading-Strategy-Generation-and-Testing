@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #1466: 4h Donchian(20) Breakout + 1d Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture intermediate-term trends with optimal trade frequency (target: 75-200 total over 4 years). 
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture intermediate-term trends with moderate trade frequency (target: 75-200 total over 4 years). 
 Trend filter from 1d timeframe ensures alignment with higher-timeframe momentum. Volume confirmation (>1.8x average) filters for institutional participation. 
 Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 1d trend direction. 
-Uses ATR-based stoploss for risk management. Position size fixed at 0.25 to balance return and drawdown.
+Uses ATR-based stoploss for risk management. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
