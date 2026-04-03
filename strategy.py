@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #2011: 6h Williams %R + 1d ADX Trend + Volume Confirmation
-HYPOTHESIS: Williams %R identifies overbought/oversold conditions while 1d ADX filters for trending markets. 
-- Primary: 6h Williams %R(14) for mean reversion entries (< -80 long, > -20 short)
-- HTF: 1d ADX(14) > 25 ensures we only trade in strong trends (avoids choppy markets)
-- Volume: Require volume > 1.3x 20-bar average to confirm institutional participation
-- Stoploss: 2.5x ATR(14) trailing stop
-- Works in bull/bear markets by combining mean reversion entries with trend filtering.
-Target: 75-150 total trades over 4 years (19-37/year).
+Experiment #2011: 6h Camarilla Pivot Breakout with 1d Volume Confirmation and ATR Stoploss
+HYPOTHESIS: Camarilla pivot levels (R3/S3, R4/S4) derived from 1d OHLC act as institutional support/resistance.
+- Primary: 6h breakout above R4 or below S4 with continuation (trend following)
+- Fade: 6h rejection at R3 or S3 with volume confirmation (mean reversion in range)
+- HTF: 1d volume > 1.5x 20-day average confirms institutional participation
+- Exit: ATR(14) trailing stop (2*ATR) or opposite Camarilla level touch
+- Works in bull/bear markets by adapting to volatility expansion/contraction regimes.
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2011_6h_williamsr_1d_adx_vol_v1"
+name = "exp_2011_6h_camarilla_breakout_1d_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -25,66 +25,42 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for ADX trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for Camarilla pivots and volume filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1d ADX(14)
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # Calculate Camarilla pivot levels for 1d
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R4 = C + (Range * 1.1/2)
+    # R3 = C + (Range * 1.1/4)
+    # S3 = C - (Range * 1.1/4)
+    # S4 = C - (Range * 1.1/2)
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
     
-    # Directional Movement
-    up_move = high_1d - np.roll(high_1d, 1)
-    down_move = np.roll(low_1d, 1) - low_1d
-    up_move[0] = 0
-    down_move[0] = 0
+    r4_1d = close_1d + (range_1d * 1.1 / 2.0)
+    r3_1d = close_1d + (range_1d * 1.1 / 4.0)
+    s3_1d = close_1d - (range_1d * 1.1 / 4.0)
+    s4_1d = close_1d - (range_1d * 1.1 / 2.0)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Volume confirmation: 1d volume > 1.5x 20-day average
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = np.ones(len(volume_1d))
+    vol_ratio_1d[20:] = volume_1d[20:] / vol_ma_1d[20:]
+    vol_filter_1d = vol_ratio_1d > 1.5
     
-    # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(arr, period):
-        result = np.full_like(arr, np.nan)
-        if len(arr) < period:
-            return result
-        # First value is simple average
-        result[period-1] = np.mean(arr[:period])
-        # Subsequent values: prev*(period-1)/period + current/period
-        for i in range(period, len(arr)):
-            result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # Align HTF levels to 6h timeframe (with shift(1) for completed bars only)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    vol_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_filter_1d.astype(np.float64))
     
-    atr_1d = wilder_smooth(tr, 14)
-    plus_di_1d = 100 * wilder_smooth(plus_dm, 14) / atr_1d
-    minus_di_1d = 100 * wilder_smooth(minus_dm, 14) / atr_1d
-    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d)
-    adx_1d = wilder_smooth(dx_1d, 14)
-    
-    # Trend filter: ADX > 25 indicates strong trend
-    trend_filter_1d = adx_1d > 25
-    trend_filter_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_filter_1d)
-    
-    # === 6h Indicators: Williams %R(14), Volume MA(20), ATR(14) ===
-    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.where((highest_high - lowest_low) != 0,
-                          ((highest_high - close) / (highest_high - lowest_low)) * -100,
-                          -50)  # neutral when no range
-    
-    # Volume MA for confirmation
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
-    
-    # ATR(14) for stoploss
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -108,8 +84,9 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(williams_r[i]) or np.isnan(trend_filter_1d_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
+            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
+            np.isnan(vol_filter_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -120,8 +97,13 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2*ATR below highest since entry
+                if price < highest_since_entry - 2.0 * atr[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price touches S3 (mean reversion target)
+                elif price <= s3_1d_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -129,8 +111,13 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2*ATR above lowest since entry
+                if price > lowest_since_entry + 2.0 * atr[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price touches R3 (mean reversion target)
+                elif price >= r3_1d_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -139,29 +126,44 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1d trend alignment for bias filter
-        trend_ok = trend_filter_1d_aligned[i]
+        # Require 1d volume confirmation for institutional participation
+        volume_confirmed = vol_filter_1d_aligned[i] > 0.5
         
-        # Volume confirmation: require volume spike (> 1.3x average)
-        volume_spike = vol_ratio[i] > 1.3
-        
-        if trend_ok and volume_spike:
-            # Long entry: Williams %R oversold (< -80)
-            if williams_r[i] < -80:
+        if volume_confirmed:
+            # Breakout continuation: price breaks R4/S4 with volume
+            if price > r4_1d_aligned[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Williams %R overbought (> -20)
-            elif williams_r[i] > -20:
+            elif price < s4_1d_aligned[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = -SIZE
+            # Mean reversion fade: price rejects R3/S3 with volume
+            elif price >= r3_1d_aligned[i] and price <= r4_1d_aligned[i]:
+                # Fade from R3: short when price reaches R3 and starts declining
+                if i > warmup and close[i-1] > r3_1d_aligned[i-1] and price < r3_1d_aligned[i]:
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    highest_since_entry = high[i]
+                    lowest_since_entry = low[i]
+                    signals[i] = -SIZE
+            elif price >= s3_1d_aligned[i] and price <= s4_1d_aligned[i]:
+                # Fade from S3: long when price reaches S3 and starts rising
+                if i > warmup and close[i-1] < s3_1d_aligned[i-1] and price > s3_1d_aligned[i]:
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    highest_since_entry = high[i]
+                    lowest_since_entry = low[i]
+                    signals[i] = SIZE
             else:
                 signals[i] = 0.0
         else:
