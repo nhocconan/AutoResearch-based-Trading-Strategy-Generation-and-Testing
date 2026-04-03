@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #759: 6h Elder Ray + 12h Regime Filter + Volume Spike
-HYPOTHESIS: Elder Ray (Bull Power/Bear Power) captures bull/bear strength, filtered by 12h ADX regime (ADX>25 = trending) 
-and volume confirmation (>1.5x average). Long when Bull Power > 0 AND Bear Power < 0 (bullish dominance) in trending regime. 
-Short when Bear Power > 0 AND Bull Power < 0 (bearish dominance) in trending regime. Works in bull/bear markets: 
-in bull trends, Elder Ray shows bullish dominance; in bear trends, shows bearish dominance. Uses discrete position sizing (0.25).
-Target: 75-150 total trades over 4 years (19-37/year).
+Experiment #761: 4h Donchian20 + 1d EMA50 + Volume Confirmation
+HYPOTHESIS: 4h Donchian(20) breakouts filtered by 1d EMA50 trend direction and volume confirmation (>1.5x average volume) 
+captures strong momentum moves with proper HTF alignment. Uses discrete position sizing (0.25) to minimize fee churn. 
+Works in bull/bear markets: long when price breaks above Donchian upper AND above 1d EMA50, short when breaks below 
+Donchian lower AND below 1d EMA50. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_759_6h_elder_ray_12h_regime_vol_v1"
-timeframe = "6h"
+name = "exp_761_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,52 +22,29 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for ADX regime filter (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === HTF: 1d data for EMA50 trend (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate ADX(14) on 12h
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-        tr[0] = high[0] - low[0]
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        # Smoothed values
-        atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-        dm_plus_smooth = pd.Series(dm_plus).ewm(span=period, min_periods=period, adjust=False).mean().values
-        dm_minus_smooth = pd.Series(dm_minus).ewm(span=period, min_periods=period, adjust=False).mean().values
-        # Directional Indicators
-        di_plus = 100 * dm_plus_smooth / np.where(atr == 0, 1, atr)
-        di_minus = 100 * dm_minus_smooth / np.where(atr == 0, 1, atr)
-        # DX and ADX
-        dx = 100 * np.abs(di_plus - di_minus) / np.where((di_plus + di_minus) == 0, 1, (di_plus + di_minus))
-        adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-        return adx
+    # Calculate 1d EMA50
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # EMA direction: 1 = price above EMA (bullish bias), -1 = price below EMA (bearish bias)
+    ema_dir = np.where(close_1d > ema_1d, 1, -1)
     
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
-    # Regime: 1 = trending (ADX > 25), 0 = ranging (ADX <= 25)
-    regime_12h = np.where(adx_12h > 25, 1, 0)
-    # Align regime to 6h timeframe
-    regime_12h_aligned = align_htf_to_ltf(prices, df_12h, regime_12h)
+    # Align 1d EMA direction to 4h timeframe
+    ema_dir_aligned = align_htf_to_ltf(prices, df_1d, ema_dir)
     
-    # === 6h Indicators: Elder Ray (Bull Power, Bear Power) ===
-    # EMA(13) as proxy for market consensus
-    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power = high - ema13  # Bull Power: High - EMA13
-    bear_power = low - ema13   # Bear Power: Low - EMA13
+    # === 4h Indicators: Donchian Channel (20) ===
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -85,12 +61,12 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = max(20, 13, 14)  # sufficient for volume MA, EMA13, ATR
+    warmup = max(20, 20, 50)  # sufficient for Donchian, volume MA, and 1d EMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(regime_12h_aligned[i]) or
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(ema_dir_aligned[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -120,7 +96,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 8 bars (~48h on 6h) to avoid overtrading
+            # Optional: time-based exit after 8 bars (~32h on 4h) to avoid overtrading
             if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
@@ -135,16 +111,19 @@ def generate_signals(prices):
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
-        if volume_spike and regime_12h_aligned[i] > 0:  # Only trade in trending regime
-            # Long: Bull Power > 0 AND Bear Power < 0 (bullish dominance)
-            if bull_power[i] > 0 and bear_power[i] < 0:
+        if volume_spike:
+            # Get trend from 1d EMA direction
+            trend = ema_dir_aligned[i]
+            
+            # Long: price breaks above Donchian upper AND 1d EMA trend bullish
+            if high[i] > donchian_high[i] and trend > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Bear Power > 0 AND Bull Power < 0 (bearish dominance)
-            elif bear_power[i] > 0 and bull_power[i] < 0:
+            # Short: price breaks below Donchian lower AND 1d EMA trend bearish
+            elif low[i] < donchian_low[i] and trend < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
