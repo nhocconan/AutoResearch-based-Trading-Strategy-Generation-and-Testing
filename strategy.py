@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #300: 4h Donchian(20) breakout + 1d weekly pivot + volume confirmation
-HYPOTHESIS: Combining Donchian breakouts with weekly pivot levels provides robust structure.
-In bull markets, breakouts above R1 with volume continue up. In bear markets, breakouts below S1 with volume fade to pivot.
-Weekly pivot offers mean-reversion target. Volume confirmation filters false breakouts.
-Discrete sizing (0.25) and ATR stoploss control risk. Target: 75-200 total trades over 4 years.
+Experiment #301: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation
+HYPOTHESIS: Price breaking 4h Donchian(20) channels with 1d HMA trend filter and volume confirmation captures strong momentum moves. In bull markets, breakouts above upper channel with uptrend continue up. In bear markets, breakouts below lower channel with downtrend continue down. The 1d HMA acts as a regime filter to avoid counter-trend whipsaws. Volume confirmation ensures breakout validity. Discrete sizing (0.25) minimizes fee drag. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_300_4h_donchian20_1d_weekly_pivot_vol_v1"
+name = "exp_301_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,37 +19,27 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for weekly pivot (Call ONCE before loop) ===
+    # === HTF: 1d data for HMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points from prior week
-    week_high = df_1d['high'].rolling(window=5, min_periods=5).max().shift(1)
-    week_low = df_1d['low'].rolling(window=5, min_periods=5).min().shift(1)
-    week_close = df_1d['close'].rolling(window=5, min_periods=5).last().shift(1)
+    # Calculate HMA(21) on 1d close
+    def hma(series, period):
+        if len(series) < period:
+            return np.full_like(series, np.nan)
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma2 = pd.Series(series).ewm(span=half, adjust=False).mean()
+        wma1 = pd.Series(series).ewm(span=period, adjust=False).mean()
+        raw = 2 * wma2 - wma1
+        hma_vals = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
+        return hma_vals.values
     
-    pivot = (week_high + week_low + week_close) / 3.0
-    r1 = 2 * pivot - week_low
-    s1 = 2 * pivot - week_high
-    r2 = pivot + (week_high - week_low)
-    s2 = pivot - (week_high - week_low)
+    hma_1d = hma(df_1d['close'].values, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Align to 4h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2.values)
-    
-    # === 4h Indicators: Donchian(20) channels ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 4h Indicators: ATR(14) for stoploss ===
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # === 4h Indicators: Donchian Channel (20) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
     # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -74,11 +61,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(atr[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or
-            np.isnan(s2_aligned[i]) or np.isnan(highest_high[i]) or
-            np.isnan(lowest_low[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(hma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -91,51 +75,51 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- Pivot Zone Logic ---
-        # Long zone: above R1 (bullish bias)
-        # Short zone: below S1 (bearish bias)
-        long_bias = price > r1_aligned[i]
-        short_bias = price < s1_aligned[i]
+        # --- 1d HMA Trend Filter ---
+        # Uptrend: price > HMA(21)
+        # Downtrend: price < HMA(21)
+        uptrend = price > hma_1d_aligned[i]
+        downtrend = price < hma_1d_aligned[i]
         
-        # --- Exit Logic (Mean reversion to pivot) ---
+        # --- Exit Logic: ATR-based stoploss (using 1.5*ATR for tighter stops) ---
         if in_position:
             bars_since_entry += 1
             
+            # Calculate ATR(14) for stoploss
+            if i >= 14:
+                tr = np.zeros(i+1)
+                for j in range(1, i+1):
+                    tr[j] = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+                tr[0] = high[0] - low[0]
+                atr_val = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().iloc[-1]
+            else:
+                atr_val = 0.0
+            
             if position_side > 0:  # Long position
-                # Stoploss: 2*ATR below entry
-                stop_level = entry_price - 2.0 * atr[i]
+                # Stoploss: 1.5*ATR below entry
+                stop_level = entry_price - 1.5 * atr_val
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Take profit: return to pivot
-                if price <= pivot_aligned[i]:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
             else:  # Short position
-                # Stoploss: 2*ATR above entry
-                stop_level = entry_price + 2.0 * atr[i]
+                # Stoploss: 1.5*ATR above entry
+                stop_level = entry_price + 1.5 * atr_val
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Take profit: return to pivot
-                if price >= pivot_aligned[i]:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
             
-            if bars_since_entry < 2:
-                signals[i] = position_side * SIZE
+            # Optional: time-based exit after 24 bars (6 days on 4h)
+            if bars_since_entry > 24:
+                in_position = False
+                position_side = 0
+                bars_since_entry = 0
+                signals[i] = 0.0
                 continue
             
             signals[i] = position_side * SIZE
@@ -143,15 +127,15 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up AND bullish bias
-            if breakout_up and long_bias:
+            # Long: breakout above upper channel AND uptrend
+            if breakout_up and uptrend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down AND bearish bias
-            elif breakout_down and short_bias:
+            # Short: breakout below lower channel AND downtrend
+            elif breakout_down and downtrend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
