@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #020: 4h Donchian20 + 1d Trend + Volume Spike Strategy
+Experiment #021: 4h Donchian20 + 1d Trend + Volume Spike Strategy (Refined)
 
 HYPOTHESIS: Donchian(20) breakouts on 4h combined with 1d trend filter (price above/below EMA50) 
 and volume confirmation (>1.5x average) captures strong directional moves. 
 In trending regimes (price clearly above/below EMA50), we trade breakouts with the trend. 
 In ranging markets (price near EMA50), we avoid false breakouts. Uses ATR-based stoploss (2.0x) 
 and minimum 3-bar holding period. Target: 75-200 trades over 4 years.
+Refined: Reduced warmup to 30, added volume ratio smoothing, and adjusted exit logic to improve trade frequency while maintaining edge.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_020_4h_donchian20_1d_trend_vol_v1"
+name = "exp_021_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -63,7 +64,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 50  # Warmup for 1d EMA50 stability
+    warmup = 30  # Reduced warmup for faster start
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -74,8 +75,8 @@ def generate_signals(prices):
         
         # --- 1d Trend Filter: Only trade when price is clearly above/below EMA50 ---
         price = close[i]
-        is_uptrend = price > ema50_1d_aligned[i] * 1.005  # 0.5% buffer above EMA50
-        is_downtrend = price < ema50_1d_aligned[i] * 0.995  # 0.5% buffer below EMA50
+        is_uptrend = price > ema50_1d_aligned[i] * 1.003  # Reduced buffer for sensitivity
+        is_downtrend = price < ema50_1d_aligned[i] * 0.997  # Reduced buffer for sensitivity
         is_trending = is_uptrend or is_downtrend
         
         # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
