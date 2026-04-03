@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #1541: 4h Donchian(20) Breakout + 1d Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: 4h Donchian breakouts aligned with daily trend and volume spikes capture significant moves while filtering noise. Using 4h primary timeframe with 1d HTF for trend reduces trade frequency to target 75-200 trades over 4 years. Position size 0.25 balances drawdown control with profit potential. Works in bull/bear via trend alignment and volatility-based stops.
+Experiment #1540: 4h Donchian(20) Breakout + 1d Trend + Volume + ATR Stop
+HYPOTHESIS: 4h Donchian breakouts with 1d EMA50 trend alignment and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. Position size fixed at 0.25 to balance return and drawdown. Target: 100-200 total trades over 4 years (25-50/year) by requiring confluence of breakout, trend, and volume. Uses ATR-based stoploss (2.0) to limit downside.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1541_4h_donchian20_1d_trend_vol_v1"
+name = "exp_1540_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -52,7 +52,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for Donchian and volume MA
+    warmup = 50  # sufficient for EMA50 and Donchian20
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -91,10 +91,13 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
+        # Require 1d trend alignment
+        trend_following = trend_1d_aligned[i] != 0  # Should always be ±1, but safety check
+        
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
-        if volume_spike:
+        if trend_following and volume_spike:
             # Breakout: price breaks above upper band OR below lower band
             if price > donch_high[i] and trend_1d_aligned[i] > 0:  # Uptrend breakout
                 in_position = True
