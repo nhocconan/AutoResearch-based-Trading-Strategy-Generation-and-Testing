@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #2087: 6h Donchian(20) breakout + 1d/1w pivot direction + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts with multi-timeframe pivot alignment capture institutional 
-order flow while avoiding overtrading. Uses 1d/1w Camarilla pivots for trend filter and 
-volume confirmation for signal quality. Designed for 50-150 total trades over 4 years.
+Experiment #2088: 12h Donchian(20) breakout + 1w HMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: 12h Donchian breakouts capture swing momentum. 1w HMA filter ensures alignment with weekly institutional trend.
+Volume spike confirms breakout strength. ATR trailing stop manages risk. Designed for 12h timeframe to avoid overtrading.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2087_6h_donchian20_1d_1w_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_2088_12h_donchian20_1w_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,56 +21,41 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivots (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d Camarilla pivots
-    # Pivot = (H + L + C) / 3
-    # R1 = C + (H-L)*1.1/12, S1 = C - (H-L)*1.1/12
-    # R2 = C + (H-L)*1.1/6, S2 = C - (H-L)*1.1/6
-    # R3 = C + (H-L)*1.1/4, S3 = C - (H-L)*1.1/4
-    # R4 = C + (H-L)*1.1/2, S4 = C - (H-L)*1.1/2
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    r1_1d = close_1d + range_1d * 1.1 / 12.0
-    s1_1d = close_1d - range_1d * 1.1 / 12.0
-    r2_1d = close_1d + range_1d * 1.1 / 6.0
-    s2_1d = close_1d - range_1d * 1.1 / 6.0
-    r3_1d = close_1d + range_1d * 1.1 / 4.0
-    s3_1d = close_1d - range_1d * 1.1 / 4.0
-    r4_1d = close_1d + range_1d * 1.1 / 2.0
-    s4_1d = close_1d - range_1d * 1.1 / 2.0
-    
-    # Trend bias from 1d: 1 if close > R3 (bullish bias), -1 if close < S3 (bearish bias), 0 otherwise
-    trend_bias_1d = np.where(close_1d > r3_1d, 1, np.where(close_1d < s3_1d, -1, 0))
-    trend_bias_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
-    
-    # Breakout bias from 1d: 1 if close > R4 (strong bullish), -1 if close < S4 (strong bearish), 0 otherwise
-    breakout_bias_1d = np.where(close_1d > r4_1d, 1, np.where(close_1d < s4_1d, -1, 0))
-    breakout_bias_1d_aligned = align_htf_to_ltf(prices, df_1d, breakout_bias_1d)
-    
-    # === HTF: 1w data for weekly pivot direction (Call ONCE before loop) ===
+    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate 1w Camarilla pivots (same formula)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    range_1w = high_1w - low_1w
+    # Calculate 1w HMA(21): Hull Moving Average
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
     
-    r3_1w = close_1w + range_1w * 1.1 / 4.0
-    s3_1w = close_1w - range_1w * 1.1 / 4.0
+    def wma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        weights = np.arange(1, period + 1)
+        return np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
     
-    # Weekly trend bias: 1 if close > R3 (bullish), -1 if close < S3 (bearish), 0 otherwise
-    weekly_bias = np.where(close_1w > r3_1w, 1, np.where(close_1w < s3_1w, -1, 0))
-    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias)
+    # Calculate WMA for close_1w
+    wma_full = np.array([np.nan] * len(close_1w))
+    wma_half = np.array([np.nan] * len(close_1w))
     
-    # === 6h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
+    for i in range(20, len(close_1w)):  # 21-1 = 20 for WMA(21)
+        wma_full[i] = np.mean(close_1w[i-20:i+1] * np.arange(1, 22))
+    for i in range(half_len-1, len(close_1w)):
+        wma_half[i] = np.mean(close_1w[i-half_len+1:i+1] * np.arange(1, half_len+1))
+    
+    # HMA = WMA(2*WMA_half - WMA_full, sqrt_len)
+    wma_diff = 2 * wma_half - wma_full
+    hma_1w = np.array([np.nan] * len(close_1w))
+    for i in range(sqrt_len-1, len(close_1w)):
+        if i >= half_len-1 and not np.isnan(wma_diff[i]):
+            hma_1w[i] = np.mean(wma_diff[i-sqrt_len+1:i+1] * np.arange(1, sqrt_len+1))
+    
+    # Trend: 1 if close > HMA, -1 otherwise
+    trend_1w = np.where(close_1w > hma_1w, 1, -1)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    
+    # === 12h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
     # Donchian channels
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -107,8 +92,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(trend_bias_1d_aligned[i]) or np.isnan(breakout_bias_1d_aligned[i]) or
-            np.isnan(weekly_bias_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -149,26 +133,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation
+        # Require 1w trend alignment for bias filter
+        trend_bias = trend_1w_aligned[i]
+        
+        # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Determine combined bias from timeframes
-            # Long bias: 1d trend up OR 1d breakout up AND weekly up
-            long_bias = (trend_bias_1d_aligned[i] > 0 or breakout_bias_1d_aligned[i] > 0) and weekly_bias_aligned[i] >= 0
-            # Short bias: 1d trend down OR 1d breakout down AND weekly down
-            short_bias = (trend_bias_1d_aligned[i] < 0 or breakout_bias_1d_aligned[i] < 0) and weekly_bias_aligned[i] <= 0
-            
-            # Long entry: price breaks above upper Donchian AND long bias
-            if long_bias and price > donchian_upper[i]:
+            # Long entry: price breaks above upper Donchian AND 1w trend up
+            if trend_bias > 0 and price > donchian_upper[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below lower Donchian AND short bias
-            elif short_bias and price < donchian_lower[i]:
+            # Short entry: price breaks below lower Donchian AND 1w trend down
+            elif trend_bias < 0 and price < donchian_lower[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -181,3 +162,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
