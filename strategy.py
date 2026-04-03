@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #261: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
+Experiment #119: 6h Camarilla Pivot Fade/Breakout + 12h Volume Spike + ADX Regime Filter
 
-HYPOTHESIS: 4h Donchian channel breakouts filtered by 1d Hull Moving Average trend 
-and volume spikes (>2.0x average) capture strong momentum moves with reduced false 
-breakouts. The 1d HMA provides a smoother, less laggy trend filter from higher 
-timeframe. 4h timeframe targets 19-50 trades/year (75-200 total over 4 years) to 
-minimize fee drag while capturing significant moves. Works in both bull (breakouts 
-with volume) and bear (failed breaks reverse sharply) markets. Uses ATR-based 
-stoploss for risk management.
+HYPOTHESIS: 6h Camarilla pivot levels (R3/S3 for mean reversion fade, R4/S4 for breakout continuation) 
+filtered by 12h volume confirmation (>2.0x average) and ADX regime filter (ADX>25 for breakout, 
+ADX<20 for fade) capture high-probability mean reversion and momentum moves. 
+6h timeframe targets 12-37 trades/year (50-150 total over 4 years) with discrete position sizing 
+(0.25) to minimize fee drag. Works in bull markets (breakouts at R4/S4 with volume) and bear 
+markets (fades at R3/S3 during ranging conditions). Uses ATR-based stoploss for risk management.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_261_4h_donchian_1d_hma_volume_v1"
-timeframe = "4h"
+name = "exp_119_6h_camarilla_12h_volume_adx_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,47 +25,82 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for HMA trend (Call ONCE before loop) ===
+    # === HTF: 12h data for volume and ADX regime (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    
+    # Calculate volume MA(20) on 12h
+    vol_ma_12h = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
+    
+    # Calculate ADX(14) on 12h
+    def calculate_adx(high, low, close, period=14):
+        """Average Directional Index"""
+        # True Range
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First value
+        
+        # Directional Movement
+        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                           np.maximum(high - np.roll(high, 1), 0), 0)
+        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                            np.maximum(np.roll(low, 1) - low, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed values
+        atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+        dm_plus_smooth = pd.Series(dm_plus).ewm(span=period, min_periods=period, adjust=False).mean().values
+        dm_minus_smooth = pd.Series(dm_minus).ewm(span=period, min_periods=period, adjust=False).mean().values
+        
+        # Directional Indicators
+        di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
+        di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
+        
+        # DX and ADX
+        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+        adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+        return adx
+    
+    adx_12h = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
+    
+    # Align HTF indicators to LTF
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # === 6h Indicators: Camarilla Pivot Levels (based on previous day) ===
+    # Calculate daily pivot from 1d data
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate HMA(21) on 1d data
-    def calculate_hma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        wma_half = pd.Series(arr).rolling(window=half_period, min_periods=half_period).mean().values
-        wma_full = pd.Series(arr).rolling(window=period, min_periods=period).mean().values
-        raw_hma = 2.0 * wma_half - wma_full
-        hma = pd.Series(raw_hma).rolling(window=sqrt_period, min_periods=sqrt_period).mean().values
-        return hma
+    # Previous day's OHLC for Camarilla calculation
+    prev_close = df_1d['close'].values
+    prev_high = df_1d['high'].values
+    prev_low = df_1d['low'].values
     
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # Camarilla levels: 
+    # R4 = close + ((high-low) * 1.1/2)
+    # R3 = close + ((high-low) * 1.1/4)
+    # S3 = close - ((high-low) * 1.1/4)
+    # S4 = close - ((high-low) * 1.1/2)
+    camarilla_r4 = prev_close + ((prev_high - prev_low) * 1.1 / 2)
+    camarilla_r3 = prev_close + ((prev_high - prev_low) * 1.1 / 4)
+    camarilla_s3 = prev_close - ((prev_high - prev_low) * 1.1 / 4)
+    camarilla_s4 = prev_close - ((prev_high - prev_low) * 1.1 / 2)
     
-    # === 4h Indicators: Donchian Channel (20) ===
-    donchian_h = np.full(n, np.nan)
-    donchian_l = np.full(n, np.nan)
-    donchian_m = np.full(n, np.nan)
+    # Align to 6h timeframe (each 6h bar gets previous day's levels)
+    camarilla_r4_6h = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_r3_6h = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_6h = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_s4_6h = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    for i in range(20, n):
-        donchian_h[i] = np.max(high[i-20:i])
-        donchian_l[i] = np.min(low[i-20:i])
-        donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
-    
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # === 4h Indicators: Volume MA(20) for spike detection ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.zeros(n)
-    vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
-    vol_ratio[:20] = 1.0  # Neutral for warmup
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -76,28 +110,38 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    bars_since_entry = 0  # Track bars in position for minimum holding period
+    bars_since_entry = 0
     
-    warmup = 50  # Ensure enough data for HTF HMA, ATR, and Donchian
+    warmup = 100  # Ensure enough data for HTF indicators and ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
-            np.isnan(hma_1d_aligned[i]) or np.isnan(atr_14[i]) or 
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(camarilla_r3_6h[i]) or np.isnan(camarilla_s3_6h[i]) or 
+            np.isnan(camarilla_r4_6h[i]) or np.isnan(camarilla_s4_6h[i]) or 
+            np.isnan(vol_ma_12h_aligned[i]) or np.isnan(adx_12h_aligned[i]) or 
+            np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
-        # --- 1d HMA Trend Filter: Price > HMA = bullish bias, Price < HMA = bearish bias ---
-        price_above_hma = close[i] > hma_1d_aligned[i]
-        price_below_hma = close[i] < hma_1d_aligned[i]
+        # --- 12h Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = volume[i] > (2.0 * vol_ma_12h_aligned[i])
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
+        # --- 12h ADX Regime Filter ---
+        adx_high = adx_12h_aligned[i] > 25   # Trending regime (breakout)
+        adx_low = adx_12h_aligned[i] < 20    # Ranging regime (mean reversion)
         
-        # --- Donchian Breakout Conditions ---
-        breakout_up = close[i] > donchian_h[i]
-        breakout_down = close[i] < donchian_l[i]
+        # --- Camarilla Breakout/Fade Conditions ---
+        # Breakout long: price > R4 with volume spike and ADX>25
+        breakout_long = (close[i] > camarilla_r4_6h[i]) and volume_spike and adx_high
+        
+        # Breakout short: price < S4 with volume spike and ADX>25
+        breakout_short = (close[i] < camarilla_s4_6h[i]) and volume_spike and adx_high
+        
+        # Fade long: price < S3 with volume spike and ADX<20 (mean reversion long)
+        fade_long = (close[i] < camarilla_s3_6h[i]) and volume_spike and adx_low
+        
+        # Fade short: price > R3 with volume spike and ADX<20 (mean reversion short)
+        fade_short = (close[i] > camarilla_r3_6h[i]) and volume_spike and adx_low
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -105,30 +149,38 @@ def generate_signals(prices):
             
             # ATR-based stoploss
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.0 * atr_14[i]
+                stop_level = entry_price - 2.5 * atr_14[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on Donchian middle line reversion (take profit)
-                if close[i] < donchian_m[i]:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
             else:  # Short position
-                stop_level = entry_price + 2.0 * atr_14[i]
+                stop_level = entry_price + 2.5 * atr_14[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on Donchian middle line reversion (take profit)
-                if close[i] > donchian_m[i]:
+            
+            # Exit conditions: opposite signal or Donchian-like middle reversion
+            # For breakout positions, exit on reversion to midpoint
+            # For fade positions, exit on reversion to pivot level (using R3/S3 as reference)
+            pivot_mid = (camarilla_r3_6h[i] + camarilla_s3_6h[i]) / 2
+            
+            if position_side > 0:  # Long
+                # Exit long on price below pivot mid (for fade) or strong reversal
+                if close[i] < pivot_mid:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+            else:  # Short
+                # Exit short on price above pivot mid
+                if close[i] > pivot_mid:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -145,19 +197,26 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Donchian breakout up + volume spike + price above 1d HMA
-        long_condition = breakout_up and volume_spike and price_above_hma
-        
-        # Short: Donchian breakout down + volume spike + price below 1d HMA
-        short_condition = breakout_down and volume_spike and price_below_hma
-        
-        if long_condition:
+        # Priority: Breakout signals first (stronger momentum), then fade signals
+        if breakout_long:
             in_position = True
             position_side = 1
             entry_price = close[i]
             bars_since_entry = 0
             signals[i] = SIZE
-        elif short_condition:
+        elif breakout_short:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = -SIZE
+        elif fade_long:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = SIZE
+        elif fade_short:
             in_position = True
             position_side = -1
             entry_price = close[i]
