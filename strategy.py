@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #031: 6h Donchian(20) breakout + 1d EMA(200) trend filter + volume confirmation
-HYPOTHESIS: Price breaking 6h Donchian(20) channels with alignment to 1d EMA(200) trend (price > EMA200 = bullish bias, price < EMA200 = bearish bias) and volume confirmation (>1.5x average) captures institutional breakout flows while avoiding counter-trend trades. The EMA200 filter provides a robust higher timeframe trend bias that works in both bull and bear markets by ensuring we only trade in the direction of the longer-term trend. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0) to manage risk. Target: 75-150 total trades over 4 years (19-37/year).
+Experiment #029: 4h Donchian(20) breakout + 1d trend filter + volume confirmation + chop filter
+HYPOTHESIS: Price breaking 4h Donchian(20) channels with 1d EMA(50) trend alignment, volume spike (>1.8x), and low chop (< 61.8) captures momentum with controlled frequency. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0) to manage risk. Target: 75-200 total trades over 4 years (19-50/year) for statistical validity and low fee drift. Works in both bull (breakouts with trend) and bear (short breakdowns with trend) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_031_6h_donchian20_1d_ema200_vol_v1"
-timeframe = "6h"
+name = "exp_029_4h_donchian20_1d_ema_vol_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,23 +19,45 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA200 trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    ema_200 = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
-    # === 6h Indicators: Donchian Channel (20) ===
+    # Calculate EMA(50) on 1d close
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # === HTF: 1d data for chop filter ===
+    # True Range for chop calculation
+    tr_1d = np.zeros(len(df_1d))
+    for i in range(1, len(df_1d)):
+        tr_1d[i] = max(
+            df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
+            abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
+            abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
+        )
+    tr_1d[0] = df_1d['high'].iloc[0] - df_1d['low'].iloc[0]
+    atr_1d = pd.Series(tr_1d).ewm(span=14, adjust=False).mean().values
+    
+    # Chopiness Index: (sum(TR14) / (max(high14) - min(low14))) * 100
+    sum_tr_14 = pd.Series(atr_1d * 14).rolling(window=14, min_periods=14).sum().values
+    highest_high_14 = pd.Series(df_1d['high'].values).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(df_1d['low'].values).rolling(window=14, min_periods=14).min().values
+    chop_denom = highest_high_14 - lowest_low_14
+    chop_denom = np.where(chop_denom == 0, 1e-10, chop_denom)  # avoid division by zero
+    chop_1d = (sum_tr_14 / chop_denom) * 100
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # === 4h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
-    valid_start = 20
-    vol_ratio[valid_start:] = volume[valid_start:] / vol_ma[valid_start:]
-    vol_ratio[:valid_start] = 1.0
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    vol_ratio[:20] = 1.0
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -52,30 +74,33 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 200  # sufficient for EMA200 calculation + HTF warmup
+    warmup = 60  # sufficient for 20-period indicators + HTF warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema_200_aligned[i]) or
-            np.isnan(atr[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i]) or
+            np.isnan(atr[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio[i] > 1.5
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
+        volume_spike = vol_ratio[i] > 1.8
+        
+        # --- Chop Filter: Require low chop (< 61.8) for trending market ---
+        low_chop = chop_1d_aligned[i] < 61.8
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- Bias Filter: 1d EMA200 trend alignment ---
-        # Bullish bias: price above EMA200
-        # Bearish bias: price below EMA200
-        bullish_bias = price > ema_200_aligned[i]
-        bearish_bias = price < ema_200_aligned[i]
+        # --- Trend Filter: 1d EMA alignment ---
+        # Uptrend: price above 1d EMA
+        # Downtrend: price below 1d EMA
+        uptrend = price > ema_1d_aligned[i]
+        downtrend = price < ema_1d_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -100,8 +125,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~36h on 6h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 8 bars (~32h on 4h) to avoid overtrading
+            if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -112,16 +137,16 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        if volume_spike:
-            # Long: breakout above upper channel AND bullish bias from EMA200
-            if breakout_up and bullish_bias:
+        if volume_spike and low_chop:
+            # Long: breakout above upper channel AND uptrend
+            if breakout_up and uptrend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: breakout below lower channel AND bearish bias from EMA200
-            elif breakout_down and bearish_bias:
+            # Short: breakout below lower channel AND downtrend
+            elif breakout_down and downtrend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
