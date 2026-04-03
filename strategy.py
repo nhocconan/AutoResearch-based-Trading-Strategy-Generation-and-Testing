@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #1528: 12h Donchian(20) Breakout + 1w Trend + Volume Spike + Chop Filter
-HYPOTHESIS: 12h Donchian breakouts with 1-week trend alignment, volume confirmation (>2.0x average), and choppiness regime filter (CHOP < 38.2 = trending) capture medium-term swings in both bull and bear markets. The 12h timeframe reduces trade frequency to avoid fee drag while allowing sufficient signals. Position size fixed at 0.25 to balance return and drawdown. Target: 75-150 total trades over 4 years (19-37/year).
+Experiment #1528: 12h Donchian(20) Breakout + 1w Trend + Volume + Chop Filter
+HYPOTHESIS: 12h Donchian breakouts with 1w trend alignment, volume confirmation (>1.5x average), and choppiness regime filter (CHOP < 61.8) capture medium-term swings in both bull and bear markets. Position size fixed at 0.25 to balance return and drawdown. Target: 50-150 total trades over 4 years (12-37/year) by using tight entry conditions and multi-timeframe confluence.
 """
 
 import numpy as np
@@ -22,8 +22,8 @@ def generate_signals(prices):
     # === HTF: 1w data for trend filter (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    hma_1w = calculate_hma(close_1w, 21)
-    trend_1w = np.where(close_1w > hma_1w, 1, -1)
+    sma_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    trend_1w = np.where(close_1w > sma_1w, 1, -1)
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
     # === HTF: 1d data for chop regime filter (Call ONCE before loop) ===
@@ -33,11 +33,14 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # True Range for 1d
-    tr1 = np.zeros(len(high_1d))
-    for i in range(1, len(high_1d)):
-        tr1[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
     tr1[0] = high_1d[0] - low_1d[0]
-    atr_1d = pd.Series(tr1).ewm(span=14, min_periods=14, adjust=False).mean().values
+    tr2[0] = np.abs(high_1d[0] - close_1d[0])
+    tr3[0] = np.abs(low_1d[0] - close_1d[0])
+    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
     
     # +DM and -DM for 1d
     up_move = np.diff(high_1d, prepend=high_1d[0])
@@ -45,26 +48,20 @@ def generate_signals(prices):
     plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
     minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
     
-    # Smoothed +DM, -DM, and TR
-    tr_period = 14
-    atr_1d_smooth = pd.Series(tr1).ewm(span=tr_period, min_periods=tr_period, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=tr_period, min_periods=tr_period, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=tr_period, min_periods=tr_period, adjust=False).mean().values
+    # Smoothed +DM, -DM, ATR
+    atr_1d_smooth = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # +DI and -DI
-    plus_di = 100 * plus_dm_smooth / (atr_1d_smooth + 1e-10)
-    minus_di = 100 * minus_dm_smooth / (atr_1d_smooth + 1e-10)
+    plus_di_1d = 100 * plus_dm_smooth / (atr_1d_smooth + 1e-10)
+    minus_di_1d = 100 * minus_dm_smooth / (atr_1d_smooth + 1e-10)
     
-    # DX and Chopiness Index (CHOP)
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=tr_period, min_periods=tr_period, adjust=False).mean().values
-    chop = 100 * np.log10(atr_1d_smooth.sum() / (np.max(high_1d) - np.min(low_1d)) + 1e-10) / np.log10(tr_period)
-    # Fix: Calculate proper CHOP using rolling sum of TR and rolling range
-    tr_sum = pd.Series(tr1).rolling(window=14, min_periods=14).sum().values
-    high_max = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-    low_min = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-    chop = 100 * np.log10(tr_sum / (high_max - low_min + 1e-10)) / np.log10(14)
-    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    # DX and Chopiness Index
+    dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
+    chop_1d = 100 * np.log10(np.sum(tr_1d[-14:]) / (np.max(high_1d[-14:]) - np.min(low_1d[-14:]) + 1e-10)) / np.log10(14)
+    chop_1d_series = pd.Series(chop_1d).rolling(window=14, min_periods=14).mean().values
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d_series)
     
     # === 12h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -92,12 +89,12 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for Donchian and volume MA
+    warmup = 50  # sufficient for 1w SMA and 1d chop calculation
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_1w_aligned[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(trend_1w_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -132,15 +129,15 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         # Require 1w trend alignment
-        trend_following = trend_1w_aligned[i] != 0
+        trend_following = trend_1w_aligned[i]
         
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
-        # Chop filter: only trade when market is trending (CHOP < 38.2)
-        chop_trending = chop_aligned[i] < 38.2
+        # Chop filter: require chop < 61.8 (trending market)
+        chop_filter = chop_1d_aligned[i] < 61.8
         
-        if trend_following and volume_spike and chop_trending:
+        if trend_following and volume_spike and chop_filter:
             # Breakout: price breaks above upper band OR below lower band
             if price > donch_high[i] and trend_1w_aligned[i] > 0:  # Uptrend breakout
                 in_position = True
@@ -160,30 +157,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average"""
-    if len(close) < period:
-        return np.full_like(close, np.nan)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA for half period
-    wma_half = np.zeros_like(close)
-    for i in range(half_period, len(close)):
-        wma_half[i] = np.dot(close[i-half_period+1:i+1], np.arange(1, half_period+1)) / (half_period * (half_period + 1) / 2)
-    
-    # WMA for full period
-    wma_full = np.zeros_like(close)
-    for i in range(period, len(close)):
-        wma_full[i] = np.dot(close[i-period+1:i+1], np.arange(1, period+1)) / (period * (period + 1) / 2)
-    
-    # Raw HMA: 2*WMA(half) - WMA(full)
-    raw_hma = 2 * wma_half - wma_full
-    
-    # Final WMA of raw_hma with sqrt_period
-    hma = np.zeros_like(close)
-    for i in range(sqrt_period, len(close)):
-        hma[i] = np.dot(raw_hma[i-sqrt_period+1:i+1], np.arange(1, sqrt_period+1)) / (sqrt_period * (sqrt_period + 1) / 2)
-    
-    return hma
