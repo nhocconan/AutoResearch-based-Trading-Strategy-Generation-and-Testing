@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #515: 6h Donchian(20) breakout + 1w weekly pivot direction + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 1w weekly pivot levels (price above weekly pivot = bullish bias, below = bearish bias) capture major trend momentum while avoiding counter-trend whipsaws. Weekly pivot from 1w timeframe provides structural bias resistant to short-term noise. Volume confirmation (>1.5x average) filters weak breakouts. 6h timeframe balances trade frequency and capture of multi-day moves. Works in bull markets (breakouts above weekly pivot) and bear markets (breakdowns below weekly pivot) by requiring pivot alignment. Discrete position sizing (0.25) manages drawdown. Target: 75-150 total trades over 4 years.
+Experiment #517: 4h Donchian(20) breakout + 1d/1w HTF trend filter + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 and 1w EMA200 trend filters capture strong momentum while avoiding counter-trend trades. Volume confirmation (>1.5x average) filters weak breakouts. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) controls drawdown. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_515_6h_donchian20_1w_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_517_4h_donchian20_1d_1w_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,30 +19,28 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for weekly pivot points (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA50 trend (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    
+    # === HTF: 1w data for EMA200 trend (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    ema200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
-    # Calculate weekly pivot points: P = (H + L + C)/3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # We use P as the bias indicator (price above P = bullish, below = bearish)
-    pivot_point = (high_1w + low_1w + close_1w) / 3.0
-    # Align the 1w pivot point to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
-    
-    # === 6h Indicators: Donchian Channel (20) ===
+    # === 4h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)  # default to 1.0 for warmup period
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -64,8 +62,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(pivot_aligned[i]) or
-            np.isnan(atr[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(ema50_1d_aligned[i]) or
+            np.isnan(ema200_1w_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -78,11 +76,11 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- 1w Weekly Pivot Filter ---
-        # For long: price above weekly pivot (bullish bias)
-        # For short: price below weekly pivot (bearish bias)
-        bullish_bias = price > pivot_aligned[i]
-        bearish_bias = price < pivot_aligned[i]
+        # --- HTF Trend Filter: 1d EMA50 + 1w EMA200 ---
+        # Bullish: price above both EMAs
+        bullish_trend = price > ema50_1d_aligned[i] and price > ema200_1w_aligned[i]
+        # Bearish: price below both EMAs
+        bearish_trend = price < ema50_1d_aligned[i] and price < ema200_1w_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -107,8 +105,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 8 bars (~4 days on 6h) to avoid overtrading
-            if bars_since_entry > 8:
+            # Optional: time-based exit after 6 bars (~1 day on 4h) to avoid overtrading
+            if bars_since_entry > 6:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -120,15 +118,15 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + bullish bias (above weekly pivot)
-            if breakout_up and bullish_bias:
+            # Long: Donchian breakout up + bullish HTF trend
+            if breakout_up and bullish_trend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + bearish bias (below weekly pivot)
-            elif breakout_down and bearish_bias:
+            # Short: Donchian breakout down + bearish HTF trend
+            elif breakout_down and bearish_trend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
