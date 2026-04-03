@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #388: 12h Donchian Breakout + 1d Volume Spike + 1w Trend Filter (Revised)
+Experiment #389: 4h Donchian Breakout + 1d Volume Spike + 1w Trend Filter
 
-HYPOTHESIS: 12h Donchian(20) breakouts with volume confirmation (>1.8x 1d average volume) 
-and weekly trend filter (price > weekly EMA50 for longs, < for shorts) captures strong 
-momentum moves. Using discrete position sizing (0.25) and ATR-based stops to reduce 
-overtrading from Experiment #382. Target: 12-37 trades/year (50-150 total over 4 years).
+HYPOTHESIS: 4h Donchian(20) breakouts combined with 1d volume confirmation (>1.8x average) 
+and 1w trend filter (price > EMA50 on weekly) captures strong momentum moves while avoiding 
+choppy markets. Donchian breakouts work in both bull (breakouts to new highs) and bear 
+(breakdowns to new lows) markets. Higher timeframes (1d/1w) filter noise and reduce overtrading.
+Target: 19-50 trades/year (75-200 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_vol_trend_v2"
-timeframe = "12h"
+name = "mtf_4h_donchian_vol_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -48,7 +49,7 @@ def generate_signals(prices):
     else:
         ema_50_1w_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Calculate Donchian channels (20-period) ===
+    # === 4h Indicators: Calculate Donchian channels (20-period) ===
     if n >= 20:
         # Calculate rolling max/min for Donchian channels
         high_series = pd.Series(high)
@@ -62,7 +63,8 @@ def generate_signals(prices):
         donchian_upper = np.full(n, np.nan)
         donchian_lower = np.full(n, np.nan)
     
-    # === Session filter: Trade all hours for 12h timeframe ===
+    # === Session filter: 00-23 UTC (trade all hours for 4h timeframe) ===
+    # For 4h timeframe, we can trade all hours as each bar represents 4 hours
     hours = prices.index.hour  # Pre-compute before loop
     
     # === Signals Initialization ===
@@ -77,9 +79,9 @@ def generate_signals(prices):
     warmup = 50  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
-        # --- Session Filter: Trade all hours for 12h timeframe ---
+        # --- Session Filter: Trade all hours for 4h timeframe ---
         hour = hours[i]
-        # No session filter for 12h - trade continuously
+        # No session filter for 4h - trade continuously
         
         # --- Data Validity Check ---
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
