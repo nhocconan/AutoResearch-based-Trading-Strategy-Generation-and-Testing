@@ -1,67 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #070: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Spike
+Experiment #071: 6h Williams %R Mean Reversion + 1d Volume Spike + ATR Stop
 
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA trend capture institutional order flow with minimal fee drag.
-Weekly HMA provides smooth trend filter to avoid whipsaws. Volume confirmation (2.0x average) ensures follow-through.
-Designed for 15-25 trades/year to minimize fee drift while maintaining statistical significance.
-Uses discrete position sizing (0.25) to reduce churn. Works in both bull/bear markets by trading breakouts
-in direction of weekly HMA slope.
+HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h timeframe.
+In ranging markets (2021-2024), price reverts from extremes with 1d volume confirmation
+providing institutional participation signal. ATR-based stops manage risk during trends.
+Discrete sizing (0.25) reduces fee churn. Target: 15-30 trades/year for statistical
+validity with minimal fee drag. Works in both bull/bear via mean reversion logic.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_1w_hma_volume_v1"
-timeframe = "1d"
+name = "mtf_6h_williamsr_1d_volume_v1"
+timeframe = "6h"
 leverage = 1.0
-
-def calculate_hma(close, period):
-    """Hull Moving Average: WMA(2*WMA(n/2) - WMA(n), sqrt(n))"""
-    n = len(close)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    half = period // 2
-    sqrt_n = int(np.sqrt(period))
-    
-    def wma(arr, window):
-        if len(arr) < window:
-            return np.full(len(arr), np.nan)
-        weights = np.arange(1, window + 1, dtype=np.float64)
-        return np.convolve(arr, weights / weights.sum(), mode='valid')
-    
-    close_series = pd.Series(close)
-    wma_half = wma(close_series.values, half)
-    wma_full = wma(close_series.values, period)
-    
-    # Align arrays: wma_half starts at index (period - half), wma_full at (period - 1)
-    raw_2wma = np.full(n, np.nan)
-    raw_2wma[half-1:half-1+len(wma_half)*2] = wma_half * 2
-    raw_2wma[period-1:period-1+len(wma_full)] -= wma_full
-    
-    wma_2wma = wma(raw_2wma[~np.isnan(raw_2wma)], sqrt_n)
-    
-    hma = np.full(n, np.nan)
-    start_idx = period - 1 + (sqrt_n - 1)//2
-    end_idx = start_idx + len(wma_2wma)
-    hma[start_idx:end_idx] = wma_2wma
-    
-    return hma
-
-def calculate_atr(high, low, close, period=14):
-    """Average True Range for stoploss calculation."""
-    n = len(close)
-    if n < 2:
-        return np.full(n, np.nan)
-    
-    tr = np.zeros(n, dtype=np.float64)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-    return atr
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
@@ -70,16 +23,19 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    hma_21 = calculate_hma(df_1w['close'].values, 21)
-    hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
+    # === HTF: 1d volume MA for confirmation (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    vol_ma_20_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
     
-    # === 1d Indicators ===
-    atr_14 = calculate_atr(high, low, close, period=14)
-    dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 6h Indicators ===
+    # Williams %R(14): (Highest High - Close) / (Highest High - Lowest Low) * -100
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = ((highest_high_14 - close) / (highest_high_14 - lowest_low_14)) * -100
+    williams_r = np.where((highest_high_14 - lowest_low_14) == 0, -50, williams_r)
+    
+    atr_14 = pd.Series(high - low).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -92,31 +48,14 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 100  # Ensure enough data for HTF and indicator calculations
+    warmup = 20  # Ensure enough data for Williams %R and ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(atr_14[i]) or np.isnan(dc_upper_20[i]) or np.isnan(dc_lower_20[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(hma_21_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(vol_ma_20_1d_aligned[i])):
             signals[i] = 0.0
             continue
-        
-        # --- Weekly HMA Trend ---
-        # Calculate slope of HMA over 3 periods
-        if i >= 3:
-            hma_slope = hma_21_aligned[i] - hma_21_aligned[i-3]
-            hma_bullish = hma_slope > 0
-            hma_bearish = hma_slope < 0
-        else:
-            hma_bullish = False
-            hma_bearish = False
-        
-        # --- Price Channel Breakout ---
-        bullish_breakout = close[i] > dc_upper_20[i]
-        bearish_breakout = close[i] < dc_lower_20[i]
-        
-        # --- Volume Confirmation ---
-        vol_ok = volume[i] > vol_ma_20[i] * 2.0 if vol_ma_20[i] > 1e-10 else False  # 2.0x volume spike
         
         # --- Position Management (Exit Logic) ---
         stop_hit = False
@@ -124,24 +63,24 @@ def generate_signals(prices):
         if in_position:
             # ATR-based trailing stoploss
             if position_side > 0:
-                stop_level = highest_since_entry - 2.5 * atr_14[i]
+                stop_level = highest_since_entry - 2.0 * atr_14[i]
                 if low[i] < stop_level:
                     stop_hit = True
             else:  # Short position
-                stop_level = lowest_since_entry + 2.5 * atr_14[i]
+                stop_level = lowest_since_entry + 2.0 * atr_14[i]
                 if high[i] > stop_level:
                     stop_hit = True
             
-            # Exit conditions: trend reversal or opposite Donchian touch
-            min_hold = (i - entry_bar) >= 3  # Minimum 3 bars hold (~3d)
+            # Exit conditions: Williams %R returns to neutral zone (between -20 and -80)
+            min_hold = (i - entry_bar) >= 2  # Minimum 2 bars hold (~12h)
             if min_hold:
                 if position_side > 0:
-                    # Exit long: price touches lower Donchian OR HMA turns bearish
-                    if close[i] <= dc_lower_20[i] or not hma_bullish:
+                    # Exit long: Williams %R rises above -20 (overbought)
+                    if williams_r[i] > -20:
                         stop_hit = True
                 else:  # position_side < 0
-                    # Exit short: price touches upper Donchian OR HMA turns bullish
-                    if close[i] >= dc_upper_20[i] or not hma_bearish:
+                    # Exit short: Williams %R falls below -80 (oversold)
+                    if williams_r[i] < -80:
                         stop_hit = True
             
             if stop_hit:
@@ -155,17 +94,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
+        # Volume confirmation: current 6h volume > 1.5x 1d average volume (scaled)
+        # 1d volume MA represents average daily volume; 6h is 1/4 of day
+        vol_6h_expected = vol_ma_20_1d_aligned[i] / 4.0
+        vol_ok = volume[i] > vol_6h_expected * 1.5 if vol_6h_expected > 1e-10 else False
+        
         # Long conditions: 
-        # Breakout above upper Donchian with bullish weekly HMA and volume confirmation
-        if bullish_breakout and hma_bullish and vol_ok:
+        # Williams %R below -80 (oversold) with volume confirmation
+        if williams_r[i] < -80 and vol_ok:
             in_position = True
             position_side = 1
             entry_bar = i
             highest_since_entry = high[i]
             signals[i] = SIZE
         # Short conditions:
-        # Breakout below lower Donchian with bearish weekly HMA and volume confirmation
-        elif bearish_breakout and hma_bearish and vol_ok:
+        # Williams %R above -20 (overbought) with volume confirmation
+        elif williams_r[i] > -20 and vol_ok:
             in_position = True
             position_side = -1
             entry_bar = i
