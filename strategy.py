@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #1547: 6h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with weekly pivot direction from 1d timeframe, with volume confirmation (>1.8x average), capture medium-term swings in both bull and bear markets. Weekly pivot provides structural support/resistance from higher timeframe, reducing false breakouts. Position size fixed at 0.25 to balance return and drawdown. Target: 75-175 total trades over 4 years (19-44/year).
+Experiment #1549: 4h Donchian(20) Breakout + 1d EMA Trend + Volume + ATR Stop
+HYPOTHESIS: 4h Donchian breakouts with 1d EMA trend alignment and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. Position size fixed at 0.25 to balance return and drawdown. Target: 75-200 total trades over 4 years (19-50/year) by using tight entry conditions and multi-timeframe confluence. Uses ATR-based stoploss to limit downside.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1547_6h_donchian20_1d_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_1549_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,46 +19,23 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for weekly pivot and trend (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Calculate weekly pivot points from prior week (using 1d data)
-    # We need to group by week and calculate pivot for prior week
-    # For simplicity, we'll use rolling window of 5 days (1 week) to approximate
-    # In practice, we'd use actual weekly grouping, but rolling 5 is close enough for 1d data
-    # Pivot = (High + Low + Close) / 3
-    # We'll calculate for each day, then use prior week's value
-    # To avoid lookahead, we shift by 5 (prior week)
-    typical_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Weekly pivot: typical price of prior week (5-day shift)
-    weekly_pivot = pd.Series(typical_1d).rolling(window=5, min_periods=5).mean().shift(5).values
-    # Support 1: 2*Pivot - High
-    weekly_s1 = (2 * weekly_pivot) - high_1d
-    # Resistance 1: 2*Pivot - Low
-    weekly_r1 = (2 * weekly_pivot) - low_1d
-    
-    # Align to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    
-    # Determine pivot bias: price above/below weekly pivot
-    pivot_bias = np.where(close_1d > weekly_pivot, 1, -1)
-    pivot_bias_aligned = align_htf_to_ltf(prices, df_1d, pivot_bias)
-    
-    # === 6h Indicators: Donchian(20) ===
+    # === 4h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -80,9 +57,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(pivot_bias_aligned[i]) or np.isnan(weekly_pivot_aligned[i]) or
-            np.isnan(weekly_s1_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -115,24 +91,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require pivot bias alignment (weekly directional filter)
-        # Volume confirmation: require volume spike (> 1.8x average)
-        volume_spike = vol_ratio[i] > 1.8
+        # Require 1d EMA trend alignment
+        trend_following = trend_1d_aligned[i] != 0  # Should always be true after warmup
         
-        if volume_spike:
-            # Long: price breaks above Donchian high AND pivot bias bullish AND price above weekly pivot
-            if (price > donch_high[i] and 
-                pivot_bias_aligned[i] > 0 and 
-                price > weekly_pivot_aligned[i]):
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
+        
+        if trend_following and volume_spike:
+            # Breakout: price breaks above upper band OR below lower band
+            if price > donch_high[i] and trend_1d_aligned[i] > 0:  # Uptrend breakout
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: price breaks below Donchian low AND pivot bias bearish AND price below weekly pivot
-            elif (price < donch_low[i] and 
-                  pivot_bias_aligned[i] < 0 and 
-                  price < weekly_pivot_aligned[i]):
+            elif price < donch_low[i] and trend_1d_aligned[i] < 0:  # Downtrend breakdown
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
