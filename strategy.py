@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #533: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts aligned with 12h HMA21 trend and volume spikes capture strong momentum. 
-12h HMA provides smoother trend filter than EMA, reducing whipsaws in sideways markets. 
-Volume confirmation (>1.5x average) ensures participation. ATR-based stoploss (2.0) manages risk. 
-Discrete position sizing (0.25) limits drawdown. Targets 75-200 total trades over 4 years.
+Experiment #533: 4h Donchian(20) breakout + 12h EMA21 trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian breakouts aligned with 12h EMA21 trend and volume spikes capture strong momentum. The 12h EMA21 provides intermediate trend filter that works in both bull and bear markets. Volume confirmation (>1.4x average) ensures participation. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 75-200 total trades over 4 years by using tight entry conditions (breakout + EMA trend + volume).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_533_4h_donchian20_12h_hma_vol_v1"
+name = "exp_533_4h_donchian20_12h_ema21_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,24 +19,18 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for HMA21 trend (Call ONCE before loop) ===
+    # === HTF: 12h data for EMA21 trend (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
-    # Calculate HMA21 on 12h timeframe
+    # Calculate EMA21 on 12h timeframe
     if len(close_12h) >= 21:
-        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        wma_half = pd.Series(close_12h).ewm(span=half_len, adjust=False).mean().values
-        wma_full = pd.Series(close_12h).ewm(span=21, adjust=False).mean().values
-        raw_hma = 2 * wma_half - wma_full
-        hma_12h = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False).mean().values
+        ema_12h = pd.Series(close_12h).ewm(span=21, min_periods=21, adjust=False).mean().values
     else:
-        hma_12h = np.full(len(close_12h), np.nan)
+        ema_12h = np.full(len(close_12h), np.nan)
     
-    # Align HMA21 to 4h timeframe
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    # Align EMA21 to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # === 4h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
@@ -72,25 +63,25 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(hma_12h_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(ema_12h_aligned[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio[i] > 1.5
+        # --- Volume Confirmation: Require volume spike (> 1.4x average) ---
+        volume_spike = vol_ratio[i] > 1.4
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- 12h HMA21 Trend Filter ---
-        # Bullish trend: price above 12h HMA21
-        bullish_trend = price > hma_12h_aligned[i]
-        # Bearish trend: price below 12h HMA21
-        bearish_trend = price < hma_12h_aligned[i]
+        # --- 12h EMA21 Trend Filter ---
+        # Bullish trend: price above 12h EMA21
+        bullish_trend = price > ema_12h_aligned[i]
+        # Bearish trend: price below 12h EMA21
+        bearish_trend = price < ema_12h_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -128,14 +119,14 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + bullish 12h HMA21 trend
+            # Long: Donchian breakout up + bullish 12h EMA21 trend
             if breakout_up and bullish_trend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + bearish 12h HMA21 trend
+            # Short: Donchian breakout down + bearish 12h EMA21 trend
             elif breakout_down and bearish_trend:
                 in_position = True
                 position_side = -1
