@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #455: 6h Elder Ray Power + 1w Trend + Volume Confirmation
+Experiment #001: 4h Donchian Breakout + Volume Spike + 1d Trend Filter
 
-HYPOTHESIS: Elder Ray Bull/Bear Power (EMA13-based) measures bull/bear strength relative to trend. 
-Combined with 1w trend filter (price > EMA50 for long, < for short) and 6h volume spike (>2x average), 
-this captures powerful continuations in the dominant weekly trend while avoiding counter-trend traps. 
-The Elder Ray indicator works in both bull and bear markets by adapting to the 1w trend direction. 
-Targets 12-37 trades/year on 6h timeframe (50-150 total over 4 years) to minimize fee drag.
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe, confirmed by 1d volume spike (>2.0x average) and 
+aligned with 1d trend (price > EMA50 for longs, < EMA50 for shorts), captures high-momentum moves 
+while filtering false breakouts. The Donchian channel provides objective breakout levels, volume 
+confirms institutional participation, and the 1d trend filter ensures alignment with higher timeframe 
+direction. Targets 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee 
+drag while participating in strong trends.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_elder_ray_power_v1"
-timeframe = "6h"
+name = "mtf_4h_donchian_vol_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,30 +25,33 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
+    # === HTF: 1d data for volume spike and trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate EMA(50) on 1w close
-    if len(df_1w) >= 50:
-        close_1w = df_1w['close'].values
-        ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # Calculate volume ratio (current vs 20-period average) on 1d
+    if len(df_1d) >= 20:
+        vol_1d = df_1d['volume'].values
+        vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+        vol_ratio_1d = np.zeros(len(vol_1d))
+        vol_ratio_1d[20:] = vol_1d[20:] / vol_ma_20[20:]
+        vol_ratio_1d[:20] = 1.0  # Neutral for warmup
+        vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     else:
-        ema_50_1w_aligned = np.full(n, np.nan)
+        vol_ratio_1d_aligned = np.full(n, 1.0)
     
-    # === 6h Indicators ===
-    # Calculate EMA(13) for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    # Calculate EMA(50) on 1d close for trend filter
+    if len(df_1d) >= 50:
+        close_1d = df_1d['close'].values
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    else:
+        ema_50_1d_aligned = np.full(n, np.nan)
     
-    # Elder Ray Bull Power = High - EMA13
-    bull_power = high - ema_13
-    # Elder Ray Bear Power = Low - EMA13 (negative values indicate bear strength)
-    bear_power = low - ema_13
-    
-    # Volume ratio (current vs 20-period average) on 6h
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)  # Default to 1.0 (neutral)
-    vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
+    # === 4h Indicators ===
+    # Calculate Donchian(20) channels on 4h
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -57,23 +61,19 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    warmup = 100  # Ensure enough data for HTF and indicator calculations
+    warmup = max(lookback, 50)  # Ensure enough data for indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Regime Filter: Only trade in direction of 1w trend ---
-        price_above_1w_ema = close[i] > ema_50_1w_aligned[i]
-        price_below_1w_ema = close[i] < ema_50_1w_aligned[i]
-        
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
-        
-        # --- Exit Logic (ATR-based stoploss) ---
+        # --- Exit Logic (ATR-based stoploss and Donchian opposite exit) ---
         if in_position:
             # Calculate ATR(14) for stoploss
             tr = np.zeros(i+1)
@@ -84,26 +84,28 @@ def generate_signals(prices):
             
             if position_side > 0:  # Long position
                 stop_level = entry_price - 2.5 * atr_14
+                # Exit conditions: stoploss, Donchian opposite break, or time-based
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit when Elder Ray turns negative (bull power fading)
-                if bull_power[i] < 0:
+                # Exit long if price breaks below Donchian low (opposite channel)
+                if close[i] < lowest_low[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
             else:  # Short position
                 stop_level = entry_price + 2.5 * atr_14
+                # Exit conditions: stoploss, Donchian opposite break, or time-based
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit when Elder Ray turns positive (bear power fading)
-                if bear_power[i] > 0:
+                # Exit short if price breaks above Donchian high (opposite channel)
+                if close[i] > highest_high[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -114,29 +116,33 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Bull Power positive (strong bulls) + volume spike + price above 1w EMA
+        # Long: Price breaks above Donchian high with volume confirmation and uptrend filter
         long_condition = (
-            bull_power[i] > 0 and 
-            volume_spike and 
-            price_above_1w_ema
+            close[i] > highest_high[i] and  # Donchian breakout
+            vol_ratio_1d_aligned[i] > 2.0 and  # Volume spike (>2x average)
+            close[i] > ema_50_1d_aligned[i]  # Uptrend filter (price > 1d EMA50)
         )
         
-        # Short: Bear Power negative (strong bears) + volume spike + price below 1w EMA
+        # Short: Price breaks below Donchian low with volume confirmation and downtrend filter
         short_condition = (
-            bear_power[i] < 0 and 
-            volume_spike and 
-            price_below_1w_ema
+            close[i] < lowest_low[i] and  # Donchian breakdown
+            vol_ratio_1d_aligned[i] > 2.0 and  # Volume spike (>2x average)
+            close[i] < ema_50_1d_aligned[i]  # Downtrend filter (price < 1d EMA50)
         )
         
         if long_condition:
             in_position = True
             position_side = 1
             entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
             signals[i] = SIZE
         elif short_condition:
             in_position = True
             position_side = -1
             entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
