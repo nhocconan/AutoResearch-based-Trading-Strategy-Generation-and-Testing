@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #1783: 4h Donchian(20) Breakout + 12h HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h HMA trend and volume spikes (>2.0x average) capture medium-term swings while minimizing false signals. The 12h timeframe provides stronger trend filtering than 4h alone, reducing whipsaws in ranging markets. Volume spike requirement ensures breakouts have conviction. Target: 75-200 total trades over 4 years (19-50/year) by using tight entry conditions (volume > 2.0x) and multi-timeframe confluence.
+Experiment #1783: 4h Donchian(20) Breakout + 12h HMA Trend + Volume + ATR Stoploss
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h HMA trend and volume confirmation (>1.3x average) capture medium-term swings in both bull and bear markets. The 12h timeframe reduces noise while providing timely trend signals. Volume confirmation ensures breakouts have conviction. ATR-based stoploss limits downside. Target: 75-200 total trades over 4 years (19-50/year) by using tight entry conditions.
 """
 
 import numpy as np
@@ -102,8 +102,8 @@ def generate_signals(prices):
         # Require 12h trend alignment
         trend_following = trend_12h_aligned[i] != 0  # Should always be ±1
         
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.3x average)
+        volume_spike = vol_ratio[i] > 1.3
         
         if trend_following and volume_spike:
             # Breakout: price breaks above upper band OR below lower band
