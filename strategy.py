@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #688: 12h Donchian(20) breakout + 1w EMA trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts filtered by 1w EMA50 trend (bullish when price > EMA50, bearish when price < EMA50)
-capture institutional order flow with lower frequency. Volume confirmation (>1.8x average) ensures breakout validity.
-Uses discrete position sizing (0.25) to minimize fee churn. Designed for 12h timeframe to achieve 
-75-150 total trades over 4 years (19-37/year). Works in bull/bear markets via EMA trend filter.
+HYPOTHESIS: 12h Donchian breakouts filtered by 1w EMA trend (bullish when price > EMA50, bearish when price < EMA50) 
+capture major trend moves while avoiding counter-trend whipsaws. Volume confirmation (>2.0x average) ensures breakout validity. 
+Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year). Works in bull/bear markets via EMA filter: 
+only take breakouts in direction of higher timeframe trend. Discrete position sizing (0.25) minimizes fee churn.
 """
 
 import numpy as np
@@ -22,7 +22,7 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for EMA50 trend (Call ONCE before loop) ===
+    # === HTF: 1w data for EMA50 trend filter (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
@@ -70,12 +70,16 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = vol_ratio[i] > 2.0
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
+        
+        # --- EMA Trend Filter: Only take breakouts in direction of 1w trend ---
+        trend_up = price > ema_1w_aligned[i]   # Bullish trend
+        trend_down = price < ema_1w_aligned[i] # Bearish trend
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -113,15 +117,15 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + price above 1w EMA50 (bullish trend)
-            if breakout_up and price > ema_1w_aligned[i]:
+            # Long: Donchian breakout up + bullish 1w trend (price > EMA50)
+            if breakout_up and trend_up:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + price below 1w EMA50 (bearish trend)
-            elif breakout_down and price < ema_1w_aligned[i]:
+            # Short: Donchian breakout down + bearish 1w trend (price < EMA50)
+            elif breakout_down and trend_down:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
