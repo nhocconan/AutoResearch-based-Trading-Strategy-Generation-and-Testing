@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #646: 4h Donchian(20) breakout + 1d EMA alignment + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA trend capture institutional order flow with lower frequency than 12h EMA. 
-Volume confirmation ensures participation. Designed for 4h timeframe to achieve 75-200 total trades over 4 years.
-Uses 1d EMA for trend filter (bull/bear agnostic) and ATR-based stoploss for risk control.
+HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA(50) trend capture institutional participation with low overtrading risk. 
+Volume confirmation ensures breakout validity. Designed for 4h to hit 75-200 total trades over 4 years (19-50/year).
+Uses 1d EMA for bull/bear agnostic trend filter and ATR-based stoploss for risk control.
 Target: 25-50 trades/year per symbol with Sharpe > 0.5 on test.
 """
 
@@ -26,8 +26,8 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(21) for trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=21, min_periods=21, adjust=False).mean().values
+    # Calculate 1d EMA(50) for trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # === 4h Indicators: Donchian Channel (20) ===
@@ -56,7 +56,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for Donchian and volume calculations
+    warmup = 50  # sufficient for 1d EMA(50) and Donchian calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -68,16 +68,16 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 1.7x average) ---
+        volume_spike = vol_ratio[i] > 1.7
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
         # --- EMA Trend Filter ---
-        # In uptrend: price > EMA(21)
-        # In downtrend: price < EMA(21)
+        # In uptrend: price > EMA(50)
+        # In downtrend: price < EMA(50)
         uptrend = price > ema_1d_aligned[i]
         downtrend = price < ema_1d_aligned[i]
         
@@ -104,8 +104,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~24h on 4h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 8 bars (~32h on 4h) to avoid overtrading
+            if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
