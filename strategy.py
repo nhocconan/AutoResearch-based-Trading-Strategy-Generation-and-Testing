@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #1895: 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Spike
-HYPOTHESIS: Donchian breakouts on 6h capture momentum bursts. Weekly pivot (from 1w) provides structural bias: price above weekly pivot = bullish bias (long breakouts only), below = bearish bias (short breakouts only). Volume confirmation (>2x average) ensures breakout strength. This avoids whipsaws in ranging markets by requiring both structural alignment and momentum. Works in bull/bear by following weekly structure. Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing 0.25.
+HYPOTHESIS: Donchian breakouts capture strong momentum. Weekly pivot provides higher timeframe bias (from 1w data), and volume confirmation filters false breakouts. Works in both bull and bear by following weekly pivot direction (above/below pivot). Target: 75-150 total trades over 4 years (19-37/year) with discrete position sizing of 0.25.
 """
 
 import numpy as np
@@ -19,13 +19,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for weekly pivot (Call ONCE before loop) ===
+    # === HTF: 1w data for pivot points (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
-    # Weekly pivot calculation: (weekly_high + weekly_low + weekly_close) / 3
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    
+    # Weekly pivot points (using prior week's OHLC)
+    # P = (H + L + C) / 3
+    # R1 = 2*P - L
+    # S1 = 2*P - H
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    
+    # Align to 6h timeframe (shifted by 1 for completed weekly bars only)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
     # === 6h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -46,31 +57,38 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for Donchian(20) and volume MA
+    warmup = 60  # sufficient for Donchian(20) and weekly data alignment
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(weekly_pivot[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or
+            np.isnan(s1_1w_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic: Donchian breakout in opposite direction ---
+        # --- Exit Logic: Reverse signal or extended adverse move ---
         if in_position:
             bars_since_entry += 1
             
-            # Exit conditions: price breaks Donchian band opposite to position
+            # Exit conditions
             exit_signal = False
             
             if position_side > 0:  # Long position
                 # Exit if price breaks below Donchian lower band (20)
                 if price < lowest_low[i]:
                     exit_signal = True
+                # Exit if price crosses below weekly pivot (trend change)
+                elif price < pivot_1w_aligned[i]:
+                    exit_signal = True
             else:  # Short position
                 # Exit if price breaks above Donchian upper band (20)
                 if price > highest_high[i]:
+                    exit_signal = True
+                # Exit if price crosses above weekly pivot (trend change)
+                elif price > pivot_1w_aligned[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -83,23 +101,19 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Weekly pivot bias: price above pivot = bullish (long breakouts only)
-        # price below pivot = bearish (short breakouts only)
-        weekly_bias = 1 if price > weekly_pivot[i] else -1
-        
-        # Volume confirmation: require volume spike (> 2x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Long entry: price breaks above Donchian upper band (20) AND weekly bullish bias
-            if weekly_bias > 0 and price > highest_high[i]:
+            # Long entry: price breaks above Donchian upper band (20) AND above weekly pivot
+            if price > highest_high[i] and price > pivot_1w_aligned[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian lower band (20) AND weekly bearish bias
-            elif weekly_bias < 0 and price < lowest_low[i]:
+            # Short entry: price breaks below Donchian lower band (20) AND below weekly pivot
+            elif price < lowest_low[i] and price < pivot_1w_aligned[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
