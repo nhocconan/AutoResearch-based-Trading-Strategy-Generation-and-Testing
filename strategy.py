@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Experiment #869: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian(20) breakouts on 4h capture momentum with filtered by 1d HMA(21) trend direction 
-and volume spike (>2.0x average). Long when price breaks above upper band AND 1d HMA rising AND volume spike.
-Short when price breaks below lower band AND 1d HMA falling AND volume spike. Uses discrete sizing (0.30).
-Target: 75-200 total trades over 4 years (19-50/year). Works in bull/bear: HMA trend filters false breakouts.
+Experiment #869: 4h Donchian(20) + 1d HMA Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: Donchian breakouts on 4h capture momentum, filtered by 1d HMA trend direction 
+and volume confirmation (>2.0x average). Long when price breaks above Donchian upper 
+AND 1d HMA rising AND volume spike. Short when price breaks below Donchian lower 
+AND 1d HMA falling AND volume spike. Works in bull/bear markets: in bull trends, 
+HMA rising filters for longs; in bear trends, HMA falling filters for shorts. 
+Uses discrete position sizing (0.25). Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -66,7 +68,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
