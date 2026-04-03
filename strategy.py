@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #712: 12h Donchian(20) + 1d EMA50 + Volume Confirmation
-HYPOTHESIS: 12h Donchian breakout (20) in direction of 1d EMA50 trend with volume confirmation 
-captures medium-term momentum while minimizing whipsaw. Uses ATR-based stoploss and discrete 
-position sizing (0.25) to control drawdown. Works in bull/bear markets via EMA50 regime filter: 
-long only when price > EMA50, short only when price < EMA50. Target: 75-150 total trades over 4 years.
+Experiment #712: 12h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts filtered by 1d EMA(50) trend direction and volume spikes capture 
+institutional moves with proper regime alignment. Uses discrete position sizing (0.25) to minimize 
+fee churn. Works in bull/bear markets via 1d EMA regime filter: long only when price > EMA50, 
+short only when price < EMA50. Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_712_12h_donchian20_1d_ema50_vol_v1"
+name = "exp_712_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -22,18 +22,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA50 regime filter (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA(50) trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA50 for 1d timeframe
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)  # auto shift(1) for completed bars
+    # Calculate EMA(50) for 1d timeframe
+    ema_period = 50
+    ema_1d = pd.Series(close_1d).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
     
-    # === 12h Indicators: Donchian Channel (20) ===
-    donchian_window = 20
-    highest_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # EMA direction: 1 = uptrend (price > EMA), -1 = downtrend (price < EMA)
+    ema_dir_1d = np.where(close_1d > ema_1d, 1, -1)
+    
+    # Align EMA direction to 12h timeframe
+    ema_dir_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_dir_1d)
+    
+    # === 12h Indicators: Donchian Channel(20) ===
+    donchian_period = 20
+    upper = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    lower = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
     # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,13 +63,12 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for EMA and Donchian calculations
+    warmup = 60  # sufficient for Donchian and EMA calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(ema_dir_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -104,22 +109,19 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
-        
-        if volume_spike:
-            # Get regime from 1d EMA50: 1 = uptrend (price > EMA50), -1 = downtrend (price < EMA50)
-            regime = 1 if price > ema_1d_aligned[i] else -1
+        if vol_ratio[i] > 2.0:  # Volume spike > 2x average
+            # Get regime from 1d EMA
+            regime = ema_dir_1d_aligned[i]
             
-            # Long: Donchian breakout above upper band + uptrend regime
-            if price > highest_high[i] and regime > 0:
+            # Long: Price breaks above upper Donchian + uptrend regime
+            if price > upper[i] and regime > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout below lower band + downtrend regime
-            elif price < lowest_low[i] and regime < 0:
+            # Short: Price breaks below lower Donchian + downtrend regime
+            elif price < lower[i] and regime < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
