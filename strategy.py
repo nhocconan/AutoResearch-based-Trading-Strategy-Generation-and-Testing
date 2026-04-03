@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #2145: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 12h Donchian channel breakouts with 1d HMA trend filter capture medium-term swings in both bull and bear markets.
-- Primary: 12h Donchian(20) breakout with volume > 1.5x 20-bar average (balanced frequency)
+Experiment #2146: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture medium-term momentum with daily trend filter.
+- Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average (balanced for trade frequency)
 - HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
-- Target: 50-150 total trades over 4 years (12-37/year) - optimized for 12h timeframe
+- Target: 75-200 total trades over 4 years (19-50/year) - optimized for 4h timeframe
 - Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets
 """
 
@@ -13,8 +13,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2145_12h_donchian20_1d_hma_vol_v1"
-timeframe = "12h"
+name = "exp_2146_4h_donchian20_1d_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -59,14 +59,14 @@ def generate_signals(prices):
     trend_1d = np.where(close_1d > hma_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 12h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
+    # === 4h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
     # Donchian channels
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_upper = high_ma
     donchian_lower = low_ma
     
-    # Volume MA for spike detection (moderate threshold for 12h)
+    # Volume MA for spike detection (moderate threshold for optimal trade frequency)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -140,7 +140,7 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average - balanced for 12h)
+        # Volume confirmation: require volume spike (> 1.5x average - balanced for trade frequency)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
