@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #1147: 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 6h capture swing moves. Weekly pivot (from 1w) provides structural bias: 
-price above weekly pivot = bullish bias (long breakouts only), below = bearish bias (short breakdowns only). 
-Volume confirmation (>1.5x avg) filters weak breakouts. Designed for both bull (continuation) and bear (continuation) markets.
-Target: 75-200 total trades over 4 years (19-50/year) on 6h timeframe.
+Experiment #1148: 12h Donchian(20) Breakout + 1w Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture medium-term swings. 
+Trend filter from 1w timeframe avoids counter-trend entries during major reversals. 
+Volume confirmation (>1.8x average) ensures institutional participation. 
+Designed for low trade frequency (<40/year) to minimize fee drag in ranging/bear markets.
+Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1147_6h_donchian20_1w_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_1148_12h_donchian20_1w_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,27 +23,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for weekly pivot (Call ONCE before loop) ===
+    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
-    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
-    # Bias: price above weekly pivot = bullish, below = bearish
-    bias_1w = np.where(close_1w > weekly_pivot, 1, -1)
-    bias_1w_aligned = align_htf_to_ltf(prices, df_1w, bias_1w)
+    # Weekly trend: price above 20-period EMA = uptrend, below = downtrend
+    ema_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    trend_1w = np.where(close_1w > ema_1w, 1, -1)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # === 6h Indicators: Donchian(20) ===
+    # === 12h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 12h Indicators: Volume MA(30) for spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    vol_ratio[30:] = volume[30:] / vol_ma[30:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -51,7 +49,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.25  # 25% position size (discrete level)
     
     # Position tracking state variables
     in_position = False
@@ -59,12 +57,12 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for Donchian and volume MA
+    warmup = 30  # sufficient for Donchian, volume MA, and ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(bias_1w_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -98,20 +96,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Breakout with weekly pivot bias: 
-            # In weekly bullish bias (above pivot): only long breakouts
-            # In weekly bearish bias (below pivot): only short breakdowns
-            if price > donch_high[i] and bias_1w_aligned[i] > 0:  # bullish bias + upside breakout
+            # Breakout: price breaks above upper band OR below lower band
+            if price > donch_high[i] and trend_1w_aligned[i] > 0:  # 1w uptrend
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and bias_1w_aligned[i] < 0:  # bearish bias + downside breakdown
+            elif price < donch_low[i] and trend_1w_aligned[i] < 0:  # 1w downtrend
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -123,4 +119,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-</SOLUSDT>
