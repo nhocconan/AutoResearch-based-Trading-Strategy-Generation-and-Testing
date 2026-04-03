@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #801: 4h Donchian(20) + 1d HMA Trend + Volume Spike + ATR Stoploss
+Experiment #800: 4h Donchian(20) + 1d HMA Trend + Volume Spike + ATR Stoploss
 HYPOTHESIS: Donchian breakouts capture momentum, filtered by 1d HMA trend direction 
 and volume confirmation (>2.0x average). Long when price breaks above Donchian upper 
 AND 1d HMA rising AND volume spike. Short when price breaks below Donchian lower 
@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_801_4h_donchian20_1d_hma_vol_v1"
+name = "exp_800_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
