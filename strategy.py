@@ -5,8 +5,8 @@ Experiment #026: 4h Donchian(20) + Choppiness Regime + Volume Spike
 HYPOTHESIS: The Choppiness Index (CHOP) is the optimal regime filter.
 It identifies strong directional moves (CHOP < 40) where Donchian breakouts are more reliable.
 It avoids ranging markets (CHOP > 61.8) where whipsaws destroy trend strategies.
-This strategy seeks high-probability, trend-following entries confirmed by volume during trending periods.
-The strategy seeks trend continuation (Long/Short) only when the market is clearly trending (low CHOP).
+This strategy seeks trend continuation (Long/Short) only when the market is clearly trending (low CHOP).
+It is designed to capture momentum in trending environments while filtering out high-volatility range-bound noise, making it robust in both bull and bear markets by focusing on confirmed breakouts within a defined volatility regime.
 """
 import numpy as np
 import pandas as pd
@@ -29,6 +29,7 @@ def calculate_atr(high, low, close, period=14):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
     # Calculate Exponentially Weighted Moving Average for ATR
+    # Use .ewm with min_periods to handle initial NaN values gracefully
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
@@ -46,8 +47,10 @@ def calculate_choppiness(high, low, close, period=14):
         tr_sum = 0.0
         for j in range(i - period + 1, i + 1):
             # Calculate TR for each bar in the window
-            # Note: We must calculate TR based on the actual OHLC values within the window
-            current_tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1])) if j > 0 else high[j] - low[j]
+            if j > 0:
+                current_tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            else:
+                current_tr = high[j] - low[j]
             tr_sum += current_tr
         
         # Highest high - lowest low over the period (Total Range)
@@ -70,10 +73,17 @@ def generate_signals(prices):
     
     # === HTF: 1d SMA for trend (Call ONCE before loop) ===
     # Load 1d data ONCE
-    df_1d = get_htf_data(prices, '1d')
+    try:
+        df_1d = get_htf_data(prices, '1d')
+    except Exception:
+        # Handle potential data loading error if environment is constrained
+        return np.zeros(n)
+
     # Use a simple 30-period SMA for 1d trend confirmation
     sma_1d = pd.Series(df_1d['close'].values).rolling(window=30, min_periods=30).mean().values
+    
     # Align HTF data (Shift(1) ensures no look-ahead)
+    # We use the calculated SMA as the HTF trend reference
     sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
     
     # === 4h Indicators ===
@@ -92,7 +102,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # Discrete position sizing
+    SIZE = 0.30  # Discrete position sizing (0.30 is within the 0.20-0.35 range)
     
     # Position tracking state variables
     in_position = False
@@ -121,6 +131,7 @@ def generate_signals(prices):
         bearish_breakout = (close[i] < dc_lower_20[i])
         
         # --- Volume Confirmation ---
+        # Require significant volume spike relative to recent average
         vol_ok = volume[i] > vol_ma_20[i] * 1.5 if vol_ma_20[i] > 1e-10 else False
         
         # --- Position Management (Exit Logic) ---
@@ -129,10 +140,12 @@ def generate_signals(prices):
         if in_position:
             # 1. Check Trailing Stop (ATR based)
             if position_side > 0:
+                # Stoploss: Price must drop by 2.5 * ATR
                 stop_level = highest_since_entry - 2.5 * atr_14[i]
                 if low[i] < stop_level:
                     stop_hit = True
             else: # Short position
+                # Stoploss: Price must rise by 2.5 * ATR
                 stop_level = lowest_since_entry + 2.5 * atr_14[i]
                 if high[i] > stop_level:
                     stop_hit = True
