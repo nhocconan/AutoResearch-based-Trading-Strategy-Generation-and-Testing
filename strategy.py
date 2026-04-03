@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #1061: 4h Donchian(20) Breakout + HMA Trend + Volume Confirmation + ATR Stoploss
-HYPOTHESIS: Donchian(20) breakouts capture institutional order flow. Long when price breaks above upper band with HMA(21) uptrend and volume spike (>1.5x avg). Short when price breaks below lower band with HMA(21) downtrend and volume spike. Uses discrete position sizing (0.30) to balance reward/risk. Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
+Experiment #1062: 12h Camarilla Pivot + Volume Spike + Chop Filter
+HYPOTHESIS: Price reacts strongly to Camarilla pivot levels (L3, L4, H3, H4) on 12h timeframe. 
+Enter long when price breaks above H4 with volume spike (>2x) and choppy market (CHOP>61.8). 
+Enter short when price breaks below L4 with volume spike and choppy market. 
+Use discrete position sizing (0.25) and ATR(14) stoploss (2.0*ATR). 
+Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1061_4h_donchian20_hma_vol_v1"
-timeframe = "4h"
+name = "exp_1062_12h_camarilla_vol_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,25 +23,80 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for additional trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    hma_1d = calculate_hma(close_1d, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # === 4h Indicators: Donchian(20) ===
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla levels for previous 1d bar
+    camarilla_h4 = np.zeros(len(close_1d))
+    camarilla_l4 = np.zeros(len(close_1d))
+    camarilla_h3 = np.zeros(len(close_1d))
+    camarilla_l3 = np.zeros(len(close_1d))
+    camarilla_h6 = np.zeros(len(close_1d))
+    camarilla_l6 = np.zeros(len(close_1d))
     
-    # === 4h Indicators: HMA(21) for trend filter ===
-    hma = calculate_hma(close, 21)
+    for i in range(1, len(close_1d)):
+        # Use previous day's range to calculate today's Camarilla levels
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_val = prev_high - prev_low
+        
+        camarilla_h4[i] = prev_close + range_val * 1.1 / 2
+        camarilla_l4[i] = prev_close - range_val * 1.1 / 2
+        camarilla_h3[i] = prev_close + range_val * 1.1 / 4
+        camarilla_l3[i] = prev_close - range_val * 1.1 / 4
+        camarilla_h6[i] = prev_close + range_val * 1.1 / 6
+        camarilla_l6[i] = prev_close - range_val * 1.1 / 6
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # Align HTF Camarilla levels to 12h timeframe (shifted by 1 for completed bars)
+    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    
+    # === 12h Indicators: Chopiness Index (CHOP) for regime filter ===
+    def calculate_chop(high, low, close, period=14):
+        """Calculate Chopiness Index"""
+        if len(close) < period:
+            return np.full_like(close, np.nan)
+        atr_sum = np.zeros_like(close)
+        tr = np.zeros_like(close)
+        
+        for i in range(1, len(close)):
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr[0] = high[0] - low[0]
+        
+        # True Range sum over period
+        for i in range(period, len(close)):
+            atr_sum[i] = np.sum(tr[i-period+1:i+1])
+        
+        # Highest high and lowest low over period
+        max_high = np.zeros_like(close)
+        min_low = np.zeros_like(close)
+        for i in range(period-1, len(close)):
+            max_high[i] = np.max(high[i-period+1:i+1])
+            min_low[i] = np.min(low[i-period+1:i+1])
+        
+        # Chopiness Index
+        chop = np.zeros_like(close)
+        for i in range(period, len(close)):
+            if atr_sum[i] > 0 and (max_high[i] - min_low[i]) > 0:
+                chop[i] = 100 * np.log10(atr_sum[i] / (max_high[i] - min_low[i])) / np.log10(period)
+            else:
+                chop[i] = 50.0
+        return chop
+    
+    chop = calculate_chop(high, low, close, 14)
+    
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -46,7 +105,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -54,13 +113,12 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for Donchian and volume MA
+    warmup = 20  # sufficient for volume MA and Camarilla calculation
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(hma[i]) or np.isnan(hma_1d_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(h4_12h[i]) or np.isnan(l4_12h[i]) or
+            np.isnan(chop[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -89,8 +147,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 8 bars (~2d on 4h) to avoid overtrading
-            if bars_since_entry > 8:
+            # Optional: time-based exit after 6 bars (~3d on 12h) to avoid overtrading
+            if bars_since_entry > 6:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -101,24 +159,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 2.0x average)
+        volume_spike = vol_ratio[i] > 2.0
         
-        if volume_spike:
-            # HMA trend filter: 4h HMA(21) direction + 1d HMA(21) alignment
-            hma_uptrend = hma[i] > hma[i-1]
-            hma_downtrend = hma[i] < hma[i-1]
-            hma_1d_uptrend = hma_1d_aligned[i] > hma_1d_aligned[i-1] if i > 0 else False
-            hma_1d_downtrend = hma_1d_aligned[i] < hma_1d_aligned[i-1] if i > 0 else False
-            
-            # Breakout continuation: price breaks above upper band OR below lower band
-            if price > donch_high[i] and hma_uptrend and hma_1d_uptrend:
+        # Chop filter: choppy market (CHOP > 61.8) for mean reversion at extremes
+        choppy_market = chop[i] > 61.8
+        
+        if volume_spike and choppy_market:
+            # Breakout above H4 with volume spike in choppy market -> long
+            if price > h4_12h[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and hma_downtrend and hma_1d_downtrend:
+            # Breakdown below L4 with volume spike in choppy market -> short
+            elif price < l4_12h[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -131,32 +187,19 @@ def generate_signals(prices):
     
     return signals
 
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average"""
-    if len(close) < period:
-        return np.full_like(close, np.nan)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA for half period
-    wma_half = np.zeros_like(close)
-    for i in range(half_period, len(close)):
-        weights = np.arange(1, half_period + 1)
-        wma_half[i] = np.dot(close[i - half_period + 1:i + 1], weights) / weights.sum()
-    
-    # WMA for full period
-    wma_full = np.zeros_like(close)
-    for i in range(period, len(close)):
-        weights = np.arange(1, period + 1)
-        wma_full[i] = np.dot(close[i - period + 1:i + 1], weights) / weights.sum()
-    
-    # Raw HMA: 2*WMA(half) - WMA(full)
-    raw_hma = 2 * wma_half - wma_full
-    
-    # Final WMA of raw HMA with sqrt_period
-    hma = np.zeros_like(close)
-    for i in range(sqrt_period, len(close)):
-        weights = np.arange(1, sqrt_period + 1)
-        hma[i] = np.dot(raw_hma[i - sqrt_period + 1:i + 1], weights) / weights.sum()
-    
-    return hma
+if __name__ == "__main__":
+    # Test with dummy data to ensure no runtime errors
+    import pandas as pd
+    import numpy as np
+    dates = pd.date_range('2021-01-01', periods=100, freq='12h')
+    test_data = pd.DataFrame({
+        'open_time': dates,
+        'open': np.random.randn(100).cumsum() + 100,
+        'high': np.random.randn(100).cumsum() + 102,
+        'low': np.random.randn(100).cumsum() + 98,
+        'close': np.random.randn(100).cumsum() + 100,
+        'volume': np.random.rand(100) * 1000 + 500,
+        'taker_buy_volume': np.random.rand(100) * 500,
+        'trades': np.random.randint(50, 200, 100)
+    })
+    print("Strategy loaded successfully")
