@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #119: 6h Williams %R + 12h Volume Spike + 1d ADX Trend Filter
+Experiment #100: 4h Donchian(20) breakout + 1d HMA trend + 1w volume confirmation + ATR stoploss
 
-HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h timeframe, 
-combined with 12h volume spike confirmation and 1d ADX trend filter (>25) to ensure 
-trending market conditions. This strategy targets mean reversion in strong trends 
-(Williams %R >80 for short in downtrend, <20 for long in uptrend) with volume 
-confirmation to filter false signals. Designed for 12-37 trades/year on 6h timeframe 
-(50-150 total over 4 years) to minimize fee drag while capturing high-probability 
-reversals within established trends. Works in both bull and bear markets by 
-aligning with higher timeframe direction via ADX.
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe, filtered by 1d HMA(21) trend and 1w volume 
+spike (>1.8x average), capture medium-term momentum while avoiding false breakouts. 
+1d HMA ensures alignment with higher timeframe direction, 1w volume confirms institutional 
+participation, and ATR-based stoploss manages risk. Targets 19-50 trades/year on 4h timeframe 
+(75-200 total over 4 years) to minimize fee drag while maintaining edge in both bull and bear 
+markets. Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_williamsr_vol_trend_v1"
-timeframe = "6h"
+name = "mtf_4h_donchian20_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,72 +25,41 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for volume spike (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
-    
-    # Calculate volume ratio (current vs 20-period average) on 12h
-    if len(df_12h) >= 20:
-        vol_12h = df_12h['volume'].values
-        vol_ma_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-        vol_ratio_12h = np.zeros(len(vol_12h))
-        vol_ratio_12h[20:] = vol_12h[20:] / vol_ma_20[20:]
-        vol_ratio_12h[:20] = 1.0  # Neutral for warmup
-        vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
-    else:
-        vol_ratio_12h_aligned = np.full(n, 1.0)
-    
-    # === HTF: 1d data for ADX trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for HMA trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate ADX(14) on 1d
-    if len(df_1d) >= 14:
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
+    # Calculate HMA(21) on 1d close
+    if len(df_1d) >= 21:
         close_1d = df_1d['close'].values
-        
-        # True Range
-        tr1 = high_1d - low_1d
-        tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-        tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]  # First period
-        
-        # Directional Movement
-        dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                           np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-        dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                            np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        
-        # Smoothed values
-        tr_14 = pd.Series(tr).ewm(span=14, adjust=False).mean().values
-        dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False).mean().values
-        dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False).mean().values
-        
-        # Directional Indicators
-        di_plus = 100 * dm_plus_14 / tr_14
-        di_minus = 100 * dm_minus_14 / tr_14
-        
-        # DX and ADX
-        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-        adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
-        
-        # Align to LTF
-        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx)
+        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+        half_len = 21 // 2
+        sqrt_len = int(np.sqrt(21))
+        wma_half = pd.Series(close_1d).rolling(window=half_len, min_periods=half_len).mean().values
+        wma_full = pd.Series(close_1d).rolling(window=21, min_periods=21).mean().values
+        raw_hma = 2 * wma_half - wma_full
+        hma_21_1d = pd.Series(raw_hma).rolling(window=sqrt_len, min_periods=sqrt_len).mean().values
+        hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
     else:
-        adx_1d_aligned = np.full(n, 0.0)
+        hma_21_1d_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators ===
-    # Williams %R(14)
-    if n >= 14:
-        highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-        lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-        williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-        # Handle division by zero (when high == low)
-        williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    # === HTF: 1w data for volume confirmation (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate volume ratio (current vs 20-period average) on 1w
+    if len(df_1w) >= 20:
+        vol_1w = df_1w['volume'].values
+        vol_ma_20 = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
+        vol_ratio_1w = np.zeros(len(vol_1w))
+        vol_ratio_1w[20:] = vol_1w[20:] / vol_ma_20[20:]
+        vol_ratio_1w[:20] = 1.0  # Neutral for warmup
+        vol_ratio_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ratio_1w)
     else:
-        williams_r = np.full(n, -50)
+        vol_ratio_1w_aligned = np.full(n, 1.0)
+    
+    # === 4h Indicators ===
+    # Donchian(20) channels - vectorized calculation
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -107,16 +74,17 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(williams_r[i]) or np.isnan(vol_ratio_12h_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(hma_21_1d_aligned[i]) or np.isnan(vol_ratio_1w_aligned[i]) or 
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
-        # --- Regime Filter: Only trade when ADX > 25 (trending market) ---
-        trending_market = adx_1d_aligned[i] > 25
+        # --- Trend Filter: Price above/below 1d HMA21 ---
+        price_above_hma = close[i] > hma_21_1d_aligned[i]
+        price_below_hma = close[i] < hma_21_1d_aligned[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio_12h_aligned[i] > 1.5
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) on 1w ---
+        volume_spike = vol_ratio_1w_aligned[i] > 1.8
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -134,8 +102,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at Williams %R reversal (exit extreme)
-                if williams_r[i] > -20:  # Exit overbought
+                # Take profit at Donchian low (trailing stop)
+                if close[i] <= donchian_low[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -147,8 +115,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at Williams %R reversal (exit extreme)
-                if williams_r[i] < -80:  # Exit oversold
+                # Take profit at Donchian high (trailing stop)
+                if close[i] >= donchian_high[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -159,29 +127,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Williams %R oversold (< -80) in uptrend (we infer trend from price vs EMA50 proxy)
-        # Use price vs 20-period EMA on 6h as short-term trend filter
-        if i >= 20:
-            ema_20 = pd.Series(close[:i+1]).ewm(span=20, adjust=False).mean().iloc[-1]
-            price_above_ema = close[i] > ema_20
-            price_below_ema = close[i] < ema_20
-        else:
-            price_above_ema = True  # Default to allow trading during warmup
-            price_below_ema = True
-        
+        # Long: Price breaks above Donchian high with volume and trend alignment
         long_condition = (
-            williams_r[i] < -80 and  # Oversold
-            price_above_ema and      # In short-term uptrend
-            trending_market and      # Higher timeframe trend confirmed
-            volume_spike             # Volume confirmation
+            close[i] > donchian_high[i] and 
+            price_above_hma and 
+            volume_spike
         )
         
-        # Short: Williams %R overbought (> -20) in downtrend
+        # Short: Price breaks below Donchian low with volume and trend alignment
         short_condition = (
-            williams_r[i] > -20 and  # Overbought
-            price_below_ema and      # In short-term downtrend
-            trending_market and      # Higher timeframe trend confirmed
-            volume_spike             # Volume confirmation
+            close[i] < donchian_low[i] and 
+            price_below_hma and 
+            volume_spike
         )
         
         if long_condition:
