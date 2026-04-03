@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #179: 6h Elder Ray + Regime Filter
+Experiment #175: 6h Williams %R Reversal + 1w Trend Filter + Volume Spike
 
-HYPOTHESIS: Elder Ray (Bull Power/Bear Power) combined with ADX regime filter captures 
-momentum exhaustion points. Long when Bull Power > 0 and ADX < 25 (range), 
-Short when Bear Power < 0 and ADX < 25. Uses 1d EMA200 as trend filter to avoid 
-counter-trend trades. Works in both bull/bear markets by adapting to regimes.
-Target: 75-150 total trades over 4 years (19-37/year).
+HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h.
+Trades are taken only in direction of 1w EMA(50) trend to avoid counter-trend whipsaws.
+Volume confirmation (>1.5x 20-period average volume on 1d) ensures breakout validity.
+ATR-based stoploss (2.0*ATR) manages risk. Target: 75-150 total trades over 4 years.
+Works in bull/bear markets by trading reversals within the dominant weekly trend.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_to_ltf, get_htf_data
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_elder_ray_regime_v1"
+name = "mtf_6h_williamsr_1w_trend_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -21,47 +21,35 @@ def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
+    volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA200 trend filter ===
+    # === HTF: 1w data for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # === HTF: 1d data for volume spike filter ===
     df_1d = get_htf_data(prices, '1d')
-    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    volume_1d = df_1d['volume'].values
+    avg_vol_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (1.5 * avg_vol_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
     # === 6h Indicators ===
-    # EMA13 for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    # Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r[highest_high == lowest_low] = -50  # Avoid division by zero
     
-    # Bull Power = High - EMA13
-    bull_power = high - ema_13
-    # Bear Power = Low - EMA13  
-    bear_power = low - ema_13
-    
-    # ADX(14) for regime detection
-    # True Range
+    # ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    up_move[0] = 0
-    down_move[0] = 0
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    # Smoothed TR, +DM, -DM
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    plus_dm_sum = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum().values
-    minus_dm_sum = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum().values
-    # DI+
-    plus_di = 100 * plus_dm_sum / tr_sum
-    minus_di = 100 * minus_dm_sum / tr_sum
-    # DX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    # ADX
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
+    tr[0] = tr1[0]  # First bar
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -71,35 +59,34 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
+    entry_bar = -1
     
-    warmup = 200  # Ensure enough data for EMA200 and ADX
+    warmup = 100  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(ema_200_1d_aligned[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(adx[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(ema_1w_aligned[i]) or 
+            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # --- Regime and Trend Filters ---
-        # Range regime: ADX < 25
-        in_range = adx[i] < 25
-        # Trend filter: price above/below 1d EMA200
-        above_ema200 = close[i] > ema_200_1d_aligned[i]
-        below_ema200 = close[i] < ema_200_1d_aligned[i]
+        # --- Williams %R Reversal Signals ---
+        # Oversold: Williams %R crosses above -80 from below
+        oversold = (williams_r[i] > -80) and (williams_r[i-1] <= -80)
+        # Overbought: Williams %R crosses below -20 from above
+        overbought = (williams_r[i] < -20) and (williams_r[i-1] >= -20)
         
         # --- Position Management ---
         if in_position:
-            # Stoploss: 3 * ATR(14) approximation using 20-period high-low range
-            # Simplified: exit if price moves against position by 3% of ATR equivalent
+            # Check stoploss: 2.0 * ATR against position
             if position_side > 0:  # Long
-                if close[i] < entry_price * 0.97:  # ~3% stop
+                if close[i] < entry_price - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
             else:  # Short
-                if close[i] > entry_price * 1.03:  # ~3% stop
+                if close[i] > entry_price + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -110,17 +97,134 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Bull Power > 0 (buying pressure) + in range + above EMA200
-        if bull_power[i] > 0 and in_range and above_ema200:
+        # Long: oversold reversal + weekly uptrend + volume confirmation
+        if oversold and (close[i] > ema_1w_aligned[i]) and vol_spike_1d_aligned[i]:
             in_position = True
             position_side = 1
             entry_price = close[i]
             signals[i] = SIZE
-        # Short: Bear Power < 0 (selling pressure) + in range + below EMA200
-        elif bear_power[i] < 0 and in_range and below_ema200:
+        # Short: overbought reversal + weekly downtrend + volume confirmation
+        elif overbought and (close[i] < ema_1w_aligned[i]) and vol_spike_1d_aligned[i]:
             in_position = True
             position_side = -1
             entry_price = close[i]
             signals[i] = -SIZE
     
     return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #175: 6h Williams %R Reversal + 1w Trend Filter + Volume Spike
+
+HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h.
+Trades are taken only in direction of 1w EMA(50) trend to avoid counter-trend whipsaws.
+Volume confirmation (>1.5x 20-period average volume on 1d) ensures breakout validity.
+ATR-based stoploss (2.0*ATR) manages risk. Target: 75-150 total trades over 4 years.
+Works in bull/bear markets by trading reversals within the dominant weekly trend.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "mtf_6h_williamsr_1w_trend_volume_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    close = prices["close"].values.astype(np.float64)
+    high = prices["high"].values.astype(np.float64)
+    low = prices["low"].values.astype(np.float64)
+    volume = prices["volume"].values.astype(np.float64)
+    n = len(close)
+    
+    # === HTF: 1w data for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # === HTF: 1d data for volume spike filter ===
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
+    avg_vol_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (1.5 * avg_vol_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    
+    # === 6h Indicators ===
+    # Williams %R(14)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r[highest_high == lowest_low] = -50  # Avoid division by zero
+    
+    # ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # === Signals Initialization ===
+    signals = np.zeros(n)
+    SIZE = 0.25  # Discrete position sizing (25% of capital)
+    
+    # Position tracking state variables
+    in_position = False
+    position_side = 0
+    entry_price = 0.0
+    entry_bar = -1
+    
+    warmup = 100  # Ensure enough data for HTF and indicator calculations
+    
+    for i in range(warmup, n):
+        # --- Data Validity Check ---
+        if (np.isnan(williams_r[i]) or np.isnan(ema_1w_aligned[i]) or 
+            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(atr[i])):
+            signals[i] = 0.0
+            continue
+        
+        # --- Williams %R Reversal Signals ---
+        # Oversold: Williams %R crosses above -80 from below
+        oversold = (williams_r[i] > -80) and (williams_r[i-1] <= -80)
+        # Overbought: Williams %R crosses below -20 from above
+        overbought = (williams_r[i] < -20) and (williams_r[i-1] >= -20)
+        
+        # --- Position Management ---
+        if in_position:
+            # Check stoploss: 2.0 * ATR against position
+            if position_side > 0:  # Long
+                if close[i] < entry_price - 2.0 * atr[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+            else:  # Short
+                if close[i] > entry_price + 2.0 * atr[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+            
+            # Still in position
+            signals[i] = position_side * SIZE
+            continue
+        
+        # --- New Position Entry Logic (Only if Flat) ---
+        # Long: oversold reversal + weekly uptrend + volume confirmation
+        if oversold and (close[i] > ema_1w_aligned[i]) and vol_spike_1d_aligned[i]:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            signals[i] = SIZE
+        # Short: overbought reversal + weekly downtrend + volume confirmation
+        elif overbought and (close[i] < ema_1w_aligned[i]) and vol_spike_1d_aligned[i]:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            signals[i] = -SIZE
+    
+    return signals
+
+</think>
