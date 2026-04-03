@@ -6,7 +6,8 @@ and volume confirmation (>1.8x average). Long when price breaks above Donchian u
 AND 1d HMA rising AND volume spike. Short when price breaks below Donchian lower 
 AND 1d HMA falling AND volume spike. Uses discrete position sizing (0.28) to balance 
 risk and reward. Target: 100-200 total trades over 4 years (25-50/year).
-Designed to work in both bull and bear markets via trend filter and strict entry conditions.
+This version fixes the HTF alignment bug by ensuring get_htf_data is called once 
+before the loop and using aligned arrays inside the loop.
 """
 
 import numpy as np
