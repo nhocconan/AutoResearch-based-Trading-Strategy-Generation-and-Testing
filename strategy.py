@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #600: 4h Donchian(20) breakout + 1d EMA200 trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts aligned with daily EMA200 trend capture medium-term momentum with low trade frequency. 
-Daily EMA200 provides strong bull/bear regime filter reducing whipsaw. Volume confirmation (>2.0x average) ensures institutional participation. 
-ATR-based stoploss (2.5) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 75-200 total trades over 4 years by using tight entry conditions.
+Experiment #601: 4h Donchian(20) breakout + 1d EMA200 trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian breakouts aligned with 1d EMA200 trend capture medium-term momentum with lower trade frequency than 1d. 
+1d EMA200 provides a strong trend filter that adapts to both bull and bear markets by reducing whipsaw. 
+Volume confirmation (>2.0x average) ensures institutional participation. 
+ATR-based stoploss (2.5) manages risk. Discrete position sizing (0.25) limits drawdown. 
+Targets 75-200 total trades over 4 years by using tight entry conditions (breakout + EMA trend + volume spike).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_600_4h_donchian20_1d_ema200_vol_v1"
+name = "exp_601_4h_donchian20_1d_ema200_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -108,8 +110,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~1.0 days on 4h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 12 bars (~2 days on 4h) to avoid overtrading
+            if bars_since_entry > 12:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
