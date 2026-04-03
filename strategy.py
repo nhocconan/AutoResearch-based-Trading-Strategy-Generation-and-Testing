@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #049: 4h Donchian(20) breakout + 1d HMA(50) trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 4h aligned with 1d HMA(50) trend capture medium-term momentum with volume filter reducing false signals.
-ATR stoploss (2.5x) limits downside. Targeting 75-200 trades over 4 years for statistical validity and fee efficiency.
-Uses daily trend to adapt to bull/bear regimes while using 4h for precise entry timing.
+Experiment #046: 4h Donchian(20) breakout + 1d HMA(21) trend + volume spike
+HYPOTHESIS: Donchian breakouts on 4h aligned with 1d HMA trend capture momentum with structural support/resistance.
+Volume confirmation (>2.0x average) filters false breakouts. ATR stoploss (2.5x) and minimum holding period (3 bars)
+reduce churn. Using 1d HTF balances signal frequency and reliability, targeting 75-200 trades over 4 years.
+Works in both bull/bear markets by following the 1d trend while using 4h for precise entry/exit.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_049_4h_donchian20_1d_hma_vol_v1"
+name = "exp_046_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,10 +22,10 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for HMA(50) trend (Call ONCE before loop) ===
+    # === HTF: 1d data for HMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate HMA(50) on 1d close
+    # Calculate HMA(21) on 1d close
     def calculate_hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -36,7 +37,7 @@ def generate_signals(prices):
         hma = pd.Series(hma_raw).ewm(span=sqrt_period, adjust=False).mean().values
         return hma
     
-    hma_1d = calculate_hma(df_1d['close'].values, 50)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
     # === 4h Indicators: Donchian(20) channels ===
