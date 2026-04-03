@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #240: 4h Donchian20 + 1d Regime + Volume Strategy
+Experiment #241: 4h Donchian20 + 1d Regime + Volume Strategy (Refined)
 
-HYPOTHESIS: Donchian(20) breakout on 4h combined with 1d trend filter (EMA50) and volume confirmation captures strong directional moves while avoiding choppy markets. In bull/bear trends, we trade breakouts with the trend. In ranging markets (price between EMA50 and EMA200 on 1d), we avoid false breakouts. This structure works in both bull (strong breakouts) and bear (failed reversals caught by stops) markets. 4h timeframe targets 19-50 trades/year (75-200 total over 4 years) to minimize fee drag.
+HYPOTHESIS: Donchian(20) breakout on 4h combined with 1d trend filter (EMA50/EMA200) and volume confirmation captures strong directional moves while avoiding choppy markets. In trending regimes (price outside EMA50-EMA200 band), we trade breakouts with the trend. In ranging markets (price between EMAs), we avoid false breakouts. Uses ATR-based stoploss and minimum 3-bar holding period to reduce churn. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_240_4h_donchian20_1d_regime_vol_v1"
+name = "exp_241_4h_donchian20_1d_regime_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
