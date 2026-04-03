@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #1178: 1d Donchian(20) Breakout + 1w Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on daily timeframe capture major swing moves with low trade frequency (target 30-100/4 years). 
-Weekly trend filter prevents counter-trend entries. Volume confirmation (>1.5x 20-day average) ensures institutional participation.
-Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets. 
-Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
+Experiment #1179: 6h Donchian(20) Breakout + 12h Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 6h timeframe capture intermediate-term swings with moderate trade frequency (target 75-200/4 years). 
+12h trend filter (price > 12h EMA50) prevents counter-trend entries. Volume confirmation (>2.0x 20-bar average) ensures institutional participation.
+Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by using 12h EMA trend direction.
+Target: 75-200 total trades over 4 years (19-50/year) on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1178_1d_donchian20_1w_trend_vol_v1"
-timeframe = "1d"
+name = "exp_1179_6h_donchian20_12h_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,24 +22,25 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Simple trend: price > previous close = uptrend, < = downtrend
-    trend_1w = np.zeros(len(close_1w))
-    trend_1w[1:] = np.where(close_1w[1:] > close_1w[:-1], 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # === HTF: 12h data for trend filter (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    # 12h EMA50 for trend filter
+    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Trend: 1 = uptrend (price > EMA50), -1 = downtrend (price < EMA50)
+    trend_12h = np.where(close_12h > ema_12h, 1, -1)
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
-    # === 1d Indicators: Donchian(20) ===
+    # === 6h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -61,7 +62,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(trend_12h_aligned[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -95,18 +96,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 2.0x average)
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
-            if price > donch_high[i] and trend_1w_aligned[i] > 0:  # 1w uptrend
+            if price > donch_high[i] and trend_12h_aligned[i] > 0:  # 12h uptrend
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and trend_1w_aligned[i] < 0:  # 1w downtrend
+            elif price < donch_low[i] and trend_12h_aligned[i] < 0:  # 12h downtrend
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
