@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #840: 4h Donchian(20) + 1d HMA Trend + Volume Spike + ATR Stoploss
+Experiment #841: 4h Donchian(20) + 1d HMA Trend + Volume Spike + ATR Stoploss
 HYPOTHESIS: Donchian breakouts capture momentum, filtered by 1d HMA trend direction 
 and volume confirmation (>2.0x average). Long when price breaks above Donchian upper 
 AND 1d HMA rising AND volume spike. Short when price breaks below Donchian lower 
-AND 1d HMA falling AND volume spike. Uses discrete position sizing (0.25). 
-Target: 75-200 total trades over 4 years (19-50/year).
+AND 1d HMA falling AND volume spike. Works in bull/bear markets: in bull trends, 
+1d HMA rising filters for longs; in bear trends, 1d HMA falling filters for shorts. 
+Uses discrete position sizing (0.25). Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_840_4h_donchian20_1d_hma_vol_v1"
+name = "exp_841_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
