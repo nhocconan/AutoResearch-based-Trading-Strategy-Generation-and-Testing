@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #758: 1d Donchian(20) breakout + 1w weekly pivot direction + volume spike
-HYPOTHESIS: Daily Donchian(20) breakouts filtered by weekly pivot direction (bullish/bearish bias) 
-and volume confirmation (>2.0x average volume) capture institutional moves with proper HTF alignment. 
-Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear markets: 
-Long when price breaks above Donchian upper AND weekly pivot direction bullish (>0), 
-Short when breaks below Donchian lower AND weekly pivot direction bearish (<0).
-Target: 30-100 total trades over 4 years (7-25/year).
+Experiment #759: 6h Donchian20 + 1d Weekly Pivot Direction + Volume Spike
+HYPOTHESIS: 6h Donchian(20) breakouts filtered by 1d weekly pivot direction (derived from 1w data) 
+and volume confirmation (>2.0x average volume) captures institutional breakouts with proper HTF alignment. 
+Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear markets: long when price 
+breaks above Donchian upper AND above weekly pivot, short when breaks below Donchian lower AND below weekly pivot. 
+Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_758_1d_donchian20_1w_pivot_vol_v1"
-timeframe = "1d"
+name = "exp_759_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +23,7 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for weekly pivot direction (Call ONCE before loop) ===
+    # === HTF: 1w data for weekly pivot (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
@@ -35,20 +34,20 @@ def generate_signals(prices):
     # Weekly pivot direction: 1 = price above pivot (bullish bias), -1 = price below pivot (bearish bias)
     weekly_pivot_dir = np.where(close_1w > weekly_pivot, 1, -1)
     
-    # Align weekly pivot direction to daily timeframe
+    # Align weekly pivot direction to 6h timeframe
     weekly_pivot_dir_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_dir)
     
-    # === Daily Indicators: Donchian Channel (20) ===
+    # === 6h Indicators: Donchian Channel (20) ===
     donchian_period = 20
     donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
     donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # === Daily Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === Daily Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -100,8 +99,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 10 bars (~10 days) to avoid overtrading
-            if bars_since_entry > 10:
+            # Optional: time-based exit after 4 bars (~24h on 6h) to avoid overtrading
+            if bars_since_entry > 4:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -116,7 +115,7 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Get regime from 1w weekly pivot direction
+            # Get regime from weekly pivot direction
             regime = weekly_pivot_dir_aligned[i]
             
             # Long: price breaks above Donchian upper AND weekly pivot direction bullish
