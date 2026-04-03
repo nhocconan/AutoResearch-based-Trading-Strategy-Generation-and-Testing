@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #244: 1d Donchian(20) Breakout + Weekly Pivot Direction + Volume Spike
+Experiment #245: 12h Donchian(20) Breakout + Daily Pivot Direction + Volume Spike
 
-HYPOTHESIS: 1d Donchian channel breakouts filtered by weekly pivot direction (price > weekly pivot = bullish bias, 
-price < weekly pivot = bearish bias) and volume spikes (>2.0x average) capture strong momentum moves with 
-reduced false breakouts. Weekly pivot provides structural support/resistance from higher timeframe. 1d timeframe 
-targets 7-25 trades/year (30-100 total over 4 years) to minimize fee drag while capturing significant moves. 
+HYPOTHESIS: 12h Donchian channel breakouts filtered by daily pivot direction (price > daily pivot = bullish bias, 
+price < daily pivot = bearish bias) and volume spikes (>2.0x average) capture strong momentum moves with 
+reduced false breakouts. Daily pivot provides structural support/resistance from higher timeframe. 12h timeframe 
+targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while capturing significant moves. 
 Works in both bull (breakouts with volume) and bear (failed breaks reverse sharply) markets. Uses ATR-based 
 stoploss for risk management.
 """
@@ -14,8 +14,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_244_1d_donchian_weekly_pivot_volume_v1"
-timeframe = "1d"
+name = "exp_245_12h_donchian_daily_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,35 +25,35 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for weekly pivot calculation (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
+    # === HTF: 1d data for daily pivot calculation (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points from 1w data (using prior week's OHLC)
-    # Weekly pivot = (Prior Week High + Prior Week Low + Prior Week Close) / 3
-    weekly_pivot = np.full(n, np.nan)
+    # Calculate daily pivot points from 1d data (using prior day's OHLC)
+    # Daily pivot = (Prior Day High + Prior Day Low + Prior Day Close) / 3
+    daily_pivot = np.full(n, np.nan)
     
-    if len(df_1w) >= 2:  # Need at least 2 weeks of data
-        # Align 1w data to LTF index for shifting
-        # Create series indexed by 1w open_time
-        df_1w_indexed = df_1w.set_index('open_time')
+    if len(df_1d) >= 2:  # Need at least 2 days of data
+        # Align 1d data to LTF index for shifting
+        # Create series indexed by 1d open_time
+        df_1d_indexed = df_1d.set_index('open_time')
         
-        # Calculate prior week's OHLC using shift(1) on the indexed series
-        prior_week_high = df_1w_indexed['high'].shift(1).values
-        prior_week_low = df_1w_indexed['low'].shift(1).values
-        prior_week_close = df_1w_indexed['close'].shift(1).values
+        # Calculate prior day's OHLC using shift(1) on the indexed series
+        prior_day_high = df_1d_indexed['high'].shift(1).values
+        prior_day_low = df_1d_indexed['low'].shift(1).values
+        prior_day_close = df_1d_indexed['close'].shift(1).values
         
-        # Calculate weekly pivot for each prior week
-        prior_week_pivot = (prior_week_high + prior_week_low + prior_week_close) / 3.0
+        # Calculate daily pivot for each prior day
+        prior_day_pivot = (prior_day_high + prior_day_low + prior_day_close) / 3.0
         
-        # Create series aligned with 1w index
-        weekly_pivot_series = pd.Series(index=df_1w_indexed.index, data=prior_week_pivot)
+        # Create series aligned with 1d index
+        daily_pivot_series = pd.Series(index=df_1d_indexed.index, data=prior_day_pivot)
         
-        # Align to LTF (1d) timeframe with shift(1) for completed bars only
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_series.values)
+        # Align to LTF (12h) timeframe with shift(1) for completed bars only
+        daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot_series.values)
     else:
-        weekly_pivot_aligned = np.full(n, np.nan)
+        daily_pivot_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: Donchian Channel (20) ===
     donchian_h = np.full(n, np.nan)
     donchian_l = np.full(n, np.nan)
     donchian_m = np.full(n, np.nan)
@@ -63,7 +63,7 @@ def generate_signals(prices):
         donchian_l[i] = np.min(low[i-20:i])
         donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
@@ -71,7 +71,7 @@ def generate_signals(prices):
     
     atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
@@ -87,19 +87,19 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 50  # Ensure enough data for HTF weekly pivot, ATR, and Donchian
+    warmup = 50  # Ensure enough data for HTF daily pivot, ATR, and Donchian
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(daily_pivot_aligned[i]) or np.isnan(atr_14[i]) or 
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- Weekly Pivot Filter: Price > pivot = bullish bias, Price < pivot = bearish bias ---
-        price_above_weekly_pivot = close[i] > weekly_pivot_aligned[i]
-        price_below_weekly_pivot = close[i] < weekly_pivot_aligned[i]
+        # --- Daily Pivot Filter: Price > pivot = bullish bias, Price < pivot = bearish bias ---
+        price_above_daily_pivot = close[i] > daily_pivot_aligned[i]
+        price_below_daily_pivot = close[i] < daily_pivot_aligned[i]
         
         # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
         volume_spike = vol_ratio[i] > 2.0
@@ -154,11 +154,11 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Donchian breakout up + volume spike + price above weekly pivot
-        long_condition = breakout_up and volume_spike and price_above_weekly_pivot
+        # Long: Donchian breakout up + volume spike + price above daily pivot
+        long_condition = breakout_up and volume_spike and price_above_daily_pivot
         
-        # Short: Donchian breakout down + volume spike + price below weekly pivot
-        short_condition = breakout_down and volume_spike and price_below_weekly_pivot
+        # Short: Donchian breakout down + volume spike + price below daily pivot
+        short_condition = breakout_down and volume_spike and price_below_daily_pivot
         
         if long_condition:
             in_position = True
