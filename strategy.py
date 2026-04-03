@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #2140: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture swing momentum with daily trend filter.
-- Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average (moderate to balance trades)
+Experiment #2141: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture intermediate-term momentum with daily trend filter.
+- Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average (moderate threshold to balance trades)
 - HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
 - Target: 75-200 total trades over 4 years (19-50/year) - optimized for 4h timeframe
 - Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets
-- Uses discrete position sizing (0.0, ±0.25) to minimize fee churn
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2140_4h_donchian20_1d_hma_vol_v1"
+name = "exp_2141_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -67,7 +66,7 @@ def generate_signals(prices):
     donchian_upper = high_ma
     donchian_lower = low_ma
     
-    # Volume MA for spike detection (moderate threshold to balance trade frequency)
+    # Volume MA for spike detection (moderate threshold to balance trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -141,7 +140,7 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average - moderate to balance trades)
+        # Volume confirmation: require volume spike (> 1.5x average - moderate threshold)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
