@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #318: 1d Donchian Breakout + 1w Volume Confirmation + Trend Filter
+Experiment #319: 6h Williams %R + 12h Supertrend + Volume Confirmation
 
-HYPOTHESIS: Daily Donchian channel breakouts (20-period) confirmed by weekly volume spikes 
-and aligned with weekly trend (price > weekly EMA50 for longs, < weekly EMA50 for shorts) 
-captures medium-term momentum moves. Using weekly data for signal direction and confirmation 
-reduces whipsaw and overtrading. Target: 50-100 total trades over 4 years (12-25/year) 
-to minimize fee drag while maintaining statistical significance.
+HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h timeframe, 
+while 12h Supertrend provides the higher timeframe trend direction. Volume confirmation 
+ensures institutional participation. This combination works in both bull and bear markets 
+by taking mean-reversion entries at extremes when aligned with HTF trend, targeting 
+12-37 trades/year on 6h timeframe (50-150 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_vol_trend_v1"
-timeframe = "1d"
+name = "mtf_6h_williamsr_12h_supertrend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,54 +22,76 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # Pre-compute session hours (optional for 1d, but keep for consistency)
-    hours = pd.DatetimeIndex(open_time).hour
+    # === HTF: 12h data for Supertrend (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
     
-    # === HTF: 1w data for volume confirmation and trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 20:
-        close_1w = df_1w['close'].values
-        volume_1w = df_1w['volume'].values
+    # Calculate Supertrend on 12h
+    if len(df_12h) >= 10:
+        high_12h = df_12h['high'].values
+        low_12h = df_12h['low'].values
+        close_12h = df_12h['close'].values
         
-        # Weekly EMA50 for trend filter
-        ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+        # ATR calculation
+        tr1 = high_12h - low_12h
+        tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+        tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First value
+        atr = pd.Series(tr).ewm(span=10, min_periods=10, adjust=False).mean().values
         
-        # Weekly volume ratio (current volume / 20-period average)
-        vol_ma_20 = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-        vol_ratio_1w = np.zeros(len(volume_1w))
-        vol_ratio_1w[20:] = volume_1w[20:] / vol_ma_20[20:]
-        vol_ratio_1w[:20] = 1.0
+        # Supertrend calculation
+        hl2 = (high_12h + low_12h) / 2
+        upperband = hl2 + (3 * atr)
+        lowerband = hl2 - (3 * atr)
         
-        # Align HTF data to LTF (1d)
-        ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-        vol_ratio_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ratio_1w)
+        supertrend = np.zeros(len(close_12h))
+        direction = np.ones(len(close_12h))  # 1 for uptrend, -1 for downtrend
+        
+        supertrend[0] = upperband[0]
+        direction[0] = 1
+        
+        for i in range(1, len(close_12h)):
+            if close_12h[i] > supertrend[i-1]:
+                direction[i] = 1
+            elif close_12h[i] < supertrend[i-1]:
+                direction[i] = -1
+            else:
+                direction[i] = direction[i-1]
+            
+            if direction[i] == 1:
+                supertrend[i] = max(lowerband[i], supertrend[i-1])
+            else:
+                supertrend[i] = min(upperband[i], supertrend[i-1])
+        
+        # Align to 6h timeframe
+        supertrend_aligned = align_htf_to_ltf(prices, df_12h, supertrend)
+        direction_aligned = align_htf_to_ltf(prices, df_12h, direction)
     else:
-        ema_50_1w_aligned = np.full(n, np.nan)
-        vol_ratio_1w_aligned = np.full(n, 1.0)
+        supertrend_aligned = np.full(n, np.nan)
+        direction_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: Donchian Channel (20) ===
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(20, n):
-            donchian_high[i] = np.max(high[i-20:i])
-            donchian_low[i] = np.min(low[i-20:i])
-        # Warmup period: use expanding window
-        for i in range(20):
-            donchian_high[i] = np.max(high[:i+1])
-            donchian_low[i] = np.min(low[:i+1])
+    # === HTF: 12h data for volume spike (Call ONCE before loop) ===
+    if len(df_12h) >= 20:
+        vol_12h = df_12h['volume'].values
+        vol_ma_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
+        vol_ratio_12h = np.zeros(len(vol_12h))
+        vol_ratio_12h[20:] = vol_12h[20:] / vol_ma_20[20:]
+        vol_ratio_12h[:20] = 1.0
+        vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    else:
+        vol_ratio_12h_aligned = np.full(n, 1.0)
     
-    # === ATR(14) for stoploss (1d) ===
-    atr_14 = np.full(n, np.nan)
+    # === 6h Indicators ===
+    # Williams %R(14)
+    williams_r = np.full(n, np.nan)
     if n >= 14:
-        tr = np.zeros(n)
-        tr[0] = high[0] - low[0]
-        for i in range(1, n):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+        highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+        lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+        williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+        # Handle division by zero
+        williams_r[highest_high == lowest_low] = -50
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -84,37 +106,49 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ratio_1w_aligned[i]) or
-            np.isnan(atr_14[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(supertrend_aligned[i]) or 
+            np.isnan(direction_aligned[i]) or np.isnan(vol_ratio_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
+        # --- Trend Filter: Use 12h Supertrend direction ---
+        trend_up = direction_aligned[i] > 0
+        trend_down = direction_aligned[i] < 0
+        
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio_12h_aligned[i] > 1.5
+        
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
-            # Calculate stop loss levels
+            # Calculate ATR(14) for stoploss
+            tr = np.zeros(i+1)
+            tr[0] = high[0] - low[0]
+            for j in range(1, i+1):
+                tr[j] = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().iloc[-1]
+            
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.5 * atr_14[i]
+                stop_level = entry_price - 2.5 * atr_14
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at Donchian Low (trailing stop)
-                if close[i] <= donchian_low[i]:
+                # Take profit at Williams %R extremes
+                if williams_r[i] >= -20:  # Overbought
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_level = entry_price + 2.5 * atr_14[i]
+                stop_level = entry_price + 2.5 * atr_14
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at Donchian High (trailing stop)
-                if close[i] >= donchian_high[i]:
+                # Take profit at Williams %R extremes
+                if williams_r[i] <= -80:  # Oversold
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -125,18 +159,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Break above Donchian High with volume confirmation in uptrend
+        # Long: Williams %R oversold (-80 to -100) in uptrend with volume
         long_condition = (
-            close[i] > donchian_high[i] and 
-            vol_ratio_1w_aligned[i] > 1.5 and 
-            close[i] > ema_50_1w_aligned[i]
+            williams_r[i] <= -80 and  # Oversold
+            trend_up and              # HTF uptrend
+            volume_spike              # Volume confirmation
         )
         
-        # Short: Break below Donchian Low with volume confirmation in downtrend
+        # Short: Williams %R overbought (-20 to 0) in downtrend with volume
         short_condition = (
-            close[i] < donchian_low[i] and 
-            vol_ratio_1w_aligned[i] > 1.5 and 
-            close[i] < ema_50_1w_aligned[i]
+            williams_r[i] >= -20 and  # Overbought
+            trend_down and            # HTF downtrend
+            volume_spike              # Volume confirmation
         )
         
         if long_condition:
