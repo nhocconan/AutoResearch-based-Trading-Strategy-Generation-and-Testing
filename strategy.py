@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """
-Experiment #120: 4h Donchian(20) breakout + 1d HMA(21) trend + 1w volume confirmation + ATR stoploss
+Experiment #121: 4h Donchian(20) breakout + 1d HMA trend + 1w volume confirmation + ATR stoploss
 
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe, filtered by 1d HMA(21) trend and 1w volume confirmation, capture medium-term momentum while avoiding false breakouts. The 1d HMA ensures alignment with higher timeframe direction, 1w volume confirms institutional participation, and ATR-based stoploss manages risk. Targets 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag while maintaining edge in both bull and bear markets.
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe, filtered by 1d HMA(21) trend and 1w volume 
+spikes (>1.8x average), capture medium-term momentum while avoiding false breakouts. The 1d HMA 
+ensures alignment with higher timeframe direction, 1w volume confirms institutional participation, 
+and ATR-based stoploss manages risk. Targets 19-50 trades/year on 4h timeframe (75-200 total over 
+4 years) to minimize fee drag while maintaining edge in both bull and bear markets.
 """
 
 import numpy as np
@@ -52,9 +56,13 @@ def generate_signals(prices):
         vol_ratio_1w_aligned = np.full(n, 1.0)
     
     # === 4h Indicators ===
-    # Donchian(20) channels - vectorized
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian(20) channels
+    donchian_high = np.zeros(n)
+    donchian_low = np.zeros(n)
+    for i in range(n):
+        start_idx = max(0, i - 19)
+        donchian_high[i] = np.max(high[start_idx:i+1])
+        donchian_low[i] = np.min(low[start_idx:i+1])
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -69,8 +77,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(hma_21_1d_aligned[i]) or np.isnan(vol_ratio_1w_aligned[i]) or
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(hma_21_1d_aligned[i]) or np.isnan(vol_ratio_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
