@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #707: 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: 6h Donchian breakouts filtered by weekly pivot levels (from 1d data) and volume confirmation
+Experiment #708: 12h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
+HYPOTHESIS: 12h Donchian breakouts filtered by weekly pivot levels (from 1d data) and volume confirmation
 captures institutional breakout moves with proper higher-timeframe alignment. Weekly pivot direction 
 provides regime filter: long only when price > weekly pivot, short only when price < weekly pivot.
 Uses discrete position sizing (0.25) to minimize fee churn. Works in both bull/bear markets via 
@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_707_6h_donchian20_1w_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_708_12h_donchian20_1w_pivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -46,7 +46,7 @@ def generate_signals(prices):
         weekly_r1 = 2 * weekly_pivot - week_low
         weekly_s1 = 2 * weekly_pivot - week_high
         
-        # Align to 6h timeframe
+        # Align to 12h timeframe
         weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
         weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
         weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
@@ -56,17 +56,17 @@ def generate_signals(prices):
         weekly_r1_aligned = close.copy() * 1.02
         weekly_s1_aligned = close.copy() * 0.98
     
-    # === 6h Indicators: Donchian Channel (20-period) ===
+    # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_period = 20
     donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().shift(1).values
     donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().shift(1).values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -118,7 +118,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~36h on 6h) to avoid overtrading
+            # Optional: time-based exit after 6 bars (~3 days on 12h) to avoid overtrading
             if bars_since_entry > 6:
                 in_position = False
                 position_side = 0
