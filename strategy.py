@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-Experiment #1169: 4h Donchian(20) Breakout + 1d Trend + Volume Confirmation + Chop Filter
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture swing moves with controlled trade frequency. 
-Trend filter from 1d timeframe prevents counter-trend entries. Volume confirmation (>1.5x avg) ensures 
-institutional participation. Choppiness Index filter (CHOP < 38.2) ensures trending regime only. 
+Experiment #1169: 4h Donchian(20) Breakout + 1d Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture medium-term trends with moderate trade frequency. 
+Trend filter from 1d timeframe prevents counter-trend entries. Volume confirmation (>1.5x avg) ensures institutional participation.
 Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets. 
 Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
 """
@@ -12,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1169_4h_donchian20_1d_trend_vol_chop_v1"
+name = "exp_1169_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,21 +29,6 @@ def generate_signals(prices):
     trend_1d = np.zeros(len(close_1d))
     trend_1d[1:] = np.where(close_1d[1:] > close_1d[:-1], 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
-    
-    # === HTF: 1d data for Chop filter ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    chop_1d = np.zeros(len(close_1d))
-    for i in range(1, len(close_1d)):
-        atr_1d = np.mean(np.maximum(high_1d[i] - low_1d[i], 
-                                   np.maximum(np.abs(high_1d[i] - close_1d[i-1]), 
-                                            np.abs(low_1d[i] - close_1d[i-1]))))
-        if atr_1d > 0:
-            chop_1d[i] = 100 * np.log10(sum(np.maximum(high_1d[max(0,i-13):i+1] - low_1d[max(0,i-13):i+1]) for _ in [1]) / 
-                                          (14 * atr_1d)) / np.log10(14)
-        else:
-            chop_1d[i] = 50.0
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     
     # === 4h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -77,8 +61,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -113,10 +97,8 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
-        # Chop filter: only trade in trending regime (CHOP < 38.2)
-        trending_regime = chop_1d_aligned[i] < 38.2
         
-        if volume_spike and trending_regime:
+        if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
             if price > donch_high[i] and trend_1d_aligned[i] > 0:  # 1d uptrend
                 in_position = True
