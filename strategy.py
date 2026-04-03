@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #1434: 1h Donchian(20) Breakout + 4h/1d Trend + Volume Confirmation + Session Filter
-HYPOTHESIS: Donchian(20) breakouts on 1h timeframe capture short-to-medium term trends with controlled trade frequency. 
-Trend filter from 4h and 1d timeframes ensures alignment with higher-timeframe momentum to avoid counter-trend trades. 
-Volume confirmation (>1.5x average) filters for institutional participation. Session filter (08-20 UTC) reduces noise during low-liquidity hours. 
-Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the HTF trend direction. 
-Uses ATR-based stoploss for risk management. Target: 60-150 total trades over 4 years (15-37/year).
+Experiment #1435: 6h Williams %R + 1d Trend + Volume Confirmation
+HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h timeframe. 
+Entries occur when %R crosses above -20 (oversold) in 1d uptrend or crosses below -80 (overbought) in 1d downtrend, 
+with volume confirmation (>1.5x average). This mean-reversion-with-trend filter works in both bull (buy dips) and 
+bear (sell rallies) markets. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1434_1h_donchian20_4h_1d_trend_vol_sess_v1"
-timeframe = "1h"
+name = "exp_1435_6h_williamsr_1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,19 +20,7 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
-    
-    # Pre-compute session hours for efficiency (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
-    
-    # === HTF: 4h data for trend filter (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    # Simple trend: price > previous close = uptrend, < = downtrend
-    trend_4h = np.zeros(len(close_4h))
-    trend_4h[1:] = np.where(close_4h[1:] > close_4h[:-1], 1, -1)
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
     
     # === HTF: 1d data for trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
@@ -43,16 +30,22 @@ def generate_signals(prices):
     trend_1d[1:] = np.where(close_1d[1:] > close_1d[:-1], 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 1h Indicators: Donchian(20) ===
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 6h Indicators: Williams %R(14) ===
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.full(n, -50.0)  # default to neutral
+    for i in range(14, n):
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
+        else:
+            williams_r[i] = -50.0
     
-    # === 1h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -61,7 +54,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -69,18 +62,11 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for Donchian and volume MA
+    warmup = 20  # sufficient for Williams %R and volume MA
     
     for i in range(warmup, n):
-        # --- Session Filter: 08-20 UTC only ---
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_4h_aligned[i]) or np.isnan(trend_1d_aligned[i]) or
+        if (np.isnan(williams_r[i]) or np.isnan(trend_1d_aligned[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -118,21 +104,23 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Require BOTH 4h and 1d trend to agree for stronger signal
-            if trend_4h_aligned[i] > 0 and trend_1d_aligned[i] > 0:  # Both uptrend
-                if price > donch_high[i]:  # Breakout above upper band
-                    in_position = True
-                    position_side = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                    signals[i] = SIZE
-            elif trend_4h_aligned[i] < 0 and trend_1d_aligned[i] < 0:  # Both downtrend
-                if price < donch_low[i]:  # Breakdown below lower band
-                    in_position = True
-                    position_side = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                    signals[i] = -SIZE
+            # Williams %R signals: cross above -20 (buy) or below -80 (sell)
+            # Use previous bar to detect cross
+            prev_williams = williams_r[i-1]
+            curr_williams = williams_r[i]
+            
+            if prev_williams <= -20 and curr_williams > -20 and trend_1d_aligned[i] > 0:  # 1d uptrend
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = SIZE
+            elif prev_williams >= -80 and curr_williams < -80 and trend_1d_aligned[i] < 0:  # 1d downtrend
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = -SIZE
             else:
                 signals[i] = 0.0
         else:
