@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #114: 4h/1d Donchian(20) Breakout + Volume Confirmation + Session Filter (1h timeframe)
+Experiment #114: 1h RSI Mean Reversion + 4h/1d Trend Filter + Volume Spike
 
-HYPOTHESIS: 4h and 1d Donchian breakouts aligned with volume confirmation capture swing momentum
-while minimizing whipsaw. 1h timeframe used only for precise entry timing. Session filter (08-20 UTC)
-reduces noise trades. Discrete position sizing (0.20) and ATR trailing stop (2.0x) manage risk.
-Targets 15-37 trades/year on 1h timeframe (60-150 total over 4 years) to minimize fee drag.
-Works in bull/bear markets by trading breakouts in direction of higher timeframe structure.
+HYPOTHESIS: In 1h timeframe, RSI extremes (RSI<30 for long, RSI>70 for short) 
+provide mean reversion opportunities when aligned with higher timeframe trend 
+(4h EMA50 for direction, 1d EMA200 for regime filter) and confirmed by volume spikes.
+Session filter (08-20 UTC) reduces noise. Discrete sizing (0.20) and ATR stop (2.0x) 
+limit drawdown. Targets 15-37 trades/year on 1h to avoid fee drag. Works in bull/bear 
+by fading extremes only when higher timeframe structure supports reversal.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_1d_donchian_volume_session_1h_v1"
+name = "mtf_1h_rsi_meanrev_4h_1d_trend_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -22,130 +23,125 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # Precompute session hours (08-20 UTC) - open_time is already datetime64[ms]
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # === HTF: 4h data for Donchian channels (Call ONCE before loop) ===
+    # === HTF: 4h EMA50 for trend direction ===
     df_4h = get_htf_data(prices, '4h')
-    dh_4h = pd.Series(df_4h['high'].values).rolling(window=20, min_periods=20).max().shift(1).values
-    dl_4h = pd.Series(df_4h['low'].values).rolling(window=20, min_periods=20).min().shift(1).values
-    dh_4h_aligned = align_htf_to_ltf(prices, df_4h, dh_4h)
-    dl_4h_aligned = align_htf_to_ltf(prices, df_4h, dl_4h)
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # === HTF: 1d data for Donchian channels (Call ONCE before loop) ===
+    # === HTF: 1d EMA200 for regime filter (bull/bear market) ===
     df_1d = get_htf_data(prices, '1d')
-    dh_1d = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().shift(1).values
-    dl_1d = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().shift(1).values
-    dh_1d_aligned = align_htf_to_ltf(prices, df_1d, dh_1d)
-    dl_1d_aligned = align_htf_to_ltf(prices, df_1d, dl_1d)
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # === 1h Indicators ===
-    atr_14 = np.zeros(n)
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # RSI(14)
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = pd.Series(gain).ewm(span=14, min_periods=14, adjust=False).mean()
+    avg_loss = pd.Series(loss).ewm(span=14, min_periods=14, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi_values = rsi.values
     
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = 0.0
+    tr3[0] = 0.0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # Volume MA(20) for spike confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20, mean).values
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour  # Already datetime64[ns] index
     
     # === Signals Initialization ===
     signals = np.zeros(n)
     SIZE = 0.20  # Discrete position sizing (20% of capital)
     
-    # Position tracking state variables
+    # Position tracking
     in_position = False
     position_side = 0
+    entry_price = 0.0
     entry_bar = -1
-    highest_since_entry = 0.0
-    lowest_since_entry = float('inf')
     
-    warmup = 100  # Ensure enough data for HTF and indicator calculations
+    warmup = 200  # For EMA200 and RSI stability
     
     for i in range(warmup, n):
-        # --- Session Filter ---
-        if not in_session[i]:
+        # Skip if any critical data is NaN
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(rsi_values[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
-        # --- Data Validity Check ---
-        if (np.isnan(atr_14[i]) or np.isnan(dh_4h_aligned[i]) or np.isnan(dl_4h_aligned[i]) or
-            np.isnan(dh_1d_aligned[i]) or np.isnan(dl_1d_aligned[i]) or np.isnan(vol_ma_20[i])):
-            signals[i] = 0.0
-            continue
-        
-        # --- Higher Timeframe Structure: Both 4h and 1d must agree ---
-        # Bullish structure: price above both 4h and 1d lower Donchian
-        bullish_structure = (close[i] > dl_4h_aligned[i]) and (close[i] > dl_1d_aligned[i])
-        # Bearish structure: price below both 4h and 1d upper Donchian
-        bearish_structure = (close[i] < dh_4h_aligned[i]) and (close[i] < dh_1d_aligned[i])
-        
-        # --- Price Channel Breakout (1h timeframe for entry timing) ---
-        bullish_breakout = close[i] > dh_4h_aligned[i]  # Break above 4h upper channel
-        bearish_breakout = close[i] < dl_4h_aligned[i]  # Break below 4h lower channel
-        
-        # --- Volume Confirmation ---
-        vol_ok = volume[i] > vol_ma_20[i] * 1.5 if vol_ma_20[i] > 1e-10 else False  # 1.5x volume spike
-        
-        # --- Position Management (Exit Logic) ---
-        stop_hit = False
-        
-        if in_position:
-            # ATR-based trailing stoploss
-            if position_side > 0:
-                stop_level = highest_since_entry - 2.0 * atr_14[i]
-                if low[i] < stop_level:
-                    stop_hit = True
-            else:  # Short position
-                stop_level = lowest_since_entry + 2.0 * atr_14[i]
-                if high[i] > stop_level:
-                    stop_hit = True
-            
-            # Exit conditions: opposite Donchian touch or structure breakdown
-            min_hold = (i - entry_bar) >= 3  # Minimum 3 bars hold (~3h)
-            if min_hold:
-                if position_side > 0:
-                    # Exit long: price touches 4h lower Donchian OR structure turns bearish
-                    if close[i] <= dl_4h_aligned[i] or not bullish_structure:
-                        stop_hit = True
-                else:  # position_side < 0
-                    # Exit short: price touches 4h upper Donchian OR structure turns bullish
-                    if close[i] >= dh_4h_aligned[i] or not bearish_structure:
-                        stop_hit = True
-            
-            if stop_hit:
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            if in_position:
+                # Close position outside session
                 signals[i] = 0.0
                 in_position = False
                 position_side = 0
-                highest_since_entry = 0.0
-                lowest_since_entry = float('inf')
             else:
-                signals[i] = position_side * SIZE
+                signals[i] = 0.0
             continue
         
-        # --- New Position Entry Logic (Only if Flat) ---
-        # Long conditions: 
-        # Breakout above 4h upper Donchian with bullish 4h/1d structure and volume confirmation
-        if bullish_breakout and bullish_structure and vol_ok:
+        # --- Position Management ---
+        if in_position:
+            # ATR-based stoploss
+            stop_distance = 2.0 * atr[i]
+            if position_side > 0:  # Long
+                if low[i] <= entry_price - stop_distance:
+                    signals[i] = 0.0
+                    in_position = False
+                    position_side = 0
+                else:
+                    signals[i] = SIZE
+            else:  # Short
+                if high[i] >= entry_price + stop_distance:
+                    signals[i] = 0.0
+                    in_position = False
+                    position_side = 0
+                else:
+                    signals[i] = -SIZE
+            continue
+        
+        # --- New Position Entry (Only if Flat) ---
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_ok = volume[i] > vol_ma[i] * 1.5 if vol_ma[i] > 0 else False
+        
+        if not vol_ok:
+            signals[i] = 0.0
+            continue
+        
+        # Trend and regime filters
+        hma_bullish = close[i] > ema_4h_aligned[i]  # Price above 4h EMA50 = short-term bullish
+        regime_bullish = close[i] > ema_1d_aligned[i]  # Price above 1d EMA200 = bull regime
+        
+        # Long conditions: RSI oversold + bullish alignment
+        if rsi_values[i] < 30 and hma_bullish and regime_bullish:
             in_position = True
             position_side = 1
+            entry_price = close[i]
             entry_bar = i
-            highest_since_entry = high[i]
             signals[i] = SIZE
-        # Short conditions:
-        # Breakout below 4h lower Donchian with bearish 4h/1d structure and volume confirmation
-        elif bearish_breakout and bearish_structure and vol_ok:
+        
+        # Short conditions: RSI overbought + bearish alignment
+        elif rsi_values[i] > 70 and not hma_bullish and not regime_bullish:
             in_position = True
             position_side = -1
+            entry_price = close[i]
             entry_bar = i
-            lowest_since_entry = low[i]
             signals[i] = -SIZE
+        
         else:
             signals[i] = 0.0
     
     return signals
-</script>
