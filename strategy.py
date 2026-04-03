@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #1198: 1d Donchian(20) Breakout + 1w Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 1d timeframe capture primary trends with optimal trade frequency.
-Trend filter from 1w timeframe ensures alignment with higher-timeframe momentum.
-Volume confirmation (>1.5x average) filters for institutional participation.
-Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 1w trend direction.
-Target: 30-100 total trades over 4 years (7-25/year).
+HYPOTHESIS: Donchian(20) breakouts on daily timeframe capture major trend moves with optimal trade frequency (target: 30-100 total trades over 4 years). 
+Weekly trend filter ensures alignment with higher-timeframe momentum, reducing false breakouts in counter-trend periods. Volume confirmation (>1.8x average) 
+filters for institutional participation. Strategy works in bull markets (breakouts continue uptrend) and bear markets (breakdowns continue downtrend) 
+by following the 1w trend direction. ATR-based stoploss manages risk. Designed for low trade frequency to minimize fee drag.
 """
 
 import numpy as np
@@ -26,7 +25,7 @@ def generate_signals(prices):
     # === HTF: 1w data for trend filter (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    # Simple trend: price > previous close = uptrend, < = downtrend
+    # Weekly trend: price > previous weekly close = uptrend, < = downtrend
     trend_1w = np.zeros(len(close_1w))
     trend_1w[1:] = np.where(close_1w[1:] > close_1w[:-1], 1, -1)
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
@@ -96,8 +95,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
