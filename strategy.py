@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #2137: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 4h Donchian breakouts capture intermediate-term momentum with 1d trend filter.
-- Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average (balanced frequency)
-- HTF: 1d HMA(21) trend filter (only trade in direction of daily timeframe trend)
+Experiment #2136: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian channel breakouts on 12h timeframe capture swing momentum with daily trend filter.
+- Primary: 12h Donchian(20) breakout with volume > 2.0x 20-bar average (strict to limit trades)
+- HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
-- Target: 75-200 total trades over 4 years (19-50/year) - proven range for 4h strategies
-- Works in bull markets (trend following) and bear markets (mean reversion at extremes)
+- Target: 50-150 total trades over 4 years (12-37/year) - optimized for 12h timeframe
+- Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2137_4h_donchian20_1d_hma_vol_v1"
-timeframe = "4h"
+name = "exp_2136_12h_donchian20_1d_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -59,14 +59,14 @@ def generate_signals(prices):
     trend_1d = np.where(close_1d > hma_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 4h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
+    # === 12h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
     # Donchian channels
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_upper = high_ma
     donchian_lower = low_ma
     
-    # Volume MA for spike detection (balanced threshold for optimal trade frequency)
+    # Volume MA for spike detection (strict threshold to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -140,8 +140,8 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average - balanced for trade frequency)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 2.0x average - strict to limit trades)
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # Long entry: price breaks above upper Donchian AND 1d trend up
