@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #236: 12h Camarilla Pivot Volume Strategy
+Experiment #237: 4h Donchian Breakout + HMA Trend + Volume Confirmation + ATR Stoploss
 
-HYPOTHESIS: Camarilla pivot levels derived from 1d OHLC act as strong intraday support/resistance. Price retesting these levels with volume confirmation offers high-probability mean-reversion entries. We use 12h timeframe to reduce noise and trade frequency, targeting 12-37 trades/year. In ranging markets (1d ADX < 25), we fade extreme deviations from Camarilla H3/L3 levels. In trending markets (1d ADX > 25), we avoid new entries and only exit existing positions. Volume spike (>2x MA20) confirms participation. ATR-based stoploss manages risk. This structure works in both bull (failed rallies at resistance) and bear (failed drops at support) markets.
+HYPOTHESIS: Donchian(20) breakout captures momentum bursts, confirmed by 1d HMA(21) trend filter and volume spike (>1.8x MA20). 
+In trending markets (1d HMA up/down), we follow breakouts. In ranging markets (1d HMA flat), we require stronger volume confirmation (>2.5x) to avoid false breakouts.
+This structure works in both bull (clear breakouts) and bear (failed reversals, volatility expansion) markets. 
+4h timeframe targets 19-50 trades/year (75-200 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_236_12h_camarilla_pivot_volume_v1"
-timeframe = "12h"
+name = "exp_237_4h_donchian_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,65 +23,46 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivots and regime (Call ONCE before loop) ===
+    # === HTF: 1d data for trend regime (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d ADX for regime detection (trending vs ranging)
-    def calculate_adx(high, low, close, period=14):
-        """Calculate ADX (Average Directional Index)"""
-        plus_dm = np.zeros(len(high))
-        minus_dm = np.zeros(len(high))
-        tr = np.zeros(len(high))
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-            if plus_dm[i] == minus_dm[i]:
-                plus_dm[i] = 0
-                minus_dm[i] = 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smoothed values
-        atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-        plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
-        minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-        return adx
+    # Calculate 1d HMA(21) for trend filter
+    def calculate_hma(series, period):
+        """Hull Moving Average"""
+        if len(series) < period:
+            return np.full_like(series, np.nan)
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma1 = pd.Series(series).ewm(span=half, adjust=False).mean()
+        wma2 = pd.Series(series).ewm(span=period, adjust=False).mean()
+        raw_hma = 2 * wma1 - wma2
+        hma = pd.Series(raw_hma).ewm(span=sqrt, adjust=False).mean()
+        return hma.values
     
-    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    hma_21_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_21_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_21_1d)
     
-    # Calculate Camarilla pivot levels from 1d OHLC
-    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.25*(high-low), etc.
-    # We focus on H3/L3 and H4/L4 for reversals
-    range_1d = df_1d['high'].values - df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1d HMA slope for trend direction (up/down/flat)
+    hma_slope_1d = np.zeros(n)
+    hma_slope_1d[1:] = hma_21_1d_aligned[1:] - hma_21_1d_aligned[:-1]
+    hma_slope_1d[0] = 0
     
-    camarilla_h3 = close_1d + 1.25 * range_1d  # Strong resistance
-    camarilla_l3 = close_1d - 1.25 * range_1d  # Strong support
-    camarilla_h4 = close_1d + 1.50 * range_1d  # Extreme resistance
-    camarilla_l4 = close_1d - 1.50 * range_1d  # Extreme support
+    # === 4h Indicators: Donchian(20) channels ===
+    def calculate_donchian(high, low, period):
+        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        return upper, lower
     
-    # Align Camarilla levels to 12h timeframe
-    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    donch_20_upper, donch_20_lower = calculate_donchian(high, low, 20)
     
-    # === 12h Indicators: ATR(14) for stoploss ===
-    tr_12h = np.zeros(n)
-    tr_12h[0] = high[0] - low[0]
+    # === 4h Indicators: ATR(14) for stoploss ===
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_12h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    atr_14 = pd.Series(tr_12h).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
@@ -98,17 +82,22 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(adx_1d_aligned[i]) or np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or
-            np.isnan(h4_12h[i]) or np.isnan(l4_12h[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(hma_21_1d_aligned[i]) or np.isnan(hma_slope_1d[i]) or
+            np.isnan(donch_20_upper[i]) or np.isnan(donch_20_lower[i]) or
+            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- 1d Regime Filter: ADX > 25 = trending, ADX < 25 = ranging ---
-        is_trending = adx_1d_aligned[i] > 25
-        is_ranging = adx_1d_aligned[i] < 25
+        # --- 1d Regime Filter: HMA slope > 0 = up, < 0 = down, |slope| < threshold = flat ---
+        hma_up = hma_slope_1d[i] > 0.0001 * close[i]  # Scaled threshold
+        hma_down = hma_slope_1d[i] < -0.0001 * close[i]
+        hma_flat = np.abs(hma_slope_1d[i]) <= 0.0001 * close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
+        # --- Volume Confirmation: Dynamic based on regime ---
+        if hma_flat:
+            volume_spike = vol_ratio[i] > 2.5  # Stronger confirmation in ranging markets
+        else:
+            volume_spike = vol_ratio[i] > 1.8  # Normal confirmation in trending markets
         
         # --- Price ---
         price = close[i]
@@ -126,9 +115,23 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
+                # Exit on Donchian middle reversion in flat markets
+                if hma_flat and price < (donch_20_upper[i] + donch_20_lower[i]) / 2:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
             else:  # Short position
                 stop_level = entry_price + 2.5 * atr_14[i]
                 if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+                # Exit on Donchian middle reversion in flat markets
+                if hma_flat and price > (donch_20_upper[i] + donch_20_lower[i]) / 2:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -145,22 +148,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Only trade in ranging markets (fade extreme levels)
-        if is_ranging:
-            # Long: Price near L3/L4 support with volume spike (mean reversion long)
-            # We look for price touching or penetrating support levels then bouncing
-            long_setup = ((price <= l3_12h[i] * 1.002) or (price <= l4_12h[i] * 1.002)) and volume_spike
+        # Trending market logic: Follow Donchian breakout with trend
+        if hma_up or hma_down:
+            # Long: Price breaks above Donchian upper AND HMA up
+            long_breakout = (price > donch_20_upper[i]) and hma_up
             
-            # Short: Price near H3/H4 resistance with volume spike (mean reversion short)
-            short_setup = ((price >= h3_12h[i] * 0.998) or (price >= h4_12h[i] * 0.998)) and volume_spike
+            # Short: Price breaks below Donchian lower AND HMA down
+            short_breakout = (price < donch_20_lower[i]) and hma_down
             
-            if long_setup:
+            # Require volume confirmation for breakout entries
+            if long_breakout and volume_spike:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif short_setup:
+            elif short_breakout and volume_spike:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -168,8 +171,28 @@ def generate_signals(prices):
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
-        else:
-            # In trending markets, stay flat (avoid counter-trend trades)
-            signals[i] = 0.0
+        
+        # Ranging market logic: Fade Donchian touches with strong volume
+        else:  # hma_flat
+            # Long: Price touches Donchian lower AND strong volume spike (mean reversion)
+            long_reversion = (price <= donch_20_lower[i] * 1.001) and volume_spike  # Allow small slippage
+            
+            # Short: Price touches Donchian upper AND strong volume spike (mean reversion)
+            short_reversion = (price >= donch_20_upper[i] * 0.999) and volume_spike  # Allow small slippage
+            
+            if long_reversion:
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = SIZE
+            elif short_reversion:
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = -SIZE
+            else:
+                signals[i] = 0.0
     
     return signals
