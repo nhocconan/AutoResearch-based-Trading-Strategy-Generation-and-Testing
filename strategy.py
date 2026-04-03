@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #695: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts filtered by weekly pivot direction (price > weekly pivot = bullish bias, 
-price < weekly pivot = bearish bias) capture institutional order flow aligned with the weekly trend. 
-Volume confirmation (>2.0x average) ensures breakout validity. Uses discrete position sizing (0.25) 
-to minimize fee churn. Designed for 6h timeframe to achieve 75-200 total trades over 4 years (19-50/year). 
-Works in bull/bear markets: long when price > weekly pivot and breaks Donchian high, 
-short when price < weekly pivot and breaks Donchian low.
+Experiment #695: 6h Elder Ray + 1w Supertrend + Volume Confirmation
+HYPOTHESIS: 6h Elder Ray (Bull/Bear Power) filtered by 1w Supertrend direction and volume confirmation 
+captures institutional order flow with proper regime alignment. Uses discrete position sizing (0.25) 
+to minimize fee churn. Works in bull/bear markets via Supertrend regime filter: long only in uptrend, 
+short only in downtrend. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_695_6h_donchian20_1w_pivot_vol_v1"
+name = "exp_695_6h_elder_ray_1w_supertrend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -24,22 +22,74 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for weekly pivot (Call ONCE before loop) ===
+    # === HTF: 1w data for Supertrend regime filter (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot levels
-    # Pivot = (H + L + C) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Calculate Supertrend for 1w timeframe
+    atr_period = 10
+    multiplier = 3.0
     
-    # Align weekly pivot to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    # True Range
+    tr_1w = np.zeros(len(high_1w))
+    for i in range(1, len(high_1w)):
+        tr_1w[i] = max(high_1w[i] - low_1w[i], abs(high_1w[i] - close_1w[i-1]), abs(low_1w[i] - close_1w[i-1]))
+    tr_1w[0] = high_1w[0] - low_1w[0]
     
-    # === 6h Indicators: Donchian Channel (20) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # ATR
+    atr_1w = pd.Series(tr_1w).ewm(span=atr_period, min_periods=atr_period, adjust=False).mean().values
+    
+    # Basic Upper and Lower Bands
+    basic_ub = (high_1w + low_1w) / 2 + multiplier * atr_1w
+    basic_lb = (high_1w + low_1w) / 2 - multiplier * atr_1w
+    
+    # Final Upper and Lower Bands
+    final_ub = np.zeros_like(basic_ub)
+    final_lb = np.zeros_like(basic_lb)
+    for i in range(len(basic_ub)):
+        if i == 0:
+            final_ub[i] = basic_ub[i]
+            final_lb[i] = basic_lb[i]
+        else:
+            if basic_ub[i] < final_ub[i-1] or close_1w[i-1] > final_ub[i-1]:
+                final_ub[i] = basic_ub[i]
+            else:
+                final_ub[i] = final_ub[i-1]
+                
+            if basic_lb[i] > final_lb[i-1] or close_1w[i-1] < final_lb[i-1]:
+                final_lb[i] = basic_lb[i]
+            else:
+                final_lb[i] = final_lb[i-1]
+    
+    # Supertrend
+    supertrend_1w = np.zeros_like(close_1w)
+    for i in range(len(supertrend_1w)):
+        if i == 0:
+            supertrend_1w[i] = final_ub[i]
+        else:
+            if supertrend_1w[i-1] == final_ub[i-1] and close_1w[i] <= final_ub[i]:
+                supertrend_1w[i] = final_ub[i]
+            elif supertrend_1w[i-1] == final_ub[i-1] and close_1w[i] > final_ub[i]:
+                supertrend_1w[i] = final_lb[i]
+            elif supertrend_1w[i-1] == final_lb[i-1] and close_1w[i] >= final_lb[i]:
+                supertrend_1w[i] = final_lb[i]
+            elif supertrend_1w[i-1] == final_lb[i-1] and close_1w[i] < final_lb[i]:
+                supertrend_1w[i] = final_ub[i]
+    
+    # Supertrend direction: 1 = uptrend, -1 = downtrend
+    supertrend_dir_1w = np.where(close_1w > supertrend_1w, 1, -1)
+    
+    # Align Supertrend direction to 6h timeframe
+    supertrend_dir_1w_aligned = align_htf_to_ltf(prices, df_1w, supertrend_dir_1w)
+    
+    # === 6h Indicators: Elder Ray (Bull Power/Bear Power) ===
+    ema_period = 13
+    ema_close = pd.Series(close).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
+    
+    bull_power = high - ema_close  # Bull Power = High - EMA
+    bear_power = low - ema_close   # Bear Power = Low - EMA
     
     # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -63,24 +113,20 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for Donchian and weekly pivot calculations
+    warmup = 50  # sufficient for EMA and Supertrend calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(pivot_1w_aligned[i]) or
+        if (np.isnan(ema_close[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(supertrend_dir_1w_aligned[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
-        
-        # --- Donchian Breakout Conditions ---
-        breakout_up = price > highest_high[i]
-        breakout_down = price < lowest_low[i]
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
+        volume_spike = vol_ratio[i] > 1.8
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -105,8 +151,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~36h on 6h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 8 bars (~48h on 6h) to avoid overtrading
+            if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -118,15 +164,18 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + price above weekly pivot (bullish bias)
-            if breakout_up and price > pivot_1w_aligned[i]:
+            # Get regime from 1w Supertrend
+            regime = supertrend_dir_1w_aligned[i]
+            
+            # Long: Bull Power > 0 (bullish momentum) + uptrend regime
+            if bull_power[i] > 0 and regime > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + price below weekly pivot (bearish bias)
-            elif breakout_down and price < pivot_1w_aligned[i]:
+            # Short: Bear Power < 0 (bearish momentum) + downtrend regime
+            elif bear_power[i] < 0 and regime < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
