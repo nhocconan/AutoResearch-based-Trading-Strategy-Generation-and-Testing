@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #1655: 6h Williams %R Reversal + Weekly Volume Spike + Daily Trend Filter
-HYPOTHESIS: In 6h timeframe, Williams %R identifies overbought/oversold conditions. Combining with weekly volume spikes (>2x average) and daily EMA50 trend filter captures reversal moves with institutional participation. Weekly volume confirms smart money involvement, daily trend ensures alignment with intermediate-term direction. Target: 75-150 total trades over 4 years (19-37/year) by requiring confluence of three filters. Works in bull/bear markets as reversals occur in all regimes.
+Experiment #1656: 12h Donchian(20) Breakout + 1d HMA Trend + Volume + ATR Stoploss
+HYPOTHESIS: 12h Donchian breakouts with 1d HMA trend alignment and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 1d timeframe filters out noise from shorter-term fluctuations, while the 12h Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 75-150 total trades over 4 years (19-37/year) by using tight entry conditions and multi-timeframe confluence.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1655_6h_willr_weekly_vol_daily_trend_v1"
-timeframe = "6h"
+name = "exp_1656_12h_donchian20_1d_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,28 +20,32 @@ def generate_signals(prices):
     open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1w data for volume spike detection (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    volume_1w = df_1w['volume'].values
-    vol_ma_1w = pd.Series(volume_1w).rolling(window=4, min_periods=4).mean().values  # ~1 month
-    vol_ratio_1w = np.ones(len(volume_1w))
-    vol_ratio_1w[4:] = volume_1w[4:] / vol_ma_1w[4:]
-    vol_spike_1w = align_htf_to_ltf(prices, df_1w, vol_ratio_1w > 2.0)
-    
     # === HTF: 1d data for trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_50_1d, 1, -1)
+    # HMA(21): Hull Moving Average
+    def hull_moving_average(arr, period):
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
+        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
+        raw_hma = 2 * wma_half - wma_full
+        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
+        return hma
+    hma_1d = hull_moving_average(close_1d, 21)
+    trend_1d = np.where(close_1d > hma_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 6h Indicators: Williams %R(14) ===
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    willr = -100 * (highest_high - close) / (highest_high - lowest_low)
-    willr = np.where((highest_high - lowest_low) == 0, -50, willr)  # avoid div by zero
+    # === 12h Indicators: Donchian(20) ===
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.ones(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -58,12 +62,12 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for all indicators
+    warmup = 20  # sufficient for Donchian and volume MA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(willr[i]) or np.isnan(trend_1d_aligned[i]) or 
-            np.isnan(vol_spike_1w[i]) or np.isnan(atr[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -74,8 +78,8 @@ def generate_signals(prices):
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.5*ATR below entry
-                stop_level = entry_price - 2.5 * atr[i]
+                # Stoploss: 2.0*ATR below entry
+                stop_level = entry_price - 2.0 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -83,8 +87,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                # Stoploss: 2.5*ATR above entry
-                stop_level = entry_price + 2.5 * atr[i]
+                # Stoploss: 2.0*ATR above entry
+                stop_level = entry_price + 2.0 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -96,23 +100,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Williams %R reversal signals
-        willr_oversold = willr[i] < -80
-        willr_overbought = willr[i] > -20
+        # Require 1d trend alignment
+        trend_following = trend_1d_aligned[i] != 0  # Should always be ±1
         
-        # Require weekly volume spike and daily trend alignment
-        volume_confirmation = vol_spike_1w[i]
-        trend_following = (willr_oversold and trend_1d_aligned[i] > 0) or \
-                         (willr_overbought and trend_1d_aligned[i] < 0)
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
-        if volume_confirmation and trend_following:
-            if willr_oversold and trend_1d_aligned[i] > 0:  # Long setup
+        if trend_following and volume_spike:
+            # Breakout: price breaks above upper band OR below lower band
+            if price > donch_high[i] and trend_1d_aligned[i] > 0:  # Uptrend breakout
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif willr_overbought and trend_1d_aligned[i] < 0:  # Short setup
+            elif price < donch_low[i] and trend_1d_aligned[i] < 0:  # Downtrend breakdown
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
