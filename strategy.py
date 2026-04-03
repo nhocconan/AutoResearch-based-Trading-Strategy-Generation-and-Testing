@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #084: 1d Donchian(20) Breakout + 1w HMA Trend Filter + Volume Spike + ATR Stoploss
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA(21) trend capture strong momentum with higher timeframe confirmation. 
-Volume spikes (>1.5x average) filter false breakouts. ATR-based stoploss (2.5x) manages risk. 
-Target: 30-100 trades over 4 years (7-25/year). Works in bull/bear by taking breakouts in direction of weekly trend.
+Experiment #085: 12h Donchian(20) Breakout + 1d HMA(50) Trend Filter + Volume Spike + ATR Stoploss
+HYPOTHESIS: Donchian breakouts on 12h aligned with 1d HMA(50) trend direction capture strong momentum with minimal overtrading. 
+Volume confirmation (>1.8x average) filters false breakouts. ATR-based stoploss (2.0x) manages risk. 
+Uses 1d timeframe for trend filter to reduce noise and improve signal quality. Target: 50-150 trades over 4 years (12-37/year).
+Works in both bull/bear by taking breakouts in direction of higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_084_1d_donchian_breakout_1w_hma_volume_atr_v1"
-timeframe = "1d"
+name = "exp_085_12h_donchian_breakout_1d_hma_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,7 +22,7 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === Indicators: Donchian Channels (20-period) on 1d ===
+    # === Indicators: Donchian Channels (20-period) on 12h ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -47,9 +48,9 @@ def generate_signals(prices):
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
     vol_ratio[:20] = 1.0
     
-    # === HTF: 1w HMA(21) for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values.astype(np.float64)
+    # === HTF: 1d HMA(50) for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values.astype(np.float64)
     # HMA calculation: WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
     def calculate_wma(data, period):
         if period <= 1:
@@ -67,8 +68,8 @@ def generate_signals(prices):
         hma = calculate_wma(raw_hma, sqrt_period)
         return hma
     
-    hma_1w = calculate_hma(close_1w, 21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)  # shift(1) applied
+    hma_1d = calculate_hma(close_1d, 50)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)  # shift(1) applied
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -81,19 +82,19 @@ def generate_signals(prices):
     entry_atr = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # Warmup for Donchian, ATR, volume, HMA stability
+    warmup = 60  # Warmup for Donchian, ATR, volume, HMA stability
     
     for i in range(warmup, n):
         # Skip if any critical values are NaN
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(atr[i]) or np.isnan(vol_ratio[i]) or np.isnan(hma_1w_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(vol_ratio[i]) or np.isnan(hma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_spike = vol_ratio[i] > 1.5  # Volume spike: 1.5x average
-        price_above_hma = price > hma_1w_aligned[i]
-        price_below_hma = price < hma_1w_aligned[i]
+        vol_spike = vol_ratio[i] > 1.8  # Volume spike: 1.8x average (stricter)
+        price_above_hma = price > hma_1d_aligned[i]
+        price_below_hma = price < hma_1d_aligned[i]
         
         # --- Exit Logic ---
         if in_position:
@@ -101,7 +102,7 @@ def generate_signals(prices):
             
             # ATR-based stoploss
             if position_side > 0:  # Long position
-                stop_price = entry_price - 2.5 * entry_atr
+                stop_price = entry_price - 2.0 * entry_atr
                 if price < stop_price:
                     in_position = False
                     position_side = 0
@@ -109,7 +110,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_price = entry_price + 2.5 * entry_atr
+                stop_price = entry_price + 2.0 * entry_atr
                 if price > stop_price:
                     in_position = False
                     position_side = 0
@@ -133,8 +134,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Minimum holding period of 1 bar to prevent whipsaw
-            if bars_since_entry < 1:
+            # Minimum holding period of 2 bars to prevent whipsaw
+            if bars_since_entry < 2:
                 signals[i] = position_side * SIZE
                 continue
             
@@ -143,7 +144,7 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Long entry: price breaks above Donchian upper with volume AND price above 1w HMA (uptrend)
+        # Long entry: price breaks above Donchian upper with volume AND price above 1d HMA (uptrend)
         if price > donchian_upper[i-1] and vol_spike and price_above_hma:
             in_position = True
             position_side = 1
@@ -151,7 +152,7 @@ def generate_signals(prices):
             entry_atr = atr[i]
             bars_since_entry = 0
             signals[i] = SIZE
-        # Short entry: price breaks below Donchian lower with volume AND price below 1w HMA (downtrend)
+        # Short entry: price breaks below Donchian lower with volume AND price below 1d HMA (downtrend)
         elif price < donchian_lower[i-1] and vol_spike and price_below_hma:
             in_position = True
             position_side = -1
@@ -163,3 +164,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</strategy.py>
