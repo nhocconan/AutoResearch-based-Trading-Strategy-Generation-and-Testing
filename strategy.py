@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #124: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
-HYPOTHESIS: 1d Donchian breakouts aligned with 1w HMA(21) trend and volume confirmation (>1.5x) capture medium-term momentum with low trade frequency. The 1w HMA provides a strong trend filter, reducing whipsaws. Volume confirmation ensures institutional participation. Target: 30-100 total trades over 4 years (7-25/year).
+Experiment #130: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA(21) trend and volume spikes (>1.5x) capture medium-term momentum with low trade frequency. The weekly HMA provides structural bias from higher timeframe, reducing false breakouts in both bull and bear markets. Volume confirmation ensures institutional participation. ATR-based stops manage risk. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_124_1d_donchian20_1w_hma_vol_v1"
+name = "exp_130_1d_donchian20_1w_hma_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -25,11 +25,12 @@ def generate_signals(prices):
     # HMA(21) = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
     half_len = 21 // 2
     sqrt_len = int(np.sqrt(21))
-    wma_half = close_1w.rolling(window=half_len, min_periods=half_len).mean()
-    wma_full = close_1w.rolling(window=21, min_periods=21).mean()
+    wma_half = close_1w.ewm(span=half_len, adjust=False).mean()
+    wma_full = close_1w.ewm(span=21, adjust=False).mean()
     raw_hma = 2 * wma_half - wma_full
-    hma_21_1w = raw_hma.rolling(window=sqrt_len, min_periods=sqrt_len).mean().values
-    hma_trend_1w = align_htf_to_ltf(prices, df_1w, hma_21_1w)
+    hma_21 = raw_hma.ewm(span=sqrt_len, adjust=False).mean()
+    hma_values = hma_21.values
+    hma_trend_1w = align_htf_to_ltf(prices, df_1w, hma_values)
     
     # === 1d Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
@@ -103,7 +104,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 10 bars (~10 days on 1d) to avoid overtrading
+            # Optional: time-based exit after 10 bars (~10d) to avoid overtrading
             if bars_since_entry > 10:
                 in_position = False
                 position_side = 0
