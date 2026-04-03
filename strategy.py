@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 4h Donchian20 + 1d/1w Trend + Volume Spike Strategy
+Experiment #020: 4h Donchian20 + 1d Trend + Volume Spike Strategy
 
-HYPOTHESIS: Donchian(20) breakouts on 4h combined with dual timeframe trend filter 
-(price above 1d EMA50 AND 1w EMA200) and volume confirmation (>1.5x average) captures 
-strong directional moves with higher conviction. In strongly trending regimes (price 
-clearly above both EMAs), we trade breakouts with the trend. Uses ATR-based stoploss 
-(2.0x) and minimum 3-bar holding period. Target: 75-200 trades over 4 years.
+HYPOTHESIS: Donchian(20) breakouts on 4h combined with 1d trend filter (price above/below EMA50) 
+and volume confirmation (>1.5x average) captures strong directional moves. 
+In trending regimes (price clearly above/below EMA50), we trade breakouts with the trend. 
+In ranging markets (price near EMA50), we avoid false breakouts. Uses ATR-based stoploss (2.0x) 
+and minimum 3-bar holding period. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_021_4h_donchian20_1d_1w_trend_vol_v1"
+name = "exp_020_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,15 +24,12 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA50 trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d EMA50 for trend filter
     ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    
-    # === HTF: 1w data for EMA200 trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    ema200_1w = pd.Series(df_1w['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
     
     # === 4h Indicators: Donchian(20) channels ===
     def calculate_donchian(high, low, period=20):
@@ -66,21 +63,20 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 200  # Warmup for 1w EMA200 stability
+    warmup = 50  # Warmup for 1d EMA50 stability
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1w_aligned[i]) or 
-            np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
             np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- Dual Timeframe Trend Filter: Only trade when price is clearly above/both EMAs ---
+        # --- 1d Trend Filter: Only trade when price is clearly above/below EMA50 ---
         price = close[i]
-        is_strong_uptrend = (price > ema50_1d_aligned[i] * 1.005) and (price > ema200_1w_aligned[i] * 1.005)
-        is_strong_downtrend = (price < ema50_1d_aligned[i] * 0.995) and (price < ema200_1w_aligned[i] * 0.995)
-        is_strong_trending = is_strong_uptrend or is_strong_downtrend
+        is_uptrend = price > ema50_1d_aligned[i] * 1.005  # 0.5% buffer above EMA50
+        is_downtrend = price < ema50_1d_aligned[i] * 0.995  # 0.5% buffer below EMA50
+        is_trending = is_uptrend or is_downtrend
         
         # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
         volume_spike = vol_ratio[i] > 1.5
@@ -135,17 +131,17 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Only trade in strong trending regimes (dual timeframe alignment)
-        if is_strong_trending:
-            # Long: Donchian breakout up AND volume spike AND strong uptrend
-            if breakout_up and volume_spike and is_strong_uptrend:
+        # Only trade in clear trending regimes
+        if is_trending:
+            # Long: Donchian breakout up AND volume spike AND uptrend
+            if breakout_up and volume_spike and is_uptrend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down AND volume spike AND strong downtrend
-            elif breakout_down and volume_spike and is_strong_downtrend:
+            # Short: Donchian breakout down AND volume spike AND downtrend
+            elif breakout_down and volume_spike and is_downtrend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -154,7 +150,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:
-            # In weak/regime or ranging regime, do not trade breakouts (avoid false signals)
+            # In ranging regime, do not trade breakouts (avoid false signals)
             signals[i] = 0.0
     
     return signals
