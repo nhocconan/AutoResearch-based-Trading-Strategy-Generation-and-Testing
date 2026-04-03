@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #1243: 4h Donchian(20) Breakout + 12h Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture intermediate-term trends with optimal trade frequency. 
-Trend filter from 12h timeframe ensures alignment with higher-timeframe momentum. Volume confirmation (>1.5x average) 
-filters for institutional participation. Designed to work in both bull (breakouts continue) and bear (breakdowns continue) 
-markets by following the 12h trend direction. Target: 75-200 total trades over 4 years (19-50/year).
+HYPOTHESIS: Donchian(20) breakouts on 4h capture intermediate trends with optimal frequency.
+Trend filter from 12h timeframe ensures alignment with higher-timeframe momentum while reducing noise.
+Volume confirmation (>1.5x average) filters for institutional participation. Designed to work in both bull 
+(breakouts continue) and bear (breakdowns continue) markets by following the 12h trend direction.
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
