@@ -5,7 +5,7 @@ HYPOTHESIS: Donchian breakouts on 12h capture medium-term momentum, filtered by 
 and volume confirmation (>1.8x average). Long when price breaks above Donchian upper 
 AND 1d HMA rising AND volume spike. Short when price breaks below Donchian lower 
 AND 1d HMA falling AND volume spike. Uses discrete position sizing (0.28) to balance 
-risk and reward. Target: 50-150 total trades over 4 years (12-37/year).
+risk and reward. Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
 """
 
 import numpy as np
