@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #235: 6h Weekly Pivot Donchian Breakout Strategy
+Experiment #236: 12h Camarilla Pivot Volume Strategy
 
-HYPOTHESIS: Weekly pivot points (PP, R1-4, S1-4) combined with 6h Donchian(20) breakouts and volume confirmation capture institutional-level breakouts and reversals. In bull/bear markets, we trade breakouts in the direction of weekly pivot bias. In ranging markets, we fade extreme weekly pivot levels (R3/S3, R4/S4) with volume exhaustion signals. Weekly pivots provide structure that works across regimes, while 6h timeframe targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag in BTC/ETH/SOL.
+HYPOTHESIS: Camarilla pivot levels derived from 1d OHLC act as strong intraday support/resistance. Price retesting these levels with volume confirmation offers high-probability mean-reversion entries. We use 12h timeframe to reduce noise and trade frequency, targeting 12-37 trades/year. In ranging markets (1d ADX < 25), we fade extreme deviations from Camarilla H3/L3 levels. In trending markets (1d ADX > 25), we avoid new entries and only exit existing positions. Volume spike (>2x MA20) confirms participation. ATR-based stoploss manages risk. This structure works in both bull (failed rallies at resistance) and bear (failed drops at support) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_235_6h_weekly_pivot_donchian_v1"
-timeframe = "6h"
+name = "exp_236_12h_camarilla_pivot_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,50 +20,65 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: Weekly data for pivot points (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
+    # === HTF: 1d data for Camarilla pivots and regime (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points: PP = (H+L+C)/3, R1 = 2*PP-L, S1 = 2*PP-H, etc.
-    # Using previous week's values (already completed)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate 1d ADX for regime detection (trending vs ranging)
+    def calculate_adx(high, low, close, period=14):
+        """Calculate ADX (Average Directional Index)"""
+        plus_dm = np.zeros(len(high))
+        minus_dm = np.zeros(len(high))
+        tr = np.zeros(len(high))
+        
+        for i in range(1, len(high)):
+            plus_dm[i] = max(high[i] - high[i-1], 0)
+            minus_dm[i] = max(low[i-1] - low[i], 0)
+            if plus_dm[i] < minus_dm[i]:
+                plus_dm[i] = 0
+            if minus_dm[i] < plus_dm[i]:
+                minus_dm[i] = 0
+            if plus_dm[i] == minus_dm[i]:
+                plus_dm[i] = 0
+                minus_dm[i] = 0
+            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        
+        # Smoothed values
+        atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+        plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
+        minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+        adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+        return adx
     
-    # Weekly pivot calculation
-    pp = (weekly_high + weekly_low + weekly_close) / 3.0
-    r1 = 2 * pp - weekly_low
-    s1 = 2 * pp - weekly_high
-    r2 = pp + (weekly_high - weekly_low)
-    s2 = pp - (weekly_high - weekly_low)
-    r3 = weekly_high + 2 * (pp - weekly_low)
-    s3 = weekly_low - 2 * (weekly_high - pp)
-    r4 = pp + 3 * (weekly_high - weekly_low)
-    s4 = pp - 3 * (weekly_high - weekly_low)
+    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Align weekly pivots to 6h timeframe (shifted by 1 for completed weeks only)
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    # Calculate Camarilla pivot levels from 1d OHLC
+    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.25*(high-low), etc.
+    # We focus on H3/L3 and H4/L4 for reversals
+    range_1d = df_1d['high'].values - df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 6h Indicators: Donchian(20) for breakout detection ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    camarilla_h3 = close_1d + 1.25 * range_1d  # Strong resistance
+    camarilla_l3 = close_1d - 1.25 * range_1d  # Strong support
+    camarilla_h4 = close_1d + 1.50 * range_1d  # Extreme resistance
+    camarilla_l4 = close_1d - 1.50 * range_1d  # Extreme support
     
-    # === 6h Indicators: ATR(14) for stoploss and volatility filter ===
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
+    # Align Camarilla levels to 12h timeframe
+    h3_12h = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    l3_12h = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    h4_12h = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    l4_12h = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    
+    # === 12h Indicators: ATR(14) for stoploss ===
+    tr_12h = np.zeros(n)
+    tr_12h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+        tr_12h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    # === 6h Indicators: Volume confirmation ===
+    atr_14 = pd.Series(tr_12h).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
@@ -79,45 +94,24 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 100  # Warmup for indicators stability
+    warmup = 100  # Warmup for 1d indicators stability
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(atr_14[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(h3_12h[i]) or np.isnan(l3_12h[i]) or
+            np.isnan(h4_12h[i]) or np.isnan(l4_12h[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
+        # --- 1d Regime Filter: ADX > 25 = trending, ADX < 25 = ranging ---
+        is_trending = adx_1d_aligned[i] > 25
+        is_ranging = adx_1d_aligned[i] < 25
+        
+        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = vol_ratio[i] > 2.0
+        
         # --- Price ---
         price = close[i]
-        
-        # --- Weekly Pivot Bias: Determine market bias from weekly PP ---
-        # Bullish bias: price above weekly PP
-        # Bearish bias: price below weekly PP
-        bullish_bias = price > pp_aligned[i]
-        bearish_bias = price < pp_aligned[i]
-        
-        # --- Distance to weekly pivot levels (normalized by ATR) ---
-        dist_to_r3 = (price - r3_aligned[i]) / atr_14[i] if atr_14[i] > 0 else 0
-        dist_to_s3 = (s3_aligned[i] - price) / atr_14[i] if atr_14[i] > 0 else 0
-        dist_to_r4 = (price - r4_aligned[i]) / atr_14[i] if atr_14[i] > 0 else 0
-        dist_to_s4 = (s4_aligned[i] - price) / atr_14[i] if atr_14[i] > 0 else 0
-        
-        # --- Breakout Detection: Donchian(20) breakout with volume confirmation ---
-        breakout_up = (price > highest_high[i]) and (vol_ratio[i] > 1.8)
-        breakout_down = (price < lowest_low[i]) and (vol_ratio[i] > 1.8)
-        
-        # --- Mean Reversion Signals at Extreme Weekly Levels ---
-        # Fade at R3/S3 with volume exhaustion (volume < average)
-        fade_r3 = (dist_to_r3 > 0.5) and (dist_to_r3 < 2.0) and (vol_ratio[i] < 0.7)
-        fade_s3 = (dist_to_s3 > 0.5) and (dist_to_s3 < 2.0) and (vol_ratio[i] < 0.7)
-        
-        # Strong fade at R4/S4 (more extreme levels)
-        fade_r4 = (dist_to_r4 > 0.0) and (vol_ratio[i] < 0.6)
-        fade_s4 = (dist_to_s4 > 0.0) and (vol_ratio[i] < 0.6)
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -132,13 +126,6 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on mean reversion signal at extreme levels
-                if fade_r4 or (fade_r3 and bearish_bias):
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
             else:  # Short position
                 stop_level = entry_price + 2.5 * atr_14[i]
                 if high[i] > stop_level:
@@ -147,16 +134,9 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on mean reversion signal at extreme levels
-                if fade_s4 or (fade_s3 and bullish_bias):
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
             
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry < 3:
+            # Minimum holding period of 2 bars to reduce churn
+            if bars_since_entry < 2:
                 signals[i] = position_side * SIZE
                 continue
             
@@ -165,45 +145,31 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Breakout entries: Trade in direction of weekly bias
-        if breakout_up and bullish_bias:
-            in_position = True
-            position_side = 1
-            entry_price = close[i]
-            bars_since_entry = 0
-            signals[i] = SIZE
-        elif breakout_down and bearish_bias:
-            in_position = True
-            position_side = -1
-            entry_price = close[i]
-            bars_since_entry = 0
-            signals[i] = -SIZE
-        # Mean reversion entries: Fade extreme weekly levels
-        elif fade_s4:
-            in_position = True
-            position_side = 1
-            entry_price = close[i]
-            bars_since_entry = 0
-            signals[i] = SIZE
-        elif fade_r4:
-            in_position = True
-            position_side = -1
-            entry_price = close[i]
-            bars_since_entry = 0
-            signals[i] = -SIZE
-        elif fade_s3 and bullish_bias:  # Fade S3 in bullish bias = long
-            in_position = True
-            position_side = 1
-            entry_price = close[i]
-            bars_since_entry = 0
-            signals[i] = SIZE
-        elif fade_r3 and bearish_bias:  # Fade R3 in bearish bias = short
-            in_position = True
-            position_side = -1
-            entry_price = close[i]
-            bars_since_entry = 0
-            signals[i] = -SIZE
+        # Only trade in ranging markets (fade extreme levels)
+        if is_ranging:
+            # Long: Price near L3/L4 support with volume spike (mean reversion long)
+            # We look for price touching or penetrating support levels then bouncing
+            long_setup = ((price <= l3_12h[i] * 1.002) or (price <= l4_12h[i] * 1.002)) and volume_spike
+            
+            # Short: Price near H3/H4 resistance with volume spike (mean reversion short)
+            short_setup = ((price >= h3_12h[i] * 0.998) or (price >= h4_12h[i] * 0.998)) and volume_spike
+            
+            if long_setup:
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = SIZE
+            elif short_setup:
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = -SIZE
+            else:
+                signals[i] = 0.0
         else:
+            # In trending markets, stay flat (avoid counter-trend trades)
             signals[i] = 0.0
     
     return signals
