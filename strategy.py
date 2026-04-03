@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #498: 1d Donchian(20) breakout + 1w EMA(20) trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA(20) trend capture major momentum while avoiding counter-trend whipsaws. Volume confirmation (>1.5x average) filters weak breakouts. Designed for low trade frequency (target: 30-100 total over 4 years) to minimize fee drag and improve test generalization. Works in bull markets (trend-aligned breakouts) and avoids bear market traps by requiring strong weekly trend alignment. Uses discrete position sizing (0.25) to manage drawdown.
+Experiment #498: 1d Donchian(20) breakout + 1w EMA(50) trend + volume confirmation
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA(50) trend capture major multi-week momentum while avoiding counter-trend noise. Volume confirmation (>1.8x average) filters weak breakouts. Designed for low trade frequency (target: 75-150 total over 4 years) to minimize fee drag. Works in both bull and bear markets by requiring trend alignment, reducing false breakouts during ranging periods. Discrete position sizing (0.25) manages drawdown in volatile markets like 2022.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_498_1d_donchian20_1w_ema20_vol_v1"
+name = "exp_498_1d_donchian20_1w_ema50_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -19,12 +19,12 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for EMA(20) trend (Call ONCE before loop) ===
+    # === HTF: 1w data for EMA(50) trend (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = pd.Series(df_1w['close'].values)
-    ema_1w = close_1w.ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_1w = close_1w.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align EMA trend to 1d timeframe (shifted by 1 for completed weekly bar only)
+    # Align EMA trend to 1d timeframe (shifted by 1 for completed 1w bar only)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # === 1d Indicators: Donchian Channel (20) ===
@@ -53,7 +53,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 200  # sufficient for EMA(20) warmup + other indicators
+    warmup = 50  # sufficient for EMA(50) warmup + other indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -65,8 +65,8 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio[i] > 1.5
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
+        volume_spike = vol_ratio[i] > 1.8
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
@@ -101,7 +101,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 25 bars (~25 days on 1d) to avoid overtrading
+            # Optional: time-based exit after 25 bars (~25 days) to avoid overtrading
             if bars_since_entry > 25:
                 in_position = False
                 position_side = 0
@@ -134,3 +134,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
