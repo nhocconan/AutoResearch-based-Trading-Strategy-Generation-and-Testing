@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #019: 6h Elder Ray + 12h ADX Trend Filter + Volume Spike
-HYPOTHESIS: Combining Elder Ray (Bull Power/Bear Power) with 12h ADX trend strength and volume confirmation captures institutional momentum with controlled frequency. Elder Ray measures buying/selling pressure relative to EMA13, ADX>25 filters for trending markets, volume spike (>1.8x) confirms participation. Works in bull markets (strong Bull Power + uptrend) and bear markets (strong Bear Power + downtrend). Target: 75-150 total trades over 4 years (19-38/year).
+Experiment #023: 4h Donchian(20) breakout + 12h HMA(21) trend + volume confirmation + chop regime filter
+HYPOTHESIS: Combining 4h Donchian breakouts with 12h HMA trend filter, volume spike (>1.5x), and choppiness regime (CHOP > 61.8 = range, < 38.2 = trend) creates high-probability entries with controlled frequency. In trending regimes (CHOP < 38.2), we follow Donchian breakouts aligned with 12h HMA. In ranging regimes (CHOP > 61.8), we fade breaks at channel extremes. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0). Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_019_6h_elder_ray_12h_adx_vol_v1"
-timeframe = "6h"
+name = "exp_023_4h_donchian20_12h_hma_vol_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,51 +19,51 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for ADX trend filter (Call ONCE before loop) ===
+    # === HTF: 12h data for HMA trend filter (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate ADX(14) on 12h
-    def calculate_adx(high_arr, low_arr, close_arr, period=14):
-        if len(high_arr) < period + 1:
-            return np.full_like(high_arr, np.nan)
-        # True Range
-        tr0 = np.abs(high_arr[1:] - low_arr[1:])
-        tr1 = np.abs(high_arr[1:] - close_arr[:-1])
-        tr2 = np.abs(low_arr[1:] - close_arr[:-1])
-        tr = np.maximum(np.maximum(tr0, tr1), tr2)
-        tr = np.concatenate([[np.nan], tr])
-        # Directional Movement
-        up_move = np.diff(high_arr)
-        down_move = -np.diff(low_arr)
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        plus_dm = np.concatenate([[0.0], plus_dm])
-        minus_dm = np.concatenate([[0.0], minus_dm])
-        # Smoothed TR, +DM, -DM
-        atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
-        plus_di = 100 * pd.Series(plus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values / atr
-        minus_di = 100 * pd.Series(minus_dm).ewm(span=period, adjust=False, min_periods=period).mean().values / atr
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx = pd.Series(dx).ewm(span=period, adjust=False, min_periods=period).mean().values
-        return adx
+    # Calculate HMA(21) on 12h close
+    def hma(series, period):
+        if len(series) < period:
+            return np.full_like(series, np.nan)
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma2 = pd.Series(series).ewm(span=half, adjust=False).mean()
+        wma1 = pd.Series(series).ewm(span=period, adjust=False).mean()
+        raw = 2 * wma2 - wma1
+        hma_vals = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
+        return hma_vals.values
     
-    adx_12h = calculate_adx(df_12h['high'].values, df_12h['low'].values, df_12h['close'].values, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    hma_12h = hma(df_12h['close'].values, 21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # === 6h Indicators: EMA(13) for Elder Ray ===
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    # === HTF: 1d data for chop regime filter ===
+    df_1d = get_htf_data(prices, '1d')
+    chop_period = 14
+    # True Range for CHOP
+    tr1 = pd.Series(df_12h['high']).diff().abs()
+    tr2 = (pd.Series(df_12h['high']) - pd.Series(df_12h['low'].shift())).abs()
+    tr3 = (pd.Series(df_12h['low']) - pd.Series(df_12h['close'].shift())).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_12h = tr.ewm(span=chop_period, adjust=False).mean()
+    highest_high = pd.Series(df_12h['high']).rolling(window=chop_period, min_periods=chop_period).max()
+    lowest_low = pd.Series(df_12h['low']).rolling(window=chop_period, min_periods=chop_period).min()
+    chop = 100 * np.log10(atr_12h.rolling(window=chop_period, min_periods=chop_period).sum() / 
+                           np.log10(highest_high - lowest_low))
+    chop_values = chop.values
+    chop_12h_aligned = align_htf_to_ltf(prices, df_12h, chop_values)
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # === 4h Indicators: Donchian Channel (20) ===
+    highest_high_4h = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    lowest_low_4h = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     vol_ratio[:20] = 1.0
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -80,34 +80,41 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for EMA13, ADX, volume MA
+    warmup = 60  # sufficient for 20-period indicators + HTF warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(adx_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(highest_high_4h[i]) or np.isnan(lowest_low_4h[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(hma_12h_aligned[i]) or
+            np.isnan(chop_12h_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio[i] > 1.5
         
-        # --- Trend Filter: 12h ADX > 25 (trending market) ---
-        trending = adx_12h_aligned[i] > 25
+        # --- Donchian Breakout Conditions ---
+        breakout_up = price > highest_high_4h[i]
+        breakout_down = price < lowest_low_4h[i]
         
-        # --- Elder Ray Signals ---
-        strong_bull = bull_power[i] > 0 and bull_power[i] > abs(bear_power[i])
-        strong_bear = bear_power[i] < 0 and abs(bear_power[i]) > bull_power[i]
+        # --- Trend Filter: 12h HMA alignment ---
+        uptrend = price > hma_12h_aligned[i]
+        downtrend = price < hma_12h_aligned[i]
+        
+        # --- Regime Filter: Choppiness Index ---
+        chop_val = chop_12h_aligned[i]
+        is_trending = chop_val < 38.2  # Trending regime
+        is_ranging = chop_val > 61.8   # Ranging regime
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.5*ATR below entry
-                stop_level = entry_price - 2.5 * atr[i]
+                # Stoploss: 2.0*ATR below entry
+                stop_level = entry_price - 2.0 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -115,8 +122,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                # Stoploss: 2.5*ATR above entry
-                stop_level = entry_price + 2.5 * atr[i]
+                # Stoploss: 2.0*ATR above entry
+                stop_level = entry_price + 2.0 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -124,8 +131,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 12 bars (~3d on 6h) to avoid overtrading
-            if bars_since_entry > 12:
+            # Optional: time-based exit after 8 bars (~32h on 4h) to avoid overtrading
+            if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -136,22 +143,41 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        if volume_spike and trending:
-            # Long: strong Bull Power AND uptrend
-            if strong_bull:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            # Short: strong Bear Power AND downtrend
-            elif strong_bear:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
+        if volume_spike:
+            if is_trending:
+                # In trending regime: follow breakout with trend
+                if breakout_up and uptrend:
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
+                elif breakout_down and downtrend:
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
+                else:
+                    signals[i] = 0.0
+            elif is_ranging:
+                # In ranging regime: fade breaks at extremes (mean reversion)
+                if breakout_down and uptrend:  # Price breaks below lower channel but 12h trend is up -> long
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
+                elif breakout_up and downtrend:  # Price breaks above upper channel but 12h trend is down -> short
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
+                else:
+                    signals[i] = 0.0
             else:
+                # Choppy regime (38.2 <= CHOP <= 61.8): no trade
                 signals[i] = 0.0
         else:
             signals[i] = 0.0
