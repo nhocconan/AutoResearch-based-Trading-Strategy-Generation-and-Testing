@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #238: 1d Donchian(20) Breakout + Weekly Trend Filter + Volume Spike
+Experiment #098: 1d Donchian(20) Breakout + Weekly HMA Trend + Volume Spike
 
-HYPOTHESIS: Daily Donchian channel breakouts filtered by weekly HMA trend direction and volume spikes 
-capture strong momentum moves with reduced false breakouts. Weekly trend provides structural bias from 
-higher timeframe. Daily timeframe targets 7-25 trades/year (30-100 total over 4 years) to minimize 
-fee drag while capturing significant moves. Works in both bull (breakouts with volume) and bear 
-(failed breaks reverse sharply) markets. Uses ATR-based stoploss for risk management.
+HYPOTHESIS: Daily Donchian channel breakouts filtered by weekly HMA trend (price > weekly HMA = bullish bias, 
+price < weekly HMA = bearish bias) and volume spikes (>2.0x average) capture strong momentum moves with 
+reduced false breakouts. Weekly HMA provides smooth higher timeframe trend filter. Daily timeframe targets 
+7-25 trades/year (30-100 total over 4 years) to minimize fee drag while capturing significant moves. 
+Works in both bull (breakouts with volume) and bear (failed breaks reverse sharply) markets. Uses ATR-based 
+stoploss for risk management.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_238_1d_donchian_weekly_trend_volume_v1"
+name = "exp_098_1d_donchian_weekly_hma_volume_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -24,45 +25,30 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for weekly trend (HMA21) (Call ONCE before loop) ===
+    # === HTF: 1w data for weekly HMA calculation (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate HMA(21) on weekly data
-    def calculate_hma(arr, period):
+    # Calculate weekly HMA(21) from 1w data
+    def hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        
-        # WMA calculation
-        def wma(values, window):
-            if len(values) < window:
-                return np.full_like(values, np.nan)
-            weights = np.arange(1, window + 1)
-            return np.convolve(values, weights / weights.sum(), mode='valid')
-        
-        wma_half = wma(arr, half_period)
-        wma_full = wma(arr, period)
-        
-        if len(wma_half) == 0 or len(wma_full) == 0:
-            return np.full_like(arr, np.nan)
-        
-        # 2*WMA(half) - WMA(full)
-        raw_hma = 2 * wma_half - wma_full
-        
-        # WMA(sqrt) of the result
-        hma = wma(raw_hma, sqrt_period)
-        
-        # Pad with NaN to match original length
-        result = np.full_like(arr, np.nan)
-        start_idx = period - 1
-        end_idx = start_idx + len(hma)
-        if end_idx <= len(arr):
-            result[start_idx:end_idx] = hma
-        return result
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma2 = np.full_like(arr, np.nan)
+        wma1 = np.full_like(arr, np.nan)
+        for i in range(len(arr)):
+            if i >= half - 1:
+                wma2[i] = np.sum(arr[i-half+1:i+1] * np.arange(1, half+1)) / (half * (half + 1) / 2)
+            if i >= period - 1:
+                wma1[i] = np.sum(arr[i-period+1:i+1] * np.arange(1, period+1)) / (period * (period + 1) / 2)
+        raw_hma = 2 * wma2 - wma1
+        hma_vals = np.full_like(arr, np.nan)
+        for i in range(sqrt - 1, len(arr)):
+            hma_vals[i] = np.sum(raw_hma[i-sqrt+1:i+1] * np.arange(1, sqrt+1)) / (sqrt * (sqrt + 1) / 2)
+        return hma_vals
     
-    hma_21w = calculate_hma(df_1w['close'].values, 21)
-    hma_21w_aligned = align_htf_to_ltf(prices, df_1w, hma_21w)
+    hma_21 = hma(df_1w['close'].values, 21)
+    hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
     
     # === 1d Indicators: Donchian Channel (20) ===
     donchian_h = np.full(n, np.nan)
@@ -103,14 +89,14 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
-            np.isnan(hma_21w_aligned[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(hma_21_aligned[i]) or np.isnan(atr_14[i]) or 
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- Weekly Trend Filter: Price above/below weekly HMA ---
-        price_above_weekly_hma = close[i] > hma_21w_aligned[i]
-        price_below_weekly_hma = close[i] < hma_21w_aligned[i]
+        # --- Weekly HMA Trend Filter: Price > HMA = bullish bias, Price < HMA = bearish bias ---
+        price_above_weekly_hma = close[i] > hma_21_aligned[i]
+        price_below_weekly_hma = close[i] < hma_21_aligned[i]
         
         # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
         volume_spike = vol_ratio[i] > 2.0
