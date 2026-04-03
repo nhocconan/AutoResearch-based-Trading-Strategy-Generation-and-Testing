@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #160: 4h Donchian(20) Breakout + 1d Trend Filter + Volume Spike + ATR Stoploss
+Experiment #022: 12h Donchian(20) Breakout + 1d Trend Filter + Volume Spike + ATR Stoploss
 
-HYPOTHESIS: Donchian channel breakouts on 4h timeframe, filtered by 1d trend (price > EMA200) 
+HYPOTHESIS: Donchian channel breakouts on 12h timeframe, filtered by 1d trend (price > EMA200) 
 and confirmed by volume spikes (>2x average), capture strong momentum moves in both bull 
-and bear markets. The Donchian structure provides objective breakout levels, the 1d EMA200 
-filter ensures alignment with higher timeframe trend (avoiding counter-trend trades), and 
-volume confirmation filters out false breakouts. Targets 20-50 trades/year on 4h timeframe 
-(80-200 total over 4 years) to minimize fee drag while capturing high-probability trends.
+and bear markets. The 12h timeframe reduces trade frequency to minimize fee drag while 
+still capturing significant trends. The 1d EMA200 filter ensures alignment with higher 
+timeframe trend (avoiding counter-trend trades), and volume confirmation filters out 
+false breakouts. Targets 12-37 trades/year on 12h timeframe (50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_vol_trend_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian_vol_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,7 +36,7 @@ def generate_signals(prices):
     else:
         ema_200_1d_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: Donchian Channel (20) ===
     donchian_h = np.full(n, np.nan)
     donchian_l = np.full(n, np.nan)
     donchian_m = np.full(n, np.nan)
@@ -46,7 +46,7 @@ def generate_signals(prices):
         donchian_l[i] = np.min(low[i-20:i])
         donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
     
-    # === 4h Indicators: ATR(14) for stoploss and volume average ===
+    # === 12h Indicators: ATR(14) for stoploss and volume average ===
     atr_14 = np.full(n, np.nan)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
@@ -55,7 +55,7 @@ def generate_signals(prices):
     
     atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
