@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #1504: 1d Donchian(20) Breakout + 1w Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on daily timeframe capture medium-term swings with 1-week EMA(21) trend filter for direction.
-Volume confirmation (>1.5x average) reduces false breakouts. ATR-based stoploss (2.0) manages risk.
-Designed for 7-25 trades/year (30-100 total over 4 years) by using tight entry conditions and multi-timeframe confluence.
-Works in bull/bear markets by following 1w trend direction.
+Experiment #1504: 1d Donchian(20) Breakout + 1w Trend + Volume Confirmation + Chop Filter
+HYPOTHESIS: Daily Donchian breakouts capture multi-week trends with 1-week trend filter for direction.
+Volume confirmation (>1.5x average) and choppiness regime filter (CHOP < 61.8) reduce false breakouts.
+ATR-based stoploss (2.5) manages risk. Designed for 7-25 trades/year (30-100 total over 4 years) by using
+tight entry conditions and multi-timeframe confluence. Works in bull/bear markets by following 1w trend direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1504_1d_donchian20_1w_trend_vol_v1"
+name = "exp_1504_1d_donchian20_1w_trend_vol_chop_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -20,15 +20,45 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
+    open_time = prices["open_time"].values
     n = len(close)
     
     # === HTF: 1w data for trend filter (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    # EMA(21) for 1w trend
-    ema_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
+    # EMA(50) for 1w trend
+    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
     trend_1w = np.where(close_1w > ema_1w, 1, -1)
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    
+    # === HTF: 1w data for chop regime filter (Call ONCE before loop) ===
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    # True Range for 1w
+    tr1w = np.zeros(len(close_1w))
+    for i in range(1, len(close_1w)):
+        tr1w[i] = max(high_1w[i] - low_1w[i], abs(high_1w[i] - close_1w[i-1]), abs(low_1w[i] - close_1w[i-1]))
+    tr1w[0] = high_1w[0] - low_1w[0]
+    atr1w = pd.Series(tr1w).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # +DM and -DM for 1w
+    up_move = np.zeros(len(high_1w))
+    down_move = np.zeros(len(high_1w))
+    for i in range(1, len(high_1w)):
+        up_move[i] = high_1w[i] - high_1w[i-1]
+        down_move[i] = low_1w[i-1] - low_1w[i]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    # Smoothed +DM, -DM, ATR
+    tr_ma = pd.Series(atr1w).ewm(span=14, min_periods=14, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # +DI and -DI
+    plus_di = 100 * plus_dm_smooth / tr_ma
+    minus_di = 100 * minus_dm_smooth / tr_ma
+    # DX and Choppiness
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    chop = 100 * np.log10(tr_ma * np.sqrt(14)) / np.log10(dx + 1e-10)
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
     # === 1d Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -61,8 +91,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i])):
+            np.isnan(trend_1w_aligned[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -73,8 +103,8 @@ def generate_signals(prices):
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.0*ATR below entry
-                stop_level = entry_price - 2.0 * atr[i]
+                # Stoploss: 2.5*ATR below entry
+                stop_level = entry_price - 2.5 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -82,8 +112,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                # Stoploss: 2.0*ATR above entry
-                stop_level = entry_price + 2.0 * atr[i]
+                # Stoploss: 2.5*ATR above entry
+                stop_level = entry_price + 2.5 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -101,7 +131,10 @@ def generate_signals(prices):
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
-        if trend_following != 0 and volume_spike:
+        # Chop regime filter: require CHOP < 61.8 (trending market, not too choppy)
+        chop_filter = chop_aligned[i] < 61.8
+        
+        if trend_following != 0 and volume_spike and chop_filter:
             # Breakout: price breaks above upper band OR below lower band
             if price > donch_high[i] and trend_following > 0:  # Uptrend breakout
                 in_position = True
@@ -121,5 +154,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
