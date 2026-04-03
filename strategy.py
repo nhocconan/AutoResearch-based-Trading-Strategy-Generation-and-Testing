@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #1361: 4h Donchian(20) Breakout + 1d/1w Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture intermediate-term trends with optimal trade frequency (target: 75-200 total over 4 years). 
-Trend filter from 1d and 1w timeframes ensures alignment with higher-timeframe momentum. Volume confirmation (>2.0x average) filters for institutional participation. 
-Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the higher-timeframe trend direction. 
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture intermediate-term trends with controlled trade frequency (target: 75-200 total over 4 years). 
+Trend filter from 1d and 1w timeframes ensures alignment with higher-timeframe momentum. Volume confirmation (>1.8x average) filters for institutional participation. 
+Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 1d/1w trend direction. 
 Uses ATR-based stoploss for risk management. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
@@ -103,14 +103,14 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Require BOTH 1d and 1w trend alignment for stronger signal
+            # Require BOTH 1d and 1w trend to agree for stronger filter
             if (price > donch_high[i] and 
                 trend_1d_aligned[i] > 0 and 
-                trend_1w_aligned[i] > 0):  # Both timeframes uptrend
+                trend_1w_aligned[i] > 0):  # Both 1d and 1w uptrend
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
@@ -118,7 +118,7 @@ def generate_signals(prices):
                 signals[i] = SIZE
             elif (price < donch_low[i] and 
                   trend_1d_aligned[i] < 0 and 
-                  trend_1w_aligned[i] < 0):  # Both timeframes downtrend
+                  trend_1w_aligned[i] < 0):  # Both 1d and 1w downtrend
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
