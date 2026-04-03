@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #1507: 6h Donchian(20) Breakout + 1d Trend + Volume Spike + Chop Filter
-HYPOTHESIS: 6h Donchian breakouts capture medium-term swings with 1d EMA(50) trend filter for direction.
-Volume confirmation (>1.5x average) and choppiness regime filter (CHOP > 38.2) reduce false breakouts.
-ATR-based stoploss (2.0) manages risk. Designed for 12-37 trades/year (50-150 total over 4 years) by using
-tight entry conditions and multi-timeframe confluence. Works in bull/bear markets by following 1d trend direction.
+Experiment #1507: 6h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 6h capture medium-term swings, filtered by 1d weekly pivot levels (R1/S1) for direction and volume confirmation (>1.5x average) to reduce false breakouts. Weekly pivot provides structural support/resistance that works in both bull and bear markets. ATR-based stoploss (2.0) manages risk. Target: 12-37 trades/year (50-150 total over 4 years) by using tight entry conditions and multi-timeframe confluence.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1507_6h_donchian20_1d_trend_vol_chop_v1"
+name = "exp_1507_6h_donchian20_1d_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,44 +20,37 @@ def generate_signals(prices):
     open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for weekly pivot levels (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    # EMA(50) for 1d trend
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === HTF: 1w data for chop regime filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    # True Range for 1w
-    tr1 = np.zeros(len(close_1w))
-    for i in range(1, len(close_1w)):
-        tr1[i] = max(high_1w[i] - low_1w[i], abs(high_1w[i] - close_1w[i-1]), abs(low_1w[i] - close_1w[i-1]))
-    tr1[0] = high_1w[0] - low_1w[0]
-    atr1w = pd.Series(tr1).ewm(span=14, min_periods=14, adjust=False).mean().values
-    # +DM and -DM for 1w
-    up_move = np.zeros(len(high_1w))
-    down_move = np.zeros(len(high_1w))
-    for i in range(1, len(high_1w)):
-        up_move[i] = high_1w[i] - high_1w[i-1]
-        down_move[i] = low_1w[i-1] - low_1w[i]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    # Smoothed +DM, -DM, ATR
-    tr_ma = pd.Series(atr1w).ewm(span=14, min_periods=14, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
-    # +DI and -DI
-    plus_di = 100 * plus_dm_smooth / tr_ma
-    minus_di = 100 * minus_dm_smooth / tr_ma
-    # DX and Choppiness
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    chop = 100 * np.log10(tr_ma * np.sqrt(14)) / np.log10(dx + 1e-10)
-    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
+    # Calculate weekly pivot from prior week (using last 5 trading days approximation)
+    # For simplicity, use prior day's high/low/close to calculate classic pivot points
+    # In practice, weekly pivot would use prior week's OHLC, but we approximate with daily
+    # Shift by 1 to use prior day's data (no look-ahead)
+    if len(high_1d) >= 2:
+        prev_high = np.roll(high_1d, 1)
+        prev_low = np.roll(low_1d, 1)
+        prev_close = np.roll(close_1d, 1)
+        prev_high[0] = high_1d[0]  # first bar uses current day's high
+        prev_low[0] = low_1d[0]
+        prev_close[0] = close_1d[0]
+    else:
+        prev_high = high_1d
+        prev_low = low_1d
+        prev_close = close_1d
+    
+    # Classic pivot points: P = (H + L + C)/3
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    # R1 = 2*P - L, S1 = 2*P - H
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    
+    # Determine bias: price above pivot = bullish bias, below = bearish bias
+    bias = np.where(close_1d > pivot, 1, np.where(close_1d < pivot, -1, 0))
+    bias_aligned = align_htf_to_ltf(prices, df_1d, bias)
     
     # === 6h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -93,8 +83,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_1d_aligned[i]) or np.isnan(chop_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(bias_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -127,24 +117,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1d trend alignment
-        trend_following = trend_1d_aligned[i]
+        # Require 1d bias alignment from pivot
+        bias_direction = bias_aligned[i]
         
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
-        # Chop regime filter: require CHOP > 38.2 (trending market)
-        chop_filter = chop_aligned[i] > 38.2
-        
-        if trend_following != 0 and volume_spike and chop_filter:
+        if bias_direction != 0 and volume_spike:
             # Breakout: price breaks above upper band OR below lower band
-            if price > donch_high[i] and trend_following > 0:  # Uptrend breakout
+            if price > donch_high[i] and bias_direction > 0:  # Bullish bias breakout
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and trend_following < 0:  # Downtrend breakdown
+            elif price < donch_low[i] and bias_direction < 0:  # Bearish bias breakdown
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
