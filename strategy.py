@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #213: 4h Donchian(20) breakout + 12h Camarilla pivot + volume confirmation
-HYPOTHESIS: Donchian breakouts on 4h timeframe aligned with 12h Camarilla pivot levels (S3/R3 for mean reversion, S4/R4 for continuation) capture high-probability moves. Volume confirmation (>2.0x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) balances return and fee drag. Target: 75-200 total trades over 4 years (19-50/year). Works in bull markets via breakout continuation at R4/S4 and in bear markets via mean reversion at R3/S3, with symmetry for longs/shorts.
+Experiment #217: 4h Donchian Breakout + HMA Trend + Volume Confirmation + ATR Stoploss
+HYPOTHESIS: Donchian channel breakouts on 4h timeframe, filtered by higher timeframe (1d/1w) HMA trend and volume spikes, capture institutional breakout moves in both bull and bear markets. The strategy uses tight entry conditions (breakout + trend + volume) to limit trades to 75-200 total over 4 years, minimizing fee drag while maintaining edge. ATR-based stoploss manages risk. Works in bull markets via breakout continuation and in bear markets via breakdown continuation when aligned with higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_213_4h_donchian20_12h_camarilla_vol_v1"
+name = "exp_217_4h_donchian_hma_volume_1d_1w_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,45 +19,31 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for Camarilla pivot levels (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
+    # === HTF: 1d data for HMA trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    # HMA(21) on 1d close: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    def hma(arr, period):
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean()
+        wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean()
+        raw = 2 * wma2 - wma1
+        return pd.Series(raw).ewm(span=sqrt, adjust=False).mean().values
+    hma_21_1d = hma(close_1d, 21)
+    trend_up_1d = close_1d > hma_21_1d
+    trend_down_1d = close_1d < hma_21_1d
+    trend_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_up_1d)
+    trend_down_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_down_1d)
     
-    # Calculate Camarilla pivot levels for 12h
-    def calculate_camarilla(high, low, close):
-        pt = (high + low + close) / 3.0
-        rng = high - low
-        r3 = pt + rng * 1.1 / 4
-        r4 = pt + rng * 1.1 / 2
-        s3 = pt - rng * 1.1 / 4
-        s4 = pt - rng * 1.1 / 2
-        return r3, r4, s3, s4
-    
-    r3_12h = np.full(len(df_12h), np.nan)
-    r4_12h = np.full(len(df_12h), np.nan)
-    s3_12h = np.full(len(df_12h), np.nan)
-    s4_12h = np.full(len(df_12h), np.nan)
-    
-    for i in range(len(df_12h)):
-        if i >= 0:
-            r3, r4, s3, s4 = calculate_camarilla(
-                df_12h['high'].values[i],
-                df_12h['low'].values[i],
-                df_12h['close'].values[i]
-            )
-            r3_12h[i] = r3
-            r4_12h[i] = r4
-            s3_12h[i] = s3
-            s4_12h[i] = s4
-    
-    # Align to 4h timeframe
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
-    
-    # === 4h Indicators: Donchian(20) channels ===
-    donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === HTF: 1w data for regime filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    hma_21_1w = hma(close_1w, 21)
+    regime_bull = close_1w > hma_21_1w  # Bull regime when price above weekly HMA
+    regime_bear = close_1w < hma_21_1w  # Bear regime when price below weekly HMA
+    regime_bull_aligned = align_htf_to_ltf(prices, df_1w, regime_bull)
+    regime_bear_aligned = align_htf_to_ltf(prices, df_1w, regime_bear)
     
     # === 4h Indicators: ATR(14) for stoploss ===
     tr_4h = np.zeros(n)
@@ -72,9 +58,14 @@ def generate_signals(prices):
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
     vol_ratio[:20] = 1.0
     
+    # === 4h Indicators: Donchian Channel (20) ===
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2.0
+    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -82,91 +73,83 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 60
+    warmup = 50  # Enough for Donchian(20), volume MA(20), ATR(14)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
-            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(r3_12h_aligned[i]) or np.isnan(r4_12h_aligned[i]) or
-            np.isnan(s3_12h_aligned[i]) or np.isnan(s4_12h_aligned[i])):
+        if (np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(trend_up_1d_aligned[i]) or np.isnan(trend_down_1d_aligned[i]) or
+            np.isnan(regime_bull_aligned[i]) or np.isnan(regime_bear_aligned[i]) or
+            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
-        
-        # --- Donchian Breakout Conditions ---
-        breakout_up = high[i] > donch_upper[i-1]
-        breakout_down = low[i] < donch_lower[i-1]
-        
-        # --- Camarilla Pivot Conditions ---
-        near_r3 = abs(price - r3_12h_aligned[i]) / price < 0.005
-        near_s3 = abs(price - s3_12h_aligned[i]) / price < 0.005
-        break_r4 = price > r4_12h_aligned[i]
-        break_s4 = price < s4_12h_aligned[i]
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.0 * atr_14[i]
+                stop_level = entry_price - 2.5 * atr_14[i]  # Wider stop for 4h volatility
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                if break_s4 and volume_spike:
+                # Take profit at 2.5x ATR profit
+                if price >= entry_price + 2.5 * atr_14[i]:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_level = entry_price + 2.0 * atr_14[i]
+                stop_level = entry_price + 2.5 * atr_14[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                if break_r4 and volume_spike:
+                # Take profit at 2.5x ATR profit
+                if price <= entry_price - 2.5 * atr_14[i]:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             
-            if bars_since_entry < 2:
-                signals[i] = position_side * SIZE
-                continue
-            
             signals[i] = position_side * SIZE
             continue
         
+        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = vol_ratio[i] > 2.0
+        
         # --- New Position Entry Logic (Only if Flat) ---
-        # Require volume spike + breakout conditions
-        if volume_spike:
-            # Long: breakout up AND (near R3 OR break R4)
-            if (breakout_up and (near_r3 or break_r4)) or (break_r4 and volume_spike):
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            # Short: breakout down AND (near S3 OR break S4)
-            elif (breakout_down and (near_s3 or break_s4)) or (break_s4 and volume_spike):
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
-            else:
-                signals[i] = 0.0
+        # Long: Donchian breakout above upper band + 1d uptrend + volume spike
+        # In bear regime, only take long if also aligned with weekly bull regime (counter-trend bounce)
+        if (price > donchian_high[i] and 
+            trend_up_1d_aligned[i] and 
+            volume_spike and
+            (regime_bull_aligned[i] or (regime_bear_aligned[i] and regime_bull_aligned[i]))):  # Allow counter-trend in bear
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = SIZE
+        # Short: Donchian breakdown below lower band + 1d downtrend + volume spike
+        # In bull regime, only take short if also aligned with weekly bear regime (counter-trend sell)
+        elif (price < donchian_low[i] and 
+              trend_down_1d_aligned[i] and 
+              volume_spike and
+              (regime_bear_aligned[i] or (regime_bull_aligned[i] and regime_bear_aligned[i]))):  # Allow counter-trend in bull
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = -SIZE
         else:
             signals[i] = 0.0
     
