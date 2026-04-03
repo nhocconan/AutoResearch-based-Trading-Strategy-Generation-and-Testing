@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #1254: 1h Donchian(20) Breakout + 4h/1d Trend + Volume Confirmation + Session Filter
-HYPOTHESIS: 1h Donchian breakouts with 4h/1d trend alignment and volume confirmation capture intermediate-term moves. 
-Session filter (08-20 UTC) reduces noise trades. Using HTF for direction (4h/1d) and 1h for timing keeps trade frequency optimal (15-37/year). 
-Volume >1.5x average filters for institutional participation. Works in bull/bear by following HTF trend. 
-Target: 60-150 total trades over 4 years (15-37/year).
+Experiment #1254: 1h Donchian(20) Breakout + 4h Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 1h timeframe capture intermediate swings with optimal trade frequency. 
+Trend filter from 4h timeframe ensures alignment with higher-timeframe momentum. Volume confirmation (>1.5x average) 
+filters for institutional participation. Designed to work in both bull (breakouts continue) and bear (breakdowns continue) 
+markets by following the 4h trend direction. Session filter (08-20 UTC) reduces noise trades. Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1254_1h_donchian20_4h_1d_trend_vol_session_v1"
+name = "exp_1254_1h_donchian20_4h_trend_vol_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -22,9 +22,6 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Pre-compute session hours for efficiency (open_time is already datetime64[ms])
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    
     # === HTF: 4h data for trend filter (Call ONCE before loop) ===
     df_4h = get_htf_data(prices, '4h')
     close_4h = df_4h['close'].values
@@ -32,22 +29,6 @@ def generate_signals(prices):
     trend_4h = np.zeros(len(close_4h))
     trend_4h[1:] = np.where(close_4h[1:] > close_4h[:-1], 1, -1)
     trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
-    
-    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    # Simple trend: price > previous close = uptrend, < = downtrend
-    trend_1d = np.zeros(len(close_1d))
-    trend_1d[1:] = np.where(close_1d[1:] > close_1d[:-1], 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
-    
-    # Combine 4h and 1d trends: require both to agree for stronger signal
-    combined_trend = np.zeros_like(trend_4h_aligned)
-    for i in range(len(combined_trend)):
-        if trend_4h_aligned[i] == trend_1d_aligned[i] and trend_4h_aligned[i] != 0:
-            combined_trend[i] = trend_4h_aligned[i]  # Both agree
-        else:
-            combined_trend[i] = 0  # No clear direction
     
     # === 1h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -65,9 +46,13 @@ def generate_signals(prices):
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
+    # === Pre-compute session filter (08-20 UTC) ===
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
+    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size (discrete level to minimize fee churn)
+    SIZE = 0.20  # 20% position size
     
     # Position tracking state variables
     in_position = False
@@ -78,14 +63,14 @@ def generate_signals(prices):
     warmup = 20  # sufficient for Donchian and volume MA
     
     for i in range(warmup, n):
-        # --- Session filter: 08-20 UTC only ---
-        if not (8 <= hours[i] <= 20):
+        # --- Session Filter ---
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(combined_trend[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(trend_4h_aligned[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -122,15 +107,15 @@ def generate_signals(prices):
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
-        if volume_spike and combined_trend[i] != 0:
+        if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
-            if price > donch_high[i] and combined_trend[i] > 0:  # Uptrend agreement
+            if price > donch_high[i] and trend_4h_aligned[i] > 0:  # 4h uptrend
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and combined_trend[i] < 0:  # Downtrend agreement
+            elif price < donch_low[i] and trend_4h_aligned[i] < 0:  # 4h downtrend
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
