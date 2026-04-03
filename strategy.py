@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #540: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation + ATR stoploss
+Experiment #541: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation + ATR stoploss
 HYPOTHESIS: Donchian breakouts aligned with daily EMA50 trend (from 1d HTF) and volume spikes capture strong momentum with lower trade frequency. Daily EMA50 provides structural trend filter that works in both bull and bear markets by filtering breakouts against the intermediate-term trend. Volume confirmation (>1.5x average) ensures participation. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 75-200 total trades over 4 years by using tight entry conditions (breakout + EMA trend + volume).
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_540_4h_donchian20_1d_ema50_vol_v1"
+name = "exp_541_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
