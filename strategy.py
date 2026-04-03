@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #1120: 4h Donchian(20) Breakout + 1d Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture swing moves with better trade frequency than 6h.
-Trend filter from 1d timeframe prevents counter-trend entries. Volume confirmation (>1.5x avg) ensures institutional participation.
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture swing moves with higher reliability than 6h.
+Using 1d trend filter prevents counter-trend entries. Volume confirmation (>1.5x avg) ensures institutional participation.
 Discrete position sizing (0.25) and ATR-based stoploss (2.0x) control risk.
+Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets.
 Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
 """
 
