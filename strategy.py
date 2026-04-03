@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #1039: 6h Donchian(20) Breakout + 12h Trend Filter + Volume Spike
-HYPOTHESIS: Donchian breakouts on 6h with 12h EMA trend alignment and volume confirmation capture institutional flow. Works in bull/bear via trend filter. Target: 75-200 total trades over 4 years (19-50/year) on 6h timeframe.
+Experiment #1039: 6h Donchian(20) Breakout + 12h Trend Filter + Volume Spike + ATR Stoploss
+HYPOTHESIS: Donchian(20) breakouts on 6h timeframe capture intermediate-term momentum. 
+Using 12h timeframe for trend filter reduces noise and false breakouts. Volume confirmation 
+ensures institutional participation. Designed for 50-150 total trades over 4 years (12-37/year) 
+to minimize fee impact. Works in both bull (breakout continuation) and bear (breakdown continuation) 
+markets by following the 12h trend direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1039_6h_donchian20_12h_ema_vol_v1"
+name = "exp_1039_6h_donchian20_12h_trend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -19,18 +23,16 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for EMA trend filter (Call ONCE before loop) ===
+    # === HTF: 12h data for trend filter (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
+    # Simple EMA(21) for 12h trend (faster than HMA, less lag)
     ema_12h = pd.Series(close_12h).ewm(span=21, min_periods=21, adjust=False).mean().values
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # === 6h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 6h Indicators: EMA(21) for additional trend filter ===
-    ema = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
     
     # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,7 +48,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.25  # 25% position size - conservative for lower drawdown
     
     # Position tracking state variables
     in_position = False
@@ -59,8 +61,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(ema[i]) or np.isnan(ema_12h_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -89,8 +91,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~3d on 6h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 12 bars (~3d on 6h) to avoid overtrading
+            if bars_since_entry > 12:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -101,24 +103,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 1.8x average) - stricter to reduce trades
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # EMA trend filter: 6h EMA(21) direction + 12h EMA(21) alignment
-            ema_uptrend = ema[i] > ema[i-1]
-            ema_downtrend = ema[i] < ema[i-1]
+            # 12h trend filter: EMA(21) direction
             ema_12h_uptrend = ema_12h_aligned[i] > ema_12h_aligned[i-1] if i > 0 else False
             ema_12h_downtrend = ema_12h_aligned[i] < ema_12h_aligned[i-1] if i > 0 else False
             
-            # Breakout continuation: price breaks above upper band OR below lower band
-            if price > donch_high[i] and ema_uptrend and ema_12h_uptrend:
+            # Donchian breakout: price breaks above upper band OR below lower band
+            if price > donch_high[i] and ema_12h_uptrend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and ema_downtrend and ema_12h_downtrend:
+            elif price < donch_low[i] and ema_12h_downtrend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -133,15 +133,19 @@ def generate_signals(prices):
 
 #!/usr/bin/env python3
 """
-Experiment #1039: 6h Donchian(20) Breakout + 12h Trend Filter + Volume Spike
-HYPOTHESIS: Donchian breakouts on 6h with 12h EMA trend alignment and volume confirmation capture institutional flow. Works in bull/bear via trend filter. Target: 75-200 total trades over 4 years (19-50/year) on 6h timeframe.
+Experiment #1039: 6h Donchian(20) Breakout + 12h Trend Filter + Volume Spike + ATR Stoploss
+HYPOTHESIS: Donchian(20) breakouts on 6h timeframe capture intermediate-term momentum. 
+Using 12h timeframe for trend filter reduces noise and false breakouts. Volume confirmation 
+ensures institutional participation. Designed for 50-150 total trades over 4 years (12-37/year) 
+to minimize fee impact. Works in both bull (breakout continuation) and bear (breakdown continuation) 
+markets by following the 12h trend direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1039_6h_donchian20_12h_ema_vol_v1"
+name = "exp_1039_6h_donchian20_12h_trend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -152,18 +156,16 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for EMA trend filter (Call ONCE before loop) ===
+    # === HTF: 12h data for trend filter (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
+    # Simple EMA(21) for 12h trend (faster than HMA, less lag)
     ema_12h = pd.Series(close_12h).ewm(span=21, min_periods=21, adjust=False).mean().values
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # === 6h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 6h Indicators: EMA(21) for additional trend filter ===
-    ema = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
     
     # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -179,7 +181,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.25  # 25% position size - conservative for lower drawdown
     
     # Position tracking state variables
     in_position = False
@@ -192,8 +194,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(ema[i]) or np.isnan(ema_12h_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -222,8 +224,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~3d on 6h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 12 bars (~3d on 6h) to avoid overtrading
+            if bars_since_entry > 12:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -234,24 +236,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 1.8x average) - stricter to reduce trades
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # EMA trend filter: 6h EMA(21) direction + 12h EMA(21) alignment
-            ema_uptrend = ema[i] > ema[i-1]
-            ema_downtrend = ema[i] < ema[i-1]
+            # 12h trend filter: EMA(21) direction
             ema_12h_uptrend = ema_12h_aligned[i] > ema_12h_aligned[i-1] if i > 0 else False
             ema_12h_downtrend = ema_12h_aligned[i] < ema_12h_aligned[i-1] if i > 0 else False
             
-            # Breakout continuation: price breaks above upper band OR below lower band
-            if price > donch_high[i] and ema_uptrend and ema_12h_uptrend:
+            # Donchian breakout: price breaks above upper band OR below lower band
+            if price > donch_high[i] and ema_12h_uptrend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and ema_downtrend and ema_12h_downtrend:
+            elif price < donch_low[i] and ema_12h_downtrend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
