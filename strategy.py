@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #1663: 4h Donchian(20) Breakout + 12h HMA Trend + Volume + ATR Stoploss
-HYPOTHESIS: 4h Donchian breakouts with 12h HMA trend alignment and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 12h timeframe filters out noise from shorter-term fluctuations, while the 4h Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 75-200 total trades over 4 years (19-50/year) by using tight entry conditions and multi-timeframe confluence.
+Experiment #1663: 4h Donchian(20) Breakout + 12h HMA Trend + Volume Confirmation + ATR Stoploss
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h HMA trend and volume spikes (>1.5x average) capture medium-term swings in both bull and bear markets. The 12h timeframe filters noise while 4h provides timely entries. Position size 0.25 balances return and drawdown. Target: 75-200 total trades over 4 years (19-50/year) via tight entry conditions and multi-timeframe confluence.
 """
 
 import numpy as np
