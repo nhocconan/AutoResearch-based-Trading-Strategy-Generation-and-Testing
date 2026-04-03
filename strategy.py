@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #918: 1d Donchian(20) + 1w HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: Daily Donchian breakouts capture major momentum moves, filtered by weekly HMA trend 
-to avoid counter-trend trades and volume confirmation to ensure legitimacy. 
-ATR-based stoploss manages risk. Designed for low frequency (target: 30-100 trades over 4 years) 
-to minimize fee drag and work in both bull and bear markets via trend filtering.
+HYPOTHESIS: Daily Donchian breakouts capture medium-term trends, filtered by weekly HMA direction 
+and volume confirmation (>1.5x average). Long when price breaks above Donchian upper 
+AND weekly HMA rising AND volume spike. Short when price breaks below Donchian lower 
+AND weekly HMA falling AND volume spike. Uses discrete position sizing (0.25) to balance 
+risk and reward. Target: 50-100 total trades over 4 years (12-25/year) for 1d timeframe.
 """
 
 import numpy as np
@@ -66,7 +67,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size - balanced for risk/return
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -109,7 +110,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 10 bars (~10d on 1d) to avoid overtrading
+            # Optional: time-based exit after 10 bars (~10 days) to avoid overtrading
             if bars_since_entry > 10:
                 in_position = False
                 position_side = 0
@@ -121,8 +122,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 2.0x average for stricter filter)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
             # Long: price breaks above Donchian upper AND 1w HMA rising
