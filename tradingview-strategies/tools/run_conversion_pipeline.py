@@ -189,12 +189,14 @@ def load_dotenv(path: Path) -> None:
 def ensure_llm_env(model: str) -> dict[str, str]:
     load_dotenv(ROOT / ".env")
     if model:
-        os.environ["OPENAI_MODEL"] = model
+        os.environ["OLLAMA_MODEL"] = model
+    base_url = os.environ.get("OLLAMA_BASE_URL", "")
+    is_local = base_url.startswith("http://127.0.0.1:") or base_url.startswith("http://localhost:")
     return {
-        "provider": "openai",
-        "base_url": os.environ.get("OPENAI_BASE_URL", ""),
-        "model": os.environ.get("OPENAI_MODEL", ""),
-        "api_key_present": bool(os.environ.get("OPENAI_API_KEY")),
+        "provider": "ollama",
+        "base_url": base_url,
+        "model": os.environ.get("OLLAMA_MODEL", ""),
+        "api_key_present": bool(os.environ.get("OLLAMA_API_KEY")) or is_local,
     }
 
 
@@ -294,7 +296,7 @@ def validate_strategy_file(path: Path) -> tuple[bool, str]:
 
 
 def run_llm_call(system_prompt: str, user_prompt: str) -> str:
-    client = LLMClient(provider="openai")
+    client = LLMClient(provider="ollama")
     return client.chat(user_prompt, system=system_prompt, temperature=0.1, max_tokens=7000)
 
 
@@ -1013,7 +1015,7 @@ def main() -> None:
 
     env_info = ensure_llm_env(args.model)
     if not env_info["api_key_present"]:
-        raise RuntimeError("OPENAI_API_KEY is not set after loading .env")
+        raise RuntimeError("OLLAMA_API_KEY is not set after loading .env")
 
     mp.freeze_support()
 

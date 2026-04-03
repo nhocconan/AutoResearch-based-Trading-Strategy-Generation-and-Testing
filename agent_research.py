@@ -22,6 +22,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from llm_healthcheck import maybe_run_daily_healthcheck
 from llm_client import LLMClient, LLMTimeoutError
 from evaluate import compute_metrics
 from backtest import run_strategy_backtest
@@ -707,7 +708,7 @@ def validate_strategy(code: str) -> tuple[bool, str]:
 def main():
     parser = argparse.ArgumentParser(description="LLM Autonomous Research Loop")
     parser.add_argument("--max", type=int, default=999999, help="Max experiments (default: unlimited)")
-    parser.add_argument("--provider", default=None, help="LLM provider (openai/anthropic/gemini)")
+    parser.add_argument("--provider", default=None, help="LLM provider (ollama/openai/anthropic/gemini)")
     parser.add_argument("--symbols", nargs="+", default=None)
     args = parser.parse_args()
 
@@ -754,6 +755,23 @@ def main():
     print()
 
     for experiment_num in range(1, args.max + 1):
+        health = maybe_run_daily_healthcheck()
+        if not health.get("skipped"):
+            overall = "OK" if health["overall_ok"] else "DEGRADED"
+            print(f"[{datetime.now():%H:%M:%S}] Daily LLM healthcheck: {overall}")
+            for item in health["checks"]:
+                model = item.get("model") or "?"
+                if item["ok"]:
+                    print(
+                        f"    {item['provider']}: ok | model={model} | "
+                        f"latency={item['latency_s']}s"
+                    )
+                else:
+                    print(
+                        f"    {item['provider']}: fail | model={model} | "
+                        f"error={item.get('error', '')}"
+                    )
+
         print(f"\n{'─' * 60}")
         print(f"[{datetime.now():%H:%M:%S}] EXPERIMENT #{experiment_num:03d}")
         print(f"{'─' * 60}")

@@ -11,6 +11,7 @@ Run:
 """
 
 import argparse
+import os
 import re
 import sqlite3
 import sys
@@ -24,7 +25,6 @@ if _env_file.exists():
         line = line.strip()
         if line and not line.startswith("#") and "=" in line:
             k, _, v = line.partition("=")
-            import os
             os.environ.setdefault(k.strip(), v.strip())
 
 from llm_client import LLMClient
@@ -41,6 +41,14 @@ def log(msg: str):
     print(line)
     with open(LOG_FILE, "a") as f:
         f.write(line + "\n")
+
+
+def resolve_analysis_model() -> str:
+    return (
+        os.environ.get("OLLAMA_ANALYSIS_MODEL")
+        or os.environ.get("OLLAMA_MODEL")
+        or "glm-5"
+    )
 
 
 def get_indicator_stats() -> dict:
@@ -194,8 +202,9 @@ def main():
     prompt = build_prompt(program_content, exhausted, stats)
 
     try:
-        client = LLMClient()
-        log(f"Using provider: {client.provider}, model: {client.provider_config.get('model', '?')}")
+        model = resolve_analysis_model()
+        client = LLMClient(provider="ollama", model_override=model)
+        log(f"Using provider: {client.provider}, model: {client._get_model()}")
 
         response = client.chat(
             message=prompt,

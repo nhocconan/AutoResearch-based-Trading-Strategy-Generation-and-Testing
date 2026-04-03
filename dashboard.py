@@ -1057,6 +1057,11 @@ function _renderModal(strategyName, s) {{
 
   // Metrics tab — full detail per symbol with averages
   let metricsHtml = '';
+  if (s.has_code === false) {{
+    metricsHtml += `<div style="margin:8px 0;padding:10px;background:#3d1f1f;border:1px solid #e74c3c;border-radius:6px;font-size:0.85em;color:#e74c3c">
+      ⚠ Strategy file not saved (discarded or not kept on test). Metrics below are from original evaluation only. View Detail is unavailable.
+    </div>`;
+  }}
   if (s.avg_sharpe !== undefined) {{
     const ddColor = s.avg_dd > -50 ? '#2ecc71' : '#e74c3c';
     const shColor = s.avg_sharpe > 0 ? '#2ecc71' : '#e74c3c';
@@ -1082,7 +1087,7 @@ function _renderModal(strategyName, s) {{
         <td>${{(r.profit_factor||0).toFixed(2)}}</td>
         <td>${{r.trades}}</td>
         <td style="color:${{r.status === 'keep' ? '#2ecc71' : '#e74c3c'}}">${{r.status}}</td>
-        <td><button class="detail-btn" onclick="event.stopPropagation();loadDetail('${{strategyName}}','${{r.symbol}}','${{period}}')">View Detail</button></td>
+        <td>${{s.has_code !== false ? `<button class="detail-btn" onclick="event.stopPropagation();loadDetail('${{strategyName}}','${{r.symbol}}','${{period}}')">View Detail</button>` : `<span style="color:var(--muted);font-size:0.75em" title="Strategy file not saved (discarded)">no file</span>`}}</td>
       </tr>`;
     }}
     metricsHtml += '</tbody></table>';
@@ -1750,9 +1755,7 @@ def run_detail_backtest(strategy_name: str, symbol: str, period: str) -> dict:
 
     strategy_path = STRATEGIES_DIR / f"{strategy_name}.py"
     if not strategy_path.exists():
-        strategy_path = STRATEGY_FILE
-        if not strategy_path.exists():
-            return {"error": f"Strategy file not found: {strategy_name}"}
+        return {"error": f"Strategy file not saved: {strategy_name} (not in strategies/ dir). Only kept strategies have saved code."}
 
     try:
         result = run_strategy_backtest(
@@ -1952,9 +1955,14 @@ def run_detail_backtest(strategy_name: str, symbol: str, period: str) -> dict:
 
 def get_strategy_data(strategy_name: str) -> dict:
     """Build modal data for a single strategy (used by /api/strategy endpoint)."""
-    from results_db import load_results as _db_load
-    df = _db_load()
-    group = df[df["strategy"] == strategy_name]
+    from results_db import get_conn
+    with get_conn() as conn:
+        group = pd.read_sql_query(
+            'SELECT git_commit AS "commit", strategy, symbol, sharpe, return_pct, cagr_pct, '
+            'max_dd_pct, win_rate, profit_factor, trades, sortino, calmar, '
+            'status, description, period FROM results WHERE strategy=?',
+            conn, params=(strategy_name,)
+        )
     code = get_strategy_code(strategy_name)
     val = run_validation(code)
     rows_by_period: dict = {}
@@ -1980,11 +1988,13 @@ def get_strategy_data(strategy_name: str) -> dict:
     avg_sharpe = sum(r["sharpe"] for r in train_rows) / len(train_rows) if train_rows else 0
     avg_dd = sum(r["max_dd_pct"] for r in train_rows) / len(train_rows) if train_rows else 0
     avg_return = sum(r["return_pct"] for r in train_rows) / len(train_rows) if train_rows else 0
+    has_code = bool(code)
     return {
         "name": strategy_name,
         "code": code,
-        "valid": val.valid,
-        "validation_html": build_validation_html(val),
+        "has_code": has_code,
+        "valid": val.valid if has_code else False,
+        "validation_html": build_validation_html(val) if has_code else '<div class="val-error">No saved strategy file — View Detail unavailable</div>',
         "rows_by_period": rows_by_period,
         "avg_sharpe": round(avg_sharpe, 4),
         "avg_dd": round(avg_dd, 2),

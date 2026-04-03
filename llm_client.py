@@ -18,6 +18,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import yaml
 
@@ -25,6 +26,24 @@ import yaml
 LLM_TIMEOUT = int(os.environ.get("LLM_TIMEOUT", "180"))
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="llm_call")
+
+
+def _load_local_dotenv() -> None:
+    """Load repo-local .env without overriding already-exported environment variables."""
+    env_path = Path(__file__).parent / ".env"
+    if not env_path.exists():
+        return
+
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(key, value)
 
 
 class LLMTimeoutError(TimeoutError):
@@ -47,16 +66,31 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
+def _is_local_ollama_url(url: Optional[str]) -> bool:
+    if not url:
+        return True
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return host in {"", "localhost", "127.0.0.1", "::1"}
+
+
 class LLMClient:
     """Unified LLM client supporting multiple providers."""
 
-    def __init__(self, provider: Optional[str] = None, config: Optional[dict] = None):
+    def __init__(
+        self,
+        provider: Optional[str] = None,
+        config: Optional[dict] = None,
+        model_override: Optional[str] = None,
+    ):
+        _load_local_dotenv()
         if config is None:
             config = load_config()
 
         self.llm_config = config["llm"]
         self.provider = provider or self.llm_config["default_provider"]
         self.provider_config = self.llm_config["providers"][self.provider]
+        self.model_override = model_override
 
         self._client = None
         self._init_client()
@@ -64,6 +98,8 @@ class LLMClient:
     def _get_api_key(self) -> str:
         env_var = self.provider_config["api_key_env"]
         key = os.environ.get(env_var)
+        if self.provider == "ollama" and not key and _is_local_ollama_url(self._get_base_url()):
+            return ""
         if not key:
             raise ValueError(
                 f"API key not found. Set {env_var} environment variable."
@@ -71,16 +107,21 @@ class LLMClient:
         return key
 
     def _get_base_url(self) -> Optional[str]:
-        # Config override takes priority
-        if self.provider_config.get("base_url"):
-            return self.provider_config["base_url"]
-        # Then environment variable
+        # Environment override should win so deployments can switch local/cloud
+        # without editing config.yaml.
         env_var = self.provider_config.get("base_url_env")
         if env_var:
-            return os.environ.get(env_var)
+            env_val = os.environ.get(env_var)
+            if env_val:
+                return env_val
+        # Fall back to config
+        if self.provider_config.get("base_url"):
+            return self.provider_config["base_url"]
         return None
 
     def _get_model(self) -> str:
+        if self.model_override:
+            return self.model_override
         # Env var override (e.g. OPENAI_MODEL=qwen3-235b-a22b)
         model_env = self.provider_config.get("model_env")
         if model_env:
@@ -88,6 +129,9 @@ class LLMClient:
             if env_val:
                 return env_val
         return self.provider_config["model"]
+
+    def _get_timeout(self) -> int:
+        return int(self.provider_config.get("timeout", LLM_TIMEOUT))
 
     def _get_fallback_model(self) -> Optional[str]:
         """Get fallback model for rate-limit scenarios (openai provider only)."""
@@ -132,10 +176,11 @@ class LLMClient:
     def _init_ollama(self):
         import requests
         self._client = requests.Session()
-        self._client.headers.update({
-            "Authorization": f"Bearer {self._get_api_key()}",
-            "Content-Type": "application/json",
-        })
+        headers = {"Content-Type": "application/json"}
+        api_key = self._get_api_key()
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        self._client.headers.update(headers)
 
     def chat(
         self,
@@ -148,7 +193,7 @@ class LLMClient:
         """Send a message and get a response. Raises LLMTimeoutError if timeout exceeded."""
         temp = temperature or self.provider_config.get("temperature", 0.7)
         tokens = max_tokens or self.provider_config.get("max_tokens", 4096)
-        t = timeout or LLM_TIMEOUT
+        t = timeout or self._get_timeout()
 
         if self.provider == "openai":
             return _run_with_timeout(lambda: self._chat_openai(message, system, temp, tokens), t)
@@ -204,20 +249,40 @@ class LLMClient:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": message})
 
-        payload = {
-            "model": self._get_model(),
-            "messages": messages,
-            "stream": False,
-            "options": {
-                "temperature": temp,
-                "num_predict": max_tokens,
-            },
-        }
-        base_url = self.provider_config.get("base_url", "https://ollama.com/api/chat")
-        resp = self._client.post(base_url, json=payload, timeout=LLM_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["message"]["content"]
+        base_url = self._get_base_url() or "http://127.0.0.1:11434/api/chat"
+        primary_model = self._get_model()
+        fallbacks = self.provider_config.get("fallback_models", [])
+        models_to_try = [primary_model] + fallbacks
+        extra_options = self.provider_config.get("options", {})
+
+        last_err = None
+        for model in models_to_try:
+            payload = {
+                "model": model,
+                "messages": messages,
+                "stream": False,
+                "options": {
+                    "temperature": temp,
+                    "num_predict": max_tokens,
+                    **extra_options,
+                },
+            }
+            try:
+                resp = self._client.post(base_url, json=payload, timeout=self._get_timeout())
+                resp.raise_for_status()
+                data = resp.json()
+                if model != primary_model:
+                    print(f"  [OLLAMA] {primary_model} unavailable, using {model}")
+                return data["message"]["content"]
+            except Exception as e:
+                last_err = e
+                status = getattr(getattr(e, 'response', None), 'status_code', None)
+                if status in (503, 502, 500, 429):
+                    print(f"  [OLLAMA] {model} returned {status}, trying next fallback...")
+                    continue
+                raise  # non-retriable error (auth, 400, etc.)
+
+        raise last_err  # all models failed
 
 
 def test_connection(provider: Optional[str] = None):

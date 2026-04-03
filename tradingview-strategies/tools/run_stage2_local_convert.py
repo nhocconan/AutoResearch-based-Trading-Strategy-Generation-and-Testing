@@ -141,19 +141,27 @@ def load_dotenv(path: Path) -> None:
 
 def ensure_llm_env(model: str | None) -> dict[str, Any]:
     load_dotenv(ROOT / ".env")
-    effective_model = model or os.environ.get("OPENAI_MODEL") or "qwen3.5-plus"
-    os.environ["OPENAI_MODEL"] = effective_model
+    effective_model = (
+        model
+        or os.environ.get("OLLAMA_CONVERT_MODEL")
+        or os.environ.get("OLLAMA_ANALYSIS_MODEL")
+        or os.environ.get("OLLAMA_MODEL")
+        or "qwen3-coder-next"
+    )
+    os.environ["OLLAMA_MODEL"] = effective_model
+    base_url = os.environ.get("OLLAMA_BASE_URL", "")
+    is_local = base_url.startswith("http://127.0.0.1:") or base_url.startswith("http://localhost:")
     return {
-        "provider": "openai",
-        "base_url": os.environ.get("OPENAI_BASE_URL", ""),
+        "provider": "ollama",
+        "base_url": base_url,
         "model": effective_model,
-        "api_key_present": bool(os.environ.get("OPENAI_API_KEY")),
+        "api_key_present": bool(os.environ.get("OLLAMA_API_KEY")) or is_local,
     }
 
 
 def _llm_worker(queue: Any, system_prompt: str, user_prompt: str) -> None:
     try:
-        client = LLMClient(provider="openai")
+        client = LLMClient(provider="ollama")
         text = client.chat(user_prompt, system=system_prompt, temperature=0.1, max_tokens=8000)
         queue.put({"ok": True, "text": text})
     except Exception as exc:

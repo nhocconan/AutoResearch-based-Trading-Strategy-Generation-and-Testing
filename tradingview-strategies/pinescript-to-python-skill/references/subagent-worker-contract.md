@@ -18,7 +18,7 @@ Every conversion sub-agent must follow this contract exactly.
 
 ## Model Requirement
 
-- Use the repo `.env` OpenAI-compatible endpoint with `OPENAI_MODEL=qwen3.5-plus` for classify, convert, and repair.
+- Use the repo `.env` official Ollama setup with `OLLAMA_MODEL` or `OLLAMA_CONVERT_MODEL` for classify, convert, and repair.
 - Do not silently switch to another model inside the pipeline worker.
 
 ## Conversion Rules

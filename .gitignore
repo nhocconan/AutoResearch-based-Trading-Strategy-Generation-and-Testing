@@ -10,6 +10,7 @@ run.log
 *.log
 *.bak
 timeout_log.txt
+logs/
 
 # Python
 __pycache__/
