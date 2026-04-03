@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #1869: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts capture strong momentum moves. Filtered by 1d EMA trend direction and volume confirmation (>1.5x average) to avoid false breakouts. Works in both bull and bear markets by following the higher timeframe trend. Uses ATR-based stoploss to manage risk. Target: 75-200 total trades over 4 years (19-50/year) with discrete position sizing of 0.25.
+Experiment #1869: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation + ATR(14) stoploss
+HYPOTHESIS: Donchian breakouts capture strong momentum moves. Filtering by 1d EMA(50) ensures alignment with higher timeframe trend. Volume confirmation (>1.5x average) adds validity. ATR-based stoploss manages risk. Works in both bull and bear markets by following the 1d trend direction. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -29,12 +29,12 @@ def generate_signals(prices):
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     # === 4h Indicators: Donchian Channel (20) ===
-    # Upper channel: highest high over last 20 periods
-    # Lower channel: lowest low over last 20 periods
+    # Upper band: highest high over 20 periods
+    # Lower band: lowest low over 20 periods
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -55,8 +55,8 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    bars_since_entry = 0
-    stoploss_price = 0.0
+    highest_since_entry = 0.0  # for long trailing stop
+    lowest_since_entry = 0.0   # for short trailing stop
     
     warmup = 50  # sufficient for EMA(50) and Donchian(20)
     
@@ -70,41 +70,41 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Exit Logic: Stoploss or reversal signal ---
+        # --- Exit Logic: ATR-based stoploss or reverse signal ---
         if in_position:
-            bars_since_entry += 1
-            
-            # Check stoploss hit
+            # Update highest/lowest since entry
             if position_side > 0:  # Long position
-                if price <= stoploss_price:
+                highest_since_entry = max(highest_since_entry, high[i])
+                # Stoploss: 2 * ATR below highest since entry
+                stop_price = highest_since_entry - 2.0 * atr[i]
+                if price <= stop_price:
                     in_position = False
                     position_side = 0
-                    bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit if 1d trend flips against position
-                elif trend_1d_aligned[i] < 0:
+                # Reverse signal: Donchian breakout in opposite direction
+                elif price <= lowest_low[i]:
                     in_position = False
                     position_side = 0
-                    bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                if price >= stoploss_price:
+                lowest_since_entry = min(lowest_since_entry, low[i])
+                # Stoploss: 2 * ATR above lowest since entry
+                stop_price = lowest_since_entry + 2.0 * atr[i]
+                if price >= stop_price:
                     in_position = False
                     position_side = 0
-                    bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit if 1d trend flips against position
-                elif trend_1d_aligned[i] > 0:
+                # Reverse signal: Donchian breakout in opposite direction
+                elif price >= highest_high[i]:
                     in_position = False
                     position_side = 0
-                    bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             
-            # Continue holding position
+            # Hold position
             signals[i] = position_side * SIZE
             continue
         
@@ -113,24 +113,24 @@ def generate_signals(prices):
         trend_bias = trend_1d_aligned[i]
         
         # Volume confirmation: require volume spike (> 1.5x average)
-        volume_confirm = vol_ratio[i] > 1.5
+        volume_spike = vol_ratio[i] > 1.5
         
-        if volume_confirm:
-            # Long breakout: price closes above upper Donchian channel
-            if trend_bias > 0 and price > highest_high[i]:
+        if volume_spike:
+            # Long entry: price breaks above Donchian upper band + 1d uptrend
+            if trend_bias > 0 and price >= highest_high[i]:
                 in_position = True
                 position_side = 1
-                entry_price = price
-                bars_since_entry = 0
-                stoploss_price = price - 2.5 * atr[i]  # 2.5x ATR stoploss
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short breakout: price closes below lower Donchian channel
-            elif trend_bias < 0 and price < lowest_low[i]:
+            # Short entry: price breaks below Donchian lower band + 1d downtrend
+            elif trend_bias < 0 and price <= lowest_low[i]:
                 in_position = True
                 position_side = -1
-                entry_price = price
-                bars_since_entry = 0
-                stoploss_price = price + 2.5 * atr[i]  # 2.5x ATR stoploss
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
