@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #062: 12h Donchian Breakout + 1d Volume Spike + 1w Trend Filter
+Experiment #082: 12h Donchian(20) Breakout + 1d Volume Spike + 1w Trend Filter
 
-HYPOTHESIS: Donchian(20) breakout on 12h timeframe combined with 1d volume spike (>2x average) 
-and 1w trend filter (price > EMA50 for longs, < EMA50 for shorts) creates a robust strategy 
-that captures medium-term trends with minimal whipsaw. The 12h timeframe targets 12-37 
-trades/year (50-150 total over 4 years) to minimize fee drag. Volume confirms institutional 
-participation at breakouts, while the weekly trend filter ensures alignment with the 
-dominant market direction, working in both bull (breakouts with volume) and bear 
-(breakdowns with volume) markets. Uses ATR-based stoploss for risk management.
+HYPOTHESIS: Donchian channel breakouts on 12h timeframe capture medium-term trends in both bull and bear markets.
+Volume confirmation from 1d ensures institutional participation, while 1w EMA filter aligns with higher timeframe direction.
+This combination reduces false breakouts and focuses on high-probability moves. Targets 12-37 trades/year on 12h timeframe
+(50-150 total over 4 years) to minimize fee drag. Uses discrete position sizing (0.25) and ATR-based stoploss for risk management.
 """
 
 import numpy as np
@@ -52,18 +49,24 @@ def generate_signals(prices):
         ema_50_1w_aligned = np.full(n, np.nan)
     
     # === 12h Indicators ===
-    # Calculate Donchian(20) channels on 12h
+    # Calculate Donchian channel (20-period) on 12h
+    # We need to get 12h OHLC data
     df_12h = get_htf_data(prices, '12h')
+    
     if len(df_12h) >= 20:
         high_12h = df_12h['high'].values
         low_12h = df_12h['low'].values
-        donchian_high = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
-        donchian_low = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
-        donchian_high_aligned = align_htf_to_ltf(prices, df_12h, donchian_high)
-        donchian_low_aligned = align_htf_to_ltf(prices, df_12h, donchian_low)
+        
+        # Donchian upper/lower bands (20-period)
+        donchian_upper = pd.Series(high_12h).rolling(window=20, min_periods=20).max().values
+        donchian_lower = pd.Series(low_12h).rolling(window=20, min_periods=20).min().values
+        
+        # Align to 12h timeframe (already aligned since df_12h is 12h data)
+        donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+        donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
     else:
-        donchian_high_aligned = np.full(n, np.nan)
-        donchian_low_aligned = np.full(n, np.nan)
+        donchian_upper_aligned = np.full(n, np.nan)
+        donchian_lower_aligned = np.full(n, np.nan)
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -78,21 +81,31 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
+        if (np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or
             np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Trend Filter: Only trade in alignment with weekly EMA50 ---
+        # --- Regime Filter: Only trade in alignment with 1w trend ---
         price_above_1w_ema = close[i] > ema_50_1w_aligned[i]
         price_below_1w_ema = close[i] < ema_50_1w_aligned[i]
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio_1d_aligned[i] > 2.0
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio_1d_aligned[i] > 1.5
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
-            # Calculate ATR(14) for stoploss
+            # Calculate ATR(14) for stoploss using 12h data
+            # We need to calculate TR from 12h data
+            if len(df_12h) >= 1:
+                # Map current index to 12h bar index
+                # Since we're on 12h timeframe, each price bar is a 12h bar
+                # But we need to calculate ATR using 12h OHLC
+                # We'll approximate using current timeframe data for simplicity
+                # In practice, we should use 12h data for ATR calculation
+                pass
+            
+            # Calculate ATR(14) on current timeframe (12h) using price data
             tr = np.zeros(i+1)
             tr[0] = high[0] - low[0]
             for j in range(1, i+1):
@@ -106,8 +119,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at Donchian low (trailing exit)
-                if close[i] <= donchian_low_aligned[i]:
+                # Take profit at Donchian lower band (trailing stop for longs)
+                if close[i] <= donchian_lower_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -119,8 +132,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at Donchian high (trailing exit)
-                if close[i] >= donchian_high_aligned[i]:
+                # Take profit at Donchian upper band (trailing stop for shorts)
+                if close[i] >= donchian_upper_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -131,16 +144,16 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Price breaks above Donchian high with volume in uptrend
+        # Long: Price breaks above Donchian upper band with volume and trend alignment
         long_condition = (
-            close[i] > donchian_high_aligned[i] and 
+            close[i] > donchian_upper_aligned[i] and 
             volume_spike and 
             price_above_1w_ema
         )
         
-        # Short: Price breaks below Donchian low with volume in downtrend
+        # Short: Price breaks below Donchian lower band with volume and trend alignment
         short_condition = (
-            close[i] < donchian_low_aligned[i] and 
+            close[i] < donchian_lower_aligned[i] and 
             volume_spike and 
             price_below_1w_ema
         )
