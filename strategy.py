@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #2189: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 4h Donchian breakouts with 1d HMA trend filter capture medium-term momentum while avoiding false breakouts.
-Volume spike (>1.5x 20-bar average) confirms breakout strength. ATR-based trailing stop manages risk.
-Designed to work in both bull (trend following) and bear (mean reversion at channel extremes) markets.
-Target: 75-200 total trades over 4 years (19-50/year) - proven range for 4h strategies.
+HYPOTHESIS: 4h Donchian breakouts capture swing momentum with 1d HMA trend filter for bias.
+Volume spike (>2.0x 20-bar avg) confirms breakout strength. ATR(14) trailing stop (2.5x) manages risk.
+Designed for 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
+Works in bull (trend continuation) and bear (mean reversion at extremes) via Donchian exit.
 """
 
 import numpy as np
@@ -27,7 +27,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate 1d HMA(21): Hull Moving Average
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
     half_len = 21 // 2
     sqrt_len = int(np.sqrt(21))
     
@@ -41,7 +40,7 @@ def generate_signals(prices):
     wma_full = np.array([np.nan] * len(close_1d))
     wma_half = np.array([np.nan] * len(close_1d))
     
-    for i in range(20, len(close_1d)):  # 21-1 = 20 for WMA(21)
+    for i in range(20, len(close_1d)):  # WMA(21)
         wma_full[i] = np.mean(close_1d[i-20:i+1] * np.arange(1, 22))
     for i in range(half_len-1, len(close_1d)):
         wma_half[i] = np.mean(close_1d[i-half_len+1:i+1] * np.arange(1, half_len+1))
@@ -64,7 +63,7 @@ def generate_signals(prices):
     donchian_upper = high_ma
     donchian_lower = low_ma
     
-    # Volume MA for spike detection (moderate threshold to balance trades)
+    # Volume MA for spike detection (strict threshold to reduce trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -80,7 +79,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size - balances return and drawdown
+    SIZE = 0.30  # 30% position size - balanced for Sharpe and drawdown
     
     # Position tracking state variables
     in_position = False
@@ -106,8 +105,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2*ATR below highest since entry
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -120,8 +119,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2*ATR above lowest since entry
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -138,8 +137,8 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average - balanced for trade frequency)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 2.0x average - strict to limit trades)
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # Long entry: price breaks above upper Donchian AND 1d trend up
