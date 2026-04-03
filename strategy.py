@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #482: 12h Donchian(20) breakout + 1d EMA(20) trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(20) trend capture medium-term momentum with controlled trade frequency (target: 50-150 total trades over 4 years). Volume confirmation (>1.5x average) ensures breakout validity. The 12h timeframe reduces noise vs lower timeframes while still capturing significant moves. EMA(20) on 1d provides adaptive trend filter that works in both bull (price > EMA) and bear (price < EMA) markets. ATR-based stoploss manages risk. Designed to avoid overtrading via strict entry conditions and time-based exit.
+Experiment #482: 12h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(50) trend capture medium-term momentum with lower frequency (target: 12-37 trades/year). Volume confirmation (>1.5x average) ensures breakout validity. Uses discrete position sizing (0.25) to minimize fee drag. Works in bull markets via breakout-with-trend and avoids whipsaws in bear/range via trend filter. Designed for 12h timeframe to reduce overtrading and improve test generalization.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_482_12h_donchian20_1d_ema20_vol_v1"
+name = "exp_482_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -19,10 +19,10 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA(20) trend (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA(50) trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = pd.Series(df_1d['close'].values)
-    ema_1d = close_1d.ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_1d = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
     
     # Align EMA trend to 12h timeframe (shifted by 1 for completed 1d bar only)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
@@ -45,7 +45,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # Reduced size for lower risk on 12h
+    SIZE = 0.25
     
     # Position tracking state variables
     in_position = False
@@ -101,8 +101,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~3 days on 12h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 4 bars (~48h on 12h) to avoid overtrading
+            if bars_since_entry > 4:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
