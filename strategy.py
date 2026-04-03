@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #011: 6h Camarilla Pivot + Volume Spike + 1d Trend Filter
+Experiment #009: 4h Donchian(20) + 1d/1w Trend + Volume Spike Strategy
 
-HYPOTHESIS: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) on 6h combined with 
-1d trend filter (price above/below EMA50) and volume confirmation (>1.8x average) captures high-probability 
-trades. In trending markets, we trade breakouts at R4/S4 with the trend. In ranging markets (price near EMA50), 
-we fade extremes at R3/S3. Uses ATR-based stoploss (2.5x) and minimum 4-bar holding period. 
-Target: 75-150 trades over 4 years.
+HYPOTHESIS: Donchian(20) breakouts on 4h combined with multi-timeframe trend filter 
+(1d price > EMA50 AND 1w price > EMA50 for longs, inverse for shorts) and volume 
+confirmation (>1.8x average) captures strong directional moves. In strong trends 
+(price clearly above/both EMAs on both 1d and 1w), we trade breakouts with the 
+trend. In conflicting or ranging markets, we avoid false breakouts. Uses ATR-based 
+stoploss (2.0x) and minimum 3-bar holding period. Target: 100-180 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_011_6h_camarilla_pivot_vol_trend_v1"
-timeframe = "6h"
+name = "exp_009_4h_donchian20_1d1w_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,77 +25,39 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA50/EMA200 ===
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d EMA50 for trend filter
     ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
-    # === 6h Indicators: Previous day's Camarilla levels ===
-    def calculate_camarilla(prev_high, prev_low, prev_close):
-        """Calculate Camarilla pivot levels for given HLC"""
-        range_val = prev_high - prev_low
-        if range_val <= 0:
-            return prev_close, prev_close, prev_close, prev_close, prev_close, prev_close, prev_close, prev_close
-        
-        pivot = (prev_high + prev_low + prev_close) / 3.0
-        r4 = pivot + (range_val * 1.1 / 2.0)
-        r3 = pivot + (range_val * 1.1 / 4.0)
-        s3 = pivot - (range_val * 1.1 / 4.0)
-        s4 = pivot - (range_val * 1.1 / 2.0)
-        return pivot, r3, r4, s3, s4
+    # === HTF: 1w data for EMA50 (stronger trend filter) ===
+    df_1w = get_htf_data(prices, '1w')
+    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # Calculate Camarilla levels for each 6h bar using previous day's data
-    camarilla_p = np.full(n, np.nan)
-    camarilla_r3 = np.full(n, np.nan)
-    camarilla_r4 = np.full(n, np.nan)
-    camarilla_s3 = np.full(n, np.nan)
-    camarilla_s4 = np.full(n, np.nan)
+    # === 4h Indicators: Donchian(20) channels ===
+    def calculate_donchian(high, low, period=20):
+        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        return upper, lower
     
-    # Group by date to get previous day's OHLC
-    dates = pd.to_datetime(prices['open_time']).date
-    unique_dates = np.unique(dates)
+    donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
-    # Create mapping from date to previous day's OHLC
-    prev_day_ohlc = {}
-    for i, date in enumerate(unique_dates):
-        if i > 0:
-            prev_date = unique_dates[i-1]
-            # Find indices for previous date
-            prev_mask = (dates == prev_date)
-            if np.any(prev_mask):
-                prev_high = high[prev_mask].max()
-                prev_low = low[prev_mask].min()
-                prev_close = close[prev_mask][-1]  # Last close of previous day
-                camarilla_p[dates == date], camarilla_r3[dates == date], camarilla_r4[dates == date], \
-                camarilla_s3[dates == date], camarilla_s4[dates == date] = calculate_camarilla(prev_high, prev_low, prev_close)
-    
-    # For first day, use first bar's data as fallback
-    if np.any(np.isnan(camarilla_p)):
-        first_high = high[0]
-        first_low = low[0]
-        first_close = close[0]
-        p, r3, r4, s3, s4 = calculate_camarilla(first_high, first_low, first_close)
-        camarilla_p[np.isnan(camarilla_p)] = p
-        camarilla_r3[np.isnan(camarilla_r3)] = r3
-        camarilla_r4[np.isnan(camarilla_r4)] = r4
-        camarilla_s3[np.isnan(camarilla_s3)] = s3
-        camarilla_s4[np.isnan(camarilla_s4)] = s4
-    
-    # === 6h Indicators: ATR(14) for stoploss ===
-    tr_6h = np.zeros(n)
-    tr_6h[0] = high[0] - low[0]
+    # === 4h Indicators: ATR(14) for stoploss ===
+    tr_4h = np.zeros(n)
+    tr_4h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr_4h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
+    atr_14 = pd.Series(tr_4h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
-    vol_ratio[:20] = 1.0  # Neutral for warmup
+    vol_ratio[:20] = 1.0
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -104,25 +67,33 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    bars_since_entry = 0  # Track bars in position for minimum holding period
+    bars_since_entry = 0
     
-    warmup = 50  # Warmup for 1d EMA50 stability
+    warmup = 200  # Warmup for 1d EMA200 stability
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(camarilla_r3[i]) or np.isnan(camarilla_r4[i]) or
-            np.isnan(camarilla_s3[i]) or np.isnan(camarilla_s4[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(ema200_1d_aligned[i]) or
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(donch_upper[i]) or
+            np.isnan(donch_lower[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- 1d Trend Filter: Only trade when price is clearly above/below EMA50 ---
         price = close[i]
-        is_uptrend = price > ema50_1d_aligned[i] * 1.005  # 0.5% buffer above EMA50
-        is_downtrend = price < ema50_1d_aligned[i] * 0.995  # 0.5% buffer below EMA50
-        is_trending = is_uptrend or is_downtrend
+        
+        # --- Multi-Timeframe Trend Filter: Require alignment on 1d AND 1w ---
+        # Bullish trend: price > EMA50 on both 1d and 1w
+        bullish_trend = (price > ema50_1d_aligned[i]) and (price > ema50_1w_aligned[i])
+        # Bearish trend: price < EMA50 on both 1d and 1w
+        bearish_trend = (price < ema50_1d_aligned[i]) and (price < ema50_1w_aligned[i])
+        # No trade if trends conflict or price between EMAs (ranging/unclear)
         
         # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
         volume_spike = vol_ratio[i] > 1.8
+        
+        # --- Donchian Breakout Conditions ---
+        breakout_up = high[i] > donch_upper[i-1]   # Break above upper channel
+        breakout_down = low[i] < donch_lower[i-1]  # Break below lower channel
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -130,40 +101,38 @@ def generate_signals(prices):
             
             # ATR-based stoploss
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.5 * atr_14[i]
+                stop_level = entry_price - 2.0 * atr_14[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on R3/S3 mean reversion signal (contrarian exit in ranging)
-                if not is_trending and ((position_side > 0 and high[i] >= camarilla_r3[i]) or 
-                                       (position_side < 0 and low[i] <= camarilla_s3[i])):
+                # Exit on opposite Donchian breakout with volume confirmation
+                if breakout_down and volume_spike:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_level = entry_price + 2.5 * atr_14[i]
+                stop_level = entry_price + 2.0 * atr_14[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on R3/S3 mean reversion signal (contrarian exit in ranging)
-                if not is_trending and ((position_side > 0 and high[i] >= camarilla_r3[i]) or 
-                                       (position_side < 0 and low[i] <= camarilla_s3[i])):
+                # Exit on opposite Donchian breakout with volume confirmation
+                if breakout_up and volume_spike:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             
-            # Minimum holding period of 4 bars to reduce churn
-            if bars_since_entry < 4:
+            # Minimum holding period of 3 bars to reduce churn
+            if bars_since_entry < 3:
                 signals[i] = position_side * SIZE
                 continue
             
@@ -172,41 +141,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        if is_trending:
-            # Trending market: Breakout at R4/S4 with volume spike
-            if high[i] > camarilla_r4[i] and volume_spike and is_uptrend:
-                # Long breakout above R4
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            elif low[i] < camarilla_s4[i] and volume_spike and is_downtrend:
-                # Short breakdown below S4
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
-            else:
-                signals[i] = 0.0
+        # Long: Bullish trend on BOTH timeframes + Donchian breakout up + volume spike
+        if bullish_trend and breakout_up and volume_spike:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = SIZE
+        # Short: Bearish trend on BOTH timeframes + Donchian breakout down + volume spike
+        elif bearish_trend and breakout_down and volume_spike:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = -SIZE
         else:
-            # Ranging market: Fade extremes at R3/S3
-            if low[i] <= camarilla_s3[i] and volume_spike:
-                # Long mean reversion from S3
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            elif high[i] >= camarilla_r3[i] and volume_spike:
-                # Short mean reversion from R3
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
-            else:
-                signals[i] = 0.0
+            signals[i] = 0.0
     
     return signals
