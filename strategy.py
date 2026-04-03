@@ -1,81 +1,60 @@
 #!/usr/bin/env python3
 """
-Experiment #027: 4h TRIX Momentum + 1d EMA50 + Volume Spike + CHOP Regime
+Experiment #026: 4h Donchian(20) + Choppiness Regime + Volume Spike
 
-HYPOTHESIS: TRIX(12) smooths noise better than RSI/MACD while catching real momentum shifts.
-Combined with 1d EMA50 for trend (proven in #003 with Sharpe 0.123), this should work
-in BOTH bull (2021, 2024-2025) and bear (2022):
-- Bull: TRIX crosses positive + price > 1d EMA50 = momentum continuation
-- Bear: TRIX crosses negative + price < 1d EMA50 = short rallies
-- Range: CHOP > 61 = stay out (avoid whipsaw in 2022)
-
-ENTRY: TRIX turns positive + Close > EMA50 + Volume > 1.5x MA(20) + CHOP < 55
-EXIT: Opposite TRIX signal or ATR 2.5x stoploss
-TARGET: 80-150 total over 4 years (20-37/year). Size: 0.30.
+HYPOTHESIS: The Choppiness Index (CHOP) is the optimal regime filter.
+It identifies strong directional moves (CHOP < 40) where Donchian breakouts are more reliable.
+It avoids ranging markets (CHOP > 61.8) where whipsaws destroy trend strategies.
+This strategy seeks high-probability, trend-following entries confirmed by volume during trending periods.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_trix_momentum_1d_ema_vol_v1"
+name = "mtf_4h_donchian_chop_volume_v3"
 timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period=14):
-    """Average True Range"""
+    """Average True Range for stoploss calculation."""
     n = len(close)
     if n < 2:
         return np.full(n, np.nan)
     
+    # Calculate True Range (TR) for each bar
     tr = np.zeros(n, dtype=np.float64)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
+    # Calculate Exponentially Weighted Moving Average for ATR
     atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
     return atr
 
-def calculate_trix(close, period=12):
-    """
-    TRIX(12) - Triple EMA momentum oscillator
-    TRIX > 0 = bullish momentum, TRIX < 0 = bearish momentum
-    """
-    n = len(close)
-    if n < period * 3:
-        return np.full(n, np.nan)
-    
-    # Triple EMA
-    ema1 = pd.Series(close).ewm(span=period, min_periods=period, adjust=False).mean().values
-    ema2 = pd.Series(ema1).ewm(span=period, min_periods=period, adjust=False).mean().values
-    ema3 = pd.Series(ema2).ewm(span=period, min_periods=period, adjust=False).mean().values
-    
-    # TRIX = rate of change of triple EMA (momentum)
-    trix = np.full(n, np.nan)
-    for i in range(period * 3, n):
-        if ema3[i-1] != 0 and not np.isnan(ema3[i-1]):
-            trix[i] = ((ema3[i] - ema3[i-1]) / ema3[i-1]) * 100
-    
-    return trix
-
 def calculate_choppiness(high, low, close, period=14):
     """
-    Choppiness Index (CHOP)
-    CHOP > 61.8 = choppy/ranging market
-    CHOP < 38.2 = trending market
+    Choppiness Index (CHOP): Measures market range vs volatility.
+    CHOP < 38.2 = trending market (Follow breakouts)
+    CHOP > 61.8 = ranging market (Avoid)
     """
     n = len(close)
     chop = np.full(n, np.nan)
     
     for i in range(period, n):
+        # Sum of true range over the lookback period
         tr_sum = 0.0
         for j in range(i - period + 1, i + 1):
-            tr_sum += max(high[j] - low[j], abs(high[j] - close[j-1]) if j > 0 else high[j] - low[j])
+            # Calculate TR for each bar in the window
+            current_tr = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1])) if j > 0 else high[j] - low[j]
+            tr_sum += current_tr
         
-        highest_high = max(high[i - period + 1:i + 1])
-        lowest_low = min(low[i - period + 1:i + 1])
+        # Highest high - lowest low over the period (Total Range)
+        highest_high = np.max(high[i - period + 1:i + 1])
+        lowest_low = np.min(low[i - period + 1:i + 1])
         hl_range = highest_high - lowest_low
         
         if hl_range > 1e-10:
+            # CHOP = 100 * log10(sum of TR / HL range) / log10(N)
             chop[i] = 100 * np.log10(tr_sum / hl_range) / np.log10(period)
     
     return chop
@@ -87,106 +66,106 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d EMA50 for trend (call ONCE before loop) ===
+    # === HTF: 1d SMA for trend (Call ONCE before loop) ===
+    # Load 1d data ONCE
     df_1d = get_htf_data(prices, '1d')
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Use a simple 30-period SMA for 1d trend confirmation
+    sma_1d = pd.Series(df_1d['close'].values).rolling(window=30, min_periods=30).mean().values
+    # Align HTF data (Shift(1) ensures no look-ahead)
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
     
     # === 4h Indicators ===
+    # ATR (for stoploss)
     atr_14 = calculate_atr(high, low, close, period=14)
-    trix_12 = calculate_trix(close, period=12)
-    trix_prev = np.roll(trix_12, 1)
-    trix_prev[0] = np.nan
+    # Choppiness Index (for regime filter)
     chop_14 = calculate_choppiness(high, low, close, period=14)
     
-    # Volume MA(20)
+    # Donchian 20 (for breakout reference)
+    # Shift(1) ensures we use the previous bar's max/min for the current bar's signal
+    dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    
+    # Volume MA(20) (for confirmation)
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # === Signals ===
+    # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30
+    SIZE = 0.30  # Discrete position sizing
     
-    # Position tracking
+    # Position tracking state variables
     in_position = False
     position_side = 0
-    entry_bar = 0
+    entry_bar = -1
     highest_since_entry = 0.0
     lowest_since_entry = float('inf')
     
-    warmup = 100  # Need enough for TRIX triple EMA (period * 3 = 36)
+    warmup = 50 # Ensure enough data for initial rolling calculations
     
     for i in range(warmup, n):
-        # NaN checks
-        if np.isnan(atr_14[i]) or atr_14[i] <= 1e-10:
+        # --- Data Validity Check ---
+        if np.isnan(atr_14[i]) or np.isnan(chop_14[i]) or np.isnan(sma_1d_aligned[i]):
             signals[i] = 0.0
             continue
         
-        if np.isnan(trix_12[i]) or np.isnan(chop_14[i]) or np.isnan(ema_1d_aligned[i]):
-            signals[i] = 0.0
-            continue
+        # --- Regime and Trend Context ---
+        is_trending = chop_14[i] < 40.0  # Entry only in trending markets
         
-        if np.isnan(trix_prev[i]):
-            signals[i] = 0.0
-            continue
+        # HTF Trend Check (using aligned data)
+        htf_bullish = close[i] > sma_1d_aligned[i]
+        htf_bearish = close[i] < sma_1d_aligned[i]
         
-        # === REGIME CHECK: Avoid choppy markets ===
-        is_trending = chop_14[i] < 55.0  # Don't trade when CHOP > 55
+        # --- Price Channel Breakout ---
+        bullish_breakout = (close[i] > dc_upper_20[i])
+        bearish_breakout = (close[i] < dc_lower_20[i])
         
-        # === TRIX MOMENTUM SHIFT ===
-        trix_turning_up = (trix_prev[i] < 0) and (trix_12[i] > 0)
-        trix_turning_down = (trix_prev[i] > 0) and (trix_12[i] < 0)
-        
-        # === TREND DIRECTION FROM 1d EMA ===
-        htf_bullish = close[i] > ema_1d_aligned[i]
-        htf_bearish = close[i] < ema_1d_aligned[i]
-        
-        # === VOLUME CONFIRMATION ===
+        # --- Volume Confirmation ---
         vol_ok = volume[i] > vol_ma_20[i] * 1.5 if vol_ma_20[i] > 1e-10 else False
         
-        # === TRAILING STOP UPDATE ===
-        if in_position:
-            if position_side > 0:
-                highest_since_entry = max(highest_since_entry, high[i])
-            else:
-                lowest_since_entry = min(lowest_since_entry, low[i])
-        
-        # === MIN HOLD: 4 bars (16h) to avoid immediate whipsaw ===
-        min_hold = (i - entry_bar) >= 4
-        
-        # === STOPLOSS CHECK (ATR trailing) ===
+        # --- Position Management (Exit Logic) ---
         stop_hit = False
+        
         if in_position:
+            # 1. Check Trailing Stop (ATR based)
             if position_side > 0:
-                stop_hit = low[i] < (highest_since_entry - 2.5 * atr_14[i])
-            else:
-                stop_hit = high[i] > (lowest_since_entry + 2.5 * atr_14[i])
-            
-            # Exit on TRIX reversal (after min hold) OR trend change
-            if min_hold:
-                if position_side > 0 and (trix_12[i] < 0 or htf_bearish):
+                stop_level = highest_since_entry - 2.5 * atr_14[i]
+                if low[i] < stop_level:
                     stop_hit = True
-                if position_side < 0 and (trix_12[i] > 0 or htf_bullish):
+            else: # Short position
+                stop_level = lowest_since_entry + 2.5 * atr_14[i]
+                if high[i] > stop_level:
+                    stop_hit = True
+            
+            # 2. Check Trend Reversal Exit (Only after a minimum hold)
+            min_hold = (i - entry_bar) >= 3
+            if min_hold:
+                if position_side > 0 and htf_bearish:
+                    stop_hit = True
+                if position_side < 0 and htf_bullish:
                     stop_hit = True
             
             if stop_hit:
                 signals[i] = 0.0
                 in_position = False
                 position_side = 0
+                highest_since_entry = 0.0
+                lowest_since_entry = float('inf')
             else:
+                # If still in position, maintain signal
                 signals[i] = position_side * SIZE
             continue
         
-        # === NEW POSITIONS ===
-        # Long: TRIX turns positive + above 1d EMA + volume spike + trending regime
-        if is_trending and trix_turning_up and htf_bullish and vol_ok:
+        # --- New Position Entry Logic (Only if Flat) ---
+        
+        # Long Entry: Trending + Bullish Breakout + Volume Confirm
+        if is_trending and bullish_breakout and vol_ok and htf_bullish:
             in_position = True
             position_side = 1
             entry_bar = i
             highest_since_entry = high[i]
             signals[i] = SIZE
         
-        # Short: TRIX turns negative + below 1d EMA + volume spike + trending regime
-        elif is_trending and trix_turning_down and htf_bearish and vol_ok:
+        # Short Entry: Trending + Bearish Breakout + Volume Confirm
+        elif is_trending and bearish_breakout and vol_ok and htf_bearish:
             in_position = True
             position_side = -1
             entry_bar = i
