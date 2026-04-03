@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #305: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation
-HYPOTHESIS: Price breaking 12h Donchian(20) channels with 1d HMA(50) trend filter and volume confirmation captures strong momentum moves with lower frequency suitable for 12h timeframe. The 1d HMA acts as regime filter to avoid counter-trend entries in bear markets (2025). Volume confirmation ensures breakout validity. Discrete sizing (0.25) minimizes fee drag. Target: 75-150 total trades over 4 years for 12h timeframe.
+Experiment #306: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation
+HYPOTHESIS: Price breaking 4h Donchian(20) channels with 1d HMA(21) trend filter and volume confirmation (>2.0x) captures strong momentum moves. The 1d HMA acts as regime filter to avoid counter-trend entries. Uses discrete sizing (0.25) to minimize fee drag. Target: 75-200 total trades over 4 years for 4h timeframe. Works in bull (trend continuation) and bear (mean reversion after extreme moves via volume spike + breakout).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_305_12h_donchian20_1d_hma_vol_v1"
-timeframe = "12h"
+name = "exp_306_4h_donchian20_1d_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,7 +22,7 @@ def generate_signals(prices):
     # === HTF: 1d data for HMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate HMA(50) on 1d close
+    # Calculate HMA(21) on 1d close
     def hma(series, period):
         if len(series) < period:
             return np.full_like(series, np.nan)
@@ -34,14 +34,14 @@ def generate_signals(prices):
         hma_vals = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
         return hma_vals.values
     
-    hma_1d = hma(df_1d['close'].values, 50)
+    hma_1d = hma(df_1d['close'].values, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # === 12h Indicators: Donchian Channel (20) ===
+    # === 4h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -68,16 +68,16 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = vol_ratio[i] > 2.0
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
         # --- 1d HMA Trend Filter ---
-        # Uptrend: price > HMA(50)
-        # Downtrend: price < HMA(50)
+        # Uptrend: price > HMA(21)
+        # Downtrend: price < HMA(21)
         uptrend = price > hma_1d_aligned[i]
         downtrend = price < hma_1d_aligned[i]
         
@@ -114,8 +114,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 8 bars (4 days on 12h)
-            if bars_since_entry > 8:
+            # Optional: time-based exit after 12 bars (2 days on 4h)
+            if bars_since_entry > 12:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
