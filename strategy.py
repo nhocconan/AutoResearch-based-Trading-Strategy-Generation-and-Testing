@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #216: 12h Donchian(20) Breakout + Daily Pivot Direction + Volume Spike + Chop Filter
+Experiment #071: 6h Donchian(20) Breakout + Daily Pivot Direction + Volume Confirmation (Novel)
 
-HYPOTHESIS: Donchian channel breakouts on 12h timeframe, filtered by daily pivot direction 
-(price > daily pivot = bullish bias, price < daily pivot = bearish bias), volume spikes (>2.0x average), 
-and choppiness regime (CHOP > 61.8 = ranging, avoid breakouts in chop) capture strong momentum 
-moves with reduced false breakouts. Daily pivot provides daily structural support/resistance. 
-12h timeframe targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while 
-capturing significant moves. Chop filter avoids whipsaws in ranging markets. ATR-based stoploss 
-manages risk. Works in both bull (breakouts with volume) and bear (failed breaks reverse sharply).
+HYPOTHESIS: Donchian channel breakouts on 6h timeframe, filtered by daily pivot direction 
+(price > daily pivot = bullish bias, price < daily pivot = bearish bias), and volume spikes 
+(>1.8x 20-period average) capture strong momentum moves. Daily pivot provides structural 
+support/resistance from the prior day. 6h timeframe targets 12-37 trades/year (50-150 total 
+over 4 years) to minimize fee drag while capturing significant moves. The strategy works in 
+both bull (breakouts with volume) and bear (failed breaks reverse sharply) markets by using 
+price action structure rather than pure trend following. Uses ATR-based stoploss (2.0x) and 
+minimum holding period (2 bars) to reduce churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_216_12h_donchian_daily_pivot_volume_chop_v1"
-timeframe = "12h"
+name = "exp_071_6h_donchian_daily_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -49,12 +50,12 @@ def generate_signals(prices):
         # Create series aligned with 1d index
         daily_pivot_series = pd.Series(index=df_1d_indexed.index, data=prior_day_pivot)
         
-        # Align to LTF (12h) timeframe with shift(1) for completed bars only
+        # Align to LTF (6h) timeframe with shift(1) for completed bars only
         daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot_series.values)
     else:
         daily_pivot_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel (20) ===
+    # === 6h Indicators: Donchian Channel (20) ===
     donchian_h = np.full(n, np.nan)
     donchian_l = np.full(n, np.nan)
     donchian_m = np.full(n, np.nan)
@@ -64,7 +65,7 @@ def generate_signals(prices):
         donchian_l[i] = np.min(low[i-20:i])
         donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
@@ -72,28 +73,15 @@ def generate_signals(prices):
     
     atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
     vol_ratio[:20] = 1.0  # Neutral for warmup
     
-    # === 12h Indicators: Choppiness Index (14) for regime filter ===
-    # CHOP = 100 * log10(sum(ATR(14)) / (log10(n) * (max(high) - min(low))))
-    # Simplified: CHOP > 61.8 = ranging (avoid breakouts), CHOP < 38.2 = trending
-    atr_14_chop = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    sum_atr_14 = pd.Series(atr_14_chop).rolling(window=14, min_periods=14).sum().values
-    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    chop = np.full(n, np.nan)
-    # Avoid division by zero
-    denominator = np.log10(14) * (highest_high_14 - lowest_low_14)
-    chop[13:] = 100 * np.log10(sum_atr_14[13:] / np.where(denominator[13:] != 0, denominator[13:], 1))
-    chop[:13] = 50.0  # Neutral for warmup
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # Position size: 25% of capital
+    SIZE = 0.25  # Position sizing (25% of capital)
     
     # Position tracking state variables
     in_position = False
@@ -101,13 +89,13 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 50  # Ensure enough data for HTF daily pivot, ATR, and chop
+    warmup = 50  # Ensure enough data for HTF daily pivot, ATR, and indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
             np.isnan(daily_pivot_aligned[i]) or np.isnan(atr_14[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(chop[i])):
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -115,11 +103,8 @@ def generate_signals(prices):
         price_above_daily_pivot = close[i] > daily_pivot_aligned[i]
         price_below_daily_pivot = close[i] < daily_pivot_aligned[i]
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
-        
-        # --- Chop Filter: Avoid breakouts in ranging markets (CHOP > 61.8) ---
-        chop_filter = chop[i] <= 61.8  # Only allow breakouts when not excessively choppy
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
+        volume_spike = vol_ratio[i] > 1.8
         
         # --- Donchian Breakout Conditions ---
         breakout_up = close[i] > donchian_h[i]
@@ -131,7 +116,7 @@ def generate_signals(prices):
             
             # ATR-based stoploss
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.0 * atr_14[i]  # Stoploss at 2x ATR
+                stop_level = entry_price - 2.0 * atr_14[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -146,7 +131,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_level = entry_price + 2.0 * atr_14[i]  # Stoploss at 2x ATR
+                stop_level = entry_price + 2.0 * atr_14[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -171,11 +156,11 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Donchian breakout up + volume spike + price above daily pivot + chop filter
-        long_condition = breakout_up and volume_spike and price_above_daily_pivot and chop_filter
+        # Long: Donchian breakout up + volume spike + price above daily pivot
+        long_condition = breakout_up and volume_spike and price_above_daily_pivot
         
-        # Short: Donchian breakout down + volume spike + price below daily pivot + chop filter
-        short_condition = breakout_down and volume_spike and price_below_daily_pivot and chop_filter
+        # Short: Donchian breakout down + volume spike + price below daily pivot
+        short_condition = breakout_down and volume_spike and price_below_daily_pivot
         
         if long_condition:
             in_position = True
