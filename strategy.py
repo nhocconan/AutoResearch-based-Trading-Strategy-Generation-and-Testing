@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #750: 1d Donchian20 + 1w HMA Trend + Volume Spike
-HYPOTHESIS: 1d Donchian(20) breakouts filtered by 1w HMA(21) trend direction and volume confirmation (>2.0x average volume) 
-captures strong momentum moves with proper HTF alignment. Uses discrete position sizing (0.25) to minimize fee churn. 
-Works in bull/bear markets: long when price breaks above Donchian upper AND weekly HMA trending up, 
-short when breaks below Donchian lower AND weekly HMA trending down. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #750: 1d Donchian20 + 1w Pivot Direction + Volume Spike
+HYPOTHESIS: 1d Donchian(20) breakouts filtered by 1w weekly pivot direction (above/below weekly pivot) 
+and volume confirmation (>2.0x average volume) captures institutional breakouts with proper HTF alignment. 
+Uses discrete position sizing (0.25) to minimize fee churn. Works in bull/bear markets: long when price 
+breaks above Donchian upper AND above weekly pivot, short when breaks below Donchian lower AND below weekly pivot. 
+Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_750_1d_donchian20_1w_hma_vol_v1"
+name = "exp_750_1d_donchian20_1w_pivot_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -22,61 +23,19 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend direction (Call ONCE before loop) ===
+    # === HTF: 1w data for weekly pivot direction (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate Hull Moving Average (HMA) on weekly close
-    def calculate_hma(series, period):
-        """Calculate Hull Moving Average"""
-        if len(series) < period:
-            return np.full_like(series, np.nan, dtype=np.float64)
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        
-        # WMA of half period
-        wma_half = np.zeros_like(series)
-        for i in range(len(series)):
-            if i < half_period - 1:
-                wma_half[i] = np.nan
-            else:
-                start = i - half_period + 1
-                weights = np.arange(1, half_period + 1)
-                wma_half[i] = np.dot(series[start:i+1], weights) / weights.sum()
-        
-        # WMA of full period
-        wma_full = np.zeros_like(series)
-        for i in range(len(series)):
-            if i < period - 1:
-                wma_full[i] = np.nan
-            else:
-                start = i - period + 1
-                weights = np.arange(1, period + 1)
-                wma_full[i] = np.dot(series[start:i+1], weights) / weights.sum()
-        
-        # Raw HMA = 2*WMA(half) - WMA(full)
-        raw_hma = 2 * wma_half - wma_full
-        
-        # Final HMA = WMA of raw_hma with sqrt_period
-        hma = np.zeros_like(series)
-        for i in range(len(series)):
-            if i < sqrt_period - 1:
-                hma[i] = np.nan
-            else:
-                start = i - sqrt_period + 1
-                weights = np.arange(1, sqrt_period + 1)
-                hma[i] = np.dot(raw_hma[start:i+1], weights) / weights.sum()
-        
-        return hma
+    # Calculate weekly pivot points (standard formula)
+    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
+    # Weekly pivot direction: 1 = price above pivot (bullish bias), -1 = price below pivot (bearish bias)
+    weekly_pivot_dir = np.where(close_1w > weekly_pivot, 1, -1)
     
-    hma_1w = calculate_hma(close_1w, 21)
-    hma_1w_slope = np.diff(hma_1w, prepend=np.nan)  # slope = current - previous
-    hma_1w_dir = np.where(hma_1w_slope > 0, 1, np.where(hma_1w_slope < 0, -1, 0))  # 1=up, -1=down, 0=flat
-    
-    # Align weekly HMA direction to daily timeframe
-    hma_1w_dir_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_dir)
+    # Align weekly pivot direction to 1d timeframe
+    weekly_pivot_dir_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_dir)
     
     # === 1d Indicators: Donchian Channel (20) ===
     donchian_period = 20
@@ -110,7 +69,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(hma_1w_dir_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(weekly_pivot_dir_aligned[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -140,8 +99,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 8 bars (~8 days on 1d) to avoid overtrading
-            if bars_since_entry > 8:
+            # Optional: time-based exit after 6 bars (~6 days on 1d) to avoid overtrading
+            if bars_since_entry > 6:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -156,17 +115,17 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Get regime from 1w HMA direction
-            regime = hma_1w_dir_aligned[i]
+            # Get regime from 1w weekly pivot direction
+            regime = weekly_pivot_dir_aligned[i]
             
-            # Long: price breaks above Donchian upper AND weekly HMA trending up
+            # Long: price breaks above Donchian upper AND weekly pivot direction bullish
             if high[i] > donchian_high[i] and regime > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: price breaks below Donchian lower AND weekly HMA trending down
+            # Short: price breaks below Donchian lower AND weekly pivot direction bearish
             elif low[i] < donchian_low[i] and regime < 0:
                 in_position = True
                 position_side = -1
