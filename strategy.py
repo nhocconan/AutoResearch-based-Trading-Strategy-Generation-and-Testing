@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #538: 1d Donchian(20) breakout + 1w EMA200 trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA200 trend and volume spikes capture strong momentum with low trade frequency. Weekly EMA200 provides structural trend filter that works in both bull and bear markets by filtering breakouts against the long-term trend. Volume confirmation (>1.5x average) ensures participation. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 30-100 total trades over 4 years by using tight entry conditions (breakout + EMA trend + volume).
+Experiment #538: 1d Donchian(20) breakout + 1w EMA50 trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA50 trend and volume spikes capture strong momentum with very low trade frequency (target 30-100 trades over 4 years). Weekly EMA50 provides structural trend filter that adapts to both bull and bear markets. Volume confirmation ensures participation. ATR-based stoploss manages risk. Discrete position sizing (0.25) limits drawdown. Designed for 1d timeframe to minimize fee drag and improve test generalization.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_538_1d_donchian20_1w_ema200_vol_v1"
+name = "exp_538_1d_donchian20_1w_ema50_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -19,17 +19,17 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for EMA200 trend (Call ONCE before loop) ===
+    # === HTF: 1w data for EMA50 trend (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate EMA200 on weekly timeframe
-    if len(close_1w) >= 200:
-        ema_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
+    # Calculate EMA50 on weekly timeframe
+    if len(close_1w) >= 50:
+        ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
     else:
         ema_1w = np.full(len(close_1w), np.nan)
     
-    # Align EMA200 to 1d timeframe
+    # Align EMA50 to 1d timeframe
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # === 1d Indicators: Donchian Channel (20) ===
@@ -58,7 +58,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 200  # sufficient for Donchian(20) warmup + EMA200 calculation
+    warmup = 50  # sufficient for EMA50 warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -77,10 +77,10 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- Weekly EMA200 Trend Filter ---
-        # Bullish trend: price above weekly EMA200
+        # --- Weekly EMA50 Trend Filter ---
+        # Bullish trend: price above weekly EMA50
         bullish_trend = price > ema_1w_aligned[i]
-        # Bearish trend: price below weekly EMA200
+        # Bearish trend: price below weekly EMA50
         bearish_trend = price < ema_1w_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
@@ -106,27 +106,19 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 20 bars (~20 days on 1d) to avoid overtrading
-            if bars_since_entry > 20:
-                in_position = False
-                position_side = 0
-                bars_since_entry = 0
-                signals[i] = 0.0
-                continue
-            
             signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + bullish weekly EMA200 trend
+            # Long: Donchian breakout up + bullish weekly EMA50 trend
             if breakout_up and bullish_trend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + bearish weekly EMA200 trend
+            # Short: Donchian breakout down + bearish weekly EMA50 trend
             elif breakout_down and bearish_trend:
                 in_position = True
                 position_side = -1
@@ -139,3 +131,4 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+}
