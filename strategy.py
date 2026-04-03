@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #1430: 1d Donchian(20) Breakout + 1w Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 1d timeframe capture intermediate-term trends with low trade frequency (target: 30-100 total over 4 years). 
-Trend filter from 1w timeframe ensures alignment with higher-timeframe momentum. Volume confirmation (>2.0x average) filters for institutional participation. 
-Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 1w trend direction. 
-Uses ATR-based stoploss for risk management. Target: 50-150 total trades over 4 years (12-38/year).
+Experiment #1428: 12h Donchian(20) Breakout + 1w Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 12h timeframe with 1-week trend filter capture major trend continuations. 
+Volume confirmation (>2.0x average) ensures institutional participation. Designed for low trade frequency (target: 50-150 total over 4 years) 
+to minimize fee drag. Works in bull markets (breakouts continue uptrend) and bear markets (breakdowns continue downtrend) by following 1w trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1430_1d_donchian20_1w_trend_vol_v1"
-timeframe = "1d"
+name = "exp_1428_12h_donchian20_1w_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,16 +29,16 @@ def generate_signals(prices):
     trend_1w[1:] = np.where(close_1w[1:] > close_1w[:-1], 1, -1)
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # === 1d Indicators: Donchian(20) ===
+    # === 12h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
