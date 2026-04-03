@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #246: 4h Donchian(20) breakout + 1d trend (HMA21) + volume confirmation
-HYPOTHESIS: Donchian breakouts on 4h aligned with 1d HMA(21) trend direction capture high-probability moves. Volume confirmation (>1.6x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) balances return and fee drag. Target: 75-200 total trades over 4 years (19-50/year). Works in bull markets via breakout continuation with trend and in bear markets via mean reversion at opposite band, with symmetry for longs/shorts.
+Experiment #240: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 4h aligned with 1d HMA(21) trend direction capture high-probability moves. Volume confirmation (>1.5x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) balances return and fee drag. Target: 75-200 total trades over 4 years (19-50/year). Works in bull markets via breakout continuation with trend and in bear markets via mean reversion at opposite band, with symmetry for longs/shorts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_246_4h_donchian20_1d_hma_vol_v1"
+name = "exp_240_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,8 +21,8 @@ def generate_signals(prices):
     
     # === HTF: 1d data for HMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    hma_21 = calculate_hma(df_1d['close'].values, 21)
-    hma_21_aligned = align_htf_to_ltf(prices, df_1d, hma_21)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
     # === 4h Indicators: Donchian(20) channels ===
     donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -57,22 +57,22 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
             np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(hma_21_aligned[i])):
+            np.isnan(hma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.6x average) ---
-        volume_spike = vol_ratio[i] > 1.6
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio[i] > 1.5
         
         # --- Donchian Breakout Conditions ---
         breakout_up = high[i] > donch_upper[i-1]
         breakout_down = low[i] < donch_lower[i-1]
         
         # --- HMA Trend Condition ---
-        hma_trend_up = close[i] > hma_21_aligned[i]
-        hma_trend_down = close[i] < hma_21_aligned[i]
+        hma_trend_up = close[i] > hma_1d_aligned[i]
+        hma_trend_down = close[i] < hma_1d_aligned[i]
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -138,32 +138,30 @@ def generate_signals(prices):
     
     return signals
 
-def calculate_hma(values, period):
+def calculate_hma(close, period):
     """Calculate Hull Moving Average"""
-    values = np.asarray(values, dtype=np.float64)
-    n = len(values)
-    if n < period:
-        return np.full(n, np.nan)
+    if len(close) < period:
+        return np.full_like(close, np.nan)
     
     half_period = period // 2
     sqrt_period = int(np.sqrt(period))
     
     # WMA of half period
-    wma_half = np.zeros(n)
-    for i in range(half_period, n):
-        wma_half[i] = np.sum(values[i-half_period+1:i+1] * np.arange(1, half_period+1)) / (half_period * (half_period + 1) / 2)
+    wma_half = np.zeros_like(close)
+    for i in range(half_period, len(close)):
+        wma_half[i] = np.dot(close[i-half_period+1:i+1], np.arange(1, half_period+1)) / (half_period * (half_period + 1) / 2)
     
     # WMA of full period
-    wma_full = np.zeros(n)
-    for i in range(period, n):
-        wma_full[i] = np.sum(values[i-period+1:i+1] * np.arange(1, period+1)) / (period * (period + 1) / 2)
+    wma_full = np.zeros_like(close)
+    for i in range(period-1, len(close)):
+        wma_full[i] = np.dot(close[i-period+1:i+1], np.arange(1, period+1)) / (period * (period + 1) / 2)
     
     # Raw HMA: 2*WMA(half) - WMA(full)
     raw_hma = 2 * wma_half - wma_full
     
     # Final WMA of sqrt_period
-    hma = np.zeros(n)
-    for i in range(sqrt_period, n):
-        hma[i] = np.sum(raw_hma[i-sqrt_period+1:i+1] * np.arange(1, sqrt_period+1)) / (sqrt_period * (sqrt_period + 1) / 2)
+    hma = np.zeros_like(close)
+    for i in range(sqrt_period-1, len(close)):
+        hma[i] = np.dot(raw_hma[i-sqrt_period+1:i+1], np.arange(1, sqrt_period+1)) / (sqrt_period * (sqrt_period + 1) / 2)
     
     return hma
