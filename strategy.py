@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Experiment #1183: 4h Donchian(20) Breakout + 12h Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture swing moves with optimal trade frequency. 
-Trend filter from 12h timeframe prevents counter-trend entries. Volume confirmation (>1.8x avg) ensures institutional participation.
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture swing moves with controlled trade frequency. 
+Trend filter from 12h timeframe prevents counter-trend entries. Volume confirmation (>1.5x avg) ensures institutional participation.
 Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets. 
 Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
 """
@@ -95,8 +95,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.8x average)
-        volume_spike = vol_ratio[i] > 1.8
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
