@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #530: 1d Donchian(20) breakout + 1w EMA20 trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA20 trend and volume confirmation capture strong momentum with lower trade frequency (target: 30-100 trades over 4 years). Weekly EMA20 provides clear bull/bear regime filter that works in both bull and bear markets. Volume confirmation (>1.5x average) ensures participation. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Uses 1d primary timeframe with 1w HTF as specified in experiment #530.
+Experiment #531: 6h Donchian(20) breakout + 1d volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian breakouts on 6h timeframe with volume confirmation (>1.5x average) capture strong momentum. 
+Volume acts as participation filter ensuring breakouts have conviction. ATR-based stoploss (2.0) manages risk. 
+Discrete position sizing (0.25) limits drawdown. Targets 75-200 total trades over 4 years.
+Uses 6h primary timeframe with 1d HTF only for volume (not trend) to test if volume alone suffices as filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_530_1d_donchian20_1w_ema20_vol_v1"
-timeframe = "1d"
+name = "exp_531_6h_donchian20_1d_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,25 +22,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for EMA20 trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    if len(close_1w) >= 20:
-        ema_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
-        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    else:
-        ema_1w_aligned = np.full(n, np.nan)
+    # === HTF: 1d data for volume confirmation (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
     
-    # === 1d Indicators: Donchian Channel (20) ===
+    # Calculate volume MA(20) on daily timeframe
+    if len(volume_1d) >= 20:
+        vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    else:
+        vol_ma_1d = np.full(len(volume_1d), np.nan)
+    
+    # Align daily volume MA to 6h timeframe
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # === 6h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)  # default to 1.0 for warmup period
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
-    
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -59,25 +61,18 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema_1w_aligned[i]) or
-            np.isnan(atr[i])):
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio[i] > 1.5
+        # --- Volume Confirmation: Require volume spike (> 1.5x daily average) ---
+        volume_spike = volume[i] > (1.5 * vol_ma_1d_aligned[i])
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
-        
-        # --- 1w EMA20 Trend Filter ---
-        # Bullish trend: price above EMA20
-        bullish_trend = price > ema_1w_aligned[i]
-        # Bearish trend: price below EMA20
-        bearish_trend = price < ema_1w_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -102,28 +97,20 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 10 bars (~10 days on 1d) to avoid overtrading
-            if bars_since_entry > 10:
-                in_position = False
-                position_side = 0
-                bars_since_entry = 0
-                signals[i] = 0.0
-                continue
-            
             signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + bullish EMA20 trend
-            if breakout_up and bullish_trend:
+            # Long: Donchian breakout up
+            if breakout_up:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + bearish EMA20 trend
-            elif breakout_down and bearish_trend:
+            # Short: Donchian breakout down
+            elif breakout_down:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
