@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Experiment #820: 4h Donchian(20) + 1d EMA Trend + Volume Spike + ATR Stoploss
+Experiment #821: 4h Donchian(20) + 1d EMA Trend + Volume Spike + ATR Stoploss
 HYPOTHESIS: Donchian(20) breakouts capture momentum, filtered by 1d EMA(50) trend direction 
-and volume confirmation (>2.0x average). Long when price breaks above Donchian upper 
+and volume confirmation (>1.8x average). Long when price breaks above Donchian upper 
 AND 1d EMA rising AND volume spike. Short when price breaks below Donchian lower 
 AND 1d EMA falling AND volume spike. Works in bull/bear markets: in bull trends, 
 EMA rising filters for longs; in bear trends, EMA falling filters for shorts. 
@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_820_4h_donchian20_1d_ema_vol_v1"
+name = "exp_821_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,11 +29,11 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate EMA(50) on 1d
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     # Trend: 1 = rising (ema > previous ema), -1 = falling (ema < previous ema), 0 = flat
-    ema_trend_1d = np.zeros_like(ema_1d)
-    ema_trend_1d[1:] = np.where(ema_1d[1:] > ema_1d[:-1], 1, 
-                                np.where(ema_1d[1:] < ema_1d[:-1], -1, 0))
+    ema_trend_1d = np.zeros_like(ema_50_1d)
+    ema_trend_1d[1:] = np.where(ema_50_1d[1:] > ema_50_1d[:-1], 1, 
+                                np.where(ema_50_1d[1:] < ema_50_1d[:-1], -1, 0))
     # Align trend to 4h timeframe
     ema_trend_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_trend_1d)
     
@@ -102,8 +102,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~24h on 4h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 8 bars (~32h on 4h) to avoid overtrading
+            if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -114,8 +114,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
             # Long: price breaks above Donchian upper AND 1d EMA rising
