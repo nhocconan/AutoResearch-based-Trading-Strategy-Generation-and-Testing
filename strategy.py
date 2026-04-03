@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #395: 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
+Experiment #386: 4h Donchian Breakout + 1d Volume Spike + 1d Trend Filter
 
-HYPOTHESIS: Donchian(20) breakouts on 6h timeframe, filtered by weekly pivot direction (price > weekly pivot = bullish bias, price < weekly pivot = bearish bias) and confirmed by 1d volume spike (>2x average), captures high-probability trend continuation moves. Weekly pivot provides structural bias from higher timeframe, Donchian breakouts capture momentum, and volume confirmation ensures institutional participation. Targets 12-37 trades/year on 6h timeframe (50-150 total over 4 years) to minimize fee drag while working in both bull and bear markets through directional filtering.
+HYPOTHESIS: 4h Donchian(20) breakouts with 1d volume confirmation (>1.8x average) and 
+1d trend filter (price > EMA50 on daily) captures strong momentum moves in both bull 
+and bear markets. The 4h primary timeframe targets 20-50 trades/year (75-200 total 
+over 4 years) to minimize fee drag while allowing sufficient statistical significance.
+Daily HTF filters reduce noise and false breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_donchian_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "mtf_4h_donchian_vol_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,7 +24,7 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for volume spike (Call ONCE before loop) ===
+    # === HTF: 1d data for volume spike and trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate volume ratio (current vs 20-period average) on 1d
@@ -34,31 +38,29 @@ def generate_signals(prices):
     else:
         vol_ratio_1d_aligned = np.full(n, 1.0)
     
-    # === HTF: 1w data for weekly pivot (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly pivot points (standard: P = (H+L+C)/3)
-    if len(df_1w) >= 1:
-        high_1w = df_1w['high'].values
-        low_1w = df_1w['low'].values
-        close_1w = df_1w['close'].values
-        weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Calculate EMA(50) on 1d close for trend filter
+    if len(df_1d) >= 50:
+        close_1d = df_1d['close'].values
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     else:
-        weekly_pivot_aligned = np.full(n, np.nan)
+        ema_50_1d_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators ===
-    # Calculate Donchian channels (20-period)
-    donchian_period = 20
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    
-    if n >= donchian_period:
-        # Calculate rolling max/min for Donchian channels
+    # === 4h Indicators: Calculate Donchian channels (20-period) ===
+    if n >= 20:
         high_series = pd.Series(high)
         low_series = pd.Series(low)
-        donchian_high = high_series.rolling(window=donchian_period, min_periods=donchian_period).max().values
-        donchian_low = low_series.rolling(window=donchian_period, min_periods=donchian_period).min().values
+        donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+        donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+        # For warmup period, fill with NaN
+        donchian_upper[:19] = np.nan
+        donchian_lower[:19] = np.nan
+    else:
+        donchian_upper = np.full(n, np.nan)
+        donchian_lower = np.full(n, np.nan)
+    
+    # === Session filter: 00-23 UTC (trade all hours for 4h timeframe) ===
+    hours = prices.index.hour  # Pre-compute before loop
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -69,21 +71,18 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     
-    warmup = max(100, donchian_period)  # Ensure enough data for HTF and indicator calculations
+    warmup = 50  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
+        # --- Session Filter: Trade all hours for 4h timeframe ---
+        hour = hours[i]
+        # No session filter for 4h - trade continuously
+        
         # --- Data Validity Check ---
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(weekly_pivot_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
             signals[i] = 0.0
             continue
-        
-        # --- Directional Filter: Weekly pivot bias ---
-        price_above_weekly_pivot = close[i] > weekly_pivot_aligned[i]
-        price_below_weekly_pivot = close[i] < weekly_pivot_aligned[i]
-        
-        # --- Volume Confirmation: Require volume spike (> 2x average) ---
-        volume_spike = vol_ratio_1d_aligned[i] > 2.0
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -101,8 +100,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at Donchian low (trailing stop) or opposite band
-                if close[i] <= donchian_low[i]:
+                # Take profit at Donchian lower (trailing stop for longs)
+                if close[i] <= donchian_lower[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -114,8 +113,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at Donchian high (trailing stop) or opposite band
-                if close[i] >= donchian_high[i]:
+                # Take profit at Donchian upper (trailing stop for shorts)
+                if close[i] >= donchian_upper[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -126,18 +125,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Donchian breakout above upper band with weekly pivot bullish bias and volume spike
+        # Long: Price breaks above Donchian upper with volume confirmation and uptrend
         long_condition = (
-            close[i] > donchian_high[i] and  # Breakout above Donchian high
-            price_above_weekly_pivot and     # Weekly pivot bullish bias
-            volume_spike                     # Volume confirmation
+            close[i] > donchian_upper[i] and  # Breakout above upper channel
+            vol_ratio_1d_aligned[i] > 1.8 and  # Volume spike confirmation
+            close[i] > ema_50_1d_aligned[i]   # Price above daily EMA50 (uptrend)
         )
         
-        # Short: Donchian breakdown below lower band with weekly pivot bearish bias and volume spike
+        # Short: Price breaks below Donchian lower with volume confirmation and downtrend
         short_condition = (
-            close[i] < donchian_low[i] and   # Breakdown below Donchian low
-            price_below_weekly_pivot and     # Weekly pivot bearish bias
-            volume_spike                     # Volume confirmation
+            close[i] < donchian_lower[i] and  # Breakdown below lower channel
+            vol_ratio_1d_aligned[i] > 1.8 and  # Volume spike confirmation
+            close[i] < ema_50_1d_aligned[i]   # Price below daily EMA50 (downtrend)
         )
         
         if long_condition:
