@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #261: 4h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
-HYPOTHESIS: Donchian breakouts on 4h aligned with 1d weekly pivot (R1/S1) direction capture high-probability moves in both bull and bear markets. Volume confirmation (>1.8x average) filters weak breakouts. In bull markets, breakouts continue; in bear markets, mean reversion occurs at opposite pivot levels. Uses discrete sizing (0.25) to minimize fee drag. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #269: 4h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+HYPOTHESIS: Donchian breakouts on 4h aligned with 1d weekly pivot (R1/S1) direction capture high-probability moves. Volume confirmation (>1.8x average) filters weak breakouts. Works in bull markets via breakout continuation and in bear markets via mean reversion at opposite pivot level. Target: 75-200 total trades over 4 years (19-50/year). Uses discrete sizing (0.25) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_261_4h_donchian20_1d_weekly_pivot_vol_v1"
+name = "exp_269_4h_donchian20_1d_weekly_pivot_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,6 +24,7 @@ def generate_signals(prices):
     
     # Calculate weekly pivot points from prior week (using prior week's OHLC)
     # For each 4h bar, we use the prior completed week's H/L/C
+    # We'll calculate weekly pivot on 1d data then align
     week_high = df_1d['high'].rolling(window=5, min_periods=5).max().shift(1)  # Prior week high
     week_low = df_1d['low'].rolling(window=5, min_periods=5).min().shift(1)    # Prior week low
     week_close = df_1d['close'].rolling(window=5, min_periods=5).last().shift(1)  # Prior week close
