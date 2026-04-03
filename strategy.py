@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #196: 12h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
-HYPOTHESIS: Donchian breakouts on 12h timeframe aligned with 1d Camarilla pivot levels (S3/R3 for mean reversion, S4/R4 for continuation) capture high-probability moves with lower trade frequency suitable for 12h. Volume confirmation (>1.5x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) minimizes fee churn. Target: 75-150 total trades over 4 years. Works in both bull and bear by using breakout logic (continuation at R4/S4) and mean reversion (at R3/S3).
+Experiment #197: 4h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: Donchian breakouts on 4h timeframe aligned with 1d Camarilla pivot levels (S3/R3 for mean reversion, S4/R4 for continuation) capture high-probability moves. Volume confirmation (>1.8x average) filters weak breakouts. ATR stoploss (2.5x) manages risk. Discrete position sizing (0.30) balances return and fee drag. Target: 100-180 total trades over 4 years (25-45/year). Works in both bull and bear by using breakout logic (continuation at R4/S4) and mean reversion (at R3/S3).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_196_12h_donchian20_1d_camarilla_vol_v1"
-timeframe = "12h"
+name = "exp_197_4h_donchian20_1d_camarilla_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -49,24 +49,24 @@ def generate_signals(prices):
             s3_1d[i] = s3
             s4_1d[i] = s4
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # === 12h Indicators: Donchian(20) channels ===
+    # === 4h Indicators: Donchian(20) channels ===
     donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: ATR(14) for stoploss ===
-    tr_12h = np.zeros(n)
-    tr_12h[0] = high[0] - low[0]
+    # === 4h Indicators: ATR(14) for stoploss ===
+    tr_4h = np.zeros(n)
+    tr_4h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_12h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr_12h).ewm(span=14, min_periods=14, adjust=False).mean().values
+        tr_4h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr_4h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
@@ -74,7 +74,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Position tracking state variables
     in_position = False
@@ -95,8 +95,8 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio[i] > 1.5
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
+        volume_spike = vol_ratio[i] > 1.8
         
         # --- Donchian Breakout Conditions ---
         breakout_up = high[i] > donch_upper[i-1]
@@ -113,7 +113,7 @@ def generate_signals(prices):
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.0 * atr_14[i]
+                stop_level = entry_price - 2.5 * atr_14[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -127,7 +127,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_level = entry_price + 2.0 * atr_14[i]
+                stop_level = entry_price + 2.5 * atr_14[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
