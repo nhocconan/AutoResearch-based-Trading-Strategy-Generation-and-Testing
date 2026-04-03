@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #2200: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture swing momentum with daily trend filter.
+HYPOTHESIS: 4h Donchian breakouts capture intermediate-term momentum with daily trend filter.
 - Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average (balanced for trade frequency)
 - HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
@@ -66,7 +66,7 @@ def generate_signals(prices):
     donchian_upper = high_ma
     donchian_lower = low_ma
     
-    # Volume MA for spike detection (balanced threshold for optimal trade frequency)
+    # Volume MA for spike detection (moderate threshold to balance trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -82,7 +82,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size - balanced for risk management
+    SIZE = 0.25  # 25% position size - conservative for risk management
     
     # Position tracking state variables
     in_position = False
