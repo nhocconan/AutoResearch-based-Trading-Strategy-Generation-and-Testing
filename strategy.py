@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #034: 1h Donchian(20) breakout + 4h/1d EMA trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 1h aligned with 4h/1d EMA trend direction capture momentum with structural support/resistance. Volume confirmation filters false breakouts. ATR stoploss (2.0x) and session filter (08-20 UTC) reduce churn. Uses discrete position sizing (0.20) to minimize fee churn. Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+Experiment #031: 6h Donchian Breakout + Weekly Pivot Direction + Volume Confirmation
+
+HYPOTHESIS: Combines 6h Donchian(20) breakouts with 1d weekly pivot levels (from prior week) 
+to determine institutional bias, confirmed by volume spikes. In bullish weekly bias (price 
+above weekly pivot), we take long breakouts above Donchian upper band. In bearish bias 
+(price below weekly pivot), we take short breakouts below Donchian lower band. Volume 
+confirmation ensures institutional participation. Uses discrete position sizing (0.25) to 
+minimize fee drag. Target: 75-150 trades over 4 years. Works in both bull/bear via pivot 
+filter that adapts to weekly structure.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_034_1h_donchian20_4h_1d_ema_vol_v1"
-timeframe = "1h"
+name = "exp_031_6h_donchian_weekly_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,154 +26,102 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h data for EMA trend (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
+    # === HTF: 1d data for weekly pivot calculation (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === 1h Indicators: Donchian(20) channels ===
-    def calculate_donchian(high, low, period=20):
-        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        return upper, lower
+    # Calculate weekly pivot from prior week's OHLC
+    # Weekly high = max(high) over last 7 days (approximated as last 7 daily bars)
+    # Weekly low = min(low) over last 7 days
+    # Weekly close = close of 7th bar ago
+    weekly_high = pd.Series(df_1d['high'].values).rolling(window=7, min_periods=7).max().values
+    weekly_low = pd.Series(df_1d['low'].values).rolling(window=7, min_periods=7).min().values
+    weekly_close = pd.Series(df_1d['close'].values).shift(7).values  # Prior week close
     
-    donch_upper, donch_lower = calculate_donchian(high, low, 20)
+    # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
-    # === 1h Indicators: ATR(14) for stoploss ===
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    # === 6h Indicators: Donchian Channel (20) ===
+    donchian_window = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # === 1h Indicators: Volume MA(20) for spike detection ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.zeros(n)
-    vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
-    vol_ratio[:20] = 1.0  # Neutral for warmup
-    
-    # === Session filter: 08-20 UTC (pre-compute for efficiency) ===
-    # open_time is already datetime64[ms], use DatetimeIndex
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # === 6h Indicators: Volume Spike (2x 20-period average) ===
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_spike = volume > (volume_ma * 2.0)
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # Position sizing (20% of capital)
+    SIZE = 0.25  # Position sizing (25% of capital)
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
-    bars_since_entry = 0  # Track bars in position for minimum holding period
+    bars_since_entry = 0
     
-    warmup = 50  # Warmup for EMA stability
+    warmup = max(20, 20) + 7  # Donchian(20) + weekly lookback
     
     for i in range(warmup, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
-            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(volume_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vol_ma = volume_ma[i]
         
-        # --- EMA Trend: Require alignment between 4h and 1d ---
-        ema_4h_up = price > ema_4h_aligned[i]
-        ema_1d_up = price > ema_1d_aligned[i]
-        trend_bullish = ema_4h_up and ema_1d_up
-        ema_4h_down = price < ema_4h_aligned[i]
-        ema_1d_down = price < ema_1d_aligned[i]
-        trend_bearish = ema_4h_down and ema_1d_down
-        
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio[i] > 1.5
+        # --- Weekly Bias from Pivot ---
+        weekly_bullish = price > weekly_pivot_aligned[i] * 1.001  # Above pivot with small buffer
+        weekly_bearish = price < weekly_pivot_aligned[i] * 0.999  # Below pivot with small buffer
         
         # --- Donchian Breakout Conditions ---
-        breakout_up = high[i] > donch_upper[i-1]  # Break above upper channel
-        breakout_down = low[i] < donch_lower[i-1]  # Break below lower channel
+        breakout_up = price > donchian_high[i]  # New 20-period high
+        breakout_down = price < donchian_low[i]  # New 20-period low
         
-        # --- Exit Logic (ATR-based stoploss) ---
+        # --- Volume Confirmation ---
+        vol_confirmed = volume[i] > (vol_ma * 2.0)
+        
+        # --- Exit Logic: Time-based or opposite signal ---
         if in_position:
             bars_since_entry += 1
             
-            # ATR-based stoploss
+            # Exit conditions
+            exit_signal = False
+            
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.0 * atr_14[i]
-                if low[i] < stop_level:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-                # Exit on opposite Donchian breakout with volume (profit taking)
-                if breakout_down and volume_spike:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
+                # Exit on bearish weekly flip OR Donchian breakdown OR max 12 bars hold
+                if weekly_bearish or breakout_down or bars_since_entry >= 12:
+                    exit_signal = True
             else:  # Short position
-                stop_level = entry_price + 2.0 * atr_14[i]
-                if high[i] > stop_level:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-                # Exit on opposite Donchian breakout with volume (profit taking)
-                if breakout_up and volume_spike:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
+                # Exit on bullish weekly flip OR Donchian breakout OR max 12 bars hold
+                if weekly_bullish or breakout_up or bars_since_entry >= 12:
+                    exit_signal = True
             
-            # Minimum holding period of 2 bars to reduce churn
-            if bars_since_entry < 2:
+            if exit_signal:
+                in_position = False
+                position_side = 0
+                bars_since_entry = 0
+                signals[i] = 0.0
+            else:
                 signals[i] = position_side * SIZE
-                continue
-            
-            # Hold position
-            signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Only trade when breakout aligns with both 4h and 1d EMA trend
-        if trend_bullish:
-            # Long: Donchian breakout up AND volume spike AND bullish trend alignment
-            if breakout_up and volume_spike:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            else:
-                signals[i] = 0.0
-        elif trend_bearish:
-            # Short: Donchian breakout down AND volume spike AND bearish trend alignment
-            if breakout_down and volume_spike:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
-            else:
-                signals[i] = 0.0
-        else:
-            # Mixed or neutral trend, do not trade
-            signals[i] = 0.0
+        # Long: Weekly bullish bias + Donchian breakout up + volume confirmation
+        if weekly_bullish and breakout_up and vol_confirmed:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = SIZE
+        # Short: Weekly bearish bias + Donchian breakout down + volume confirmation
+        elif weekly_bearish and breakout_down and vol_confirmed:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = -SIZE
     
     return signals
