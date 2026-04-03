@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #485: 12h Donchian(20) breakout + 1d EMA(200) trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(200) trend capture major momentum shifts. 
-Volume confirmation (>1.8x average) filters false breakouts. Discrete position sizing (0.25) 
-controls risk. Works in bull markets (breakouts with trend) and bear markets (short breakdowns 
-against downtrend). Uses proven structure from top performers with tighter entry conditions 
-to reduce trade count and fee drag.
+Experiment #486: 4h Donchian(20) breakout + 1d EMA(200) trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(200) trend capture major trend momentum while avoiding counter-trend whipsaws. Volume confirmation (>1.6x average) filters weak breakouts. Uses tighter volume threshold and longer EMA to reduce trade frequency (target: 75-200 trades over 4 years). Works in bull markets (trend-aligned breakouts) and avoids bear market traps by requiring strong trend alignment. Discrete position sizing (0.25) manages drawdown.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_485_12h_donchian20_1d_ema200_vol_v1"
-timeframe = "12h"
+name = "exp_486_4h_donchian20_1d_ema200_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,19 +24,19 @@ def generate_signals(prices):
     close_1d = pd.Series(df_1d['close'].values)
     ema_1d = close_1d.ewm(span=200, min_periods=200, adjust=False).mean().values
     
-    # Align EMA trend to 12h timeframe (shifted by 1 for completed 1d bar only)
+    # Align EMA trend to 4h timeframe (shifted by 1 for completed 1d bar only)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === 12h Indicators: Donchian Channel (20) ===
+    # === 4h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)  # default to 1.0 for warmup period
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -57,7 +53,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 200  # sufficient for 200-period EMA + 20-period indicators
+    warmup = 200  # sufficient for EMA(200) warmup + other indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -69,8 +65,8 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 1.6x average) ---
+        volume_spike = vol_ratio[i] > 1.6
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
@@ -87,8 +83,8 @@ def generate_signals(prices):
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.5*ATR below entry
-                stop_level = entry_price - 2.5 * atr[i]
+                # Stoploss: 2.0*ATR below entry
+                stop_level = entry_price - 2.0 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -96,8 +92,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                # Stoploss: 2.5*ATR above entry
-                stop_level = entry_price + 2.5 * atr[i]
+                # Stoploss: 2.0*ATR above entry
+                stop_level = entry_price + 2.0 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -105,8 +101,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 4 bars (~48h on 12h) to avoid overtrading
-            if bars_since_entry > 4:
+            # Optional: time-based exit after 10 bars (~40h on 4h) to avoid overtrading
+            if bars_since_entry > 10:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
