@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #2025: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian channel breakouts on 12h capture institutional order flow with lower frequency.
-- Primary: 12h Donchian(20) breakout with volume > 1.5x 20-bar average
+Experiment #2026: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian channel breakouts capture institutional order flow. 
+- Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average
 - HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
-- Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year) avoiding overtrading.
+- Works in bull/bear markets by following 1d institutional trend with precise 4h entries.
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2025_12h_donchian20_1d_hma_vol_v1"
-timeframe = "12h"
+name = "exp_2026_4h_donchian20_1d_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -58,7 +59,7 @@ def generate_signals(prices):
     trend_1d = np.where(close_1d > hma_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 12h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
+    # === 4h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
     # Donchian channels
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
