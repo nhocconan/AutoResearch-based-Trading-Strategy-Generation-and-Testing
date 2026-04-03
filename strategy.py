@@ -1,50 +1,76 @@
 #!/usr/bin/env python3
 """
-Experiment #150: 1d Donchian(20) Breakout + Weekly Volume Spike + Weekly Pivot Direction
+Experiment #151: 6h ADX + Williams Alligator Combination
 
-HYPOTHESIS: Donchian(20) breakouts on 1d timeframe with volume confirmation (>2x 20-period weekly average volume) 
-and weekly pivot direction filter (price above/below weekly pivot) captures strong momentum moves. 
-Weekly pivot provides structural bias: long only when price > weekly pivot, short only when price < weekly pivot. 
-This avoids counter-trend breakouts that fail in ranging/bear markets. Using 1d timeframe targets 30-100 trades 
-over 4 years (7-25/year) to minimize fee drag. Weekly timeframe HTF filters ensure alignment with longer-term 
-structure, working in both bull and bear markets via adaptive pivot bias.
+HYPOTHESIS: Williams Alligator identifies trend phases (jaw-teeth-lips alignment) while ADX > 25 confirms trend strength. 
+This combination filters out ranging markets and whipsaws. Long when Alligator is bullish (lips > teeth > jaw) and ADX rising; 
+short when bearish (lips < teeth < jaw) and ADX rising. Uses 6h timeframe for lower noise and 1d HTF for ADX smoothing. 
+Target: 75-150 total trades over 4 years. Works in bull/bear via trend strength filter that adapts to market conditions.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1d_donchian_breakout_1w_volume_weekly_pivot_v1"
-timeframe = "1d"
+name = "mtf_6h_adx_alligator_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
-    close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
-    volume = prices["volume"].values.astype(np.float64)
+    close = prices["close"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for volume spike filter and weekly pivot ===
-    df_1w = get_htf_data(prices, '1w')
-    volume_1w = df_1w['volume'].values
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # === HTF: 1d data for ADX calculation (smoother trend strength) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly volume spike: >2x 20-period average volume
-    avg_vol_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1w = volume_1w > (2.0 * avg_vol_1w)
-    vol_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_spike_1w)
+    # Calculate ADX(14) on 1d
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[np.nan], tr])  # align with original length
+        
+        # Directional Movement
+        up_move = high[1:] - high[:-1]
+        down_move = low[:-1] - low[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        plus_dm = np.concatenate([[0.0], plus_dm])
+        minus_dm = np.concatenate([[0.0], minus_dm])
+        
+        # Smoothed TR, +DM, -DM
+        atr = pd.Series(tr).ewm(alpha=1/period, adjust=False).mean().values
+        plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr
+        minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().values / atr
+        
+        # DX and ADX
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean().values
+        return adx
     
-    # Weekly pivot calculation from prior week's OHLC
-    # Using current week's high/low/close for pivot (standard formula)
-    weekly_pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    weekly_pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_1w)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # === 1d Indicators ===
-    # Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 6h Indicators: Williams Alligator ===
+    # Alligator: Jaw (13-period SMMA, 8 offset), Teeth (8-period SMMA, 5 offset), Lips (5-period SMMA, 3 offset)
+    def smma(series, period):
+        # Smoothed Moving Average: EMA-like but with different smoothing
+        return pd.Series(series).ewm(alpha=1/period, adjust=False).mean().values
+    
+    jaw = smma(high, 13)  # Using high for jaw (typical Alligator uses median price)
+    teeth = smma(high, 8)
+    lips = smma(high, 5)
+    
+    # Apply offsets (shift right by offset periods)
+    jaw = np.concatenate([np.full(8, np.nan), jaw[:-8]]) if len(jaw) > 8 else np.full_like(jaw, np.nan)
+    teeth = np.concatenate([np.full(5, np.nan), teeth[:-5]]) if len(teeth) > 5 else np.full_like(teeth, np.nan)
+    lips = np.concatenate([np.full(3, np.nan), lips[:-3]]) if len(lips) > 3 else np.full_like(lips, np.nan)
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -53,38 +79,35 @@ def generate_signals(prices):
     # Position tracking state variables
     in_position = False
     position_side = 0
+    entry_bar = -1
     
     warmup = 100  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_spike_1w_aligned[i]) or np.isnan(weekly_pivot_1w_aligned[i])):
+        if (np.isnan(adx_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i])):
             signals[i] = 0.0
             continue
         
-        # --- Weekly Pivot Direction Filter ---
-        bullish_bias = close[i] > weekly_pivot_1w_aligned[i]   # Price above weekly pivot
-        bearish_bias = close[i] < weekly_pivot_1w_aligned[i]   # Price below weekly pivot
+        # --- ADX Trend Strength Filter ---
+        strong_trend = adx_1d_aligned[i] > 25.0
+        rising_adx = adx_1d_aligned[i] > adx_1d_aligned[i-1] if i > 0 else False
         
-        # --- Donchian Breakout + Volume Confirmation ---
-        # Upper breakout: price breaks above Donchian high with volume spike
-        upper_breakout = (close[i] > donchian_high[i]) and vol_spike_1w_aligned[i]
-        # Lower breakout: price breaks below Donchian low with volume spike
-        lower_breakout = (close[i] < donchian_low[i]) and vol_spike_1w_aligned[i]
+        # --- Williams Alligator Alignment ---
+        # Bullish: lips > teeth > jaw (all aligned upward)
+        bullish_alligator = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
+        # Bearish: lips < teeth < jaw (all aligned downward)
+        bearish_alligator = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
         
         # --- Position Management (Exit Logic) ---
         if in_position:
-            # Exit when price returns to Donchian midpoint (mean reversion within channel)
-            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2.0
-            if position_side > 0:  # Long
-                if close[i] < donchian_mid:
-                    in_position = False
-                    position_side = 0
-            else:  # Short
-                if close[i] > donchian_mid:
-                    in_position = False
-                    position_side = 0
+            # Exit when Alligator alignment breaks (trend weakening) OR ADX falls below 20
+            alignment_break = not bullish_alligator and not bearish_alligator
+            weak_trend = adx_1d_aligned[i] < 20.0
+            
+            if alignment_break or weak_trend:
+                in_position = False
+                position_side = 0
             
             if not in_position:
                 signals[i] = 0.0
@@ -93,126 +116,15 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: upper breakout + bullish bias (price above weekly pivot)
-        if upper_breakout and bullish_bias:
+        # Long: bullish Alligator + strong/trending ADX
+        if bullish_alligator and strong_trend and rising_adx:
             in_position = True
             position_side = 1
             signals[i] = SIZE
-        # Short: lower breakout + bearish bias (price below weekly pivot)
-        elif lower_breakout and bearish_bias:
+        # Short: bearish Alligator + strong/trending ADX
+        elif bearish_alligator and strong_trend and rising_adx:
             in_position = True
             position_side = -1
             signals[i] = -SIZE
     
     return signals
-
-</think>
-#!/usr/bin/env python3
-"""
-Experiment #150: 1d Donchian(20) Breakout + Weekly Volume Spike + Weekly Pivot Direction
-
-HYPOTHESIS: Donchian(20) breakouts on 1d timeframe with volume confirmation (>2x 20-period weekly average volume) 
-and weekly pivot direction filter (price above/below weekly pivot) captures strong momentum moves. 
-Weekly pivot provides structural bias: long only when price > weekly pivot, short only when price < weekly pivot. 
-This avoids counter-trend breakouts that fail in ranging/bear markets. Using 1d timeframe targets 30-100 trades 
-over 4 years (7-25/year) to minimize fee drag. Weekly timeframe HTF filters ensure alignment with longer-term 
-structure, working in both bull and bear markets via adaptive pivot bias.
-"""
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "mtf_1d_donchian_breakout_1w_volume_weekly_pivot_v1"
-timeframe = "1d"
-leverage = 1.0
-
-def generate_signals(prices):
-    close = prices["close"].values.astype(np.float64)
-    high = prices["high"].values.astype(np.float64)
-    low = prices["low"].values.astype(np.float64)
-    volume = prices["volume"].values.astype(np.float64)
-    n = len(close)
-    
-    # === HTF: 1w data for volume spike filter and weekly pivot ===
-    df_1w = get_htf_data(prices, '1w')
-    volume_1w = df_1w['volume'].values
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Weekly volume spike: >2x 20-period average volume
-    avg_vol_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
-    vol_spike_1w = volume_1w > (2.0 * avg_vol_1w)
-    vol_spike_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_spike_1w)
-    
-    # Weekly pivot calculation from prior week's OHLC
-    # Using current week's high/low/close for pivot (standard formula)
-    weekly_pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    weekly_pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_1w)
-    
-    # === 1d Indicators ===
-    # Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === Signals Initialization ===
-    signals = np.zeros(n)
-    SIZE = 0.25  # Discrete position sizing (25% of capital)
-    
-    # Position tracking state variables
-    in_position = False
-    position_side = 0
-    
-    warmup = 100  # Ensure enough data for HTF and indicator calculations
-    
-    for i in range(warmup, n):
-        # --- Data Validity Check ---
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_spike_1w_aligned[i]) or np.isnan(weekly_pivot_1w_aligned[i])):
-            signals[i] = 0.0
-            continue
-        
-        # --- Weekly Pivot Direction Filter ---
-        bullish_bias = close[i] > weekly_pivot_1w_aligned[i]   # Price above weekly pivot
-        bearish_bias = close[i] < weekly_pivot_1w_aligned[i]   # Price below weekly pivot
-        
-        # --- Donchian Breakout + Volume Confirmation ---
-        # Upper breakout: price breaks above Donchian high with volume spike
-        upper_breakout = (close[i] > donchian_high[i]) and vol_spike_1w_aligned[i]
-        # Lower breakout: price breaks below Donchian low with volume spike
-        lower_breakout = (close[i] < donchian_low[i]) and vol_spike_1w_aligned[i]
-        
-        # --- Position Management (Exit Logic) ---
-        if in_position:
-            # Exit when price returns to Donchian midpoint (mean reversion within channel)
-            donchian_mid = (donchian_high[i] + donchian_low[i]) / 2.0
-            if position_side > 0:  # Long
-                if close[i] < donchian_mid:
-                    in_position = False
-                    position_side = 0
-            else:  # Short
-                if close[i] > donchian_mid:
-                    in_position = False
-                    position_side = 0
-            
-            if not in_position:
-                signals[i] = 0.0
-            else:
-                signals[i] = position_side * SIZE
-            continue
-        
-        # --- New Position Entry Logic (Only if Flat) ---
-        # Long: upper breakout + bullish bias (price above weekly pivot)
-        if upper_breakout and bullish_bias:
-            in_position = True
-            position_side = 1
-            signals[i] = SIZE
-        # Short: lower breakout + bearish bias (price below weekly pivot)
-        elif lower_breakout and bearish_bias:
-            in_position = True
-            position_side = -1
-            signals[i] = -SIZE
-    
-    return signals
-
-</think>
