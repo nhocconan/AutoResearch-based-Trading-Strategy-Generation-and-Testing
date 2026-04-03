@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #174: 1h 4h/1d Donchian Breakout with Volume and Session Filter
-HYPOTHESIS: Use 4h for trend direction (price > Donchian(20) high/low) and 1d for regime filter (ADX > 25), 
-then enter on 1h breakouts in direction of trend during active session (08-20 UTC). 
-Volume confirmation (>1.5x average) reduces false breakouts. 
-Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+Experiment #175: 6h Volume Spike Donchian Breakout with Weekly HTF Filter
+HYPOTHESIS: 6h Donchian(20) breakouts combined with volume spikes (>2x average) and weekly trend filter (price > weekly EMA20) capture institutional breakout moves. Weekly EMA20 filter ensures we only trade in the direction of the higher timeframe trend, reducing whipsaws in ranging markets. Volume spike confirms breakout legitimacy. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_174_1h_donchian_4h_1d_trend_vol_session_v1"
-timeframe = "1h"
+name = "exp_175_6h_volume_spike_donchian_weekly_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,109 +19,39 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h data for trend direction (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h Donchian channels (20-period)
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.max(arr[i-window+1:i+1])
-        return res
+    # Calculate EMA20 on weekly close
+    close_1w = df_1w['close'].values
+    ema20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    trend_up_1w = close_1w > ema20_1w
+    trend_down_1w = close_1w < ema20_1w
     
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.min(arr[i-window+1:i+1])
-        return res
+    # Align to 6h timeframe
+    trend_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_up_1w)
+    trend_down_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_down_1w)
     
-    donchian_high_20_4h = rolling_max(high_4h, 20)
-    donchian_low_20_4h = rolling_min(low_4h, 20)
-    
-    # Trend direction: price above/below Donchian channels
-    trend_up_4h = close_4h > donchian_high_20_4h
-    trend_down_4h = close_4h < donchian_low_20_4h
-    
-    # Align 4h trend to 1h timeframe
-    trend_up_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_up_20_4h)
-    trend_down_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_down_20_4h)
-    
-    # === HTF: 1d data for regime filter (ADX > 25 = trending market) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d ADX (14-period)
-    def calculate_adx(high, low, close, window=14):
-        # True Range
-        tr1 = high[1:] - low[1:]
-        tr2 = np.abs(high[1:] - close[:-1])
-        tr3 = np.abs(low[1:] - close[:-1])
-        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-        
-        # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        # Smoothed values
-        def wilders_smooth(data, period):
-            res = np.full_like(data, np.nan)
-            for i in range(len(data)):
-                if i < period:
-                    continue
-                if i == period:
-                    res[i] = np.nansum(data[i-period+1:i+1])
-                else:
-                    res[i] = res[i-1] - (res[i-1]/period) + data[i]
-            return res
-        
-        tr_smoothed = wilders_smooth(tr, window)
-        plus_dm_smoothed = wilders_smooth(plus_dm, window)
-        minus_dm_smoothed = wilders_smooth(minus_dm, window)
-        
-        # Directional Indicators
-        plus_di = 100 * plus_dm_smoothed / tr_smoothed
-        minus_di = 100 * minus_dm_smoothed / tr_smoothed
-        
-        # DX and ADX
-        dx = np.where((plus_di + minus_di) != 0, 
-                      100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 
-                      0.0)
-        adx = wilders_smooth(dx, window)
-        return adx
-    
-    adx_14_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    trending_regime = adx_14_1d > 25
-    
-    # Align 1d regime to 1h timeframe
-    trending_regime_aligned = align_htf_to_ltf(prices, df_1d, trending_regime)
-    
-    # === 1h Indicators: ATR(14) for stoploss ===
-    tr_1h = np.zeros(n)
-    tr_1h[0] = high[0] - low[0]
+    # === 6h Indicators: ATR(14) for stoploss ===
+    tr_6h = np.zeros(n)
+    tr_6h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_1h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr_1h).ewm(span=14, min_periods=14, adjust=False).mean().values
+        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 1h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Donchian Channels (20) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
     vol_ratio[:20] = 1.0
     
-    # === Session filter: 08-20 UTC ===
-    hours = prices.index.hour  # open_time is already datetime64[ms]
-    in_session = (hours >= 8) & (hours <= 20)
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20
+    SIZE = 0.25
     
     # Position tracking state variables
     in_position = False
@@ -132,13 +59,12 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 100  # Enough for 4h Donchian (20*4=80) + 1d ADX + volume MA
+    warmup = 60
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or 
-            np.isnan(trend_up_4h_aligned[i]) or np.isnan(trend_down_4h_aligned[i]) or
-            np.isnan(trending_regime_aligned[i])):
+        if (np.isnan(atr_14[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(trend_up_1w_aligned[i]) or np.isnan(trend_down_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -149,7 +75,7 @@ def generate_signals(prices):
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.0 * atr_14[i]
+                stop_level = entry_price - 2.5 * atr_14[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -157,7 +83,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_level = entry_price + 2.0 * atr_14[i]
+                stop_level = entry_price + 2.5 * atr_14[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -165,42 +91,31 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
+            if bars_since_entry < 2:
+                signals[i] = position_side * SIZE
+                continue
+            
             signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Require: in session, volume spike, trending regime (from 1d ADX)
-        volume_spike = vol_ratio[i] > 1.5
-        session_ok = in_session[i]
-        regime_ok = trending_regime_aligned[i]
+        # Volume confirmation: require significant spike (> 2.0x average)
+        volume_spike = vol_ratio[i] > 2.0
         
-        if not (session_ok and volume_spike and regime_ok):
-            signals[i] = 0.0
-            continue
-        
-        # Long: 4h uptrend (price > 4h Donchian high) and 1h breakout above recent high
-        if trend_up_4h_aligned[i]:
-            # 1h Donchian breakout (20-period) for entry timing
-            lookback = min(20, i)
-            if lookback >= 20:
-                recent_high = np.max(high[i-lookback:i])
-                if price > recent_high:
-                    in_position = True
-                    position_side = 1
-                    entry_price = price
-                    bars_since_entry = 0
-                    signals[i] = SIZE
-        # Short: 4h downtrend (price < 4h Donchian low) and 1h breakout below recent low
-        elif trend_down_4h_aligned[i]:
-            lookback = min(20, i)
-            if lookback >= 20:
-                recent_low = np.min(low[i-lookback:i])
-                if price < recent_low:
-                    in_position = True
-                    position_side = -1
-                    entry_price = price
-                    bars_since_entry = 0
-                    signals[i] = -SIZE
+        # Long: Price breaks above Donchian upper band, weekly uptrend, volume spike
+        if high[i] > highest_high[i] and trend_up_1w_aligned[i] and volume_spike:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = SIZE
+        # Short: Price breaks below Donchian lower band, weekly downtrend, volume spike
+        elif low[i] < lowest_low[i] and trend_down_1w_aligned[i] and volume_spike:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = -SIZE
         else:
             signals[i] = 0.0
     
