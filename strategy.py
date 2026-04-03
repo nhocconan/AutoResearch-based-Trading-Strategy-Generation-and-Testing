@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #460: 4h Donchian(20) breakout + 1d EMA(20) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(20) trend capture medium-term momentum while avoiding noise. Volume confirmation (>1.5x average) ensures breakout validity. Using 4h timeframe with 1d HTF balances trade frequency (target: 75-200 total trades over 4 years) with statistical significance. Discrete position sizing (0.25) minimizes fee churn. Designed to work in both bull (breakouts with trend) and bear (mean reversion at extremes) markets via trend filter.
+Experiment #462: 12h Donchian(20) breakout + 1d EMA(20) trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(20) trend capture medium-term momentum while avoiding noise. Volume confirmation (>1.5x average) ensures breakout validity. Using 12h timeframe with 1d HTF balances trade frequency (target: 50-150 total trades over 4 years) with statistical significance. Discrete position sizing (0.25) minimizes fee churn. Designed to work in both bull (breakouts with trend) and bear (mean reversion at extremes) markets via trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_460_4h_donchian20_1d_ema20_vol_v1"
-timeframe = "4h"
+name = "exp_462_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,19 +24,19 @@ def generate_signals(prices):
     close_1d = pd.Series(df_1d['close'].values)
     ema_1d = close_1d.ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Align EMA trend to 4h timeframe (shifted by 1 for completed 1d bar only)
+    # Align EMA trend to 12h timeframe (shifted by 1 for completed 1d bar only)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)  # default to 1.0 for warmup period
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -101,8 +101,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~24h on 4h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 3 bars (~36h on 12h) to avoid overtrading
+            if bars_since_entry > 3:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
