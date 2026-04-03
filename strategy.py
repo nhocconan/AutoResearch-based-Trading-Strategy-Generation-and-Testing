@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #055: 6h Williams %R + 1d EMA trend + volume confirmation
-HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h chart, while 1d EMA(50) provides trend filter. Enter long when %R < -80 (oversold) and price > 1d EMA(50), enter short when %R > -20 (overbought) and price < 1d EMA(50). Volume confirmation (>1.5x average) ensures momentum. This mean-reversion-with-trend filter works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0) to manage risk. Target: 75-150 total trades over 4 years (19-37/year).
+Experiment #056: 12h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Price breaking 12h Donchian(20) channels with 1d EMA(50) trend alignment and volume spike (>1.5x) captures medium-term momentum with fewer trades than 4h. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0*ATR). Designed to work in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend) by requiring trend alignment. Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_055_6h_williamsr_1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_056_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,22 +23,19 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate EMA(50) on 1d close
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === 6h Indicators: Williams %R(14) ===
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)  # avoid div by zero
+    # === 12h Indicators: Donchian Channel (20) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.zeros(n)
+    vol_ratio = np.ones(n)  # default to 1.0 for warmup period
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
-    vol_ratio[:20] = 1.0
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -61,7 +58,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i]) or
-            np.isnan(williams_r[i]) or np.isnan(atr[i])):
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -70,13 +67,13 @@ def generate_signals(prices):
         # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
         volume_spike = vol_ratio[i] > 1.5
         
-        # --- Williams %R Conditions ---
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
+        # --- Donchian Breakout Conditions ---
+        breakout_up = price > highest_high[i]
+        breakout_down = price < lowest_low[i]
         
         # --- Trend Filter: 1d EMA alignment ---
-        # Uptrend: price above 1d EMA(50)
-        # Downtrend: price below 1d EMA(50)
+        # Uptrend: price above 1d EMA
+        # Downtrend: price below 1d EMA
         uptrend = price > ema_1d_aligned[i]
         downtrend = price < ema_1d_aligned[i]
         
@@ -103,8 +100,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 8 bars (~32h on 6h) to avoid overtrading
-            if bars_since_entry > 8:
+            # Optional: time-based exit after 4 bars (~48h on 12h) to avoid overtrading
+            if bars_since_entry > 4:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -116,15 +113,15 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: oversold AND uptrend
-            if oversold and uptrend:
+            # Long: breakout above upper channel AND uptrend
+            if breakout_up and uptrend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: overbought AND downtrend
-            elif overbought and downtrend:
+            # Short: breakout below lower channel AND downtrend
+            elif breakout_down and downtrend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -136,5 +133,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
