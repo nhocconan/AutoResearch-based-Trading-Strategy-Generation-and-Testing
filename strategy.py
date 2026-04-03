@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #1125: 12h Donchian(20) Breakout + 1d Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture swing moves with lower frequency. 
+HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture swing moves with lower trade frequency than 4h/6h. 
 Trend filter from 1d timeframe prevents counter-trend entries. Volume confirmation (>1.5x avg) ensures institutional participation.
 Discrete position sizing (0.25) and ATR-based stoploss (2.0x) control risk. 
 Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets.
