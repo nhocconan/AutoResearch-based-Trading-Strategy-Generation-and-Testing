@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #128: 12h Donchian(20) breakout + 1d/1w HTF EMA(50) trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with BOTH 1d AND 1w EMA(50) trend filters (requiring confluence) and volume confirmation (>1.5x) capture medium-term momentum with controlled trade frequency. Requiring BOTH timeframes to agree reduces false breakouts in choppy/ranging markets while still catching strong trends. Volume confirmation ensures institutional participation. ATR-based stops manage risk. Target: 50-150 total trades over 4 years (12-37/year).
+Experiment #132: 12h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(50) trend and volume confirmation (>1.5x) capture medium-term momentum with controlled trade frequency. The 1d EMA provides structural bias from higher timeframe, reducing false breakouts. Volume confirmation ensures institutional participation. Works in bull/bear via EMA trend filter and ATR-based stops. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_128_12h_donchian20_1d1w_ema_vol_v1"
+name = "exp_132_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -24,12 +24,6 @@ def generate_signals(prices):
     close_1d = pd.Series(df_1d['close'].values)
     ema_50_1d = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_trend_1d = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # === HTF: 1w data for EMA(50) trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = pd.Series(df_1w['close'].values)
-    ema_50_1w = close_1w.ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_trend_1w = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     # === 12h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
@@ -63,7 +57,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(ema_trend_1d[i]) or
-            np.isnan(ema_trend_1w[i]) or np.isnan(atr[i])):
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -76,9 +70,9 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- HTF EMA Trend: Require BOTH 1d AND 1w to agree ---
-        bullish_trend = (close[i] > ema_trend_1d[i]) and (close[i] > ema_trend_1w[i])
-        bearish_trend = (close[i] < ema_trend_1d[i]) and (close[i] < ema_trend_1w[i])
+        # --- 1d EMA Trend: from 1d data ---
+        bullish_trend = close[i] > ema_trend_1d[i]
+        bearish_trend = close[i] < ema_trend_1d[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -103,8 +97,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~72h on 12h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 4 bars (~48h on 12h) to avoid overtrading
+            if bars_since_entry > 4:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -116,14 +110,14 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: breakout above upper channel AND BOTH timeframes bullish
+            # Long: breakout above upper channel AND bullish 1d trend
             if breakout_up and bullish_trend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: breakout below lower channel AND BOTH timeframes bearish
+            # Short: breakout below lower channel AND bearish 1d trend
             elif breakout_down and bearish_trend:
                 in_position = True
                 position_side = -1
