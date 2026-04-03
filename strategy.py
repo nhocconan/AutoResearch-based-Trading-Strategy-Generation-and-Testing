@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #234: 1h HTF Direction + Volume Timing Strategy
+Experiment #235: 6h Weekly Pivot Donchian Breakout Strategy
 
-HYPOTHESIS: Use 4h and 1d timeframes for signal direction (trend and regime) and 1h only for entry timing with volume confirmation. 4h Donchian(20) breakout provides trend direction, 1d ADX < 25 defines ranging regime for mean reversion at 4h VWAP, and 1h volume spike (>2.0x) triggers entry. This reduces trades by requiring confluence across three timeframes while capturing both trending and ranging market moves. Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag on 1h timeframe.
+HYPOTHESIS: Weekly pivot points (PP, R1-4, S1-4) combined with 6h Donchian(20) breakouts and volume confirmation capture institutional-level breakouts and reversals. In bull/bear markets, we trade breakouts in the direction of weekly pivot bias. In ranging markets, we fade extreme weekly pivot levels (R3/S3, R4/S4) with volume exhaustion signals. Weekly pivots provide structure that works across regimes, while 6h timeframe targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag in BTC/ETH/SOL.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_234_1h_htf_direction_volume_timing_v1"
-timeframe = "1h"
+name = "exp_235_6h_weekly_pivot_donchian_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,85 +20,58 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h data for trend direction (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
+    # === HTF: Weekly data for pivot points (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h Donchian(20) for trend direction
-    def calculate_donchian_channels(high, low, period=20):
-        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        return upper, lower
+    # Calculate weekly pivot points: PP = (H+L+C)/3, R1 = 2*PP-L, S1 = 2*PP-H, etc.
+    # Using previous week's values (already completed)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    donch_4h_high, donch_4h_low = calculate_donchian_channels(
-        df_4h['high'].values, df_4h['low'].values
-    )
-    donch_4h_high_aligned = align_htf_to_ltf(prices, df_4h, donch_4h_high)
-    donch_4h_low_aligned = align_htf_to_ltf(prices, df_4h, donch_4h_low)
+    # Weekly pivot calculation
+    pp = (weekly_high + weekly_low + weekly_close) / 3.0
+    r1 = 2 * pp - weekly_low
+    s1 = 2 * pp - weekly_high
+    r2 = pp + (weekly_high - weekly_low)
+    s2 = pp - (weekly_high - weekly_low)
+    r3 = weekly_high + 2 * (pp - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - pp)
+    r4 = pp + 3 * (weekly_high - weekly_low)
+    s4 = pp - 3 * (weekly_high - weekly_low)
     
-    # === HTF: 1d data for regime detection (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
+    # Align weekly pivots to 6h timeframe (shifted by 1 for completed weeks only)
+    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
-    # Calculate 1d ADX for regime detection (trending vs ranging)
-    def calculate_adx(high, low, close, period=14):
-        """Calculate ADX (Average Directional Index)"""
-        plus_dm = np.zeros(len(high))
-        minus_dm = np.zeros(len(high))
-        tr = np.zeros(len(high))
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(high[i] - high[i-1], 0)
-            minus_dm[i] = max(low[i-1] - low[i], 0)
-            if plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            if minus_dm[i] < plus_dm[i]:
-                minus_dm[i] = 0
-            if plus_dm[i] == minus_dm[i]:
-                plus_dm[i] = 0
-                minus_dm[i] = 0
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Smoothed values
-        atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-        plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
-        minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-        adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-        return adx
+    # === 6h Indicators: Donchian(20) for breakout detection ===
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate 1d VWAP for mean reversion reference
-    typical_price_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-    vwap_1d = (pd.Series(typical_price_1d * df_1d['volume'].values).cumsum() / 
-               pd.Series(df_1d['volume'].values).cumsum()).values
-    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
-    
-    # === 1h Indicators: ATR(14) for stoploss and VWAP calculation ===
-    tr_1h = np.zeros(n)
-    tr_1h[0] = high[0] - low[0]
+    # === 6h Indicators: ATR(14) for stoploss and volatility filter ===
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_1h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    atr_14 = pd.Series(tr_1h).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # Calculate 1h VWAP for entry timing
-    typical_price_1h = (high + low + close) / 3.0
-    vwap_1h = (pd.Series(typical_price_1h * volume).cumsum() / 
-               pd.Series(volume).cumsum()).values
-    
-    # === 1h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume confirmation ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
     vol_ratio[:20] = 1.0  # Neutral for warmup
     
-    # === Session filter: 08-20 UTC ===
-    hours = prices.index.hour  # Already datetime64, .hour works
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # Position sizing (20% of capital)
+    SIZE = 0.25  # Position sizing (25% of capital)
     
     # Position tracking state variables
     in_position = False
@@ -109,29 +82,42 @@ def generate_signals(prices):
     warmup = 100  # Warmup for indicators stability
     
     for i in range(warmup, n):
-        # --- Session Filter: Only trade 08-20 UTC ---
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
-        if (np.isnan(donch_4h_high_aligned[i]) or np.isnan(donch_4h_low_aligned[i]) or
-            np.isnan(adx_1d_aligned[i]) or np.isnan(vwap_1d_aligned[i]) or
-            np.isnan(atr_14[i]) or np.isnan(vwap_1h[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(atr_14[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
-        
-        # --- HTF Direction: 4h Donchian breakout ====
-        price_4h_high = donch_4h_high_aligned[i]
-        price_4h_low = donch_4h_low_aligned[i]
-        
-        # --- HTF Regime: 1d ADX < 25 = ranging, > 25 = trending ---
-        is_ranging = adx_1d_aligned[i] < 25
-        is_trending = adx_1d_aligned[i] >= 25
         
         # --- Price ---
         price = close[i]
+        
+        # --- Weekly Pivot Bias: Determine market bias from weekly PP ---
+        # Bullish bias: price above weekly PP
+        # Bearish bias: price below weekly PP
+        bullish_bias = price > pp_aligned[i]
+        bearish_bias = price < pp_aligned[i]
+        
+        # --- Distance to weekly pivot levels (normalized by ATR) ---
+        dist_to_r3 = (price - r3_aligned[i]) / atr_14[i] if atr_14[i] > 0 else 0
+        dist_to_s3 = (s3_aligned[i] - price) / atr_14[i] if atr_14[i] > 0 else 0
+        dist_to_r4 = (price - r4_aligned[i]) / atr_14[i] if atr_14[i] > 0 else 0
+        dist_to_s4 = (s4_aligned[i] - price) / atr_14[i] if atr_14[i] > 0 else 0
+        
+        # --- Breakout Detection: Donchian(20) breakout with volume confirmation ---
+        breakout_up = (price > highest_high[i]) and (vol_ratio[i] > 1.8)
+        breakout_down = (price < lowest_low[i]) and (vol_ratio[i] > 1.8)
+        
+        # --- Mean Reversion Signals at Extreme Weekly Levels ---
+        # Fade at R3/S3 with volume exhaustion (volume < average)
+        fade_r3 = (dist_to_r3 > 0.5) and (dist_to_r3 < 2.0) and (vol_ratio[i] < 0.7)
+        fade_s3 = (dist_to_s3 > 0.5) and (dist_to_s3 < 2.0) and (vol_ratio[i] < 0.7)
+        
+        # Strong fade at R4/S4 (more extreme levels)
+        fade_r4 = (dist_to_r4 > 0.0) and (vol_ratio[i] < 0.6)
+        fade_s4 = (dist_to_s4 > 0.0) and (vol_ratio[i] < 0.6)
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -146,9 +132,23 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
+                # Exit on mean reversion signal at extreme levels
+                if fade_r4 or (fade_r3 and bearish_bias):
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
             else:  # Short position
                 stop_level = entry_price + 2.5 * atr_14[i]
                 if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+                # Exit on mean reversion signal at extreme levels
+                if fade_s4 or (fade_s3 and bullish_bias):
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -160,92 +160,50 @@ def generate_signals(prices):
                 signals[i] = position_side * SIZE
                 continue
             
-            # Exit conditions based on regime
-            if is_ranging:
-                # In ranging: exit when price returns to 1d VWAP
-                if position_side > 0 and price >= vwap_1d_aligned[i]:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-                elif position_side < 0 and price <= vwap_1d_aligned[i]:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-            else:
-                # In trending: exit on Donchian reversal
-                if position_side > 0 and price < price_4h_low:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-                elif position_side < 0 and price > price_4h_high:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-            
             # Hold position
             signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Volume confirmation: Require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
-        
-        if not volume_spike:
+        # Breakout entries: Trade in direction of weekly bias
+        if breakout_up and bullish_bias:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = SIZE
+        elif breakout_down and bearish_bias:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = -SIZE
+        # Mean reversion entries: Fade extreme weekly levels
+        elif fade_s4:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = SIZE
+        elif fade_r4:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = -SIZE
+        elif fade_s3 and bullish_bias:  # Fade S3 in bullish bias = long
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = SIZE
+        elif fade_r3 and bearish_bias:  # Fade R3 in bearish bias = short
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = -SIZE
+        else:
             signals[i] = 0.0
-            continue
-        
-        # Ranging market logic: Mean reversion at 4h levels toward 1d VWAP
-        if is_ranging:
-            # Long: Price near 4h low AND below 1d VWAP (oversold)
-            long_range = (price <= price_4h_low * 1.005) and (price < vwap_1d_aligned[i])
-            
-            # Short: Price near 4h high AND above 1d VWAP (overbought)
-            short_range = (price >= price_4h_high * 0.995) and (price > vwap_1d_aligned[i])
-            
-            if long_range:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            elif short_range:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
-            else:
-                signals[i] = 0.0
-        
-        # Trending market logic: Donchian breakout with 1h VWAP pullback
-        else:  # is_trending
-            # Long: Price breaks above 4h Donchian high AND pulls back to 1h VWAP
-            long_trend = (price > price_4h_high) and (price <= vwap_1h[i] * 1.01)
-            
-            # Short: Price breaks below 4h Donchian low AND pulls back to 1h VWAP
-            short_trend = (price < price_4h_low) and (price >= vwap_1h[i] * 0.99)
-            
-            if long_trend:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            elif short_trend:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
-            else:
-                signals[i] = 0.0
     
     return signals
