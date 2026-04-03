@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 4h Donchian(20) Breakout + 1d Trend + Volume Spike (Revised)
+Experiment #017: 4h Donchian(20) Breakout + 1d Trend + Volume Spike (Revised)
 
 HYPOTHESIS: 4h Donchian breakouts aligned with 1d trend (price above/below 50-period EMA) 
 and volume confirmation (2x average volume) capture strong momentum moves. 
