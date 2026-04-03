@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-Experiment #782: 12h Donchian(20) + 1d EMA(50) Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: Donchian breakouts capture momentum, filtered by 1d EMA trend direction 
-and volume confirmation (>2.0x average). Long when price breaks above Donchian upper 
-AND 1d EMA rising AND volume spike. Short when price breaks below Donchian lower 
-AND 1d EMA falling AND volume spike. Uses discrete position sizing (0.25). 
-Target: 50-150 total trades over 4 years (12-37/year). Works in bull/bear markets: 
-in bull trends, EMA rising filters for longs; in bear trends, EMA falling filters for shorts.
+Experiment #782: 12h Donchian(20) + 1d EMA Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: Donchian breakouts on 12h capture medium-term momentum, filtered by 1d EMA50 trend direction 
+and volume confirmation (>1.5x average). Long when price breaks above Donchian upper 
+AND 1d EMA50 rising AND volume spike. Short when price breaks below Donchian lower 
+AND 1d EMA50 falling AND volume spike. Works in bull/bear markets: in bull trends, 
+EMA50 rising filters for longs; in bear trends, EMA50 falling filters for shorts. 
+Uses discrete position sizing (0.25). Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
@@ -24,7 +24,7 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA50 trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
@@ -33,7 +33,7 @@ def generate_signals(prices):
     # Trend: 1 = rising (ema > previous ema), -1 = falling (ema < previous ema), 0 = flat
     ema_trend_1d = np.zeros_like(ema_1d)
     ema_trend_1d[1:] = np.where(ema_1d[1:] > ema_1d[:-1], 1, 
-                                np.where(ema_1d[1:] < ema_1d[:-1], -1, 0))
+                                 np.where(ema_1d[1:] < ema_1d[:-1], -1, 0))
     # Align trend to 12h timeframe
     ema_trend_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_trend_1d)
     
@@ -102,8 +102,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 4 bars (~48h on 12h) to avoid overtrading
-            if bars_since_entry > 4:
+            # Optional: time-based exit after 8 bars (~4 days on 12h) to avoid overtrading
+            if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -114,18 +114,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Long: price breaks above Donchian upper AND 1d EMA rising
+            # Long: price breaks above Donchian upper AND 1d EMA50 rising
             if price > upper_20[i] and ema_trend_1d_aligned[i] > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: price breaks below Donchian lower AND 1d EMA falling
+            # Short: price breaks below Donchian lower AND 1d EMA50 falling
             elif price < lower_20[i] and ema_trend_1d_aligned[i] < 0:
                 in_position = True
                 position_side = -1
@@ -138,5 +138,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
