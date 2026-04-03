@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #523: 4h Donchian(20) breakout + 12h HTF EMA21 + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts aligned with 12h EMA21 trend and volume spikes capture strong momentum with lower trade frequency than 1d HTF. The 12h HTF provides intermediate-term trend filter that works in both bull and bear markets by reducing false breakouts. Volume confirmation (>1.5x average) filters weak breakouts. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 75-200 total trades over 4 years by using tight entry conditions (trend + breakout + volume).
+Experiment #525: 12h Donchian(20) breakout + 1d HTF EMA50 + volume confirmation + ATR stoploss
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA50 trend and volume spikes capture strong momentum with lower trade frequency suitable for 12h timeframe. The 1d HTF provides longer-term trend filter that works in both bull and bear markets by reducing false breakouts. Volume confirmation (>1.5x average) filters weak breakouts. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 50-150 total trades over 4 years by using tight entry conditions (trend + breakout + volume).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_523_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_525_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,22 +19,22 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for EMA21 trend (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema21_12h = pd.Series(close_12h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema21_12h_aligned = align_htf_to_ltf(prices, df_12h, ema21_12h)
+    # === HTF: 1d data for EMA50 trend (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)  # default to 1.0 for warmup period
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -56,7 +56,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema21_12h_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(ema50_1d_aligned[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -70,11 +70,11 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- HTF Trend Filter: 12h EMA21 ---
-        # Bullish: price above EMA21
-        bullish_trend = price > ema21_12h_aligned[i]
-        # Bearish: price below EMA21
-        bearish_trend = price < ema21_12h_aligned[i]
+        # --- HTF Trend Filter: 1d EMA50 ---
+        # Bullish: price above EMA50
+        bullish_trend = price > ema50_1d_aligned[i]
+        # Bearish: price below EMA50
+        bearish_trend = price < ema50_1d_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -99,8 +99,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~1 day on 4h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 3 bars (~1.5 days on 12h) to avoid overtrading
+            if bars_since_entry > 3:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
