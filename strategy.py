@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #762: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: Donchian channel breakouts capture strong momentum, filtered by 1d EMA50 trend direction and volume spike (>1.8x average). 
-Long when price breaks above Donchian(20) upper band AND close > EMA50(1d). Short when price breaks below Donchian(20) lower band AND close < EMA50(1d). 
-Uses discrete position sizing (0.25) and ATR-based stoploss (2.0*ATR). 
-Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+Experiment #762: 12h Donchian Breakout + 1d EMA + Volume Spike
+HYPOTHESIS: Donchian(20) breakout on 12h captures strong momentum, filtered by 1d EMA(50) trend and volume confirmation (>1.5x average). 
+Long when price breaks above Donchian upper band AND close > 1d EMA50 AND volume spike. 
+Short when price breaks below Donchian lower band AND close < 1d EMA50 AND volume spike. 
+Uses ATR(14) stoploss and discrete position sizing (0.25). 
+Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
@@ -28,17 +29,14 @@ def generate_signals(prices):
     
     # Calculate EMA(50) on 1d
     ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Align EMA50 to 12h timeframe
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # === 12h Indicators: Donchian Channel(20) ===
-    # Upper band: highest high of last 20 bars
-    # Lower band: lowest low of last 20 bars
-    def calculate_donchian(high, low, period=20):
-        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        return upper, lower
-    
-    upper_band, lower_band = calculate_donchian(high, low, 20)
+    # === 12h Indicators: Donchian Channel (20) ===
+    # Donchian Upper Band: highest high over 20 periods
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Donchian Lower Band: lowest low over 20 periods
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,12 +60,12 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = max(20, 20, 14, 50)  # sufficient for Donchian, volume MA, ATR, EMA50
+    warmup = max(20, 50, 20, 14)  # sufficient for Donchian, EMA50, volume MA, ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema50_1d_aligned[i]) or
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -97,7 +95,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 12 bars (~6 days on 12h) to avoid overtrading
+            # Optional: time-based exit after 12 bars (~6d on 12h) to avoid overtrading
             if bars_since_entry > 12:
                 in_position = False
                 position_side = 0
@@ -109,19 +107,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.8x average)
-        volume_spike = vol_ratio[i] > 1.8
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
+        
+        # Donchian breakout conditions
+        breakout_up = high[i] > highest_high[i-1]  # price breaks above upper band
+        breakout_down = low[i] < lowest_low[i-1]   # price breaks below lower band
         
         if volume_spike:
-            # Long: Price breaks above Donchian upper band AND price > EMA50(1d)
-            if high[i] > upper_band[i] and close[i] > ema50_1d_aligned[i]:
+            # Long: breakout up AND price > 1d EMA50 (uptrend)
+            if breakout_up and price > ema50_1d_aligned[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Price breaks below Donchian lower band AND price < EMA50(1d)
-            elif low[i] < lower_band[i] and close[i] < ema50_1d_aligned[i]:
+            # Short: breakout down AND price < 1d EMA50 (downtrend)
+            elif breakout_down and price < ema50_1d_aligned[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
