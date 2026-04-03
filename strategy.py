@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #1926: 4h Donchian(20) Breakout + 1d Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture institutional order flow. 
-Filter by 1d EMA(50) trend direction and volume spikes (>2x average) to avoid false breakouts.
-ATR-based trailing stoploss (2.5x ATR) limits drawdown in bear markets.
-Target: 100-180 total trades over 4 years (25-45/year) to minimize fee drag.
-Works in bull markets via breakouts and in bear markets via short breakdowns with trend filter.
+Experiment #1927: 6h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Spike + ATR Stoploss
+HYPOTHESIS: 6h Donchian breakouts capture swing momentum. Filter by 1d weekly pivot (Camarilla R4/S4) direction to align with institutional levels, requiring volume spike (>2x avg) to confirm breakout strength. ATR trailing stop (2.5x) manages risk. Targets 75-200 total trades over 4 years (19-50/year) to balance opportunity with fee drag. Works in bull/bear via breakout/breakdown with trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1926_4h_donchian20_1d_trend_vol_sl_v1"
-timeframe = "4h"
+name = "exp_1927_6h_donchian20_1d_pivot_vol_sl_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,24 +19,35 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for weekly pivot calculation (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d EMA(50) trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_50_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # Calculate weekly pivot points (Camarilla) from prior 1d bar
+    # Using prior bar to avoid look-ahead: R4 = C + (H-L)*1.1/2, S4 = C - (H-L)*1.1/2
+    # Actually Camarilla: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, etc.
+    # We'll use R4/S4 as breakout/breakdown levels
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    rang = high_1d - low_1d
+    r4 = pivot + (rang * 1.1 / 2.0)
+    s4 = pivot - (rang * 1.1 / 2.0)
     
-    # === 4h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
-    # Donchian channels
+    # Determine bias: if close > pivot, bullish bias (look for longs at R4 breaks)
+    # if close < pivot, bearish bias (look for shorts at S4 breaks)
+    bias_1d = np.where(close_1d > pivot, 1, -1)
+    bias_1d_aligned = align_htf_to_ltf(prices, df_1d, bias_1d)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # === 6h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume confirmation
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for volatility and stoploss
+    # ATR calculation
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -55,16 +62,16 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    highest_since_entry = 0.0  # for trailing stop
+    highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 50  # sufficient for Donchian(20), EMA(50), ATR(14)
+    warmup = 50  # sufficient for Donchian(20), ATR(14)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
             np.isnan(vol_ma[i]) or np.isnan(atr[i]) or
-            np.isnan(trend_1d_aligned[i])):
+            np.isnan(bias_1d_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -73,10 +80,8 @@ def generate_signals(prices):
         
         # --- Exit Logic (Trailing Stoploss) ---
         if in_position:
-            # Update highest/lowest since entry
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR from highest since entry
                 if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
@@ -85,7 +90,6 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR from lowest since entry
                 if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
@@ -99,15 +103,15 @@ def generate_signals(prices):
         volume_spike = vol_ratio > 2.0
         
         if volume_spike:
-            # Long entry: price breaks above Donchian HIGH + 1d trend up
-            if trend_1d_aligned[i] > 0 and price > donch_high[i]:
+            # Long entry: price breaks above Donchian HIGH AND above 1d R4 + bullish bias
+            if bias_1d_aligned[i] > 0 and price > donch_high[i] and price > r4_aligned[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian LOW + 1d trend down
-            elif trend_1d_aligned[i] < 0 and price < donch_low[i]:
+            # Short entry: price breaks below Donchian LOW AND below 1d S4 + bearish bias
+            elif bias_1d_aligned[i] < 0 and price < donch_low[i] and price < s4_aligned[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
