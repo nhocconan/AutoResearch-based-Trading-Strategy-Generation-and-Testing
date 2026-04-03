@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #039: 6h Williams %R(14) Extreme + 12h Volume Spike + 1d Trend Filter
-HYPOTHESIS: Williams %R identifies overextended moves on 6h; volume spike confirms participation; 
-12h EMA trend filter ensures alignment with intermediate trend. Works in bull/bear by taking 
-extreme reversals in direction of 12h trend. Target: 75-150 trades over 4 years.
+Experiment #044: 1d Donchian(20) Breakout + 1w HMA(21) Trend + Volume Spike
+HYPOTHESIS: Daily Donchian breakouts capture significant moves; weekly HMA filter ensures alignment with major trend; volume spike confirms institutional participation. Works in bull/bear by trading breakouts in direction of weekly trend. Target: 50-100 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_039_6h_williamsr14_12h_volume_1d_trend_v1"
-timeframe = "6h"
+name = "exp_044_1d_donchian20_1w_hma_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,39 +19,31 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for EMA trend (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
+    # === HTF: 1w data for HMA trend filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate EMA(21) on 12h close
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate HMA(21) on 1w close
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
     
-    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
+    wma_half = pd.Series(df_1w['close'].values).rolling(window=half_len, min_periods=half_len).mean().values
+    wma_full = pd.Series(df_1w['close'].values).rolling(window=21, min_periods=21).mean().values
+    raw_hma = 2 * wma_half - wma_full
+    hma_1w = pd.Series(raw_hma).rolling(window=sqrt_len, min_periods=sqrt_len).mean().values
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Calculate EMA(50) on 1d close for trend filter
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === 1d Indicators: Donchian Channel (20) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Williams %R(14) ===
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = np.zeros(n)
-    williams_r[:] = -100  # Initialize to -100 (oversold)
-    # Avoid division by zero
-    denominator = highest_high - lowest_low
-    mask = denominator != 0
-    williams_r[mask] = -100 * (highest_high[mask] - close[mask]) / denominator[mask]
-    
-    # === 6h Indicators: ATR(14) for stoploss ===
-    tr_6h = np.zeros(n)
-    tr_6h[0] = high[0] - low[0]
+    # === 1d Indicators: ATR(14) for stoploss ===
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 1d Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
@@ -73,26 +63,22 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(williams_r[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(hma_1w_aligned[i]) or
             np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- Williams %R Conditions ---
-        williams_oversold = williams_r[i] < -80  # Oversold
-        williams_overbought = williams_r[i] > -20  # Overbought
-        
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
-        
-        # --- 12h EMA Trend: Determine intermediate trend direction ---
+        # --- Donchian Breakout Conditions ---
         price = close[i]
-        ema_12h_trend_up = price > ema_12h_aligned[i]  # Above 12h EMA = uptrend
-        ema_12h_trend_down = price < ema_12h_aligned[i]  # Below 12h EMA = downtrend
+        donchian_breakout_up = price > highest_high[i-1]  # Break above previous period's high
+        donchian_breakout_down = price < lowest_low[i-1]  # Break below previous period's low
         
-        # --- 1d EMA Trend Filter: Ensure alignment with higher timeframe trend ---
-        ema_1d_trend_up = price > ema_1d_aligned[i]  # Above 1d EMA = bullish bias
-        ema_1d_trend_down = price < ema_1d_aligned[i]  # Below 1d EMA = bearish bias
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
+        volume_spike = vol_ratio[i] > 1.8
+        
+        # --- 1w HMA Trend: Determine major trend direction ---
+        hma_trend_up = price > hma_1w_aligned[i]  # Above weekly HMA = uptrend bias
+        hma_trend_down = price < hma_1w_aligned[i]  # Below weekly HMA = downtrend bias
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -107,13 +93,6 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on Williams %R extreme in opposite direction (mean reversion)
-                if williams_overbought and volume_spike:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
             else:  # Short position
                 stop_level = entry_price + 2.5 * atr_14[i]
                 if high[i] > stop_level:
@@ -122,16 +101,9 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on Williams %R extreme in opposite direction (mean reversion)
-                if williams_oversold and volume_spike:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
             
-            # Minimum holding period of 2 bars to reduce churn
-            if bars_since_entry < 2:
+            # Minimum holding period of 3 days to reduce churn
+            if bars_since_entry < 3:
                 signals[i] = position_side * SIZE
                 continue
             
@@ -140,15 +112,15 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Williams %R oversold + volume spike + price above 12h EMA + price above 1d EMA
-        if williams_oversold and volume_spike and ema_12h_trend_up and ema_1d_trend_up:
+        # Long: Donchian breakout up + volume spike + price above weekly HMA
+        if donchian_breakout_up and volume_spike and hma_trend_up:
             in_position = True
             position_side = 1
             entry_price = close[i]
             bars_since_entry = 0
             signals[i] = SIZE
-        # Short: Williams %R overbought + volume spike + price below 12h EMA + price below 1d EMA
-        elif williams_overbought and volume_spike and ema_12h_trend_down and ema_1d_trend_down:
+        # Short: Donchian breakout down + volume spike + price below weekly HMA
+        elif donchian_breakout_down and volume_spike and hma_trend_down:
             in_position = True
             position_side = -1
             entry_price = close[i]
