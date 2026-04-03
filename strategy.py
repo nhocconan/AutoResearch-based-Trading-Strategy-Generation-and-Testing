@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #924: 1d Donchian(20) + 1w HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: Daily Donchian breakouts capture medium-term momentum, filtered by weekly HMA trend 
-and volume confirmation (>1.8x average). Works in both bull and bear markets by only taking 
-trends in the direction of the higher timeframe. Target: 30-100 total trades over 4 years (7-25/year).
+HYPOTHESIS: Daily Donchian breakouts capture multi-week momentum, filtered by weekly HMA trend 
+and volume confirmation (>2.0x average). This lower-frequency approach (1d primary, 1w HTF) 
+reduces trade count to avoid fee drag while maintaining edge in both bull (breakouts work) 
+and bear (trend filter prevents counter-trend entries) markets. Target: 30-80 total trades 
+over 4 years (7-20/year) to stay within fee-efficient bounds.
 """
 
 import numpy as np
@@ -65,7 +67,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.28  # 28% position size
+    SIZE = 0.25  # 25% position size - conservative for lower TF
     
     # Position tracking state variables
     in_position = False
@@ -90,8 +92,8 @@ def generate_signals(prices):
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.0*ATR below entry
-                stop_level = entry_price - 2.0 * atr[i]
+                # Stoploss: 2.5*ATR below entry (wider for daily volatility)
+                stop_level = entry_price - 2.5 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -99,8 +101,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                # Stoploss: 2.0*ATR above entry
-                stop_level = entry_price + 2.0 * atr[i]
+                # Stoploss: 2.5*ATR above entry
+                stop_level = entry_price + 2.5 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -108,8 +110,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 10 bars (~10 days on 1d) to avoid overtrading
-            if bars_since_entry > 10:
+            # Optional: time-based exit after 15 bars (~3 weeks) to avoid overtrading
+            if bars_since_entry > 15:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -120,8 +122,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.8x average)
-        volume_spike = vol_ratio[i] > 1.8
+        # Volume confirmation: require volume spike (> 2.0x average)
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # Long: price breaks above Donchian upper AND 1w HMA rising
