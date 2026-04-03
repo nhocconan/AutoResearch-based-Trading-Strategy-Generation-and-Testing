@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #267: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h aligned with 1d weekly pivot (R1/S1) direction capture high-probability moves. Volume confirmation (>1.8x average) filters weak breakouts. Works in bull markets via breakout continuation and in bear markets via mean reversion at opposite pivot level. Target: 75-200 total trades over 4 years (19-50/year). Uses discrete sizing (0.25) to minimize fee drag.
+Experiment #259: 6h Donchian(20) breakout + 12h ADX trend filter + volume confirmation
+HYPOTHESIS: Donchian breakouts on 6h with 12h ADX > 25 filter capture strong trending moves while avoiding choppy markets. Volume confirmation (>2.0x average) ensures institutional participation. Works in bull markets via breakout continuation and in bear markets via strong downtrends. Target: 75-200 total trades over 4 years (19-50/year). Uses discrete sizing (0.25) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_267_6h_donchian20_1d_weekly_pivot_vol_v1"
+name = "exp_259_6h_donchian20_12h_adx_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -19,28 +19,45 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for weekly pivot levels (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
+    # === HTF: 12h data for ADX trend filter (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly pivot points from prior week (using prior week's OHLC)
-    # For each 6h bar, we use the prior completed week's H/L/C
-    # We'll calculate weekly pivot on 1d data then align
-    week_high = df_1d['high'].rolling(window=5, min_periods=5).max().shift(1)  # Prior week high
-    week_low = df_1d['low'].rolling(window=5, min_periods=5).min().shift(1)    # Prior week low
-    week_close = df_1d['close'].rolling(window=5, min_periods=5).last().shift(1)  # Prior week close
+    # Calculate ADX(14) on 12h data
+    # True Range
+    tr_12h = np.zeros(len(df_12h))
+    tr_12h[0] = df_12h['high'].iloc[0] - df_12h['low'].iloc[0]
+    for i in range(1, len(df_12h)):
+        tr_12h[i] = max(
+            df_12h['high'].iloc[i] - df_12h['low'].iloc[i],
+            abs(df_12h['high'].iloc[i] - df_12h['close'].iloc[i-1]),
+            abs(df_12h['low'].iloc[i] - df_12h['close'].iloc[i-1])
+        )
     
-    pivot = (week_high + week_low + week_close) / 3.0
-    r1 = 2 * pivot - week_low
-    s1 = 2 * pivot - week_high
-    r2 = pivot + (week_high - week_low)
-    s2 = pivot - (week_high - week_low)
+    # Directional Movement
+    up_move = df_12h['high'].diff().values
+    down_move = -df_12h['low'].diff().values
     
-    # Align to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot.values)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1.values)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1.values)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2.values)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2.values)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed values using Wilder's smoothing (equivalent to EMA with alpha=1/period)
+    def WilderSmoothing(data, period):
+        result = np.zeros_like(data)
+        result[period-1] = np.mean(data[:period])
+        for i in range(period, len(data)):
+            result[i] = (result[i-1] * (period-1) + data[i]) / period
+        return result
+    
+    atr_12h = WilderSmoothing(tr_12h, 14)
+    plus_di_12h = 100 * WilderSmoothing(plus_dm, 14) / atr_12h
+    minus_di_12h = 100 * WilderSmoothing(minus_dm, 14) / atr_12h
+    
+    # ADX calculation
+    dx = 100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h + 1e-10)
+    adx_12h = WilderSmoothing(dx, 14)
+    
+    # Align ADX to 6h timeframe (shifted by 1 for completed bars only)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
     # === 6h Indicators: Donchian(20) channels ===
     donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -69,31 +86,27 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 60  # Enough for 20-period indicators and 5-day weekly pivot
+    warmup = 60  # Enough for 20-period indicators and 12h ADX calculation
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
             np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or
-            np.isnan(s1_aligned[i])):
+            np.isnan(adx_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = vol_ratio[i] > 2.0
+        
+        # --- Trend Filter: Require 12h ADX > 25 (strong trend) ---
+        strong_trend = adx_12h_aligned[i] > 25.0
         
         # --- Donchian Breakout Conditions ---
         breakout_up = high[i] > donch_upper[i-1]
         breakout_down = low[i] < donch_lower[i-1]
-        
-        # --- Pivot Direction Logic ---
-        # Long bias: price above R1 (bullish)
-        # Short bias: price below S1 (bearish)
-        long_bias = price > r1_aligned[i]
-        short_bias = price < s1_aligned[i]
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -107,8 +120,8 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on breakout down with volume if bearish bias
-                if breakout_down and volume_spike and short_bias:
+                # Exit on breakout down with volume if trend weakening
+                if breakout_down and volume_spike and adx_12h_aligned[i] < 20:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -122,8 +135,8 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on breakout up with volume if bullish bias
-                if breakout_up and volume_spike and long_bias:
+                # Exit on breakout up with volume if trend weakening
+                if breakout_up and volume_spike and adx_12h_aligned[i] < 20:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -138,17 +151,17 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Require volume spike + breakout conditions + pivot bias alignment
-        if volume_spike:
-            # Long: breakout up AND bullish bias (above R1)
-            if breakout_up and long_bias:
+        # Require volume spike + strong trend + breakout conditions
+        if volume_spike and strong_trend:
+            # Long: breakout up
+            if breakout_up:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: breakout down AND bearish bias (below S1)
-            elif breakout_down and short_bias:
+            # Short: breakout down
+            elif breakout_down:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -160,5 +173,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
