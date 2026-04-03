@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #027: 6h Williams Alligator + Elder Ray + 1d Trend Filter Strategy
-
-HYPOTHESIS: Combines Williams Alligator (trend identification) with Elder Ray 
-(Bull/Bear Power) on 6h timeframe, filtered by 1d trend direction. The Alligator 
-identifies trending vs ranging markets via jaw-teeth-lips alignment, while Elder 
-Ray measures bull/bear strength relative to EMA13. In strong trends (Alligator 
-awake with Elder Ray confirmation), we enter pullbacks to the middle line (teeth). 
-In ranging markets (Alligator sleeping), we avoid trades. Uses 1d trend filter 
-to only trade in alignment with higher timeframe direction. Target: 75-150 trades 
-over 4 years with discrete position sizing to minimize fee drag.
+Experiment #031: 6h Ichimoku Cloud + 1d Weekly Pivot Direction Filter
+HYPOTHESIS: Ichimoku Cloud (TK cross + price relative to cloud) provides high-probability momentum signals,
+while 1d weekly pivot acts as a regime filter - only take longs when price above weekly pivot (bull bias),
+only shorts when price below weekly pivot (bear bias). This combines trend momentum with structural bias
+to work in both bull and bear markets by avoiding counter-trend trades. Minimum 6-bar holding period
+reduces churn. Target: 75-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_027_6h_alligator_elder_ray_1d_trend_v1"
+name = "exp_031_6h_ichimoku_1d_weekly_pivot_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -24,58 +20,51 @@ def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
-    volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for weekly pivot (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA50 for trend filter
-    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate weekly pivot points from 1d data (using prior week's OHLC)
+    df_1d_idx = pd.RangeIndex(len(df_1d))
+    weekly_high = pd.Series(df_1d['high'].values).rolling(window=5, min_periods=5).max().shift(1)  # Prior week high
+    weekly_low = pd.Series(df_1d['low'].values).rolling(window=5, min_periods=5).min().shift(1)   # Prior week low
+    weekly_close = pd.Series(df_1d['close'].values).rolling(window=5, min_periods=5).last().shift(1) # Prior week close
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot.values)
     
-    # === 6h Indicators: Williams Alligator ===
-    # Jaw: 13-period SMMA, shifted 8 bars forward
-    # Teeth: 8-period SMMA, shifted 5 bars forward  
-    # Lips: 5-period SMMA, shifted 3 bars forward
-    def smma(arr, period):
-        """Smoothed Moving Average"""
-        result = np.full_like(arr, np.nan, dtype=np.float64)
-        if len(arr) >= period:
-            # First value is simple SMA
-            result[period-1] = np.mean(arr[:period])
-            # Subsequent values: SMMA = (prev_SMMA*(period-1) + current_price) / period
-            for i in range(period, len(arr)):
-                result[i] = (result[i-1] * (period-1) + arr[i]) / period
-        return result
+    # === 6h Indicators: Ichimoku Cloud ===
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period_tenkan = 9
+    tenkan_sen = (pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max() + 
+                  pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min()) / 2
     
-    jaw = smma(close, 13)  # Blue line
-    teeth = smma(close, 8)  # Red line
-    lips = smma(close, 5)   # Green line
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period_kijun = 26
+    kijun_sen = (pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max() + 
+                 pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min()) / 2
     
-    # Shift forward as per Alligator definition
-    jaw = np.roll(jaw, -8)
-    teeth = np.roll(teeth, -5)
-    lips = np.roll(lips, -3)
-    # NaN out the shifted values at the end
-    jaw[-8:] = np.nan
-    teeth[-5:] = np.nan
-    lips[-3:] = np.nan
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(26)
     
-    # === 6h Indicators: Elder Ray (Bull/Bear Power) ===
-    # Bull Power = High - EMA13
-    # Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    period_senkou_b = 52
+    senkou_span_b = ((pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max() + 
+                      pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min()) / 2).shift(26)
+    
+    # Current Ichimoku values (no look-ahead - using already shifted components)
+    tenkan_sen_vals = tenkan_sen.values
+    kijun_sen_vals = kijun_sen.values
+    senkou_span_a_vals = senkou_span_a.values
+    senkou_span_b_vals = senkou_span_b.values
     
     # === 6h Indicators: ATR(14) for stoploss ===
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
+    tr_6h = np.zeros(n)
+    tr_6h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -85,35 +74,41 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    bars_since_entry = 0
+    bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 50  # Sufficient warmup for SMMA and EMA
+    warmup = 60  # Warmup for Ichimoku stability (need 52+26 periods)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(atr_14[i])):
+        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(tenkan_sen_vals[i]) or np.isnan(kijun_sen_vals[i]) or
+            np.isnan(senkou_span_a_vals[i]) or np.isnan(senkou_span_b_vals[i]) or np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- 1d Trend Filter: Only trade when price is clearly above/below EMA50 ---
-        is_uptrend_1d = price > ema50_1d_aligned[i] * 1.002
-        is_downtrend_1d = price < ema50_1d_aligned[i] * 0.998
+        # --- Ichimoku Components ---
+        tenkan = tenkan_sen_vals[i]
+        kijun = kijun_sen_vals[i]
+        span_a = senkou_span_a_vals[i]
+        span_b = senkou_span_b_vals[i]
         
-        # --- Williams Alligator Conditions ---
-        # Alligator awake: lips > teeth > jaw (uptrend) OR lips < teeth < jaw (downtrend)
-        alligator_awake_up = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        alligator_awake_down = lips[i] < teeth[i] and teeth[i] < jaw[i]
-        alligator_sleeping = not (alligator_awake_up or alligator_awake_down)
+        # Cloud boundaries (top and bottom of cloud)
+        cloud_top = max(span_a, span_b)
+        cloud_bottom = min(span_a, span_b)
         
-        # --- Elder Ray Conditions ---
-        # Strong bull power: positive and increasing
-        # Strong bear power: negative and decreasing (more negative)
-        bull_strong = bull_power[i] > 0 and bull_power[i] > bull_power[i-1]
-        bear_strong = bear_power[i] < 0 and bear_power[i] < bear_power[i-1]
+        # TK Cross (Tenkan-sen crossing Kijun-sen)
+        tk_cross_up = tenkan > kijun and tenkan_sen_vals[i-1] <= kijun_sen_vals[i-1]
+        tk_cross_down = tenkan < kijun and tenkan_sen_vals[i-1] >= kijun_sen_vals[i-1]
+        
+        # Price relative to cloud
+        price_above_cloud = price > cloud_top
+        price_below_cloud = price < cloud_bottom
+        price_in_cloud = (price >= cloud_bottom) and (price <= cloud_top)
+        
+        # --- Weekly Pivot Bias: Only trade when price is clearly above/below weekly pivot ---
+        is_above_pivot = price > weekly_pivot_aligned[i] * 1.001  # 0.1% buffer above pivot
+        is_below_pivot = price < weekly_pivot_aligned[i] * 0.999  # 0.1% buffer below pivot
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -121,38 +116,38 @@ def generate_signals(prices):
             
             # ATR-based stoploss
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.5 * atr_14[i]
+                stop_level = entry_price - 2.0 * atr_14[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit if Alligator starts sleeping or Elder Ray weakens
-                if alligator_sleeping or not bull_strong:
+                # Exit on TK cross down (contrarian exit)
+                if tk_cross_down:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_level = entry_price + 2.5 * atr_14[i]
+                stop_level = entry_price + 2.0 * atr_14[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit if Alligator starts sleeping or Elder Ray weakens
-                if alligator_sleeping or not bear_strong:
+                # Exit on TK cross up (contrarian exit)
+                if tk_cross_up:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             
-            # Minimum holding period of 4 bars to reduce churn
-            if bars_since_entry < 4:
+            # Minimum holding period of 6 bars to reduce churn
+            if bars_since_entry < 6:
                 signals[i] = position_side * SIZE
                 continue
             
@@ -161,25 +156,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Only trade when Alligator is awake AND aligned with 1d trend
-        if not alligator_sleeping:
-            # Long: Alligator awake up AND 1d uptrend AND strong bull power
-            if alligator_awake_up and is_uptrend_1d and bull_strong:
-                # Enter on pullback to teeth (red line) - wait for price to touch/near teeth
-                if abs(price - teeth[i]) < 0.5 * atr_14[i]:  # Near teeth
-                    in_position = True
-                    position_side = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                    signals[i] = SIZE
-            # Short: Alligator awake down AND 1d downtrend AND strong bear power
-            elif alligator_awake_down and is_downtrend_1d and bear_strong:
-                # Enter on pullback to teeth (red line)
-                if abs(price - teeth[i]) < 0.5 * atr_14[i]:  # Near teeth
-                    in_position = True
-                    position_side = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                    signals[i] = -SIZE
+        # Long: TK cross up + price above cloud + price above weekly pivot
+        if tk_cross_up and price_above_cloud and is_above_pivot:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = SIZE
+        # Short: TK cross down + price below cloud + price below weekly pivot
+        elif tk_cross_down and price_below_cloud and is_below_pivot:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = -SIZE
+        else:
+            signals[i] = 0.0
     
     return signals
