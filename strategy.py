@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #796: 12h Donchian(20) + 1d Volume Spike + ATR Stoploss
-HYPOTHESIS: 12h Donchian breakouts capture medium-term momentum, filtered by 1d volume confirmation (>2.0x average) 
-to ensure institutional participation. Long when price breaks above Donchian upper AND volume spike. 
-Short when price breaks below Donchian lower AND volume spike. Works in bull/bear markets: in bull trends, 
-breakouts above upper channel capture momentum; in bear trends, breakouts below lower channel capture momentum. 
-Uses discrete position sizing (0.25). Target: 75-150 total trades over 4 years (19-37/year).
+HYPOTHESIS: 12h Donchian breakouts capture medium-term momentum, filtered by 1d volume confirmation (>1.5x average). 
+Long when price breaks above Donchian upper AND volume spike. Short when price breaks below Donchian lower AND volume spike. 
+Works in bull/bear markets: volume confirms breakout validity regardless of trend direction. Uses ATR-based stoploss for risk control. 
+Discrete position sizing (0.25). Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
@@ -29,9 +28,9 @@ def generate_signals(prices):
     
     # Calculate volume MA(20) on 1d for spike detection
     vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = np.ones_like(volume_1d)
+    vol_ratio_1d = np.ones(len(volume_1d))
     vol_ratio_1d[20:] = volume_1d[20:] / vol_ma_1d[20:]
-    # Align volume ratio to 12h timeframe
+    # Align volume ratio to 12h timeframe (shifted by 1 for completed 1d bar)
     vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
     # === 12h Indicators: Donchian Channel (20) ===
@@ -93,8 +92,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 12 bars (~6 days on 12h) to avoid overtrading
-            if bars_since_entry > 12:
+            # Optional: time-based exit after 4 bars (~48h on 12h) to avoid overtrading
+            if bars_since_entry > 4:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -105,8 +104,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio_1d_aligned[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.5x average on 1d)
+        volume_spike = vol_ratio_1d_aligned[i] > 1.5
         
         if volume_spike:
             # Long: price breaks above Donchian upper
