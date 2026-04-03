@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #1521: 4h Donchian(20) Breakout + 1d/1w Trend + Volume Confirmation + ATR Stop
-HYPOTHESIS: 4h Donchian breakouts with 1d/1w trend alignment and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. Uses discrete position sizing (0.25) to limit drawdown and reduce fee churn. Target: 100-200 total trades over 4 years (25-50/year) by requiring multi-timeframe confluence and volume spike.
+Experiment #1521: 4h Donchian(20) Breakout + 1d/1w Trend + Volume + ATR Stoploss
+HYPOTHESIS: 4h Donchian breakouts with 1d/1w trend alignment and volume confirmation capture medium-term swings in both bull and bear markets. Using 4h timeframe reduces trade frequency vs lower TFs, minimizing fee drag. Position size 0.25 balances profit potential with drawdown control. Target: 100-180 total trades over 4 years (25-45/year).
 """
 
 import numpy as np
@@ -19,6 +19,9 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     open_time = prices["open_time"].values
     n = len(close)
+    
+    # Pre-compute session hours for filter (optional, can remove if too restrictive)
+    hours = pd.DatetimeIndex(open_time).hour
     
     # === HTF: 1d data for trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
@@ -71,6 +74,8 @@ def generate_signals(prices):
             continue
         
         price = close[i]
+        hour = hours[i]
+        in_session = (8 <= hour <= 20)  # UTC 08-20 session filter (can be removed if too restrictive)
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -105,21 +110,15 @@ def generate_signals(prices):
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
-        if trend_following and volume_spike:
-            # Breakout: price breaks above upper band for long
+        # Session filter: only trade during active hours (can adjust or remove)
+        if trend_following and volume_spike and in_session:
+            # Breakout: price breaks above upper band (only long in aligned uptrend)
             if price > donch_high[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Breakdown: price breaks below lower band for short (only in aligned downtrend)
-            elif price < donch_low[i] and (trend_1d_aligned[i] < 0) and (trend_1w_aligned[i] < 0):
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
             else:
                 signals[i] = 0.0
         else:
