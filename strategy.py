@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #069: 4h Donchian(20) Breakout + 1d Volume Spike + 1w Trend Filter
+Experiment #052: 12h Camarilla Pivot + 1d Volume Spike + 1w Trend Filter
 
-HYPOTHESIS: Donchian channel breakouts on 4h timeframe combined with 1d volume confirmation 
-and 1w trend filter (price > EMA50) captures strong momentum moves with institutional 
-participation. The Donchian structure provides objective breakout levels, volume confirms 
-the breakout is real, and the weekly trend filter ensures alignment with higher timeframe 
-direction. Targets 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize 
-fee drag while capturing high-probability trend continuation moves.
+HYPOTHESIS: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) on 12h timeframe,
+combined with 1d volume spike confirmation and 1w trend filter (price > EMA50), creates a
+robust strategy that works in both bull and bear markets. The 12h timeframe targets 12-37
+trades/year (50-150 total over 4 years) to minimize fee drag. Camarilla levels provide
+mathematically derived support/resistance, volume confirms institutional participation,
+and the weekly trend filter ensures alignment with higher timeframe direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian20_1d_vol_1w_trend_v1"
-timeframe = "4h"
+name = "mtf_12h_camarilla_vol_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,19 +50,40 @@ def generate_signals(prices):
     else:
         ema_50_1w_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel (20) ===
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # === 12h Indicators ===
+    # Calculate Camarilla pivot levels for each 12h bar using previous day's OHLC
+    # We need to map each 12h bar to the prior 1d bar's OHLC
+    camarilla_r3 = np.full(n, np.nan)
+    camarilla_s3 = np.full(n, np.nan)
+    camarilla_r4 = np.full(n, np.nan)
+    camarilla_s4 = np.full(n, np.nan)
+    camarilla_r3_s4 = np.full(n, np.nan)  # Midpoint between R3 and S4 for breakout
     
+    # For each 12h bar, get the prior 1d bar's OHLC
     for i in range(n):
-        if i >= 20:
-            window_high = high[i-20:i]  # Previous 20 bars (excludes current)
-            window_low = low[i-20:i]
-            donchian_high[i] = np.max(window_high)
-            donchian_low[i] = np.min(window_low)
+        current_time = prices.iloc[i]['open_time']
+        # Find the most recent completed 1d bar before current 12h bar
+        prior_1d_bars = df_1d[df_1d['open_time'] < current_time]
+        if len(prior_1d_bars) > 0:
+            prev_day = prior_1d_bars.iloc[-1]
+            ph = prev_day['high']
+            pl = prev_day['low']
+            pc = prev_day['close']
+            
+            # Camarilla formulas
+            range_ = ph - pl
+            camarilla_r3[i] = pc + range_ * 1.1 / 4
+            camarilla_s3[i] = pc - range_ * 1.1 / 4
+            camarilla_r4[i] = pc + range_ * 1.1 / 2
+            camarilla_s4[i] = pc - range_ * 1.1 / 2
+            camarilla_r3_s4[i] = (camarilla_r3[i] + camarilla_s4[i]) / 2
         else:
-            donchian_high[i] = np.nan
-            donchian_low[i] = np.nan
+            # Not enough prior data
+            camarilla_r3[i] = np.nan
+            camarilla_s3[i] = np.nan
+            camarilla_r4[i] = np.nan
+            camarilla_s4[i] = np.nan
+            camarilla_r3_s4[i] = np.nan
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -77,12 +98,13 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+        if (np.isnan(camarilla_r3[i]) or np.isnan(camarilla_s3[i]) or 
+            np.isnan(camarilla_r4[i]) or np.isnan(camarilla_s4[i]) or
             np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Trend Filter: Only trade in direction of 1w EMA50 ---
+        # --- Regime Filter: Only trade in trending markets (price > 1w EMA50 for long, < for short) ---
         price_above_1w_ema = close[i] > ema_50_1w_aligned[i]
         price_below_1w_ema = close[i] < ema_50_1w_aligned[i]
         
@@ -105,8 +127,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at Donchian Low (trailing stop)
-                if close[i] <= donchian_low[i]:
+                # Take profit at Camarilla S4 (strong support) or R4 (strong resistance)
+                if close[i] >= camarilla_r4[i] or close[i] <= camarilla_s4[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -118,8 +140,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at Donchian High (trailing stop)
-                if close[i] >= donchian_high[i]:
+                # Take profit at Camarilla R4 (strong resistance) or S4 (strong support)
+                if close[i] >= camarilla_r4[i] or close[i] <= camarilla_s4[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -130,18 +152,16 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Price breaks above Donchian High with volume and trend alignment
+        # Long: Price at S3 (mean reversion) OR break above R3_S4 midpoint with volume
         long_condition = (
-            close[i] > donchian_high[i] and 
-            volume_spike and 
-            price_above_1w_ema
+            (close[i] <= camarilla_s3[i] * 1.001 and price_above_1w_ema) or  # S3 mean reversion in uptrend
+            (close[i] > camarilla_r3_s4[i] and volume_spike and price_above_1w_ema)  # Breakout with volume
         )
         
-        # Short: Price breaks below Donchian Low with volume and trend alignment
+        # Short: Price at R3 (mean reversion) OR break below R3_S4 midpoint with volume
         short_condition = (
-            close[i] < donchian_low[i] and 
-            volume_spike and 
-            price_below_1w_ema
+            (close[i] >= camarilla_r3[i] * 0.999 and price_below_1w_ema) or  # R3 mean reversion in downtrend
+            (close[i] < camarilla_r3_s4[i] and volume_spike and price_below_1w_ema)  # Breakdown with volume
         )
         
         if long_condition:
@@ -158,5 +178,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
