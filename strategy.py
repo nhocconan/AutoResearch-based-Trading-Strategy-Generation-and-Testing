@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #620: 4h Donchian(20) breakout + 1d EMA(200) trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(200) trend capture major trend moves while avoiding counter-trend trades. Volume confirmation filters breakouts with low participation. ATR-based stoploss manages risk. Designed to work in both bull (trend following) and bear (avoiding false breakouts) markets by requiring HTF alignment. Target: 75-200 total trades over 4 years via tight entry conditions.
+Experiment #621: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend capture medium-term momentum with reduced whipsaw. Volume confirmation ensures institutional participation. Target: 75-200 total trades over 4 years via tight entry conditions (Donchian breakout + HTF trend + volume spike). This version tightens volume confirmation to 2.0x (from 1.8x) and adds ATR-based profit taking to reduce trade frequency and improve Sharpe in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_620_4h_donchian20_1d_ema200_vol_v1"
+name = "exp_621_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,12 +19,12 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA(200) trend (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA(50) trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(200) on 1d
-    ema_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
+    # Calculate EMA(50) on 1d
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # === 4h Indicators: Donchian Channel (20) ===
@@ -52,8 +52,9 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     bars_since_entry = 0
+    max_favorable_price = 0.0  # For trailing profit taking
     
-    warmup = 200  # sufficient for EMA(200) and Donchian calculations
+    warmup = 50  # sufficient for Donchian and EMA calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -65,47 +66,65 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = vol_ratio[i] > 2.0
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- HTF Trend Filter: 1d EMA(200) direction ---
-        # Long only when price above 1d EMA(200) (bullish bias)
-        # Short only when price below 1d EMA(200) (bearish bias)
+        # --- HTF Trend Filter: 1d EMA(50) direction ---
+        # Long only when price above 1d EMA(50) (uptrend)
+        # Short only when price below 1d EMA(50) (downtrend)
         ema_trend_up = price > ema_1d_aligned[i]
         ema_trend_down = price < ema_1d_aligned[i]
         
-        # --- Exit Logic: ATR-based stoploss ---
+        # --- Exit Logic: ATR-based stoploss and profit taking ---
         if in_position:
             bars_since_entry += 1
             
+            # Update max favorable price for trailing
             if position_side > 0:  # Long position
+                max_favorable_price = max(max_favorable_price, price)
                 # Stoploss: 2.5*ATR below entry
                 stop_level = entry_price - 2.5 * atr[i]
+                # Profit take: reduce to half position at 2R profit
+                profit_level = entry_price + 2.0 * atr[i] * 2.0  # 2R = 4*ATR
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
+                    max_favorable_price = 0.0
                     signals[i] = 0.0
                     continue
+                elif high[i] > profit_level and bars_since_entry > 2:
+                    # Take half profit
+                    signals[i] = position_side * SIZE * 0.5
+                    continue
             else:  # Short position
+                max_favorable_price = min(max_favorable_price, price)
                 # Stoploss: 2.5*ATR above entry
                 stop_level = entry_price + 2.5 * atr[i]
+                # Profit take: reduce to half position at 2R profit
+                profit_level = entry_price - 2.0 * atr[i] * 2.0  # 2R = 4*ATR
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
+                    max_favorable_price = 0.0
                     signals[i] = 0.0
                     continue
+                elif low[i] < profit_level and bars_since_entry > 2:
+                    # Take half profit
+                    signals[i] = position_side * SIZE * 0.5
+                    continue
             
-            # Optional: time-based exit after 12 bars (~48h on 4h) to avoid overtrading
-            if bars_since_entry > 12:
+            # Optional: time-based exit after 8 bars (~32h on 4h) to avoid overtrading
+            if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
+                max_favorable_price = 0.0
                 signals[i] = 0.0
                 continue
             
@@ -114,19 +133,21 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + 1d EMA(200) uptrend
+            # Long: Donchian breakout up + 1d EMA(50) uptrend
             if breakout_up and ema_trend_up:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
+                max_favorable_price = price
                 signals[i] = SIZE
-            # Short: Donchian breakout down + 1d EMA(200) downtrend
+            # Short: Donchian breakout down + 1d EMA(50) downtrend
             elif breakout_down and ema_trend_down:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
                 bars_since_entry = 0
+                max_favorable_price = price
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
