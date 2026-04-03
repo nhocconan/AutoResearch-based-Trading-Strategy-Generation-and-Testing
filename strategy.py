@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #134: 1h Donchian(20) Breakout + 4h/1d Pivot Direction + Volume Spike + Session Filter
+Experiment #135: 6h Williams %R Extreme + 1w Trend Filter + Volume Confirmation
 
-HYPOTHESIS: 1h Donchian breakouts filtered by 4h/1d pivot direction (price > pivot = bullish bias, 
-price < pivot = bearish bias) and volume spikes (>2.0x average) capture strong momentum moves with 
-reduced false breakouts. Pivot provides structural support/resistance from higher timeframe (4h/1d), 
-more stable than lower timeframe for 1h timeframe. Session filter (08-20 UTC) avoids low-liquidity periods. 
-Target: 60-150 total trades over 4 years = 15-37/year for 1h to minimize fee drag. Works in bull markets 
-(breakouts with volume) and bear markets (failed breaks reverse sharply from pivot levels). 
-Uses ATR-based stoploss for risk management.
+HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions. Extreme readings 
+(%R < -90 for oversold, %R > -10 for overbought) combined with 1week trend direction 
+(price > 20-period EMA = bullish, price < 20-period EMA = bearish) and volume confirmation 
+(>1.5x average) capture high-probability reversals in both bull and bear markets. 
+In bull markets, we buy oversold dips in uptrends; in bear markets, we sell overbought 
+rallies in downtrends. The 1week EMA filter ensures we trade with the higher timeframe 
+trend, reducing false signals. Targets 12-37 trades/year (50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_134_1h_donchian_4h_1d_pivot_volume_session_v1"
-timeframe = "1h"
+name = "exp_135_6h_williamsr_1w_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,44 +26,27 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === Pre-compute session hours ONCE before loop ===
-    hours = prices.index.hour  # prices.index is DatetimeIndex, .hour works directly
+    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # === HTF: 4h data for pivot calculation (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
+    # Calculate 1w EMA(20) for trend direction
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 4h pivot points from prior 4h bar
-    # Pivot = (Prior 4h High + Prior 4h Low + Prior 4h Close) / 3
-    pivot_4h = (df_4h['high'].shift(1) + df_4h['low'].shift(1) + df_4h['close'].shift(1)) / 3.0
-    pivot_4h_aligned = align_htf_to_ltf(prices, df_4h, pivot_4h.values)
+    # === 6h Indicators: Williams %R(14) ===
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.full(n, np.nan)
+    williams_r[13:] = -100 * (highest_high[13:] - close[13:]) / (highest_high[13:] - lowest_low[13:])
     
-    # === HTF: 1d data for daily pivot calculation (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate daily pivot points from prior day
-    # Pivot = (Prior Day High + Prior Day Low + Prior Day Close) / 3
-    pivot_1d = (df_1d['high'].shift(1) + df_1d['low'].shift(1) + df_1d['close'].shift(1)) / 3.0
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d.values)
-    
-    # === 1h Indicators: Donchian Channel (20) ===
-    donchian_h = np.full(n, np.nan)
-    donchian_l = np.full(n, np.nan)
-    donchian_m = np.full(n, np.nan)
-    
-    for i in range(20, n):
-        donchian_h[i] = np.max(high[i-20:i])
-        donchian_l[i] = np.min(low[i-20:i])
-        donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
-    
-    # === 1h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
     atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 1h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
@@ -71,41 +54,33 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # Position sizing (20% of capital) - conservative to manage drawdown
+    SIZE = 0.25  # Position sizing (25% of capital)
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
-    bars_since_entry = 0  # Track bars in position for minimum holding period
+    bars_since_entry = 0
     
-    warmup = 50  # Ensure enough data for HTF pivot, ATR, and Donchian
+    warmup = 50  # Ensure enough data for HTF EMA, Williams %R, ATR, and volume
     
     for i in range(warmup, n):
-        # --- Session Filter: Only trade 08-20 UTC ---
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
-        if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
-            np.isnan(pivot_4h_aligned[i]) or np.isnan(pivot_1d_aligned[i]) or 
+        if (np.isnan(williams_r[i]) or np.isnan(ema_1w_aligned[i]) or 
             np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- Pivot Trend Filter: Price > Pivot = bullish bias, Price < Pivot = bearish bias ---
-        # Require BOTH 4h and 1d pivot to agree for stronger signal
-        price_above_pivot = close[i] > pivot_4h_aligned[i] and close[i] > pivot_1d_aligned[i]
-        price_below_pivot = close[i] < pivot_4h_aligned[i] and close[i] < pivot_1d_aligned[i]
+        # --- 1w Trend Filter: Price > EMA = bullish bias, Price < EMA = bearish bias ---
+        price_above_ema = close[i] > ema_1w_aligned[i]
+        price_below_ema = close[i] < ema_1w_aligned[i]
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
+        # --- Williams %R Extreme Conditions ---
+        williams_oversold = williams_r[i] < -90  # Oversold condition
+        williams_overbought = williams_r[i] > -10  # Overbought condition
         
-        # --- Donchian Breakout Conditions ---
-        breakout_up = close[i] > donchian_h[i]
-        breakout_down = close[i] < donchian_l[i]
+        # --- Volume Confirmation: Require volume > 1.5x average ---
+        volume_confirm = vol_ratio[i] > 1.5
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -113,38 +88,38 @@ def generate_signals(prices):
             
             # ATR-based stoploss
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.0 * atr_14[i]
+                stop_level = entry_price - 2.5 * atr_14[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on Donchian middle line reversion (take profit)
-                if close[i] < donchian_m[i]:
+                # Exit on Williams %R normalization (take profit)
+                if williams_r[i] > -50:  # Exit when momentum fades
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_level = entry_price + 2.0 * atr_14[i]
+                stop_level = entry_price + 2.5 * atr_14[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit on Donchian middle line reversion (take profit)
-                if close[i] > donchian_m[i]:
+                # Exit on Williams %R normalization (take profit)
+                if williams_r[i] < -50:  # Exit when momentum fades
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry < 3:
+            # Minimum holding period of 2 bars to reduce churn
+            if bars_since_entry < 2:
                 signals[i] = position_side * SIZE
                 continue
             
@@ -153,11 +128,165 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Donchian breakout up + volume spike + price above BOTH pivots
-        long_condition = breakout_up and volume_spike and price_above_pivot
+        # Long: Williams %R oversold + volume confirmation + price above 1w EMA (bullish trend)
+        long_condition = williams_oversold and volume_confirm and price_above_ema
         
-        # Short: Donchian breakout down + volume spike + price below BOTH pivots
-        short_condition = breakout_down and volume_spike and price_below_pivot
+        # Short: Williams %R overbought + volume confirmation + price below 1w EMA (bearish trend)
+        short_condition = williams_overbought and volume_confirm and price_below_ema
+        
+        if long_condition:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = SIZE
+        elif short_condition:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            bars_since_entry = 0
+            signals[i] = -SIZE
+        else:
+            signals[i] = 0.0
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #135: 6h Williams %R Extreme + 1w Trend Filter + Volume Confirmation
+
+HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions. Extreme readings 
+(%R < -90 for oversold, %R > -10 for overbought) combined with 1week trend direction 
+(price > 20-period EMA = bullish, price < 20-period EMA = bearish) and volume confirmation 
+(>1.5x average) capture high-probability reversals in both bull and bear markets. 
+In bull markets, we buy oversold dips in uptrends; in bear markets, we sell overbought 
+rallies in downtrends. The 1week EMA filter ensures we trade with the higher timeframe 
+trend, reducing false signals. Targets 12-37 trades/year (50-150 total over 4 years).
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "exp_135_6h_williamsr_1w_trend_volume_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    close = prices["close"].values.astype(np.float64)
+    high = prices["high"].values.astype(np.float64)
+    low = prices["low"].values.astype(np.float64)
+    volume = prices["volume"].values.astype(np.float64)
+    n = len(close)
+    
+    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate 1w EMA(20) for trend direction
+    ema_1w = pd.Series(df_1w['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # === 6h Indicators: Williams %R(14) ===
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.full(n, np.nan)
+    williams_r[13:] = -100 * (highest_high[13:] - close[13:]) / (highest_high[13:] - lowest_low[13:])
+    
+    # === 6h Indicators: ATR(14) for stoploss ===
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # === 6h Indicators: Volume MA(20) for confirmation ===
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.zeros(n)
+    vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
+    vol_ratio[:20] = 1.0  # Neutral for warmup
+    
+    # === Signals Initialization ===
+    signals = np.zeros(n)
+    SIZE = 0.25  # Position sizing (25% of capital)
+    
+    # Position tracking state variables
+    in_position = False
+    position_side = 0
+    entry_price = 0.0
+    bars_since_entry = 0
+    
+    warmup = 50  # Ensure enough data for HTF EMA, Williams %R, ATR, and volume
+    
+    for i in range(warmup, n):
+        # --- Data Validity Check ---
+        if (np.isnan(williams_r[i]) or np.isnan(ema_1w_aligned[i]) or 
+            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
+            signals[i] = 0.0
+            continue
+        
+        # --- 1w Trend Filter: Price > EMA = bullish bias, Price < EMA = bearish bias ---
+        price_above_ema = close[i] > ema_1w_aligned[i]
+        price_below_ema = close[i] < ema_1w_aligned[i]
+        
+        # --- Williams %R Extreme Conditions ---
+        williams_oversold = williams_r[i] < -90  # Oversold condition
+        williams_overbought = williams_r[i] > -10  # Overbought condition
+        
+        # --- Volume Confirmation: Require volume > 1.5x average ---
+        volume_confirm = vol_ratio[i] > 1.5
+        
+        # --- Exit Logic (ATR-based stoploss) ---
+        if in_position:
+            bars_since_entry += 1
+            
+            # ATR-based stoploss
+            if position_side > 0:  # Long position
+                stop_level = entry_price - 2.5 * atr_14[i]
+                if low[i] < stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+                # Exit on Williams %R normalization (take profit)
+                if williams_r[i] > -50:  # Exit when momentum fades
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+            else:  # Short position
+                stop_level = entry_price + 2.5 * atr_14[i]
+                if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+                # Exit on Williams %R normalization (take profit)
+                if williams_r[i] < -50:  # Exit when momentum fades
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+            
+            # Minimum holding period of 2 bars to reduce churn
+            if bars_since_entry < 2:
+                signals[i] = position_side * SIZE
+                continue
+            
+            # Hold position
+            signals[i] = position_side * SIZE
+            continue
+        
+        # --- New Position Entry Logic (Only if Flat) ---
+        # Long: Williams %R oversold + volume confirmation + price above 1w EMA (bullish trend)
+        long_condition = williams_oversold and volume_confirm and price_above_ema
+        
+        # Short: Williams %R overbought + volume confirmation + price below 1w EMA (bearish trend)
+        short_condition = williams_overbought and volume_confirm and price_below_ema
         
         if long_condition:
             in_position = True
