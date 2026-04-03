@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #148: 12h Donchian(20) breakout + 1w/1d Camarilla pivot + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with weekly/daily Camarilla pivot levels capture high-probability moves in both bull and bear markets. Volume confirmation (>1.5x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) minimizes fee churn. Target: 50-150 total trades over 4 years.
+Experiment #159: 6h Donchian(20) breakout + 12h Camarilla pivot + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts aligned with 12h Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for continuation) capture high-probability moves in both bull and bear markets. Volume confirmation (>1.5x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_148_12h_donchian20_1w1d_camarilla_vol_v1"
-timeframe = "12h"
+name = "exp_159_6h_donchian20_12h_camarilla_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,77 +19,54 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w and 1d data for Camarilla pivot levels (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    df_1d = get_htf_data(prices, '1d')
+    # === HTF: 12h data for Camarilla pivot levels (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Camarilla pivot levels for HTF
-    def calculate_camarilla(high_val, low_val, close_val):
-        pt = (high_val + low_val + close_val) / 3.0
-        rng = high_val - low_val
+    # Calculate Camarilla pivot levels for 12h
+    def calculate_camarilla(high, low, close):
+        pt = (high + low + close) / 3.0
+        rng = high - low
         r3 = pt + rng * 1.1 / 4
         r4 = pt + rng * 1.1 / 2
         s3 = pt - rng * 1.1 / 4
         s4 = pt - rng * 1.1 / 2
         return r3, r4, s3, s4
     
-    # Weekly Camarilla levels
-    r3_1w = np.full(len(df_1w), np.nan)
-    r4_1w = np.full(len(df_1w), np.nan)
-    s3_1w = np.full(len(df_1w), np.nan)
-    s4_1w = np.full(len(df_1w), np.nan)
+    r3_12h = np.full(len(df_12h), np.nan)
+    r4_12h = np.full(len(df_12h), np.nan)
+    s3_12h = np.full(len(df_12h), np.nan)
+    s4_12h = np.full(len(df_12h), np.nan)
     
-    for i in range(len(df_1w)):
-        r3, r4, s3, s4 = calculate_camarilla(
-            df_1w['high'].values[i],
-            df_1w['low'].values[i],
-            df_1w['close'].values[i]
-        )
-        r3_1w[i] = r3
-        r4_1w[i] = r4
-        s3_1w[i] = s3
-        s4_1w[i] = s4
+    for i in range(len(df_12h)):
+        if i >= 0:
+            r3, r4, s3, s4 = calculate_camarilla(
+                df_12h['high'].values[i],
+                df_12h['low'].values[i],
+                df_12h['close'].values[i]
+            )
+            r3_12h[i] = r3
+            r4_12h[i] = r4
+            s3_12h[i] = s3
+            s4_12h[i] = s4
     
-    # Daily Camarilla levels
-    r3_1d = np.full(len(df_1d), np.nan)
-    r4_1d = np.full(len(df_1d), np.nan)
-    s3_1d = np.full(len(df_1d), np.nan)
-    s4_1d = np.full(len(df_1d), np.nan)
+    # Align to 6h timeframe
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
     
-    for i in range(len(df_1d)):
-        r3, r4, s3, s4 = calculate_camarilla(
-            df_1d['high'].values[i],
-            df_1d['low'].values[i],
-            df_1d['close'].values[i]
-        )
-        r3_1d[i] = r3
-        r4_1d[i] = r4
-        s3_1d[i] = s3
-        s4_1d[i] = s4
-    
-    # Align to 12h timeframe
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
-    
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # === 12h Indicators: Donchian(20) channels ===
+    # === 6h Indicators: Donchian(20) channels ===
     donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: ATR(14) for stoploss ===
-    tr_12h = np.zeros(n)
-    tr_12h[0] = high[0] - low[0]
+    # === 6h Indicators: ATR(14) for stoploss ===
+    tr_6h = np.zeros(n)
+    tr_6h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_12h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr_12h).ewm(span=14, min_periods=14, adjust=False).mean().values
+        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
@@ -111,10 +88,8 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
             np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(r3_1w_aligned[i]) or np.isnan(r4_1w_aligned[i]) or
-            np.isnan(s3_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or
-            np.isnan(r3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i])):
+            np.isnan(r3_12h_aligned[i]) or np.isnan(r4_12h_aligned[i]) or
+            np.isnan(s3_12h_aligned[i]) or np.isnan(s4_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -127,16 +102,11 @@ def generate_signals(prices):
         breakout_up = high[i] > donch_upper[i-1]
         breakout_down = low[i] < donch_lower[i-1]
         
-        # --- Camarilla Pivot Conditions (Weekly and Daily) ---
-        near_r3_w = abs(price - r3_1w_aligned[i]) / price < 0.005
-        near_s3_w = abs(price - s3_1w_aligned[i]) / price < 0.005
-        break_r4_w = price > r4_1w_aligned[i]
-        break_s4_w = price < s4_1w_aligned[i]
-        
-        near_r3_d = abs(price - r3_1d_aligned[i]) / price < 0.005
-        near_s3_d = abs(price - s3_1d_aligned[i]) / price < 0.005
-        break_r4_d = price > r4_1d_aligned[i]
-        break_s4_d = price < s4_1d_aligned[i]
+        # --- Camarilla Pivot Conditions ---
+        near_r3 = abs(price - r3_12h_aligned[i]) / price < 0.005
+        near_s3 = abs(price - s3_12h_aligned[i]) / price < 0.005
+        break_r4 = price > r4_12h_aligned[i]
+        break_s4 = price < s4_12h_aligned[i]
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -150,7 +120,7 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                if (break_s4_w or break_s4_d) and volume_spike:
+                if break_s4 and volume_spike:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -164,7 +134,7 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                if (break_r4_w or break_r4_d) and volume_spike:
+                if break_r4 and volume_spike:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -179,18 +149,13 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        long_condition = (breakout_up and volume_spike and (near_r3_w or near_r3_d or break_r4_w or break_r4_d)) or \
-                         ((break_r4_w or break_r4_d) and volume_spike)
-        short_condition = (breakout_down and volume_spike and (near_s3_w or near_s3_d or break_s4_w or break_s4_d)) or \
-                          ((break_s4_w or break_s4_d) and volume_spike)
-        
-        if long_condition:
+        if (breakout_up and volume_spike and (near_r3 or break_r4)) or (break_r4 and volume_spike):
             in_position = True
             position_side = 1
             entry_price = close[i]
             bars_since_entry = 0
             signals[i] = SIZE
-        elif short_condition:
+        elif (breakout_down and volume_spike and (near_s3 or break_s4)) or (break_s4 and volume_spike):
             in_position = True
             position_side = -1
             entry_price = close[i]
