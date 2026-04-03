@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #1410: 1d Donchian(20) Breakout + 1w Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 1d timeframe capture swing trends with low trade frequency (target: 30-100 total over 4 years). 
+HYPOTHESIS: Donchian(20) breakouts on 1d timeframe capture intermediate-term trends with low trade frequency (target: 30-100 total over 4 years). 
 Trend filter from 1w timeframe ensures alignment with higher-timeframe momentum. Volume confirmation (>1.8x average) filters for institutional participation. 
 Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 1w trend direction. 
 Uses ATR-based stoploss for risk management. Target: 30-100 total trades over 4 years (7-25/year).
