@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #1692: 12h Donchian(20) Breakout + 1d HMA Trend + Volume + ATR Stoploss
-HYPOTHESIS: 12h Donchian breakouts with 1d HMA trend alignment and volume confirmation (>1.3x average) capture swing moves in both bull and bear markets. The 1d timeframe filters short-term noise while 12h provides sufficient trade frequency. Target: 75-150 total trades over 4 years (19-37/year) by using moderate entry conditions and multi-timeframe confluence.
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d HMA trend and volume confirmation capture medium-term swings in both bull and bear markets. The 1d timeframe filters noise from shorter-term fluctuations, while the 12h Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 50-150 total trades over 4 years (12-37/year) by using tight entry conditions and multi-timeframe confluence.
 """
 
 import numpy as np
@@ -103,8 +103,8 @@ def generate_signals(prices):
         # Require 1d trend alignment
         trend_following = trend_1d_aligned[i] != 0  # Should always be ±1
         
-        # Volume confirmation: require volume spike (> 1.3x average)
-        volume_spike = vol_ratio[i] > 1.3
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
         if trend_following and volume_spike:
             # Breakout: price breaks above upper band OR below lower band
