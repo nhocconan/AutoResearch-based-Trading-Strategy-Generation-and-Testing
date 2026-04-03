@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #881: 4h Donchian(20) breakout + 1d HMA trend + volume spike + ATR stoploss
+Experiment #881: 4h Donchian(20) + 1d HMA Trend + Volume Spike + ATR Stoploss
 HYPOTHESIS: Donchian breakouts on 4h capture momentum, filtered by 1d HMA trend direction 
-and volume confirmation (>2.0x average). Long when price breaks above Donchian upper 
+and volume confirmation (>1.8x average). Long when price breaks above Donchian upper 
 AND 1d HMA rising AND volume spike. Short when price breaks below Donchian lower 
-AND 1d HMA falling AND volume spike. Works in bull/bear markets: in bull trends, 
-HMA rising filters for longs; in bear trends, HMA falling filters for shorts. 
-Uses discrete position sizing (0.25). Target: 75-200 total trades over 4 years (19-50/year).
+AND 1d HMA falling AND volume spike. Uses discrete position sizing (0.28) to balance 
+risk and reward. Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
@@ -68,7 +67,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.28  # 28% position size
     
     # Position tracking state variables
     in_position = False
@@ -111,8 +110,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~1d on 4h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 5 bars (~20h on 4h) to avoid overtrading
+            if bars_since_entry > 5:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -123,8 +122,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
             # Long: price breaks above Donchian upper AND 1d HMA rising
