@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #1512: 12h Donchian(20) Breakout + 1d Trend + Volume Confirmation + Chop Filter
-HYPOTHESIS: Donchian(20) breakouts on 12h capture medium-term swings with 1d EMA(50) trend filter for direction.
+Experiment #1513: 4h Donchian(20) Breakout + 12h Trend + Volume Confirmation + Chop Filter
+HYPOTHESIS: Donchian(20) breakouts on 4h capture medium-term swings with 12h EMA(50) trend filter for direction.
 Volume confirmation (>1.3x average) and choppiness regime filter (CHOP > 38.2) reduce false breakouts.
-ATR-based stoploss (2.0) manages risk. Designed for 12-37 trades/year (50-150 total over 4 years) by using
-tight entry conditions and multi-timeframe confluence. Works in bull/bear markets by following 1d trend direction.
+ATR-based stoploss (2.0) manages risk. Uses 12h HTF for trend to avoid look-ahead and improve alignment.
+Designed for 19-50 trades/year (75-200 total over 4 years) by using tight entry conditions and multi-timeframe confluence.
+Works in bull/bear markets by following 12h trend direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1512_12h_donchian20_1d_trend_vol_chop_v1"
-timeframe = "12h"
+name = "exp_1513_4h_donchian20_12h_trend_vol_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,13 +24,13 @@ def generate_signals(prices):
     open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    # EMA(50) for 1d trend
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # === HTF: 12h data for trend filter (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    # EMA(50) for 12h trend
+    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_12h = np.where(close_12h > ema_12h, 1, -1)
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
     # === HTF: 1w data for chop regime filter (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
@@ -62,16 +63,16 @@ def generate_signals(prices):
     chop = 100 * np.log10(tr_ma * np.sqrt(14)) / np.log10(dx + 1e-10)
     chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
-    # === 12h Indicators: Donchian(20) ===
+    # === 4h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -93,8 +94,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_1d_aligned[i]) or np.isnan(chop_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i]):
+            np.isnan(trend_12h_aligned[i]) or np.isnan(chop_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -127,8 +128,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1d trend alignment
-        trend_following = trend_1d_aligned[i]
+        # Require 12h trend alignment
+        trend_following = trend_12h_aligned[i]
         
         # Volume confirmation: require volume spike (> 1.3x average)
         volume_spike = vol_ratio[i] > 1.3
@@ -156,5 +157,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
