@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #370: 1d Donchian(20) Breakout + Weekly Volume Spike + Weekly ATR Filter
+Experiment #375: 6h Weekly Pivot + Volume Confirmation + ATR Stop
 
-HYPOTHESIS: Daily Donchian(20) breakouts capture institutional participation when confirmed by 
-weekly volume spikes (>2.0x average) and sufficient volatility (weekly ATR > 20-day mean ATR). 
-This combines price structure (Donchian channels) with volume confirmation and volatility 
-regime filtering to avoid choppy markets. Targets 15-25 trades/year on 1d timeframe 
-(60-100 total over 4 years) for minimal fee drag. Works in both bull (breakouts continue) 
-and bear (breakdowns continue) markets via symmetric long/short logic.
+HYPOTHESIS: Weekly pivot points (R1/S1, R2/S2) provide strong institutional support/resistance. 
+Price approaching weekly S1/R1 with volume confirmation offers high-probability mean reversion 
+entries, while breaks of weekly R2/S2 with volume indicate continuation. The 6h timeframe 
+captures these reactions with sufficient precision. Volume confirms institutional participation. 
+ATR-based stoploss manages risk. Targets 12-37 trades/year (50-150 total over 4 years) to 
+minimize fee drag while capturing high-probability reactions at weekly pivot levels in both 
+bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "donchian_1d_weekly_vol_atr_v1"
-timeframe = "1d"
+name = "mtf_6h_weekly_pivot_vol_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,204 +26,133 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for volume spike and ATR filter (Call ONCE before loop) ===
+    # === HTF: Weekly data for pivot points (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate volume ratio (current vs 20-period average) on weekly
-    if len(df_1w) >= 20:
-        vol_1w = df_1w['volume'].values
-        vol_ma_20 = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
-        vol_ratio_1w = np.zeros(len(vol_1w))
-        vol_ratio_1w[20:] = vol_1w[20:] / vol_ma_20[20:]
-        vol_ratio_1w[:20] = 1.0  # Neutral for warmup
-        vol_ratio_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ratio_1w)
-    else:
-        vol_ratio_1w_aligned = np.full(n, 1.0)
-    
-    # Calculate ATR(14) on weekly
-    if len(df_1w) >= 14:
+    # Calculate weekly pivot points
+    if len(df_1w) >= 1:
         high_1w = df_1w['high'].values
         low_1w = df_1w['low'].values
         close_1w = df_1w['close'].values
         
-        # True Range
-        tr1 = high_1w[1:] - low_1w[1:]
-        tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-        tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-        tr = np.concatenate([[high_1w[0] - low_1w[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
+        # Weekly pivot calculations
+        pivot_1w = (high_1w + low_1w + close_1w) / 3
+        range_1w = high_1w - low_1w
+        r1_1w = 2 * pivot_1w - low_1w
+        s1_1w = 2 * pivot_1w - high_1w
+        r2_1w = pivot_1w + range_1w
+        s2_1w = pivot_1w - range_1w
         
-        atr_1w = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-        # 20-period mean of weekly ATR for regime filter
-        atr_ma_20 = pd.Series(atr_1w).rolling(window=20, min_periods=20).mean().values
-        atr_ratio_1w = np.zeros(len(atr_1w))
-        atr_ratio_1w[20:] = atr_1w[20:] / atr_ma_20[20:]
-        atr_ratio_1w[:20] = 1.0  # Neutral for warmup
-        atr_ratio_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio_1w)
+        # Align to 6h timeframe (shifted by 1 week for completed bars only)
+        pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+        r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+        s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+        r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+        s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
     else:
-        atr_ratio_1w_aligned = np.full(n, 1.0)
+        pivot_1w_aligned = np.full(n, np.nan)
+        r1_1w_aligned = np.full(n, np.nan)
+        s1_1w_aligned = np.full(n, np.nan)
+        r2_1w_aligned = np.full(n, np.nan)
+        s2_1w_aligned = np.full(n, np.nan)
     
-    # === Calculate Daily Donchian(20) channels ===
-    # Use expanding window for warmup, then rolling 20
-    donchian_h = np.full(n, np.nan)
-    donchian_l = np.full(n, np.nan)
+    # === HTF: Daily data for volume spike (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
     
-    for i in range(n):
-        if i < 20:
-            # Expanding window for warmup period
-            donchian_h[i] = np.max(high[:i+1])
-            donchian_l[i] = np.min(low[:i+1])
-        else:
-            # Rolling 20-period window
-            donchian_h[i] = np.max(high[i-19:i+1])
-            donchian_l[i] = np.min(low[i-19:i+1])
+    # Calculate volume ratio (current vs 20-period average) on 1d
+    if len(df_1d) >= 20:
+        vol_1d = df_1d['volume'].values
+        vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+        vol_ratio_1d = np.zeros(len(vol_1d))
+        vol_ratio_1d[20:] = vol_1d[20:] / vol_ma_20[20:]
+        vol_ratio_1d[:20] = 1.0  # Neutral for warmup
+        vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    else:
+        vol_ratio_1d_aligned = np.full(n, 1.0)
+    
+    # === 6h Indicators: ATR for stoploss ===
+    # Calculate ATR(14) on 6h
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
     SIZE = 0.25  # Discrete position sizing (25% of capital)
     
-    warmup = 60  # Ensure enough data for HTF and Donchian calculation
+    # Position tracking state variables
+    in_position = False
+    position_side = 0
+    entry_price = 0.0
+    
+    warmup = 100  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or
-            np.isnan(vol_ratio_1w_aligned[i]) or np.isnan(atr_ratio_1w_aligned[i])):
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or 
+            np.isnan(s1_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]) or 
+            np.isnan(s2_1w_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i]) or 
+            np.isnan(atr_14[i])):
             signals[i] = 0.0
             continue
         
-        # --- Regime Filters ---
-        # Volume confirmation: weekly volume spike (> 2.0x average)
-        volume_spike = vol_ratio_1w_aligned[i] > 2.0
-        
-        # Volatility regime: weekly ATR > 20-day mean ATR (avoid low volatility chop)
-        vol_regime = atr_ratio_1w_aligned[i] > 1.0
-        
-        # Only trade when both filters are present
-        trade_allowed = volume_spike and vol_regime
-        
-        # --- Donchian Breakout Logic ---
-        long_breakout = close[i] > donchian_h[i]
-        short_breakout = close[i] < donchian_l[i]
-        
-        # --- Entry Logic (Only if Flat) ---
-        if long_breakout and trade_allowed:
-            signals[i] = SIZE
-        elif short_breakout and trade_allowed:
-            signals[i] = -SIZE
-        else:
-            signals[i] = 0.0
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-"""
-Experiment #370: 1d Donchian(20) Breakout + Weekly Volume Spike + Weekly ATR Filter
-
-HYPOTHESIS: Daily Donchian(20) breakouts capture institutional participation when confirmed by 
-weekly volume spikes (>2.0x average) and sufficient volatility (weekly ATR > 20-day mean ATR). 
-This combines price structure (Donchian channels) with volume confirmation and volatility 
-regime filtering to avoid choppy markets. Targets 15-25 trades/year on 1d timeframe 
-(60-100 total over 4 years) for minimal fee drag. Works in both bull (breakouts continue) 
-and bear (breakdowns continue) markets via symmetric long/short logic.
-"""
-
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "donchian_1d_weekly_vol_atr_v1"
-timeframe = "1d"
-leverage = 1.0
-
-def generate_signals(prices):
-    close = prices["close"].values.astype(np.float64)
-    high = prices["high"].values.astype(np.float64)
-    low = prices["low"].values.astype(np.float64)
-    volume = prices["volume"].values.astype(np.float64)
-    n = len(close)
-    
-    # === HTF: 1w data for volume spike and ATR filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate volume ratio (current vs 20-period average) on weekly
-    if len(df_1w) >= 20:
-        vol_1w = df_1w['volume'].values
-        vol_ma_20 = pd.Series(vol_1w).rolling(window=20, min_periods=20).mean().values
-        vol_ratio_1w = np.zeros(len(vol_1w))
-        vol_ratio_1w[20:] = vol_1w[20:] / vol_ma_20[20:]
-        vol_ratio_1w[:20] = 1.0  # Neutral for warmup
-        vol_ratio_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ratio_1w)
-    else:
-        vol_ratio_1w_aligned = np.full(n, 1.0)
-    
-    # Calculate ATR(14) on weekly
-    if len(df_1w) >= 14:
-        high_1w = df_1w['high'].values
-        low_1w = df_1w['low'].values
-        close_1w = df_1w['close'].values
-        
-        # True Range
-        tr1 = high_1w[1:] - low_1w[1:]
-        tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-        tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-        tr = np.concatenate([[high_1w[0] - low_1w[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-        
-        atr_1w = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-        # 20-period mean of weekly ATR for regime filter
-        atr_ma_20 = pd.Series(atr_1w).rolling(window=20, min_periods=20).mean().values
-        atr_ratio_1w = np.zeros(len(atr_1w))
-        atr_ratio_1w[20:] = atr_1w[20:] / atr_ma_20[20:]
-        atr_ratio_1w[:20] = 1.0  # Neutral for warmup
-        atr_ratio_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio_1w)
-    else:
-        atr_ratio_1w_aligned = np.full(n, 1.0)
-    
-    # === Calculate Daily Donchian(20) channels ===
-    # Use expanding window for warmup, then rolling 20
-    donchian_h = np.full(n, np.nan)
-    donchian_l = np.full(n, np.nan)
-    
-    for i in range(n):
-        if i < 20:
-            # Expanding window for warmup period
-            donchian_h[i] = np.max(high[:i+1])
-            donchian_l[i] = np.min(low[:i+1])
-        else:
-            # Rolling 20-period window
-            donchian_h[i] = np.max(high[i-19:i+1])
-            donchian_l[i] = np.min(low[i-19:i+1])
-    
-    # === Signals Initialization ===
-    signals = np.zeros(n)
-    SIZE = 0.25  # Discrete position sizing (25% of capital)
-    
-    warmup = 60  # Ensure enough data for HTF and Donchian calculation
-    
-    for i in range(warmup, n):
-        # --- Data Validity Check ---
-        if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or
-            np.isnan(vol_ratio_1w_aligned[i]) or np.isnan(atr_ratio_1w_aligned[i])):
-            signals[i] = 0.0
+        # --- Exit Logic (ATR-based stoploss) ---
+        if in_position:
+            if position_side > 0:  # Long position
+                stop_level = entry_price - 2.5 * atr_14[i]
+                if low[i] < stop_level:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+                # Take profit at weekly R2 (strong resistance)
+                if close[i] >= r2_1w_aligned[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+            else:  # Short position
+                stop_level = entry_price + 2.5 * atr_14[i]
+                if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+                # Take profit at weekly S2 (strong support)
+                if close[i] <= s2_1w_aligned[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+            
+            # Hold position
+            signals[i] = position_side * SIZE
             continue
         
-        # --- Regime Filters ---
-        # Volume confirmation: weekly volume spike (> 2.0x average)
-        volume_spike = vol_ratio_1w_aligned[i] > 2.0
+        # --- New Position Entry Logic (Only if Flat) ---
+        # Long: Price at S1 (mean reversion) OR break above R2 with volume
+        long_condition = (
+            (close[i] <= s1_1w_aligned[i] * 1.002) or  # S1 mean reversion (0.2% buffer)
+            (close[i] > r2_1w_aligned[i] and vol_ratio_1d_aligned[i] > 2.0)  # Breakout with volume spike
+        )
         
-        # Volatility regime: weekly ATR > 20-day mean ATR (avoid low volatility chop)
-        vol_regime = atr_ratio_1w_aligned[i] > 1.0
+        # Short: Price at R1 (mean reversion) OR break below S2 with volume
+        short_condition = (
+            (close[i] >= r1_1w_aligned[i] * 0.998) or  # R1 mean reversion (0.2% buffer)
+            (close[i] < s2_1w_aligned[i] and vol_ratio_1d_aligned[i] > 2.0)  # Breakdown with volume spike
+        )
         
-        # Only trade when both filters are present
-        trade_allowed = volume_spike and vol_regime
-        
-        # --- Donchian Breakout Logic ---
-        long_breakout = close[i] > donchian_h[i]
-        short_breakout = close[i] < donchian_l[i]
-        
-        # --- Entry Logic (Only if Flat) ---
-        if long_breakout and trade_allowed:
+        if long_condition:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
             signals[i] = SIZE
-        elif short_breakout and trade_allowed:
+        elif short_condition:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
