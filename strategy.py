@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #1385: 12h Donchian(20) Breakout + 1d Trend + Volume Spike
-HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture intermediate-term trends with low trade frequency (target: 50-150 total over 4 years). 
-Trend filter from 1d timeframe (close > SMA50 = uptrend, < = downtrend) ensures alignment with higher-timeframe momentum. 
-Volume confirmation (>2.0x average volume) filters for institutional participation and reduces false breakouts. 
-ATR-based stoploss (2.0*ATR) manages risk. Designed to work in both bull and bear markets by following 1d trend direction.
+Experiment #1386: 4h Donchian(20) Breakout + 1d Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 4h capture intermediate swings with volume confirmation filtering noise. 
+1d trend filter ensures alignment with daily momentum. Target: 75-200 total trades over 4 years (19-50/year).
+Uses ATR-based stoploss for risk management. Works in bull/bear markets by following 1d trend direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1385_12h_donchian20_1d_trend_vol_v1"
-timeframe = "12h"
+name = "exp_1386_4h_donchian20_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,22 +24,21 @@ def generate_signals(prices):
     # === HTF: 1d data for trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    # Trend: price > SMA50 = uptrend (1), price < SMA50 = downtrend (-1)
-    sma_50 = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    # Simple trend: price > previous close = uptrend, < = downtrend
     trend_1d = np.zeros(len(close_1d))
-    trend_1d[50:] = np.where(close_1d[50:] > sma_50[50:], 1, -1)
+    trend_1d[1:] = np.where(close_1d[1:] > close_1d[:-1], 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 12h Indicators: Donchian(20) ===
+    # === 4h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -57,7 +55,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for SMA50, Donchian and volume MA
+    warmup = 20  # sufficient for Donchian and volume MA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -96,8 +94,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
