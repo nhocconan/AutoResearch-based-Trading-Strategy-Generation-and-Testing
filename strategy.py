@@ -1,67 +1,84 @@
 #!/usr/bin/env python3
 """
-Experiment #423: 4h Donchian Breakout + 1d Volume Spike + 1d Trend Filter
+Experiment #415: 6h Elder Ray + 1d ADX Regime
 
-HYPOTHESIS: 4h Donchian(20) breakouts with 1d volume confirmation (>1.8x average) and 
-1d trend filter (price > EMA50 on daily) captures strong momentum moves in both bull 
-(bullish breakouts) and bear (bearish breakdowns) markets. Using 4h primary timeframe 
-with 1d HTF filters reduces noise and overtrading vs lower timeframes. Target: 75-200 
-total trades over 4 years (19-50/year) to minimize fee drag while maintaining statistical 
-significance.
+HYPOTHESIS: Elder Ray (Bull/Bear Power) on 6h combined with 1d ADX regime filter captures 
+trend strength and momentum in both bull and bear markets. Bull Power > 0 + Bear Power < 0 
+with ADX > 25 indicates strong trending conditions. Uses discrete position sizing (0.25) 
+to minimize fee drag. Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_vol_trend_v1"
-timeframe = "4h"
+name = "mtf_6h_elder_ray_1d_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
-    volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for volume spike and trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for ADX regime filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate volume ratio (current vs 20-period average) on 1d
-    if len(df_1d) >= 20:
-        vol_1d = df_1d['volume'].values
-        vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-        vol_ratio_1d = np.zeros(len(vol_1d))
-        vol_ratio_1d[20:] = vol_1d[20:] / vol_ma_20[20:]
-        vol_ratio_1d[:20] = 1.0  # Neutral for warmup
-        vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
-    else:
-        vol_ratio_1d_aligned = np.full(n, 1.0)
-    
-    # Calculate EMA(50) on 1d close for trend filter
-    if len(df_1d) >= 50:
+    # Calculate ADX(14) on 1d
+    if len(df_1d) >= 14:
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
         close_1d = df_1d['close'].values
-        ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+        
+        # True Range
+        tr = np.maximum(high_1d - low_1d, 
+                        np.maximum(abs(high_1d - np.roll(close_1d, 1)), 
+                                   abs(low_1d - np.roll(close_1d, 1))))
+        tr[0] = high_1d[0] - low_1d[0]  # First value
+        
+        # Directional Movement
+        dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                           np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+        dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                            np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed values
+        tr_14 = pd.Series(tr).ewm(span=14, adjust=False).mean().values
+        dm_plus_14 = pd.Series(dm_plus).ewm(span=14, adjust=False).mean().values
+        dm_minus_14 = pd.Series(dm_minus).ewm(span=14, adjust=False).mean().values
+        
+        # Directional Indicators
+        di_plus = 100 * dm_plus_14 / tr_14
+        di_minus = 100 * dm_minus_14 / tr_14
+        
+        # DX and ADX
+        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+        adx = pd.Series(dx).ewm(span=14, adjust=False).mean().values
+        
+        # Align to 6h timeframe
+        adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     else:
-        ema_50_1d_aligned = np.full(n, np.nan)
+        adx_aligned = np.full(n, 20.0)  # Default to ranging market
     
-    # === 4h Indicators: Calculate Donchian channels (20-period) ===
-    if n >= 20:
-        # Calculate rolling max/min for Donchian channels
-        high_series = pd.Series(high)
-        low_series = pd.Series(low)
-        donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-        donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-        # For warmup period, fill with NaN
-        donchian_upper[:19] = np.nan
-        donchian_lower[:19] = np.nan
+    # === 6h Indicators: Elder Ray (Bull/Bear Power) ===
+    if n >= 13:
+        # EMA(13) as the reference
+        ema_13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
+        
+        # Bull Power = High - EMA(13)
+        bull_power = high - ema_13
+        
+        # Bear Power = Low - EMA(13)
+        bear_power = low - ema_13
     else:
-        donchian_upper = np.full(n, np.nan)
-        donchian_lower = np.full(n, np.nan)
+        ema_13 = np.full(n, np.nan)
+        bull_power = np.full(n, np.nan)
+        bear_power = np.full(n, np.nan)
     
-    # === Session filter: 00-23 UTC (trade all hours for 4h timeframe) ===
+    # === Session filter: 00-23 UTC (trade all hours for 6h timeframe) ===
     hours = prices.index.hour  # Pre-compute before loop
     
     # === Signals Initialization ===
@@ -76,13 +93,13 @@ def generate_signals(prices):
     warmup = 50  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
-        # --- Session Filter: Trade all hours for 4h timeframe ---
+        # --- Session Filter: Trade all hours for 6h timeframe ---
         hour = hours[i]
-        # No session filter for 4h - trade continuously
+        # No session filter for 6h - trade continuously
         
         # --- Data Validity Check ---
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -102,21 +119,9 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at Donchian lower (trailing stop for longs)
-                if close[i] <= donchian_lower[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
             else:  # Short position
                 stop_level = entry_price + 2.5 * atr_14
                 if high[i] > stop_level:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
-                # Take profit at Donchian upper (trailing stop for shorts)
-                if close[i] >= donchian_upper[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -127,18 +132,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Price breaks above Donchian upper with volume confirmation and uptrend
+        # Regime filter: ADX > 25 indicates trending market
+        is_trending = adx_aligned[i] > 25
+        
+        # Long: Bull Power > 0 (buying pressure) + Bear Power < 0 (weak selling) + trending
         long_condition = (
-            close[i] > donchian_upper[i] and  # Breakout above upper channel
-            vol_ratio_1d_aligned[i] > 1.8 and  # Volume spike confirmation
-            close[i] > ema_50_1d_aligned[i]   # Price above daily EMA50 (uptrend)
+            bull_power[i] > 0 and      # Buying pressure
+            bear_power[i] < 0 and      # Weak selling pressure
+            is_trending                # Trending market (ADX > 25)
         )
         
-        # Short: Price breaks below Donchian lower with volume confirmation and downtrend
+        # Short: Bear Power < 0 (selling pressure) + Bull Power < 0 (weak buying) + trending
         short_condition = (
-            close[i] < donchian_lower[i] and  # Breakdown below lower channel
-            vol_ratio_1d_aligned[i] > 1.8 and  # Volume spike confirmation
-            close[i] < ema_50_1d_aligned[i]   # Price below daily EMA50 (downtrend)
+            bear_power[i] < 0 and      # Selling pressure
+            bull_power[i] < 0 and      # Weak buying pressure
+            is_trending                # Trending market (ADX > 25)
         )
         
         if long_condition:
