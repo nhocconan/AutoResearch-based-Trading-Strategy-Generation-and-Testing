@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #1712: 12h Camarilla Pivot + 1d Trend + Volume Spike
-HYPOTHESIS: Camarilla pivot levels from 1d timeframe act as strong support/resistance zones. 
-Price touching these levels with volume confirmation and 1d trend alignment provides high-probability 
-mean-reversion entries in ranging markets and pullback entries in trending markets. 
-12h timeframe reduces noise while capturing multi-day swings. Target: 75-150 total trades over 4 years.
+Experiment #1714: 1h Donchian(20) Breakout + 4h/1d Trend + Volume + Session Filter
+HYPOTHESIS: 1h Donchian breakouts aligned with 4h/1d trend direction and volume confirmation capture swing moves in both bull and bear markets. Using 4h/1d for signal direction (HTF) and 1h only for entry timing reduces trade frequency. Session filter (08-20 UTC) avoids low-liquidity periods. Target: 60-150 total trades over 4 years (15-37/year) with discrete position sizing (0.20) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1712_12h_camarilla_pivot_1d_vol_v1"
-timeframe = "12h"
+name = "exp_1714_1h_donchian20_4h1d_trend_vol_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,51 +17,38 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
+    open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivot levels and trend (Call ONCE before loop) ===
+    # Pre-compute session hours for filter (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    
+    # === HTF: 4h data for trend filter (Call ONCE before loop) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    # EMA(21) for 4h trend
+    ema_4h = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
+    trend_4h = np.where(close_4h > ema_4h, 1, -1)
+    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
+    
+    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # Camarilla pivot levels from previous 1d bar
-    # Pivot = (H + L + C) / 3
-    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), R2 = C + ((H-L) * 1.1/6), R1 = C + ((H-L) * 1.1/12)
-    # S4 = C - ((H-L) * 1.1/2), S3 = C - ((H-L) * 1.1/4), S2 = C - ((H-L) * 1.1/6), S1 = C - ((H-L) * 1.1/12)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r4_1d = close_1d + (range_1d * 1.1 / 2.0)
-    r3_1d = close_1d + (range_1d * 1.1 / 4.0)
-    r2_1d = close_1d + (range_1d * 1.1 / 6.0)
-    r1_1d = close_1d + (range_1d * 1.1 / 12.0)
-    s1_1d = close_1d - (range_1d * 1.1 / 12.0)
-    s2_1d = close_1d - (range_1d * 1.1 / 6.0)
-    s3_1d = close_1d - (range_1d * 1.1 / 4.0)
-    s4_1d = close_1d - (range_1d * 1.1 / 2.0)
-    
-    # 1d trend filter: EMA(21)
-    ema_21_1d = pd.Series(close_1d).ewm(span=21, min_periods=21, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_21_1d, 1, -1)  # 1 = uptrend, -1 = downtrend
-    
-    # Align HTF arrays to 12h timeframe (with shift(1) for completed bars only)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
-    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # EMA(50) for 1d trend
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 1h Indicators: Donchian(20) ===
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === 1h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 1h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -73,7 +57,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.20  # 20% position size
     
     # Position tracking state variables
     in_position = False
@@ -81,12 +65,19 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for volume MA and ATR
+    warmup = 20  # sufficient for Donchian and volume MA
     
     for i in range(warmup, n):
+        # --- Session filter: trade only 08-20 UTC ---
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
+        
         # --- Data Validity Check ---
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(trend_4h_aligned[i]) or np.isnan(trend_1d_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -119,36 +110,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
+        # Require both 4h and 1d trend alignment (confluence)
+        trend_bullish = (trend_4h_aligned[i] > 0) and (trend_1d_aligned[i] > 0)
+        trend_bearish = (trend_4h_aligned[i] < 0) and (trend_1d_aligned[i] < 0)
+        
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Mean reversion at Camarilla levels
-            # In uptrend: look for longs at S1/S2, shorts at R1/R2
-            # In downtrend: look for longs at S1/S2, shorts at R1/R2
-            # Always fade extreme levels (S3/S4, R3/R4) with trend
-            
-            # Long conditions: price near support levels
-            near_s1 = abs(price - s1_1d_aligned[i]) / price < 0.002  # within 0.2%
-            near_s2 = abs(price - s2_1d_aligned[i]) / price < 0.002
-            near_s3 = abs(price - s3_1d_aligned[i]) / price < 0.002
-            near_s4 = abs(price - s4_1d_aligned[i]) / price < 0.002
-            
-            # Short conditions: price near resistance levels
-            near_r1 = abs(price - r1_1d_aligned[i]) / price < 0.002
-            near_r2 = abs(price - r2_1d_aligned[i]) / price < 0.002
-            near_r3 = abs(price - r3_1d_aligned[i]) / price < 0.002
-            near_r4 = abs(price - r4_1d_aligned[i]) / price < 0.002
-            
-            # Enter long at support levels with volume spike
-            if (near_s1 or near_s2 or near_s3 or near_s4) and trend_1d_aligned[i] != 0:
+            if trend_bullish and price > donch_high[i]:  # Uptrend breakout
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Enter short at resistance levels with volume spike
-            elif (near_r1 or near_r2 or near_r3 or near_r4) and trend_1d_aligned[i] != 0:
+            elif trend_bearish and price < donch_low[i]:  # Downtrend breakdown
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
