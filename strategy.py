@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #1140: 4h Donchian(20) Breakout + 1d Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture swing moves with lower frequency than 6h. 
+Experiment #1141: 4h Donchian(20) Breakout + 1d Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture swing moves with higher reliability than 6h.
 Trend filter from 1d timeframe prevents counter-trend entries. Volume confirmation (>1.5x avg) ensures institutional participation.
 Discrete position sizing (0.25) and ATR-based stoploss (2.0x) control risk. 
 Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets.
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1140_4h_donchian20_1d_trend_vol_v1"
+name = "exp_1141_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
