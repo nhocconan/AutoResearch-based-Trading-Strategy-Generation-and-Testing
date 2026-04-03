@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #1600: 4h Donchian(20) Breakout + 1d HMA Trend + Volume + ATR Stoploss
+Experiment #1601: 4h Donchian(20) Breakout + 1d HMA Trend + Volume + ATR Stoploss
 HYPOTHESIS: 4h Donchian breakouts with 1d HMA trend alignment and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 1d timeframe filters out noise from shorter-term fluctuations, while the 4h Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 75-200 total trades over 4 years (19-50/year) by using tight entry conditions and multi-timeframe confluence.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1600_4h_donchian20_1d_hma_vol_v1"
+name = "exp_1601_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
