@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #934: 1h Donchian(20) + 4h EMA Trend + Volume Spike + Session Filter + ATR Stoploss
-HYPOTHESIS: Donchian breakouts on 1h capture short-term momentum, filtered by 4h EMA trend direction 
-and volume confirmation (>1.6x average). Long when price breaks above Donchian upper 
-AND 4h EMA rising AND volume spike AND session active (08-20 UTC). Short when price breaks 
-below Donchian lower AND 4h EMA falling AND volume spike AND session active. Uses discrete 
-position sizing (0.20) to limit risk. Target: 60-150 total trades over 4 years (15-37/year) 
-on 1h timeframe. Works in bull/bear via trend filter and session reduces noise.
+Experiment #934: 1h Donchian(20) + 4h EMA50 + 1d EMA200 Trend + Volume Spike + Session Filter (08-20 UTC)
+HYPOTHESIS: 1h timeframe is noisy; use 4h EMA50 for medium-term trend and 1d EMA200 for long-term bias.
+Only take longs when price > both EMAs and breaks above Donchian upper with volume spike.
+Only take shorts when price < both EMAs and breaks below Donchian lower with volume spike.
+Session filter (08-20 UTC) reduces noise outside active trading hours.
+Discrete position sizing (0.20) minimizes fee churn. Target: 60-150 total trades over 4 years (15-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_934_1h_donchian20_4h_ema_vol_session_v1"
+name = "exp_934_1h_donchian20_4h_ema50_1d_ema200_vol_sess_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -22,25 +21,28 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
+    open_time = prices["open_time"].values  # already datetime64[ms]
     n = len(close)
     
-    # Pre-compute session hours (08-20 UTC) - vectorized, no look-ahead
+    # Pre-compute session hours (08-20 UTC) to avoid per-bar datetime ops
     hours = pd.DatetimeIndex(open_time).hour
     in_session = (hours >= 8) & (hours <= 20)
     
-    # === HTF: 4h data for EMA trend filter (Call ONCE before loop) ===
+    # === HTF: 4h data for EMA50 trend filter (Call ONCE before loop) ===
     df_4h = get_htf_data(prices, '4h')
     close_4h = df_4h['close'].values
     
-    # Calculate EMA(21) on 4h
-    ema_4h = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    # Trend: 1 = rising (ema > previous ema), -1 = falling (ema < previous ema), 0 = flat
-    ema_trend_4h = np.zeros_like(ema_4h)
-    ema_trend_4h[1:] = np.where(ema_4h[1:] > ema_4h[:-1], 1, 
-                                 np.where(ema_4h[1:] < ema_4h[:-1], -1, 0))
-    # Align trend to 1h timeframe
-    ema_trend_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_trend_4h)
+    # Calculate EMA(50) on 4h
+    ema_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)  # auto shift(1) for completed bars
+    
+    # === HTF: 1d data for EMA200 long-term bias (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # Calculate EMA(200) on 1d
+    ema_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)  # auto shift(1) for completed bars
     
     # === 1h Indicators: Donchian Channel (20) ===
     def donchian_channel(high, low, period):
@@ -72,13 +74,18 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = max(20, 20)  # sufficient for Donchian, volume MA
+    warmup = max(20, 20, 50, 200)  # sufficient for Donchian, volume MA, EMAs
     
     for i in range(warmup, n):
+        # Skip if outside active session (08-20 UTC)
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+        
         # --- Data Validity Check ---
         if (np.isnan(upper_20[i]) or np.isnan(lower_20[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema_trend_4h_aligned[i]) or
-            np.isnan(atr[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(ema_4h_aligned[i]) or
+            np.isnan(ema_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -107,7 +114,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 12 bars (~12h) to avoid overtrading
+            # Optional: time-based exit after 12 bars (~12h on 1h) to avoid overtrading
             if bars_since_entry > 12:
                 in_position = False
                 position_side = 0
@@ -119,24 +126,19 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require active session (08-20 UTC) to reduce noise
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-            
-        # Volume confirmation: require volume spike (> 1.6x average)
-        volume_spike = vol_ratio[i] > 1.6
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Long: price breaks above Donchian upper AND 4h EMA rising
-            if price > upper_20[i] and ema_trend_4h_aligned[i] > 0:
+            # Long: price > both EMAs AND breaks above Donchian upper
+            if price > ema_4h_aligned[i] and price > ema_1d_aligned[i] and price > upper_20[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: price breaks below Donchian lower AND 4h EMA falling
-            elif price < lower_20[i] and ema_trend_4h_aligned[i] < 0:
+            # Short: price < both EMAs AND breaks below Donchian lower
+            elif price < ema_4h_aligned[i] and price < ema_1d_aligned[i] and price < lower_20[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
