@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #1930: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Confirmation
-HYPOTHESIS: Daily Donchian breakouts capture institutional momentum when aligned with weekly trend (HMA21) and volume confirmation (>1.5x average). 
-Works in bull markets via breakout continuation and bear markets via breakdown continuation. 
-Target: 30-100 trades over 4 years (7-25/year) with discrete sizing to minimize fee drag.
+Experiment #1931: 6h Ichimoku Cloud + 1d Trend Filter + Volume Spike
+HYPOTHESIS: Ichimoku cloud on 6h provides dynamic support/resistance, while 1d trend filter ensures alignment with higher timeframe momentum. Volume spike confirms breakout strength. Works in bull/bear by following 1d trend direction only. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1930_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_1931_6h_ichimoku_1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,34 +19,48 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly HMA(21)
-    def hma(arr, period):
-        half = arr.copy()
-        half[:] = np.nan
-        half[period//2:] = arr[:-period//2] if period//2 > 0 else arr
-        sqrt_period = int(np.sqrt(period))
-        wma2 = pd.Series(arr).ewm(span=period//2, min_periods=period//2, adjust=False).mean().values
-        wma1 = pd.Series(half).ewm(span=period//2, min_periods=period//2, adjust=False).mean().values
-        raw = 2 * wma2 - wma1
-        hma_vals = pd.Series(raw).ewm(span=sqrt_period, min_periods=sqrt_period, adjust=False).mean().values
-        return hma_vals
+    # 1d trend filter: EMA(50)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_50_1d, 1, -1)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    hma_21_1w = hma(close_1w, 21)
-    hma_21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_21_1w)
+    # === 6h Indicators: Ichimoku Cloud ===
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period_tenkan = 9
+    high_tenkan = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+    low_tenkan = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+    tenkan = (high_tenkan + low_tenkan) / 2.0
     
-    # === Primary: 1d Donchian channels (20-period) ===
-    def donchian_channel(high, low, period):
-        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        return upper, lower
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period_kijun = 26
+    high_kijun = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
+    low_kijun = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
+    kijun = (high_kijun + low_kijun) / 2.0
     
-    donchian_upper, donchian_lower = donchian_channel(high, low, 20)
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2.0
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period_senkou_b = 52
+    high_senkou_b = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+    low_senkou_b = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+    senkou_b = (high_senkou_b + low_senkou_b) / 2.0
+    
+    # Chikou Span (Lagging Span): close plotted 26 periods behind
+    # For signal generation, we use current price vs cloud
+    
+    # The cloud is between Senkou Span A and Senkou Span B
+    # Bullish when price is above cloud, bearish when below
+    # Cloud top = max(senkou_a, senkou_b)
+    # Cloud bottom = min(senkou_a, senkou_b)
+    cloud_top = np.maximum(senkou_a, senkou_b)
+    cloud_bottom = np.minimum(senkou_a, senkou_b)
+    
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -63,12 +75,13 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for Donchian(20) and volume MA
+    warmup = 52  # sufficient for Ichimoku calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(hma_21_1w_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(trend_1d_aligned[i]) or np.isnan(cloud_top[i]) or 
+            np.isnan(cloud_bottom[i]) or np.isnan(tenkan[i]) or 
+            np.isnan(kijun[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -78,22 +91,22 @@ def generate_signals(prices):
         if in_position:
             bars_since_entry += 1
             
-            # Exit conditions: opposite Donchian breakout OR price crosses weekly HMA
+            # Exit conditions
             exit_signal = False
             
             if position_side > 0:  # Long position
-                # Exit if price breaks below weekly HMA (trend change)
-                if price < hma_21_1w_aligned[i]:
+                # Exit if price re-enters the cloud (cloud bottom)
+                if price <= cloud_bottom[i]:
                     exit_signal = True
-                # Exit if price touches lower Donchian (mean reversion)
-                elif price <= donchian_lower[i]:
+                # Optional: exit on TK cross down (tenkan < kijun)
+                elif tenkan[i] < kijun[i]:
                     exit_signal = True
             else:  # Short position
-                # Exit if price breaks above weekly HMA (trend change)
-                if price > hma_21_1w_aligned[i]:
+                # Exit if price re-enters the cloud (cloud top)
+                if price >= cloud_top[i]:
                     exit_signal = True
-                # Exit if price touches upper Donchian (mean reversion)
-                elif price >= donchian_upper[i]:
+                # Optional: exit on TK cross up (tenkan > kijun)
+                elif tenkan[i] > kijun[i]:
                     exit_signal = True
             
             if exit_signal:
@@ -106,22 +119,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Weekly trend filter: price relative to HMA21
-        trend_bias = 1 if price > hma_21_1w_aligned[i] else -1
+        # Require 1d trend alignment for bias filter
+        trend_bias = trend_1d_aligned[i]
         
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Long entry: price breaks above upper Donchian AND weekly trend up
-            if trend_bias > 0 and price > donchian_upper[i]:
+            # Long entry: price breaks above cloud TOP AND 1d trend up AND TK cross up (tenkan > kijun)
+            if trend_bias > 0 and price > cloud_top[i] and tenkan[i] > kijun[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short entry: price breaks below lower Donchian AND weekly trend down
-            elif trend_bias < 0 and price < donchian_lower[i]:
+            # Short entry: price breaks below cloud BOTTOM AND 1d trend down AND TK cross down (tenkan < kijun)
+            elif trend_bias < 0 and price < cloud_bottom[i] and tenkan[i] < kijun[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
