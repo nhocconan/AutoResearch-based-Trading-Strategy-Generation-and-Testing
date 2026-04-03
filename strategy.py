@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #472: 12h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(50) trend capture medium-term momentum while avoiding noise. Volume confirmation (>1.8x average) ensures breakout validity. Using 12h timeframe with 1d HTF balances trade frequency (target: 50-150 total trades over 4 years) with statistical significance. Discrete position sizing (0.25) minimizes fee churn. Designed to work in both bull (breakouts with trend) and bear (mean reversion at extremes) markets via trend filter.
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(50) trend capture primary trend momentum while avoiding noise. Volume confirmation (>1.8x average) ensures breakout validity. Using 12h timeframe with 1d HTF balances trade frequency (target: 50-150 total trades over 4 years) with statistical significance. Discrete position sizing (0.25) minimizes fee churn. Designed to work in both bull (breakouts with trend) and bear (mean reversion at extremes via trend filter) markets.
 """
 
 import numpy as np
@@ -53,7 +53,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 100  # sufficient for 50-period EMA + 20-period indicators + HTF warmup
+    warmup = 100  # sufficient for 50-period EMA + 20-period indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -101,8 +101,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 4 bars (~48h on 12h) to avoid overtrading
-            if bars_since_entry > 4:
+            # Optional: time-based exit after 8 bars (~4 days on 12h) to avoid overtrading
+            if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
