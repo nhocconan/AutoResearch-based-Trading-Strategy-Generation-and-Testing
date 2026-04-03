@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #235: 6h Camarilla Pivot + Weekly Trend + Volume Spike
+Experiment #095: 6h Camarilla Pivot + Weekly Trend + Volume Spike
 
 HYPOTHESIS: 6h Camarilla pivot breakouts filtered by weekly trend direction (price > weekly EMA200 = bullish bias, 
 price < weekly EMA200 = bearish bias) and volume spikes (>1.8x average) capture institutional interest at key 
@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_235_6h_camarilla_weekly_trend_volume_v1"
+name = "exp_095_6h_camarilla_weekly_trend_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -102,9 +102,10 @@ def generate_signals(prices):
         camarilla_h3_aligned = np.full(n, np.nan)
         camarilla_l3_aligned = np.full(n, np.nan)
         camarilla_h2_aligned = np.full(n, np.nan)
-        camarilla_l2_aligned = np.full(n, np.nan)
         camarilla_h1_aligned = np.full(n, np.nan)
         camarilla_l1_aligned = np.full(n, np.nan)
+        camarilla_h2_aligned = np.full(n, np.nan)
+        camarilla_l2_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
