@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #046: 4h Donchian(20) Breakout + 1d Trend Filter + Volume Spike + ATR Stoploss
+Experiment #189: 4h Donchian(20) Breakout + 1d Trend Filter + Volume Spike + ATR Stoploss
 
 HYPOTHESIS: Donchian channel breakouts on 4h timeframe, filtered by 1d trend alignment (price > EMA50) 
 and confirmed by volume spikes (>1.8x average), capture strong momentum moves with reduced false breakouts. 
@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_046_4h_donchian_1d_volume_v1"
+name = "exp_189_4h_donchian_1d_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
