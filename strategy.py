@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #1643: 4h Donchian(20) Breakout + 12h HMA Trend + Volume + ATR Stoploss
-HYPOTHESIS: 4h Donchian breakouts with 12h HMA trend alignment and volume confirmation (>1.5x average) capture swing moves in both bull and bear markets. The 12h timeframe filters out 4h noise while providing reliable trend direction. Discrete position sizing (0.25) and ATR-based stops limit drawdown. Target: 100-180 total trades over 4 years (25-45/year) by requiring confluence of trend, volume, and breakout.
+HYPOTHESIS: 4h Donchian breakouts with 12h HMA trend alignment and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 12h timeframe filters noise while 4h provides timely entries. ATR-based stoploss limits drawdown. Target: 75-200 total trades over 4 years (19-50/year) via tight conditions and MTF confluence.
 """
 
 import numpy as np
@@ -17,7 +17,6 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
     # === HTF: 12h data for trend filter (Call ONCE before loop) ===
