@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #309: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation
-HYPOTHESIS: Price breaking 4h Donchian(20) channels with 1d HMA(21) trend filter and volume confirmation (>2.0x) captures strong momentum moves. The 1d HMA acts as regime filter to avoid counter-trend entries. Uses discrete sizing (0.25) to minimize fee drag. Target: 75-200 total trades over 4 years for 4h timeframe. Works in bull (trend continuation) and bear (mean reversion after extreme moves via volume spike + breakout).
+Experiment #310: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
+HYPOTHESIS: Price breaking 1d Donchian(20) channels with 1w HMA(21) trend filter and volume confirmation (>2.0x) captures strong momentum moves on daily timeframe. The 1w HMA acts as regime filter to avoid counter-trend entries. Uses discrete sizing (0.25) to minimize fee drag. Target: 75-200 total trades over 4 years for 1d timeframe. Works in bull (trend continuation) and bear (mean reversion after extreme moves via volume spike + breakout).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_309_4h_donchian20_1d_hma_vol_v1"
-timeframe = "4h"
+name = "exp_310_1d_donchian20_1w_hma_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,10 +19,10 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for HMA trend (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
+    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate HMA(21) on 1d close
+    # Calculate HMA(21) on 1w close
     def hma(series, period):
         if len(series) < period:
             return np.full_like(series, np.nan)
@@ -34,14 +34,14 @@ def generate_signals(prices):
         hma_vals = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
         return hma_vals.values
     
-    hma_1d = hma(df_1d['close'].values, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    hma_1w = hma(df_1w['close'].values, 21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 1d Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 1d Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -62,7 +62,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(hma_1d_aligned[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(hma_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -75,11 +75,11 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- 1d HMA Trend Filter ---
+        # --- 1w HMA Trend Filter ---
         # Uptrend: price > HMA(21)
         # Downtrend: price < HMA(21)
-        uptrend = price > hma_1d_aligned[i]
-        downtrend = price < hma_1d_aligned[i]
+        uptrend = price > hma_1w_aligned[i]
+        downtrend = price < hma_1w_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss (using 2.0*ATR for standard stops) ---
         if in_position:
@@ -114,7 +114,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 12 bars (2 days on 4h)
+            # Optional: time-based exit after 12 bars (12 days on 1d)
             if bars_since_entry > 12:
                 in_position = False
                 position_side = 0
