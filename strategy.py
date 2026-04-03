@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #353: 4h Donchian(20) Breakout + 12h Volume Spike + ATR Stoploss
+Experiment #354: 1h Donchian Breakout + 4h Volume Spike + 1d Trend Filter
 
-HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture strong momentum moves.
-Combined with 12h volume spike confirmation (>2.0x average) to ensure institutional
-participation and ATR-based stoploss for risk management. Targets 75-200 total trades
-over 4 years (19-50/year) to minimize fee drag while capturing trending moves in
-both bull and bear markets. Uses discrete position sizing (0.25) to balance
-return potential with drawdown control.
+HYPOTHESIS: Donchian channel breakouts on 1h timeframe, confirmed by 4h volume spikes and 
+aligned with 1d trend direction, captures high-probability momentum moves while minimizing 
+false breakouts. The 4h volume filter ensures institutional participation, and the 1d trend 
+filter avoids counter-trend trades. Using discrete position sizing (0.20) and session filter 
+(08-20 UTC) reduces overtrading. Target: 60-150 total trades over 4 years (15-37/year) on 1h.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian20_vol_spike_atr_v1"
-timeframe = "4h"
+name = "mtf_1h_donchian_vol_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,43 +24,69 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for volume spike confirmation (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
+    # Pre-compute session hours (08-20 UTC) to reduce noise trades
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate volume ratio (current vs 20-period average) on 12h
-    if len(df_12h) >= 20:
-        vol_12h = df_12h['volume'].values
-        vol_ma_20 = pd.Series(vol_12h).rolling(window=20, min_periods=20).mean().values
-        vol_ratio_12h = np.zeros(len(vol_12h))
-        vol_ratio_12h[20:] = vol_12h[20:] / vol_ma_20[20:]
-        vol_ratio_12h[:20] = 1.0  # Neutral for warmup
-        vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    # === HTF: 4h data for volume spike confirmation (Call ONCE before loop) ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) >= 20:
+        vol_4h = df_4h['volume'].values
+        vol_ma_20 = pd.Series(vol_4h).rolling(window=20, min_periods=20).mean().values
+        vol_ratio_4h = np.zeros(len(vol_4h))
+        vol_ratio_4h[20:] = vol_4h[20:] / vol_ma_20[20:]
+        vol_ratio_4h[:20] = 1.0  # Neutral for warmup
+        vol_ratio_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ratio_4h)
     else:
-        vol_ratio_12h_aligned = np.full(n, 1.0)
+        vol_ratio_4h_aligned = np.full(n, 1.0)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
-    # Calculate Donchian upper/lower bounds using rolling window
-    donchian_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_middle = (donchian_upper + donchian_lower) / 2
+    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 50:
+        close_1d = df_1d['close'].values
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    else:
+        ema_50_1d_aligned = np.full(n, np.nan)
+    
+    # === 1h Indicators: Donchian Channel (20-period) ===
+    lookback = 20
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    
+    for i in range(lookback, n):
+        highest_high[i] = np.max(high[i-lookback:i])
+        lowest_low[i] = np.min(low[i-lookback:i])
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # Discrete position sizing (25% of capital)
+    SIZE = 0.20  # Discrete position sizing (20% of capital)
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
     
-    warmup = 100  # Ensure enough data for HTF and indicator calculations
+    warmup = max(lookback, 50) + 20  # Ensure enough data for HTF and indicators
     
     for i in range(warmup, n):
-        # --- Data Validity Check ---
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(vol_ratio_12h_aligned[i])):
+        # --- Session Filter: Only trade during active hours (08-20 UTC) ---
+        if not in_session[i]:
             signals[i] = 0.0
             continue
+        
+        # --- Data Validity Check ---
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ratio_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i])):
+            signals[i] = 0.0
+            continue
+        
+        # --- Regime Filter: Only trade in direction of 1d EMA50 trend ---
+        price_above_1d_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_1d_ema = close[i] < ema_50_1d_aligned[i]
+        
+        # --- Volume Confirmation: Require volume spike (> 1.8x average) on 4h ---
+        volume_spike = vol_ratio_4h_aligned[i] > 1.8
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -79,9 +104,21 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
+                # Take profit at Donchian upper band (trailing breakout)
+                if close[i] <= highest_high[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
             else:  # Short position
                 stop_level = entry_price + 2.5 * atr_14
                 if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+                # Take profit at Donchian lower band
+                if close[i] >= lowest_low[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -92,14 +129,19 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Volume confirmation: require significant spike (> 2.0x average)
-        volume_spike = vol_ratio_12h_aligned[i] > 2.0
+        # Long: Break above Donchian upper band with volume spike and uptrend
+        long_condition = (
+            close[i] > highest_high[i] and 
+            volume_spike and 
+            price_above_1d_ema
+        )
         
-        # Long: Price breaks above Donchian upper band with volume confirmation
-        long_condition = (close[i] > donchian_upper[i]) and volume_spike
-        
-        # Short: Price breaks below Donchian lower band with volume confirmation
-        short_condition = (close[i] < donchian_lower[i]) and volume_spike
+        # Short: Break below Donchian lower band with volume spike and downtrend
+        short_condition = (
+            close[i] < lowest_low[i] and 
+            volume_spike and 
+            price_below_1d_ema
+        )
         
         if long_condition:
             in_position = True
