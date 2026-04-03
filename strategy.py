@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #2242: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 12h Donchian channel breakouts capture swing momentum with daily trend filter.
-- Primary: 12h Donchian(20) breakout with volume > 1.5x 20-bar average (balanced for 50-150 trades)
+HYPOTHESIS: 12h Donchian breakouts with 1d HMA trend filter capture swing momentum while limiting overtrading.
+- Primary: 12h Donchian(20) breakout with volume > 1.5x 20-bar average (balanced frequency)
 - HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
 - Target: 50-150 total trades over 4 years (12-37/year) - optimized for 12h timeframe
-- Works in bull markets via trend-following breakouts, in bear markets via mean-reversion at extremes
+- Designed to work in bull markets (trend following) and bear markets (mean reversion at extremes)
 """
 
 import numpy as np
@@ -42,7 +42,7 @@ def generate_signals(prices):
     wma_full = np.array([np.nan] * len(close_1d))
     wma_half = np.array([np.nan] * len(close_1d))
     
-    for i in range(20, len(close_1d)):  # 21-1 = 20 for WMA(21)
+    for i in range(20, len(close_1d)):
         wma_full[i] = np.mean(close_1d[i-20:i+1] * np.arange(1, 22))
     for i in range(half_len-1, len(close_1d)):
         wma_half[i] = np.mean(close_1d[i-half_len+1:i+1] * np.arange(1, half_len+1))
@@ -65,7 +65,7 @@ def generate_signals(prices):
     donchian_upper = high_ma
     donchian_lower = low_ma
     
-    # Volume MA for spike detection (moderate threshold for optimal trade frequency)
+    # Volume MA for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -81,7 +81,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size - conservative for risk management
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -90,7 +90,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 50  # sufficient for all indicators
+    warmup = 50
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -139,7 +139,7 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average - balanced for trade frequency)
+        # Volume confirmation: require volume spike (> 1.5x average - balanced frequency)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
@@ -165,3 +165,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
