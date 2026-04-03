@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #2228: 12h Donchian(20) breakout + 1w HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 12h timeframe reduces trade frequency while capturing multi-day swings. 
-Donchian(20) breakouts with volume confirmation capture momentum bursts. 
-1w HMA trend filter ensures we only trade in the direction of the higher timeframe trend.
-ATR-based trailing stop manages risk. Designed for 12h timeframe to target 50-150 trades over 4 years.
-Should work in bull markets (trend following) and bear markets (mean reversion at extremes via Donchian touch exit).
+Experiment #2230: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian channel breakouts on daily timeframe capture swing momentum with weekly trend filter.
+- Primary: 1d Donchian(20) breakout with volume > 1.8x 20-bar average (strict to limit trades)
+- HTF: 1w HMA(21) trend filter (only trade in direction of higher timeframe trend)
+- Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
+- Target: 30-100 total trades over 4 years (7-25/year) - optimized for 1d timeframe
+- Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2228_12h_donchian20_1w_hma_vol_v1"
-timeframe = "12h"
+name = "exp_2230_1d_donchian20_1w_hma_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -58,7 +59,7 @@ def generate_signals(prices):
     trend_1w = np.where(close_1w > hma_1w, 1, -1)
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # === 12h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
+    # === 1d Indicators: Donchian(20), Volume MA(20), ATR(14) ===
     # Donchian channels
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
