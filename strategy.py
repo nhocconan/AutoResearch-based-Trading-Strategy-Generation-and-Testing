@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #572: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts aligned with daily EMA50 trend and volume spikes capture strong momentum with low trade frequency suitable for 12h timeframe. Daily EMA50 provides structural trend filter that works in both bull and bear markets by filtering breakouts against the intermediate-term trend. Volume confirmation (>1.5x average) ensures participation. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 50-150 total trades over 4 years by using tight entry conditions (breakout + EMA trend + volume).
+HYPOTHESIS: Donchian breakouts aligned with daily EMA50 trend (from 1d HTF) and volume spikes capture strong momentum with lower trade frequency on 12h timeframe. Daily EMA50 provides structural trend filter that works in both bull and bear markets by filtering breakouts against the intermediate-term trend. Volume confirmation (>1.5x average) ensures participation. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 50-150 total trades over 4 years by using tight entry conditions (breakout + EMA trend + volume).
 """
 
 import numpy as np
@@ -106,8 +106,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 4 bars (~2 days on 12h) to avoid overtrading
-            if bars_since_entry > 4:
+            # Optional: time-based exit after 6 bars (~3 days on 12h) to avoid overtrading
+            if bars_since_entry > 6:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
