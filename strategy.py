@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #134: 1h Volume Spike + 4h Donchian Breakout + 1d Trend Filter
+Experiment #135: 6h Elder Ray Power + 1w Trend + Volume Filter
 
-HYPOTHESIS: On 1h timeframe, combine 4h Donchian breakout for trend direction with 1h volume spike confirmation and 1d EMA200 filter to capture high-probability momentum moves. The 4h Donchian(20) provides structure and filters noise, 1h volume spike (>2.0x average) confirms institutional participation, and 1d EMA200 ensures alignment with higher timeframe trend. Targets 60-150 trades over 4 years (15-37/year) by requiring confluence of three filters, minimizing fee drag while capturing strong trends in both bull and bear markets.
+HYPOTHESIS: Elder Ray Bull Power (high - EMA13) and Bear Power (low - EMA13) on 6h timeframe,
+combined with 1week trend filter (price > EMA50 for long, < EMA50 for short) and volume confirmation,
+creates a robust strategy that captures institutional buying/selling pressure. Elder Ray measures
+the power of bulls/bears behind each bar, working in both trending and ranging markets. The 1w trend
+filter ensures we only take trades aligned with the higher timeframe direction, reducing false signals.
+Targets 12-37 trades/year on 6h timeframe (50-150 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_1h_donchian_vol_ema200_v1"
-timeframe = "1h"
+name = "mtf_6h_elder_ray_power_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,62 +25,64 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h data for Donchian channel (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) >= 20:
-        high_4h = df_4h['high'].values
-        low_4h = df_4h['low'].values
-        # Donchian(20): highest high and lowest low of last 20 bars
-        highest_20 = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-        lowest_20 = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-        # Align to 1h timeframe (shifted by 1 HTF bar for completed bars only)
-        highest_20_aligned = align_htf_to_ltf(prices, df_4h, highest_20)
-        lowest_20_aligned = align_htf_to_ltf(prices, df_4h, lowest_20)
-    else:
-        highest_20_aligned = np.full(n, np.nan)
-        lowest_20_aligned = np.full(n, np.nan)
+    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
     
-    # === HTF: 1d data for EMA200 trend filter (Call ONCE before loop) ===
+    # Calculate EMA(50) on 1w close
+    if len(df_1w) >= 50:
+        close_1w = df_1w['close'].values
+        ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    else:
+        ema_50_1w_aligned = np.full(n, np.nan)
+    
+    # === HTF: 1d data for volume average (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 200:
-        close_1d = df_1d['close'].values
-        ema_200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-        ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    
+    # Calculate 20-period volume average on 1d
+    if len(df_1d) >= 20:
+        vol_1d = df_1d['volume'].values
+        vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+        vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
     else:
-        ema_200_1d_aligned = np.full(n, np.nan)
+        vol_ma_20_aligned = np.full(n, 1.0)
     
-    # === 1h Indicators ===
-    # Volume spike: current volume > 2.0 x 20-period average
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_spike = np.zeros(n, dtype=bool)
-    volume_spike[20:] = volume[20:] > (vol_ma_20[20:] * 2.0)
+    # === 6h Indicators ===
+    # Calculate EMA(13) for Elder Ray
+    if len(close) >= 13:
+        ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    else:
+        ema_13 = np.full(n, np.nan)
     
-    # Session filter: 08-20 UTC (pre-compute hours array)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Elder Ray Bull Power = High - EMA13
+    bull_power = high - ema_13
+    # Elder Ray Bear Power = Low - EMA13 (negative values indicate bear strength)
+    bear_power = low - ema_13
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # Discrete position sizing (20% of capital)
+    SIZE = 0.25  # Discrete position sizing (25% of capital)
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
     
-    warmup = 200  # Ensure enough data for HTF and indicator calculations
+    warmup = 100  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
-        # Skip if outside trading session
-        if not in_session[i]:
+        # --- Data Validity Check ---
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_ma_20_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Data Validity Check ---
-        if (np.isnan(highest_20_aligned[i]) or np.isnan(lowest_20_aligned[i]) or 
-            np.isnan(ema_200_1d_aligned[i])):
-            signals[i] = 0.0
-            continue
+        # --- Trend Filter: Only trade in direction of 1w EMA50 ---
+        price_above_1w_ema = close[i] > ema_50_1w_aligned[i]
+        price_below_1w_ema = close[i] < ema_50_1w_aligned[i]
+        
+        # --- Volume Confirmation: Require volume above 1d average ---
+        volume_confirm = volume[i] > vol_ma_20_aligned[i]
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -93,9 +100,21 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
+                # Exit when Bull Power turns negative (bulls losing control)
+                if bull_power[i] < 0:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
             else:  # Short position
                 stop_level = entry_price + 2.5 * atr_14
                 if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+                # Exit when Bear Power turns positive (bears losing control)
+                if bear_power[i] > 0:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -106,24 +125,26 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Breakout conditions
-        bullish_breakout = close[i] > highest_20_aligned[i]
-        bearish_breakout = close[i] < lowest_20_aligned[i]
+        # Long: Bull Power positive (bulls in control) + uptrend + volume
+        long_condition = (
+            bull_power[i] > 0 and 
+            price_above_1w_ema and 
+            volume_confirm
+        )
         
-        # Trend filter: price above/below 1d EMA200
-        price_above_ema = close[i] > ema_200_1d_aligned[i]
-        price_below_ema = close[i] < ema_200_1d_aligned[i]
+        # Short: Bear Power negative (bears in control) + downtrend + volume
+        short_condition = (
+            bear_power[i] < 0 and 
+            price_below_1w_ema and 
+            volume_confirm
+        )
         
-        # Entry conditions
-        long_entry = bullish_breakout and price_above_ema and volume_spike[i]
-        short_entry = bearish_breakout and price_below_ema and volume_spike[i]
-        
-        if long_entry:
+        if long_condition:
             in_position = True
             position_side = 1
             entry_price = close[i]
             signals[i] = SIZE
-        elif short_entry:
+        elif short_condition:
             in_position = True
             position_side = -1
             entry_price = close[i]
@@ -132,5 +153,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
