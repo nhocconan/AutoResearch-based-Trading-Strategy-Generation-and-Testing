@@ -2,10 +2,11 @@
 """
 Experiment #903: 4h Donchian(20) + 12h HMA Trend + Volume Spike + ATR Stoploss
 HYPOTHESIS: Donchian breakouts on 4h capture momentum, filtered by 12h HMA trend direction 
-and volume confirmation (>1.8x average). Long when price breaks above Donchian upper 
+and volume confirmation (>1.6x average). Long when price breaks above Donchian upper 
 AND 12h HMA rising AND volume spike. Short when price breaks below Donchian lower 
-AND 12h HMA falling AND volume spike. Uses discrete position sizing (0.28) to balance 
-risk and reward. Target: 75-200 total trades over 4 years (19-50/year).
+AND 12h HMA falling AND volume spike. Uses discrete position sizing (0.25) to reduce 
+fee drag. Target: 75-200 total trades over 4 years (19-50/year). Works in bull/bear via 
+HTF trend filter and volatility-based stops.
 """
 
 import numpy as np
@@ -41,7 +42,7 @@ def generate_signals(prices):
     # Trend: 1 = rising (hma > previous hma), -1 = falling (hma < previous hma), 0 = flat
     hma_trend_12h = np.zeros_like(hma_12h)
     hma_trend_12h[1:] = np.where(hma_12h[1:] > hma_12h[:-1], 1, 
-                                 np.where(hma_12h[1:] < hma_12h[:-1], -1, 0))
+                                  np.where(hma_12h[1:] < hma_12h[:-1], -1, 0))
     # Align trend to 4h timeframe
     hma_trend_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_trend_12h)
     
@@ -67,7 +68,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.28  # 28% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -110,8 +111,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 5 bars (~20h on 4h) to avoid overtrading
-            if bars_since_entry > 5:
+            # Optional: time-based exit after 6 bars (~24h on 4h) to avoid overtrading
+            if bars_since_entry > 6:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -122,8 +123,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.8x average)
-        volume_spike = vol_ratio[i] > 1.8
+        # Volume confirmation: require volume spike (> 1.6x average)
+        volume_spike = vol_ratio[i] > 1.6
         
         if volume_spike:
             # Long: price breaks above Donchian upper AND 12h HMA rising
