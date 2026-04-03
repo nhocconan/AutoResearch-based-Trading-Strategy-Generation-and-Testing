@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #784: 1d Donchian(20) + 1w HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: Daily Donchian breakouts filtered by weekly HMA trend and volume confirmation.
-Long when price breaks above Donchian upper AND weekly HMA rising AND volume spike.
-Short when price breaks below Donchian lower AND weekly HMA falling AND volume spike.
-Uses discrete position sizing (0.30). Target: 75-200 total trades over 4 years (19-50/year).
-Works in bull/bear: in bull trends, weekly HMA rising filters for longs; in bear trends,
-weekly HMA falling filters for shorts. Volume spike ensures momentum confirmation.
+HYPOTHESIS: Daily Donchian breakouts capture intermediate-term momentum, filtered by weekly HMA trend direction 
+and volume confirmation (>2.0x average). Long when price breaks above Donchian upper AND weekly HMA rising 
+AND volume spike. Short when price breaks below Donchian lower AND weekly HMA falling AND volume spike. 
+Works in bull/bear markets: in bull trends, weekly HMA rising filters for longs; in bear trends, weekly HMA 
+falling filters for shorts. Uses discrete position sizing (0.25). Target: 30-100 total trades over 4 years 
+(7-25/year).
 """
 
 import numpy as np
@@ -41,7 +41,7 @@ def generate_signals(prices):
     hma_1w = calculate_hma(close_1w, 21)
     # Trend: 1 = rising (hma > previous hma), -1 = falling (hma < previous hma), 0 = flat
     hma_trend_1w = np.zeros_like(hma_1w)
-    hma_trend_1w[1:] = np.where(hma_1w[1:] > hma_1w[:-1], 1,
+    hma_trend_1w[1:] = np.where(hma_1w[1:] > hma_1w[:-1], 1, 
                                  np.where(hma_1w[1:] < hma_1w[:-1], -1, 0))
     # Align trend to 1d timeframe
     hma_trend_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_trend_1w)
@@ -68,7 +68,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
