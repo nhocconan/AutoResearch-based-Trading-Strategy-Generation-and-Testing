@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #2113: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 4h Donchian breakouts capture intermediate-term momentum with 12h HMA trend filter.
-Volume confirmation (>1.5x 20-bar average) ensures breakout validity. ATR-based trailing stop
-(2*ATR) manages risk. Designed to work in bull markets (trend following) and bear markets
-(mean reversion at channel extremes). Target: 75-200 total trades over 4 years (19-50/year).
+HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture swing momentum with 12h trend filter.
+- Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average (balanced for trade frequency)
+- HTF: 12h HMA(21) trend filter (only trade in direction of higher timeframe trend)
+- Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
+- Target: 75-200 total trades over 4 years (19-50/year) - optimized for 4h timeframe
+- Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets
 """
 
 import numpy as np
@@ -27,6 +29,7 @@ def generate_signals(prices):
     close_12h = df_12h['close'].values
     
     # Calculate 12h HMA(21): Hull Moving Average
+    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
     half_len = 21 // 2
     sqrt_len = int(np.sqrt(21))
     
@@ -40,7 +43,7 @@ def generate_signals(prices):
     wma_full = np.array([np.nan] * len(close_12h))
     wma_half = np.array([np.nan] * len(close_12h))
     
-    for i in range(20, len(close_12h)):
+    for i in range(20, len(close_12h)):  # 21-1 = 20 for WMA(21)
         wma_full[i] = np.mean(close_12h[i-20:i+1] * np.arange(1, 22))
     for i in range(half_len-1, len(close_12h)):
         wma_half[i] = np.mean(close_12h[i-half_len+1:i+1] * np.arange(1, half_len+1))
@@ -63,7 +66,7 @@ def generate_signals(prices):
     donchian_upper = high_ma
     donchian_lower = low_ma
     
-    # Volume MA for confirmation (threshold set to limit trades)
+    # Volume MA for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -137,7 +140,7 @@ def generate_signals(prices):
         # Require 12h trend alignment for bias filter
         trend_bias = trend_12h_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average)
+        # Volume confirmation: require volume spike (> 1.5x average - balanced for trade frequency)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
