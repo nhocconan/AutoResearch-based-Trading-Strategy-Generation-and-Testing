@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #1164: 1d Donchian(20) Breakout + 1w Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on daily timeframe capture major swing moves with low trade frequency. 
-Trend filter from weekly timeframe ensures we only trade in the direction of the major trend. 
-Volume confirmation (>1.8x average) filters for institutional participation. 
-Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the weekly trend.
+HYPOTHESIS: Donchian(20) breakouts on 1d timeframe capture major swing moves with very low trade frequency. 
+Trend filter from 1w timeframe ensures we only trade with the major trend, avoiding counter-trend whipsaws. 
+Volume confirmation (>2.0x average) ensures institutional participation and reduces false breakouts. 
+Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 1w trend. 
 Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
 """
 
@@ -26,7 +26,7 @@ def generate_signals(prices):
     # === HTF: 1w data for trend filter (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    # Weekly trend: price > previous weekly close = uptrend, < = downtrend
+    # Simple trend: price > previous close = uptrend, < = downtrend
     trend_1w = np.zeros(len(close_1w))
     trend_1w[1:] = np.where(close_1w[1:] > close_1w[:-1], 1, -1)
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
@@ -49,7 +49,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.30  # 30% position size
     
     # Position tracking state variables
     in_position = False
@@ -96,8 +96,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.8x average)
-        volume_spike = vol_ratio[i] > 1.8
+        # Volume confirmation: require volume spike (> 2.0x average)
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
