@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #154: 1h RSI(14) pullback + 4h EMA(50) trend + 1d volume confirmation + ATR stoploss
-HYPOTHESIS: In 1h timeframe, RSI pullbacks during strong 4h/1d trends with volume confirmation capture swing trades with controlled frequency. The 4h EMA(50) provides medium-term trend bias, 1d volume ensures institutional participation, and RSI(14)<30/>70 identifies exhaustion points. ATR-based stops limit losses. Target: 60-150 total trades over 4 years (15-37/year) for 1h.
+Experiment #154: 1h RSI(14) mean reversion + 4h/1d trend filter + session filter
+HYPOTHESIS: In choppy/ranging markets (2025+ test), RSI extremes combined with higher-timeframe trend filters provide high-probability mean-reversion entries. Using 4h for trend direction and 1d for regime filter reduces false signals. Session filter (08-20 UTC) avoids low-liquidity periods. Target: 60-150 total trades over 4 years (15-37/year) to balance statistical significance with fee drag on 1h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_154_1h_rsi14_pullback_4h_ema50_1d_vol_v1"
+name = "exp_154_1h_rsi14_4h_1d_trend_session_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -20,36 +20,60 @@ def generate_signals(prices):
     open_time = prices["open_time"].values
     n = len(close)
     
-    # Pre-compute session hours (08-20 UTC) once before loop
+    # === Pre-compute session filter ONCE (avoid datetime ops in loop) ===
     hours = pd.DatetimeIndex(open_time).hour
-    
-    # === HTF: 4h data for EMA(50) trend (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = pd.Series(df_4h['close'].values)
-    ema_50_4h = close_4h.ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_trend_4h = align_htf_to_ltf(prices, df_4h, ema_50_4h)
-    
-    # === HTF: 1d data for volume MA(20) confirmation (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = pd.Series(df_1d['volume'].values)
-    vol_ma_20_1d = volume_1d.rolling(window=20, min_periods=20).mean().values
-    vol_ma_aligned_1d = align_htf_to_ltf(prices, df_1d, vol_ma_20_1d)
+    in_session = (hours >= 8) & (hours <= 20)
     
     # === 1h Indicators: RSI(14) ===
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0.0)
     loss = np.where(delta < 0, -delta, 0.0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    avg_gain = pd.Series(gain).ewm(span=14, min_periods=14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(span=14, min_periods=14, adjust=False).mean().values
     rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0.0)
-    rsi = 100 - (100 / (1 + rs))
+    rsi = 100.0 - (100.0 / (1.0 + rs))
     
-    # === 1h Indicators: ATR(14) for stoploss ===
-    tr = np.zeros(n)
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    tr[0] = high[0] - low[0]
-    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # === HTF: 4h data for trend direction (Call ONCE before loop) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = pd.Series(df_4h['close'].values)
+    # EMA(21) for 4h trend
+    ema_4h = close_4h.ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Price vs EMA: 1 = uptrend, -1 = downtrend
+    trend_4h = np.where(close > ema_4h_aligned, 1, -1)
+    
+    # === HTF: 1d data for regime filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = pd.Series(df_1d['close'].values)
+    # ADX(14) for regime detection on 1d
+    def calculate_adx(high, low, close, period=14):
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]
+        atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
+        
+        up_move = high - np.roll(high, 1)
+        down_move = np.roll(low, 1) - low
+        up_move[0] = 0
+        down_move[0] = 0
+        
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
+        minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
+        
+        dx = np.where((plus_di + minus_di) != 0, 
+                      100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0.0)
+        adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
+        return adx
+    
+    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Regime: trending if ADX > 25, ranging if ADX <= 25
+    ranging_regime = adx_1d_aligned <= 25
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -61,59 +85,53 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 100  # sufficient for RSI/ATR warmup + HTF
+    warmup = 100  # sufficient for RSI + HTF warmup
     
     for i in range(warmup, n):
-        # --- Session Filter: 08-20 UTC only ---
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        # Skip if outside trading session
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
-        # --- Data Validity Check ---
-        if (np.isnan(rsi[i]) or np.isnan(ema_trend_4h[i]) or
-            np.isnan(vol_ma_aligned_1d[i]) or np.isnan(atr[i])):
+        # Skip if any indicator is NaN
+        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or 
+            np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require current volume > 1.5x 1d average ---
-        volume_spike = volume[i] > 1.5 * vol_ma_aligned_1d[i]
-        
-        # --- RSI Conditions ---
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        
-        # --- 4h EMA Trend ---
-        bullish_trend = close[i] > ema_trend_4h[i]
-        bearish_trend = close[i] < ema_trend_4h[i]
-        
-        # --- Exit Logic: ATR-based stoploss ---
+        # --- Exit Logic: Mean reversion completion or stoploss ---
         if in_position:
             bars_since_entry += 1
             
-            if position_side > 0:  # Long position
-                # Stoploss: 2.0*ATR below entry
-                stop_level = entry_price - 2.0 * atr[i]
-                if low[i] < stop_level:
+            # Stoploss: 2.5*ATR(14) approximation using price deviation
+            # Simplified: exit if price moves 2.5% against entry (conservative for 1h)
+            if position_side > 0:  # Long
+                if price < entry_price * 0.975:  # 2.5% stop
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-            else:  # Short position
-                # Stoploss: 2.0*ATR above entry
-                stop_level = entry_price + 2.0 * atr[i]
-                if high[i] > stop_level:
+            else:  # Short
+                if price > entry_price * 1.025:  # 2.5% stop
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 24 bars (~24h on 1h) to avoid overtrading
-            if bars_since_entry > 24:
+            # Exit conditions: RSI returns to neutral zone (40-60)
+            if 40 <= rsi[i] <= 60:
+                in_position = False
+                position_side = 0
+                bars_since_entry = 0
+                signals[i] = 0.0
+                continue
+            
+            # Time-based exit: max 12 bars (~12h) to avoid overtrading
+            if bars_since_entry > 12:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -124,19 +142,20 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        if volume_spike:
-            # Long: RSI oversold AND bullish 4h trend
-            if rsi_oversold and bullish_trend:
+        # Only enter in ranging regime (ADX <= 25) for mean reversion
+        if ranging_regime[i]:
+            # Long: RSI oversold (<30) + 4h uptrend filter
+            if rsi[i] < 30 and trend_4h[i] > 0:
                 in_position = True
                 position_side = 1
-                entry_price = close[i]
+                entry_price = price
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: RSI overbought AND bearish 4h trend
-            elif rsi_overbought and bearish_trend:
+            # Short: RSI overbought (>70) + 4h downtrend filter
+            elif rsi[i] > 70 and trend_4h[i] < 0:
                 in_position = True
                 position_side = -1
-                entry_price = close[i]
+                entry_price = price
                 bars_since_entry = 0
                 signals[i] = -SIZE
             else:
