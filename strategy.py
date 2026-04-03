@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #609: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: Combining 4h Donchian breakouts with 1d EMA50 trend filter and volume confirmation 
-captures institutional breakouts in both bull and bear markets. The 1d EMA50 provides a robust 
-trend filter that works across regimes, while volume confirmation ensures participation. 
-Target: 75-200 total trades over 4 years via tight entry conditions (Donchian breakout + 
-volume spike + EMA alignment). Uses ATR-based stoploss for risk management.
+Experiment #611: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
+HYPOTHESIS: Using weekly pivot levels (from 1w HTF) to determine structural bias, combined with 6h Donchian breakouts and volume confirmation, captures institutional participation while avoiding whipsaws. Weekly pivots provide multi-week support/resistance that adapts to bull/bear regimes. Target: 75-150 total trades over 4 years via tight entry conditions requiring volume spike and alignment with weekly pivot bias.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_609_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_611_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,24 +19,41 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA50 trend filter (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # === HTF: 1w data for weekly pivot points (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA50
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly pivot levels (standard floor trader pivots)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    r1 = pivot_1w + range_1w
+    s1 = pivot_1w - range_1w
+    r2 = pivot_1w + 2 * range_1w
+    s2 = pivot_1w - 2 * range_1w
+    r3 = pivot_1w + 3 * range_1w
+    s3 = pivot_1w - 3 * range_1w
     
-    # === 4h Indicators: Donchian Channel (20) ===
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    
+    # === 6h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)  # default to 1.0 for warmup period
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -62,28 +75,49 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(pivot_aligned[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = vol_ratio[i] > 2.0
         
         # --- Donchian Breakout Conditions ---
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- 1d EMA50 Trend Filter ---
-        # Above EMA50 = bullish bias (favor longs)
-        # Below EMA50 = bearish bias (favor shorts)
-        bullish_bias = price > ema_1d_aligned[i]
-        bearish_bias = price < ema_1d_aligned[i]
+        # --- Weekly Pivot Bias Filter ---
+        # Bias determination: price relative to weekly pivot
+        bullish_bias = price > pivot_aligned[i]
+        bearish_bias = price < pivot_aligned[i]
         
-        # --- Exit Logic: ATR-based stoploss ---
-        if in_position:
+        # --- Entry Logic ---
+        # Long: bullish bias + Donchian breakout up + volume spike
+        # Short: bearish bias + Donchian breakout down + volume spike
+        if volume_spike:
+            if bullish_bias and breakout_up:
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = SIZE
+            elif bearish_bias and breakout_down:
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = -SIZE
+            else:
+                signals[i] = 0.0
+        else:
+            signals[i] = 0.0
+            continue
+        
+        # --- Position Management (if already in position) ---
+        if in_position and i > warmup:  # Skip management on entry bar
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
@@ -95,6 +129,14 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
+                # Optional: time-based exit after 20 bars (~5 days on 6h) to avoid overtrading
+                if bars_since_entry > 20:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+                signals[i] = SIZE
             else:  # Short position
                 # Stoploss: 2.5*ATR above entry
                 stop_level = entry_price + 2.5 * atr[i]
@@ -104,37 +146,13 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-            
-            # Optional: time-based exit after 8 bars (~32h on 4h) to avoid overtrading
-            if bars_since_entry > 8:
-                in_position = False
-                position_side = 0
-                bars_since_entry = 0
-                signals[i] = 0.0
-                continue
-            
-            signals[i] = position_side * SIZE
-            continue
-        
-        # --- New Position Entry Logic ---
-        if volume_spike:
-            # Long: Donchian breakout up + bullish bias (price above 1d EMA50)
-            if breakout_up and bullish_bias:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            # Short: Donchian breakout down + bearish bias (price below 1d EMA50)
-            elif breakout_down and bearish_bias:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
+                # Optional: time-based exit after 20 bars (~5 days on 6h) to avoid overtrading
+                if bars_since_entry > 20:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
                 signals[i] = -SIZE
-            else:
-                signals[i] = 0.0
-        else:
-            signals[i] = 0.0
     
     return signals
