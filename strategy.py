@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #011: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
-HYPOTHESIS: 6h price breaking Donchian(20) channels with alignment to 1d weekly pivot trend (price above/below weekly pivot) and volume confirmation (>1.5x average) captures institutional breakouts with controlled frequency. Weekly pivot provides structural bias from higher timeframe, reducing false breakouts in ranging markets. Discrete sizing (0.25) and ATR(14) stoploss (2.0) manage risk. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #015: 6h Williams %R + 1d EMA Trend + Volume Confirmation
+HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h, while 1d EMA(50) provides the primary trend filter. Volume confirmation (>1.5x average) ensures momentum validity. This combination works in both bull and bear markets by fading extremes in the direction of the higher timeframe trend. Discrete sizing (0.25) and ATR(14) stoploss (2.0) manage risk. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_011_6h_donchian20_1d_weekly_pivot_vol_v1"
+name = "exp_015_6h_williamsr_1d_ema_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -19,35 +19,22 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for weekly pivot calculation (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points on 1d data (using prior week's OHLC)
-    # Weekly pivot = (Prior week high + prior week low + prior week close) / 3
-    # We need to align this to 6h bars
-    if len(df_1d) >= 5:  # need at least a week of data
-        # Calculate weekly OHLC from daily data
-        df_1d_weekly = df_1d.resample('W', label='left').agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last'
-        })
-        # Shift by 1 to use prior week's data (no look-ahead)
-        df_1d_weekly = df_1d_weekly.shift(1)
-        
-        # Calculate weekly pivot
-        weekly_pivot = (df_1d_weekly['high'] + df_1d_weekly['low'] + df_1d_weekly['close']) / 3
-        
-        # Align weekly pivot to 6h timeframe
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d_weekly, weekly_pivot.values)
-    else:
-        # Not enough data for weekly pivot
-        weekly_pivot_aligned = np.full(n, np.nan)
+    # Calculate EMA(50) on 1d close
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === 6h Indicators: Donchian Channel (20) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # === 6h Indicators: Williams %R(14) ===
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.full(n, np.nan)
+    for i in range(n):
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
+        else:
+            williams_r[i] = -50  # neutral when no range
     
     # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,13 +59,13 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 60  # sufficient for 20-period indicators + HTF warmup
+    warmup = 60  # sufficient for 14/20/50-period indicators + HTF warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(weekly_pivot_aligned[i]) or
-            np.isnan(atr[i])):
+            np.isnan(williams_r[i]) or np.isnan(ema_1d_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -87,15 +74,15 @@ def generate_signals(prices):
         # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
         volume_spike = vol_ratio[i] > 1.5
         
-        # --- Donchian Breakout Conditions ---
-        breakout_up = price > highest_high[i]
-        breakout_down = price < lowest_low[i]
+        # --- Williams %R Conditions ---
+        oversold = williams_r[i] < -80  # Oversold condition
+        overbought = williams_r[i] > -20  # Overbought condition
         
-        # --- Trend Filter: Weekly pivot alignment ---
-        # Uptrend bias: price above weekly pivot
-        # Downtrend bias: price below weekly pivot
-        uptrend_bias = price > weekly_pivot_aligned[i]
-        downtrend_bias = price < weekly_pivot_aligned[i]
+        # --- Trend Filter: 1d EMA alignment ---
+        # Uptrend: price above 1d EMA(50)
+        # Downtrend: price below 1d EMA(50)
+        uptrend = price > ema_1d_aligned[i]
+        downtrend = price < ema_1d_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -120,8 +107,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~36h on 6h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 12 bars (~3 days on 6h) to avoid overtrading
+            if bars_since_entry > 12:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -133,15 +120,15 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: breakout above upper channel AND uptrend bias from weekly pivot
-            if breakout_up and uptrend_bias:
+            # Long: Williams %R oversold AND uptrend (fade oversold in uptrend)
+            if oversold and uptrend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: breakout below lower channel AND downtrend bias from weekly pivot
-            elif breakout_down and downtrend_bias:
+            # Short: Williams %R overbought AND downtrend (fade overbought in downtrend)
+            elif overbought and downtrend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
