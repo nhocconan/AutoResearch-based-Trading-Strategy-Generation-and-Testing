@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #294: 1h Supertrend(10,3) + 4h/1d Donchian(20) trend filter + volume spike + session filter (08-20 UTC)
-HYPOTHESIS: Supertrend catches momentum on 1h while 4h/1d Donchian channels ensure we only trade with the higher timeframe trend. Volume spike confirms institutional participation. Session filter avoids low-liquidity Asian session noise. Discrete sizing (0.20) minimizes fee drag. Target: 60-150 total trades over 4 years.
+Experiment #295: 6h Elder Ray + 1d ADX Regime + Volume Confirmation
+HYPOTHESIS: Elder Ray (Bull/Bear Power) identifies momentum strength while 1d ADX regime filters for trending vs ranging markets. In trending markets (ADX>25), follow Elder Ray signals. In ranging markets (ADX<20), fade extreme Bull/Bear Power readings. Volume confirmation reduces false signals. Designed to work in both bull (trend following) and bear (mean reversion in ranges) markets. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_294_1h_supertrend10_3_4h1d_donchian20_vol_session_v1"
-timeframe = "1h"
+name = "exp_295_6h_elder_ray_1d_adx_regime_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,81 +19,68 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h and 1d data for Donchian channels (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
+    # === HTF: 1d data for ADX regime (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # 4h Donchian(20)
-    donch_high_4h = pd.Series(df_4h['high'].values).rolling(window=20, min_periods=20).max().shift(1).values
-    donch_low_4h = pd.Series(df_4h['low'].values).rolling(window=20, min_periods=20).min().shift(1).values
-    donch_high_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_high_4h)
-    donch_low_4h_aligned = align_htf_to_ltf(prices, df_4h, donch_low_4h)
-    
-    # 1d Donchian(20)
-    donch_high_1d = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().shift(1).values
-    donch_low_1d = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().shift(1).values
-    donch_high_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_high_1d)
-    donch_low_1d_aligned = align_htf_to_ltf(prices, df_1d, donch_low_1d)
-    
-    # === 1h Indicators: Supertrend(10,3) ===
+    # Calculate ADX(14) on 1d
+    period = 14
     # True Range
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
+    tr1 = df_1d['high'] - df_1d['low']
+    tr2 = abs(df_1d['high'] - df_1d['close'].shift(1))
+    tr3 = abs(df_1d['low'] - df_1d['close'].shift(1))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_1d = tr.rolling(window=period, min_periods=period).mean()
+    
+    # Directional Movement
+    up_move = df_1d['high'] - df_1d['high'].shift(1)
+    down_move = df_1d['low'].shift(1) - df_1d['low']
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM
+    plus_dm_smooth = pd.Series(plus_dm).ewm(span=period, adjust=False).mean()
+    minus_dm_smooth = pd.Series(minus_dm).ewm(span=period, adjust=False).mean()
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / atr_1d
+    minus_di = 100 * minus_dm_smooth / atr_1d
+    
+    # DX and ADX
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.ewm(span=period, adjust=False).mean()
+    
+    # Align ADX to 6h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx.values)
+    
+    # === 6h Indicators: Elder Ray (Bull Power / Bear Power) ===
+    # EMA(13) as trend proxy
+    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    
+    # Bull Power = High - EMA(13)
+    bull_power = high - ema_13
+    # Bear Power = Low - EMA(13)
+    bear_power = low - ema_13
+    
+    # Normalize by ATR(14) for consistency across volatility regimes
+    # ATR(14) on 6h
+    tr_6h = np.zeros(n)
+    tr_6h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr = pd.Series(tr).ewm(span=10, min_periods=10, adjust=False).mean().values
+        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_6h = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # Basic Upper and Lower Bands
-    basic_ub = (high + low) / 2 + 3 * atr
-    basic_lb = (high + low) / 2 - 3 * atr
+    bull_power_norm = bull_power / atr_6h
+    bear_power_norm = bear_power / atr_6h
     
-    # Final Upper and Lower Bands
-    final_ub = np.zeros(n)
-    final_lb = np.zeros(n)
-    final_ub[0] = basic_ub[0]
-    final_lb[0] = basic_lb[0]
-    for i in range(1, n):
-        if basic_ub[i] < final_ub[i-1] or close[i-1] > final_ub[i-1]:
-            final_ub[i] = basic_ub[i]
-        else:
-            final_ub[i] = final_ub[i-1]
-            
-        if basic_lb[i] > final_lb[i-1] or close[i-1] < final_lb[i-1]:
-            final_lb[i] = basic_lb[i]
-        else:
-            final_lb[i] = final_lb[i-1]
-    
-    # Supertrend
-    supertrend = np.zeros(n)
-    direction = np.ones(n)  # 1 for uptrend, -1 for downtrend
-    supertrend[0] = final_ub[0]
-    direction[0] = 1
-    for i in range(1, n):
-        if close[i] > final_ub[i-1]:
-            direction[i] = 1
-        elif close[i] < final_lb[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-        
-        if direction[i] == 1:
-            supertrend[i] = final_lb[i]
-        else:
-            supertrend[i] = final_ub[i]
-    
-    # === 1h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     vol_ratio[:20] = 1.0
     
-    # === Session filter: 08-20 UTC (pre-compute hours) ===
-    # prices.index is already DatetimeIndex
-    hours = prices.index.hour.values
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20
+    SIZE = 0.25
     
     # Position tracking state variables
     in_position = False
@@ -101,60 +88,45 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # enough for Donchian(20) and Supertrend
+    warmup = max(60, 20)  # ATR/EMA warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(atr[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(donch_high_4h_aligned[i]) or np.isnan(donch_low_4h_aligned[i]) or
-            np.isnan(donch_high_1d_aligned[i]) or np.isnan(donch_low_1d_aligned[i]) or
-            np.isnan(supertrend[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(bull_power_norm[i]) or 
+            np.isnan(bear_power_norm[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(ema_13[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        hour = hours[i]
-        
-        # --- Session Filter: Only trade 08-20 UTC ---
-        if not (8 <= hour <= 20):
-            if in_position:
-                # Keep position but don't allow new entries outside session
-                signals[i] = position_side * SIZE
-                continue
-            else:
-                signals[i] = 0.0
-                continue
         
         # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
         volume_spike = vol_ratio[i] > 1.5
         
-        # --- Trend Conditions: Must align with BOTH 4h and 1d Donchian ---
-        # Uptrend: price above both 4h and 1d Donchian lower bands
-        # Downtrend: price below both 4h and 1d Donchian upper bands
-        uptrend_4h = price > donch_low_4h_aligned[i]
-        uptrend_1d = price > donch_low_1d_aligned[i]
-        downtrend_4h = price < donch_high_4h_aligned[i]
-        downtrend_1d = price < donch_high_1d_aligned[i]
+        # --- Regime Detection ---
+        adx_val = adx_aligned[i]
+        is_trending = adx_val > 25
+        is_ranging = adx_val < 20
         
-        # --- Supertrend Entry Signals ---
-        supertrend_long = direction[i] == 1 and price > supertrend[i]
-        supertrend_short = direction[i] == -1 and price < supertrend[i]
+        # --- Elder Ray Signals ---
+        bullish_momentum = bull_power_norm[i] > 0.5  # Strong bullish pressure
+        bearish_momentum = bear_power_norm[i] < -0.5  # Strong bearish pressure
         
+        # --- Exit Logic ---
         if in_position:
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
                 # Stoploss: 2*ATR below entry
-                stop_level = entry_price - 2.0 * atr[i]
+                stop_level = entry_price - 2.0 * atr_6h[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit: Supertrend reversal or loss of 1h/4h/1d alignment
-                if (direction[i] == -1 or  # Supertrend flipped
-                    not (price > donch_low_4h_aligned[i] and price > donch_low_1d_aligned[i])):  # Lost uptrend alignment
+                # Take profit: momentum fades
+                if not bullish_momentum and bars_since_entry >= 3:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -162,16 +134,15 @@ def generate_signals(prices):
                     continue
             else:  # Short position
                 # Stoploss: 2*ATR above entry
-                stop_level = entry_price + 2.0 * atr[i]
+                stop_level = entry_price + 2.0 * atr_6h[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Exit: Supertrend reversal or loss of 1h/4h/1d alignment
-                if (direction[i] == 1 or  # Supertrend flipped
-                    not (price < donch_high_4h_aligned[i] and price < donch_high_1d_aligned[i])):  # Lost downtrend alignment
+                # Take profit: momentum fades
+                if not bearish_momentum and bars_since_entry >= 3:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -187,21 +158,38 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Supertrend bullish AND price above both 4h and 1d Donchian lower bands
-            if supertrend_long and uptrend_4h and uptrend_1d:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            # Short: Supertrend bearish AND price below both 4h and 1d Donchian upper bands
-            elif supertrend_short and downtrend_4h and downtrend_1d:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
+            if is_trending:
+                # Trending market: follow momentum
+                if bullish_momentum:
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
+                elif bearish_momentum:
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
+            elif is_ranging:
+                # Ranging market: fade extreme momentum
+                if bullish_momentum:
+                    # Extreme bullish power in range = short opportunity
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
+                elif bearish_momentum:
+                    # Extreme bearish power in range = long opportunity
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
             else:
+                # Transition regime (ADX 20-25): no clear edge
                 signals[i] = 0.0
         else:
             signals[i] = 0.0
