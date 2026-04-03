@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #529: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts aligned with 1d EMA50 trend (HTF) and volume confirmation capture strong momentum with lower trade frequency. EMA50 provides clear bull/bear regime filter that works in both bull and bear markets. Volume confirmation (>1.5x average) ensures participation. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 75-200 total trades over 4 years by using tight entry conditions (breakout + EMA50 trend + volume).
+HYPOTHESIS: Donchian breakouts aligned with daily EMA50 trend (from 1d HTF) and volume spikes capture strong momentum with lower trade frequency. Daily EMA50 provides structural trend filter that works in both bull and bear markets by filtering breakouts against the intermediate trend. Volume confirmation (>1.5x average) ensures participation. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 75-200 total trades over 4 years by using tight entry conditions (breakout + EMA trend + volume).
 """
 
 import numpy as np
@@ -22,11 +22,15 @@ def generate_signals(prices):
     # === HTF: 1d data for EMA50 trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    
+    # Calculate EMA50 on daily timeframe
     if len(close_1d) >= 50:
         ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        ema_1d = np.full(len(close_1d), np.nan)
+    
+    # Align EMA50 to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # === 4h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
@@ -73,10 +77,10 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- 1d EMA50 Trend Filter ---
-        # Bullish trend: price above EMA50
+        # --- Daily EMA50 Trend Filter ---
+        # Bullish trend: price above daily EMA50
         bullish_trend = price > ema_1d_aligned[i]
-        # Bearish trend: price below EMA50
+        # Bearish trend: price below daily EMA50
         bearish_trend = price < ema_1d_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
@@ -115,14 +119,14 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + bullish EMA50 trend
+            # Long: Donchian breakout up + bullish daily EMA50 trend
             if breakout_up and bullish_trend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + bearish EMA50 trend
+            # Short: Donchian breakout down + bearish daily EMA50 trend
             elif breakout_down and bearish_trend:
                 in_position = True
                 position_side = -1
