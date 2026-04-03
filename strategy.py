@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #570: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA trend direction and volume confirmation (>1.5x average) capture swing moves with proper trend filtering. The weekly EMA provides a robust multi-week trend filter that avoids whipsaws in ranging markets. Volume confirmation ensures institutional participation. Targets 30-100 total trades over 4 years by using tight daily timeframe entry conditions.
+Experiment #570: 1d Donchian(20) breakout + 1w EMA200 trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA200 trend capture strong momentum with low trade frequency. Weekly EMA200 provides structural trend filter that works in both bull and bear markets by filtering breakouts against the long-term trend. Volume confirmation (>1.5x average) ensures participation. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) limits drawdown. Targets 30-100 total trades over 4 years by using tight entry conditions (breakout + EMA trend + volume).
 """
 
 import numpy as np
@@ -19,12 +19,17 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for EMA50 trend filter (Call ONCE before loop) ===
+    # === HTF: 1w data for EMA200 trend (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate weekly EMA50
-    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate EMA200 on weekly timeframe
+    if len(close_1w) >= 200:
+        ema_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
+    else:
+        ema_1w = np.full(len(close_1w), np.nan)
+    
+    # Align EMA200 to 1d timeframe
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # === 1d Indicators: Donchian Channel (20) ===
@@ -53,7 +58,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for Donchian and EMA calculation
+    warmup = 200  # sufficient for EMA200 calculation
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -72,10 +77,10 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- EMA Trend Filter ---
-        # Bullish trend: price above weekly EMA50
+        # --- Weekly EMA200 Trend Filter ---
+        # Bullish trend: price above weekly EMA200
         bullish_trend = price > ema_1w_aligned[i]
-        # Bearish trend: price below weekly EMA50
+        # Bearish trend: price below weekly EMA200
         bearish_trend = price < ema_1w_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
@@ -101,19 +106,27 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
+            # Optional: time-based exit after 30 bars (~1 month on 1d) to avoid overtrading
+            if bars_since_entry > 30:
+                in_position = False
+                position_side = 0
+                bars_since_entry = 0
+                signals[i] = 0.0
+                continue
+            
             signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: Donchian breakout up + bullish EMA trend
+            # Long: Donchian breakout up + bullish weekly EMA200 trend
             if breakout_up and bullish_trend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Donchian breakout down + bearish EMA trend
+            # Short: Donchian breakout down + bearish weekly EMA200 trend
             elif breakout_down and bearish_trend:
                 in_position = True
                 position_side = -1
