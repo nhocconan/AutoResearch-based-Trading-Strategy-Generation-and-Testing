@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #939: 6h Camarilla Pivot + 12h Trend + Volume Spike
-HYPOTHESIS: Camarilla pivot levels (R3/S3, R4/S4) from 12h act as strong support/resistance. 
-Fade at R3/S3 when 12h trend is weak (ADX<25), breakout continuation at R4/S4 when 12h trend is strong (ADX>25).
-Volume confirmation (>1.5x average) filters false signals. Target: 75-150 total trades over 4 years (19-37/year) on 6h timeframe.
-Works in bull/bear via regime-adaptive logic (fade in ranging, breakout in trending).
+Experiment #940: 4h Donchian(20) + 1d HMA Trend + Volume Confirmation + ATR Stoploss
+HYPOTHESIS: Donchian breakouts on 4h capture intermediate-term momentum, filtered by 1d HMA(21) trend direction 
+and volume confirmation (>1.5x average volume). Long when price breaks above Donchian upper AND 1d HMA rising AND volume spike. 
+Short when price breaks below Donchian lower AND 1d HMA falling AND volume spike. Uses discrete position sizing (0.25) to limit 
+fee drag and drawdown. Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_939_6h_camarilla_pivot_12h_trend_vol_v1"
-timeframe = "6h"
+name = "exp_940_4h_donchian20_1d_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,85 +22,47 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for Camarilla pivot and ADX trend filter (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === HTF: 1d data for HMA trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for 12h (using previous 12h bar's OHLC)
-    def camarilla_levels(high, low, close):
-        # Typical price for pivot
-        pivot = (high + low + close) / 3.0
-        range_ = high - low
-        # Camarilla levels
-        r4 = pivot + (range_ * 1.1 / 2)
-        r3 = pivot + (range_ * 1.1 / 4)
-        s3 = pivot - (range_ * 1.1 / 4)
-        s4 = pivot - (range_ * 1.1 / 2)
-        return r3, r4, s3, s4
+    # Calculate HMA(21) on 1d
+    def calculate_hma(arr, period):
+        half = int(period / 2)
+        sqrt = int(np.sqrt(period))
+        wma1 = pd.Series(arr).ewm(span=half, min_periods=half, adjust=False).mean().values
+        wma2 = pd.Series(arr).ewm(span=period, min_periods=period, adjust=False).mean().values
+        raw_hma = 2 * wma1 - wma2
+        hma = pd.Series(raw_hma).ewm(span=sqrt, min_periods=sqrt, adjust=False).mean().values
+        return hma
     
-    # Calculate for each 12h bar (using that bar's OHLC as the "previous" bar for next period)
-    r3_12h = np.zeros(len(close_12h))
-    r4_12h = np.zeros(len(close_12h))
-    s3_12h = np.zeros(len(close_12h))
-    s4_12h = np.zeros(len(close_12h))
+    hma_1d = calculate_hma(close_1d, 21)
+    # Trend: 1 = rising (hma > previous hma), -1 = falling (hma < previous hma), 0 = flat
+    hma_trend_1d = np.zeros_like(hma_1d)
+    hma_trend_1d[1:] = np.where(hma_1d[1:] > hma_1d[:-1], 1, 
+                                 np.where(hma_1d[1:] < hma_1d[:-1], -1, 0))
+    # Align trend to 4h timeframe
+    hma_trend_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_trend_1d)
     
-    for i in range(1, len(close_12h)):  # Start from 1 to use previous bar
-        r3, r4, s3, s4 = camarilla_levels(high_12h[i-1], low_12h[i-1], close_12h[i-1])
-        r3_12h[i] = r3
-        r4_12h[i] = r4
-        s3_12h[i] = s3
-        s4_12h[i] = s4
-    # First bar remains 0 (no previous bar)
+    # === 4h Indicators: Donchian Channel (20) ===
+    def donchian_channel(high, low, period):
+        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        return upper, lower
     
-    # Calculate ADX(14) on 12h for trend strength
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = high[0] - low[0]  # First TR
-        
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        
-        # Smoothed values
-        atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
-        dm_plus_smooth = pd.Series(dm_plus).ewm(span=period, min_periods=period, adjust=False).mean().values
-        dm_minus_smooth = pd.Series(dm_minus).ewm(span=period, min_periods=period, adjust=False).mean().values
-        
-        # Directional Indicators
-        di_plus = 100 * dm_plus_smooth / atr
-        di_minus = 100 * dm_minus_smooth / atr
-        
-        # DX and ADX
-        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-        dx = np.where(np.isnan(dx), 0, dx)
-        adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
-        return adx
+    upper_20, lower_20 = donchian_channel(high, low, 20)
     
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
-    # Trend strength: 1 = strong (ADX>25), 0 = weak (ADX<=25)
-    trend_strength_12h = np.where(adx_12h > 25, 1, 0)
-    
-    # Align HTF indicators to 6h timeframe
-    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
-    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
-    trend_strength_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_strength_12h)
-    
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    
+    # === 4h Indicators: ATR(14) for stoploss ===
+    tr = np.zeros(n)
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -112,43 +74,43 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = max(20, 20)  # sufficient for volume MA
+    warmup = max(20, 20)  # sufficient for Donchian, volume MA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(r3_12h_aligned[i]) or np.isnan(r4_12h_aligned[i]) or
-            np.isnan(s3_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or
-            np.isnan(trend_strength_12h_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(upper_20[i]) or np.isnan(lower_20[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(hma_trend_1d_aligned[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic: Opposite signal or time-based exit ---
+        # --- Exit Logic: ATR-based stoploss ---
         if in_position:
             bars_since_entry += 1
             
-            # Exit conditions
-            exit_signal = False
-            
             if position_side > 0:  # Long position
-                # Exit if price reaches S3 (fade) or S4 breaks (stop)
-                if price <= s3_12h_aligned[i] and trend_strength_12h_aligned[i] == 0:
-                    exit_signal = True  # Fade exit in ranging market
-                elif price < s4_12h_aligned[i]:
-                    exit_signal = True  # Stop loss on breakdown
+                # Stoploss: 2.0*ATR below entry
+                stop_level = entry_price - 2.0 * atr[i]
+                if low[i] < stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
             else:  # Short position
-                # Exit if price reaches R3 (fade) or R4 breaks (stop)
-                if price >= r3_12h_aligned[i] and trend_strength_12h_aligned[i] == 0:
-                    exit_signal = True  # Fade exit in ranging market
-                elif price > r4_12h_aligned[i]:
-                    exit_signal = True  # Stop loss on breakout
+                # Stoploss: 2.0*ATR above entry
+                stop_level = entry_price + 2.0 * atr[i]
+                if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
             
-            # Time-based exit: max 12 bars (~3d on 6h) to prevent overtrading
-            if bars_since_entry > 12:
-                exit_signal = True
-            
-            if exit_signal:
+            # Optional: time-based exit after 6 bars (~1d on 4h) to avoid overtrading
+            if bars_since_entry > 6:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -163,38 +125,22 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Fade logic at R3/S3 when trend is weak (ranging market)
-            if trend_strength_12h_aligned[i] == 0:  # Weak trend = ranging
-                # Short at R3 with volume spike
-                if price >= r3_12h_aligned[i]:
-                    in_position = True
-                    position_side = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                    signals[i] = -SIZE
-                # Long at S3 with volume spike
-                elif price <= s3_12h_aligned[i]:
-                    in_position = True
-                    position_side = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                    signals[i] = SIZE
-            # Breakout logic at R4/S4 when trend is strong (trending market)
-            else:  # Strong trend
-                # Long on breakout above R4 with volume spike
-                if price > r4_12h_aligned[i]:
-                    in_position = True
-                    position_side = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                    signals[i] = SIZE
-                # Short on breakdown below S4 with volume spike
-                elif price < s4_12h_aligned[i]:
-                    in_position = True
-                    position_side = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                    signals[i] = -SIZE
+            # Long: price breaks above Donchian upper AND 1d HMA rising
+            if price > upper_20[i] and hma_trend_1d_aligned[i] > 0:
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = SIZE
+            # Short: price breaks below Donchian lower AND 1d HMA falling
+            elif price < lower_20[i] and hma_trend_1d_aligned[i] < 0:
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = -SIZE
+            else:
+                signals[i] = 0.0
         else:
             signals[i] = 0.0
     
