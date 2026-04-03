@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Experiment #010: 1d Donchian(20) Breakout + 1w Trend Filter + Volume Spike + ATR Stoploss
+Experiment #150: 1d Donchian(20) Breakout + 1w Trend Filter + Volume Spike + ATR Stoploss
 
 HYPOTHESIS: Donchian channel breakouts on 1d timeframe, filtered by 1w trend (price > EMA50) 
-and confirmed by volume spikes (>1.8x average), capture strong momentum moves in both bull 
+and confirmed by volume spikes (>2x average), capture strong momentum moves in both bull 
 and bear markets. The Donchian structure provides objective breakout levels, the 1w EMA50 
 filter ensures alignment with higher timeframe trend (avoiding counter-trend trades), and 
-volume confirmation filters out false breakouts. Targets 75-150 total trades over 4 years 
-(19-38/year) to minimize fee drag while capturing high-probability trends.
+volume confirmation filters out false breakouts. Targets 15-30 trades/year on 1d timeframe 
+(60-120 total over 4 years) to minimize fee drag while capturing high-probability trends.
 """
 
 import numpy as np
@@ -46,7 +46,7 @@ def generate_signals(prices):
         donchian_l[i] = np.min(low[i-20:i])
         donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for stoploss and volume average ===
     atr_14 = np.full(n, np.nan)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
@@ -84,8 +84,8 @@ def generate_signals(prices):
         price_above_1w_ema = close[i] > ema_50_1w_aligned[i]
         price_below_1w_ema = close[i] < ema_50_1w_aligned[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = vol_ratio[i] > 2.0
         
         # --- Donchian Breakout Conditions ---
         breakout_up = close[i] > donchian_h[i]
