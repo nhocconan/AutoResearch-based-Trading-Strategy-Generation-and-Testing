@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #1870: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Daily Donchian breakouts capture major trend moves. Weekly HMA filter ensures alignment with primary trend, reducing false breakouts. Volume confirmation (>1.5x average) adds conviction. ATR-based stoploss manages risk. Works in bull markets via upside breakouts and bear markets via downside breakouts. Target: 30-100 total trades over 4 years (7-25/year) with position sizing 0.25.
+Experiment #1871: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+HYPOTHESIS: Donchian breakouts capture strong momentum. Weekly pivot (from 1d data) provides institutional reference levels: price above weekly pivot = bullish bias, below = bearish bias. Volume confirmation (>1.5x average) ensures breakouts have conviction. Works in both bull and bear markets by aligning with 1d trend via weekly pivot. Target: 75-150 total trades over 4 years (19-37/year) with discrete position sizing of 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1870_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_1871_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,127 +19,121 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === HTF: 1d data for weekly pivot and trend (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Weekly HMA(21) for trend direction
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    def wma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        weights = np.arange(1, period + 1)
-        return np.convolve(arr, weights/weights.sum(), mode='valid')
+    # Weekly pivot from prior week (using 1d data: (PriorWeek High + Low + Close) / 3)
+    # Need to compute weekly OHLC from daily data
+    # We'll approximate: for each day, use prior 5-day high/low/close
+    high_5d = pd.Series(high_1d).rolling(window=5, min_periods=5).max().shift(1).values
+    low_5d = pd.Series(low_1d).rolling(window=5, min_periods=5).min().shift(1).values
+    close_5d = pd.Series(close_1d).rolling(window=5, min_periods=5).last().shift(1).values
+    weekly_pivot = (high_5d + low_5d + close_5d) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
-    def hma(arr, period):
-        half = period // 2
-        sqrt_period = int(np.sqrt(period))
-        if half < 1 or sqrt_period < 1:
-            return np.full_like(arr, np.nan)
-        wma_half = wma(arr, half)
-        wma_full = wma(arr, period)
-        # Pad to original length
-        wma_half_padded = np.concatenate([np.full(period - half, np.nan), wma_half])
-        wma_full_padded = np.concatenate([np.full(period - len(wma_full), np.nan), wma_full])
-        raw_hma = 2 * wma_half_padded - wma_full_padded
-        hma_values = wma(raw_hma, sqrt_period)
-        # Final padding
-        hma_values = np.concatenate([np.full(len(arr) - len(hma_values), np.nan), hma_values])
-        return hma_values
+    # 1d EMA(50) for additional trend filter
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_50_1d, 1, -1)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    hma_21_1w = hma(close_1w, 21)
-    trend_1w = np.where(close_1w > hma_21_1w, 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # === 6h Indicators: Donchian(20) channels ===
+    # Donchian Upper = highest high of past 20 periods
+    # Donchian Lower = lowest low of past 20 periods
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 1d Indicators: Donchian(20) channels ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # === 1d Indicators: Volume confirmation ===
+    # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
-    
-    # === 1d Indicators: ATR(14) for stoploss ===
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[high[0] - low[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
     SIZE = 0.25  # 25% position size
     
-    # Position tracking state variables
+    # Position tracking
     in_position = False
     position_side = 0
     entry_price = 0.0
-    stoploss_price = 0.0
+    bars_since_entry = 0
     
-    warmup = max(lookback, 20)  # sufficient for Donchian and volume MA
+    warmup = 50  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(trend_1w_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(trend_1d_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic: Stoploss or trend change ---
+        # --- Exit Logic: Reverse signal or time-based ---
         if in_position:
-            # Check stoploss
-            if position_side > 0:  # Long position
-                if price <= stoploss_price:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
-            else:  # Short position
-                if price >= stoploss_price:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
+            bars_since_entry += 1
             
-            # Exit if weekly trend flips
-            if (position_side > 0 and trend_1w_aligned[i] < 0) or \
-               (position_side < 0 and trend_1w_aligned[i] > 0):
+            # Exit conditions
+            exit_signal = False
+            
+            if position_side > 0:  # Long position
+                # Exit if price breaks below Donchian Lower (failed breakout)
+                if price < donchian_low[i]:
+                    exit_signal = True
+                # Exit if 1d trend flips against position
+                elif trend_1d_aligned[i] < 0:
+                    exit_signal = True
+                # Time-based exit: max 10 bars (~60 hours) to avoid overstaying
+                elif bars_since_entry >= 10:
+                    exit_signal = True
+            else:  # Short position
+                # Exit if price breaks above Donchian Upper (failed breakdown)
+                if price > donchian_high[i]:
+                    exit_signal = True
+                # Exit if 1d trend flips against position
+                elif trend_1d_aligned[i] > 0:
+                    exit_signal = True
+                # Time-based exit
+                elif bars_since_entry >= 10:
+                    exit_signal = True
+            
+            if exit_signal:
                 in_position = False
                 position_side = 0
+                bars_since_entry = 0
                 signals[i] = 0.0
-                continue
-            
-            # Hold position
-            signals[i] = position_side * SIZE
+            else:
+                signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic ---
-        # Require weekly trend alignment for bias
-        trend_bias = trend_1w_aligned[i]
+        # Require volume confirmation (> 1.5x average)
+        volume_confirmed = vol_ratio[i] > 1.5
         
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Require alignment with 1d trend (via EMA)
+        trend_aligned = trend_1d_aligned[i]
         
-        if volume_spike:
-            # Breakout conditions
-            if trend_bias > 0 and price > highest_high[i]:
-                # Long breakout above upper Donchian
+        if volume_confirmed:
+            # Long: price breaks above Donchian Upper AND above weekly pivot AND 1d trend up
+            if (price > donchian_high[i] and 
+                price > weekly_pivot_aligned[i] and 
+                trend_aligned > 0):
                 in_position = True
                 position_side = 1
-                entry_price = price
-                stoploss_price = price - 2.5 * atr[i]  # 2.5 ATR stoploss
+                entry_price = close[i]
+                bars_since_entry = 0
                 signals[i] = SIZE
-            elif trend_bias < 0 and price < lowest_low[i]:
-                # Short breakout below lower Donchian
+            # Short: price breaks below Donchian Lower AND below weekly pivot AND 1d trend down
+            elif (price < donchian_low[i] and 
+                  price < weekly_pivot_aligned[i] and 
+                  trend_aligned < 0):
                 in_position = True
                 position_side = -1
-                entry_price = price
-                stoploss_price = price + 2.5 * atr[i]  # 2.5 ATR stoploss
+                entry_price = close[i]
+                bars_since_entry = 0
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
@@ -148,153 +142,4 @@ def generate_signals(prices):
     
     return signals
 
-</think>
-#!/usr/bin/env python3
-"""
-Experiment #1870: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Daily Donchian breakouts capture major trend moves. Weekly HMA filter ensures alignment with primary trend, reducing false breakouts. Volume confirmation (>1.5x average) adds conviction. ATR-based stoploss manages risk. Works in bull markets via upside breakouts and bear markets via downside breakouts. Target: 30-100 total trades over 4 years (7-25/year) with position sizing 0.25.
-"""
-
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "exp_1870_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
-leverage = 1.0
-
-def generate_signals(prices):
-    close = prices["close"].values.astype(np.float64)
-    high = prices["high"].values.astype(np.float64)
-    low = prices["low"].values.astype(np.float64)
-    volume = prices["volume"].values.astype(np.float64)
-    n = len(close)
-    
-    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Weekly HMA(21) for trend direction
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    def wma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        weights = np.arange(1, period + 1)
-        return np.convolve(arr, weights/weights.sum(), mode='valid')
-    
-    def hma(arr, period):
-        half = period // 2
-        sqrt_period = int(np.sqrt(period))
-        if half < 1 or sqrt_period < 1:
-            return np.full_like(arr, np.nan)
-        wma_half = wma(arr, half)
-        wma_full = wma(arr, period)
-        # Pad to original length
-        wma_half_padded = np.concatenate([np.full(period - half, np.nan), wma_half])
-        wma_full_padded = np.concatenate([np.full(period - len(wma_full), np.nan), wma_full])
-        raw_hma = 2 * wma_half_padded - wma_full_padded
-        hma_values = wma(raw_hma, sqrt_period)
-        # Final padding
-        hma_values = np.concatenate([np.full(len(arr) - len(hma_values), np.nan), hma_values])
-        return hma_values
-    
-    hma_21_1w = hma(close_1w, 21)
-    trend_1w = np.where(close_1w > hma_21_1w, 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
-    
-    # === 1d Indicators: Donchian(20) channels ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    
-    # === 1d Indicators: Volume confirmation ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
-    
-    # === 1d Indicators: ATR(14) for stoploss ===
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[high[0] - low[0]], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # === Signals Initialization ===
-    signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
-    
-    # Position tracking state variables
-    in_position = False
-    position_side = 0
-    entry_price = 0.0
-    stoploss_price = 0.0
-    
-    warmup = max(lookback, 20)  # sufficient for Donchian and volume MA
-    
-    for i in range(warmup, n):
-        # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(trend_1w_aligned[i])):
-            signals[i] = 0.0
-            continue
-        
-        price = close[i]
-        
-        # --- Exit Logic: Stoploss or trend change ---
-        if in_position:
-            # Check stoploss
-            if position_side > 0:  # Long position
-                if price <= stoploss_price:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
-            else:  # Short position
-                if price >= stoploss_price:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
-            
-            # Exit if weekly trend flips
-            if (position_side > 0 and trend_1w_aligned[i] < 0) or \
-               (position_side < 0 and trend_1w_aligned[i] > 0):
-                in_position = False
-                position_side = 0
-                signals[i] = 0.0
-                continue
-            
-            # Hold position
-            signals[i] = position_side * SIZE
-            continue
-        
-        # --- New Position Entry Logic ---
-        # Require weekly trend alignment for bias
-        trend_bias = trend_1w_aligned[i]
-        
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
-        
-        if volume_spike:
-            # Breakout conditions
-            if trend_bias > 0 and price > highest_high[i]:
-                # Long breakout above upper Donchian
-                in_position = True
-                position_side = 1
-                entry_price = price
-                stoploss_price = price - 2.5 * atr[i]  # 2.5 ATR stoploss
-                signals[i] = SIZE
-            elif trend_bias < 0 and price < lowest_low[i]:
-                # Short breakout below lower Donchian
-                in_position = True
-                position_side = -1
-                entry_price = price
-                stoploss_price = price + 2.5 * atr[i]  # 2.5 ATR stoploss
-                signals[i] = -SIZE
-            else:
-                signals[i] = 0.0
-        else:
-            signals[i] = 0.0
-    
-    return signals
+}
