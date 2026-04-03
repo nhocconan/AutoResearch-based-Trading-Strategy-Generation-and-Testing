@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Experiment #1937: 4h Donchian Breakout + 1d EMA Trend + Volume Confirmation + ATR Stoploss
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture institutional order flow when aligned with 1d trend (EMA50) and confirmed by volume spikes (>1.5x 20-period average). 
-Exit on opposite Donchian touch or ATR-based stoploss (2*ATR). Works in bull/bear markets by following higher timeframe trend.
-Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #1937: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation
+HYPOTHESIS: Donchian channel breakouts capture institutional order flow. 
+- Use 1d EMA(50) for trend filter (avoid counter-trend trades)
+- Enter long when price breaks above 4h Donchian upper (20) with 1d uptrend and volume > 1.8x 20-period average
+- Enter short when price breaks below 4h Donchian lower (20) with 1d downtrend and volume > 1.8x average
+- Exit when price touches opposite Donchian level (mean reversion) or after 12 bars (time stop)
+- Works in bull/bear markets by following higher timeframe trend. Target: 100-180 total trades over 4 years.
 """
 
 import numpy as np
@@ -25,51 +28,40 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # 1d EMA(50) for trend filter
+    # Calculate 1d EMA(50) for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     trend_1d = np.where(close_1d > ema_50_1d, 1, -1)  # 1 = uptrend, -1 = downtrend
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 4h Indicators: Donchian(20) channels ===
-    # Highest high of last 20 periods (including current)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    # Lowest low of last 20 periods (including current)
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_upper = high_roll  # Upper band
-    donchian_lower = low_roll   # Lower band
+    # === 4h Indicators: Donchian channels (20) and Volume MA(20) ===
+    # Donchian upper = max(high, lookback=20)
+    # Donchian lower = min(low, lookback=20)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     # Volume MA(20) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.25  # 25% position size (discrete level to minimize fee churn)
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
-    entry_atr = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for Donchian(20), EMA(50), ATR(14)
+    warmup = 50  # sufficient for EMA(50) and Donchian(20)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i])):
+            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -83,18 +75,18 @@ def generate_signals(prices):
             exit_signal = False
             
             if position_side > 0:  # Long position
-                # Exit if price touches lower Donchian band (mean reversion)
+                # Exit if price touches or crosses below Donchian lower (mean reversion)
                 if price <= donchian_lower[i]:
                     exit_signal = True
-                # Stoploss: price moves 2*ATR against position
-                elif price < entry_price - 2.0 * entry_atr:
+                # Time stop: exit after 12 bars (3 days on 4h)
+                elif bars_since_entry >= 12:
                     exit_signal = True
             else:  # Short position
-                # Exit if price touches upper Donchian band
+                # Exit if price touches or crosses above Donchian upper (mean reversion)
                 if price >= donchian_upper[i]:
                     exit_signal = True
-                # Stoploss: price moves 2*ATR against position
-                elif price > entry_price + 2.0 * entry_atr:
+                # Time stop: exit after 12 bars (3 days on 4h)
+                elif bars_since_entry >= 12:
                     exit_signal = True
             
             if exit_signal:
@@ -107,24 +99,25 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Require 1d trend alignment for bias filter
+        trend_bias = trend_1d_aligned[i]
+        
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Long entry: price breaks above upper Donchian AND 1d trend up
-            if trend_1d_aligned[i] > 0 and price > donchian_upper[i]:
+            # Long entry: price breaks above Donchian upper AND 1d uptrend
+            if trend_bias > 0 and price > donchian_upper[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
-                entry_atr = atr[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short entry: price breaks below lower Donchian AND 1d trend down
-            elif trend_1d_aligned[i] < 0 and price < donchian_lower[i]:
+            # Short entry: price breaks below Donchian lower AND 1d downtrend
+            elif trend_bias < 0 and price < donchian_lower[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
-                entry_atr = atr[i]
                 bars_since_entry = 0
                 signals[i] = -SIZE
             else:
