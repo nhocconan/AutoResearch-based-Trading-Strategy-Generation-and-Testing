@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #2268: 12h Donchian(20) breakout + 1w HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian channel breakouts on 12h timeframe capture swing momentum with weekly trend filter.
-- Primary: 12h Donchian(20) breakout with volume > 2.0x 20-bar average (strict to limit trades to target range)
-- HTF: 1w HMA(21) trend filter (only trade in direction of higher timeframe trend)
+Experiment #2271: 6h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: Donchian breakouts on 6h timeframe with 1d Camarilla pivot levels as support/resistance filters.
+- Primary: 6h Donchian(20) breakout with volume > 2.0x 20-bar average (strict to limit trades)
+- HTF: 1d Camarilla pivot levels - only trade breakouts in direction of daily bias
+  * Bullish bias: price > (R3+S3)/2 → only long breakouts
+  * Bearish bias: price < (R3+S3)/2 → only short breakouts
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
-- Target: 50-150 total trades over 4 years (12-37/year) - optimized for 12h timeframe
-- Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets
-- Uses discrete position sizing (0.25) to minimize fee churn
+- Target: 75-200 total trades over 4 years (19-50/year) - optimized for 6h timeframe
+- Works in bull markets (trend continuation) and bear markets (mean reversion at extremes)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2268_12h_donchian20_1w_hma_vol_v1"
-timeframe = "12h"
+name = "exp_2271_6h_donchian20_1d_camarilla_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,41 +26,32 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w HMA(21): Hull Moving Average
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
+    # Calculate 1d Camarilla pivot levels
+    # Pivot = (high + low + close) / 3
+    # Range = high - low
+    # R4 = close + Range * 1.1/2
+    # R3 = close + Range * 1.1/4
+    # S3 = close - Range * 1.1/4
+    # S4 = close - Range * 1.1/2
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r3_1d = close_1d + range_1d * 1.1 / 4.0
+    s3_1d = close_1d - range_1d * 1.1 / 4.0
+    r4_1d = close_1d + range_1d * 1.1 / 2.0
+    s4_1d = close_1d - range_1d * 1.1 / 2.0
     
-    def wma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        weights = np.arange(1, period + 1)
-        return np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
+    # Daily bias: 1 if close > (R3+S3)/2 (bullish), -1 if close < (R3+S3)/2 (bearish)
+    mid_point = (r3_1d + s3_1d) / 2.0
+    bias_1d = np.where(close_1d > mid_point, 1, np.where(close_1d < mid_point, -1, 0))
+    bias_1d_aligned = align_htf_to_ltf(prices, df_1d, bias_1d)
     
-    # Calculate WMA for close_1w
-    wma_full = np.array([np.nan] * len(close_1w))
-    wma_half = np.array([np.nan] * len(close_1w))
-    
-    for i in range(20, len(close_1w)):  # 21-1 = 20 for WMA(21)
-        wma_full[i] = np.mean(close_1w[i-20:i+1] * np.arange(1, 22))
-    for i in range(half_len-1, len(close_1w)):
-        wma_half[i] = np.mean(close_1w[i-half_len+1:i+1] * np.arange(1, half_len+1))
-    
-    # HMA = WMA(2*WMA_half - WMA_full, sqrt_len)
-    wma_diff = 2 * wma_half - wma_full
-    hma_1w = np.array([np.nan] * len(close_1w))
-    for i in range(sqrt_len-1, len(close_1w)):
-        if i >= half_len-1 and not np.isnan(wma_diff[i]):
-            hma_1w[i] = np.mean(wma_diff[i-sqrt_len+1:i+1] * np.arange(1, sqrt_len+1))
-    
-    # Trend: 1 if close > HMA, -1 otherwise
-    trend_1w = np.where(close_1w > hma_1w, 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
-    
-    # === 12h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
+    # === 6h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
     # Donchian channels
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -96,7 +88,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(bias_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -137,23 +129,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1w trend alignment for bias filter
-        trend_bias = trend_1w_aligned[i]
+        # Require 1d bias alignment for direction filter
+        daily_bias = bias_1d_aligned[i]
         
         # Volume confirmation: require volume spike (> 2.0x average - strict to limit trades)
         volume_spike = vol_ratio[i] > 2.0
         
-        if volume_spike:
-            # Long entry: price breaks above upper Donchian AND 1w trend up
-            if trend_bias > 0 and price > donchian_upper[i]:
+        if volume_spike and daily_bias != 0:
+            # Long entry: price breaks above upper Donchian AND 1d bias bullish
+            if daily_bias > 0 and price > donchian_upper[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below lower Donchian AND 1w trend down
-            elif trend_bias < 0 and price < donchian_lower[i]:
+            # Short entry: price breaks below lower Donchian AND 1d bias bearish
+            elif daily_bias < 0 and price < donchian_lower[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -166,4 +158,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-</trading_strategy>
