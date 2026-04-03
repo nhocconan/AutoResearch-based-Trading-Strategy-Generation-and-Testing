@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #1333: 4h Donchian(20) Breakout + 12h Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture intermediate-term trends with moderate trade frequency (target: 75-200 total over 4 years). 
-Trend filter from 12h timeframe ensures alignment with higher-timeframe momentum. Volume confirmation (>1.8x average) filters for institutional participation. 
-Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 12h trend direction. 
-Uses ATR-based stoploss for risk management. Target: 75-200 total trades over 4 years (19-50/year).
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture short-to-medium term trends with moderate trade frequency (target: 75-200 total over 4 years). 
+Trend filter from 12h timeframe ensures alignment with intermediate-term momentum. Volume confirmation (>1.6x average) filters for institutional participation. 
+ATR-based stoploss (2.0) manages risk. Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 12h trend direction.
 """
 
 import numpy as np
@@ -95,8 +94,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.8x average)
-        volume_spike = vol_ratio[i] > 1.8
+        # Volume confirmation: require volume spike (> 1.6x average)
+        volume_spike = vol_ratio[i] > 1.6
         
         if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
