@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #706: 4h Donchian(20) + 1d EMA(50) + Volume Spike + ATR Stoploss
-HYPOTHESIS: Donchian(20) breakouts on 4h filtered by 1d EMA(50) trend direction and volume confirmation 
-captures institutional breakout moves with proper trend alignment. Uses ATR-based stoploss and discrete 
-position sizing (0.25) to minimize fee churn. Works in bull/bear markets via 1d EMA trend filter: 
-long only when price > EMA50, short only when price < EMA50. Target: 75-200 total trades over 4 years 
-(19-50/year).
+Experiment #706: 4h Donchian(20) breakout + 1d HMA(21) trend + Volume confirmation
+HYPOTHESIS: 4h Donchian breakouts filtered by 1d HMA trend direction and volume spikes capture 
+institutional order flow with proper trend alignment. Uses discrete position sizing (0.25) 
+to minimize fee churn. Works in bull/bear markets via HMA regime filter: long only when price>HMA, 
+short only when price<HMA. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_706_4h_donchian20_1d_ema_vol_v1"
+name = "exp_706_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,28 +22,33 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA(50) trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for HMA trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1d timeframe
-    ema_period = 50
-    ema_1d = pd.Series(close_1d).ewm(span=ema_period, min_periods=ema_period, adjust=False).mean().values
+    # Calculate HMA(21) for 1d timeframe
+    def hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan, dtype=np.float64)
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean().values
+        wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean().values
+        raw = 2 * wma2 - wma1
+        hma_vals = pd.Series(raw).ewm(span=sqrt, adjust=False).mean().values
+        return hma_vals
     
-    # EMA direction: 1 = uptrend (price > EMA), -1 = downtrend (price < EMA)
-    ema_dir_1d = np.where(close_1d > ema_1d, 1, -1)
+    hma_1d = hma(close_1d, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Align EMA direction to 4h timeframe
-    ema_dir_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_dir_1d)
+    # HMA trend direction: 1 = uptrend (price > HMA), -1 = downtrend (price < HMA)
+    hma_trend_1d = np.where(close_1d > hma_1d, 1, -1)
+    hma_trend_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_trend_1d)
     
-    # === 4h Indicators: Donchian Channel(20) ===
+    # === 4h Indicators: Donchian Channel (20) ===
     donchian_period = 20
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(donchian_period - 1, n):
-        upper[i] = np.max(high[i - donchian_period + 1:i + 1])
-        lower[i] = np.min(low[i - donchian_period + 1:i + 1])
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
     # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -68,12 +72,13 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for Donchian and EMA calculations
+    warmup = max(50, donchian_period, 20)  # sufficient for Donchian and volume calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(ema_dir_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(hma_trend_1d_aligned[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -102,8 +107,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 12 bars (~2 days on 4h) to avoid overtrading
-            if bars_since_entry > 12:
+            # Optional: time-based exit after 6 bars (~24h on 4h) to avoid overtrading
+            if bars_since_entry > 6:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
@@ -114,22 +119,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.8x average)
-        volume_spike = vol_ratio[i] > 1.8
+        # Volume confirmation: Require volume spike (> 2.0x average)
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Get trend from 1d EMA
-            trend = ema_dir_1d_aligned[i]
+            # Get regime from 1d HMA trend
+            regime = hma_trend_1d_aligned[i]
             
-            # Long: price breaks above Donchian upper + uptrend
-            if price > upper[i] and trend > 0:
+            # Long: Price breaks above Donchian upper + uptrend regime
+            if price > donchian_high[i] and regime > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: price breaks below Donchian lower + downtrend
-            elif price < lower[i] and trend < 0:
+            # Short: Price breaks below Donchian lower + downtrend regime
+            elif price < donchian_low[i] and regime < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
