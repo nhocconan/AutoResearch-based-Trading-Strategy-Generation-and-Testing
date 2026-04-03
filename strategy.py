@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #092: 12h Donchian(20) breakout + 1d HMA(20) trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with daily HMA trend capture medium-term momentum with fewer whipsaws. Daily timeframe provides strong trend filter suitable for both bull and bear markets. Volume confirmation (>2.0x average) ensures breakout legitimacy. ATR stoploss (2.0x) reduces churn. Target: 75-150 trades over 4 years (19-37/year).
+Experiment #096: 12h Donchian(20) breakout + 1d HMA(20) trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with daily HMA trend capture medium-term momentum with reduced whipsaws. Daily timeframe provides stronger trend filter than lower timeframes, suitable for both bull and bear markets. Volume confirmation (>2.0x average) ensures breakout legitimacy. ATR stoploss (2.0x) reduces drawdown. Target: 75-150 trades over 4 years (19-37/year) to balance statistical validity and fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_092_12h_donchian20_1d_hma_vol_v1"
+name = "exp_096_12h_donchian20_1d_hma_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -67,7 +67,7 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    bars_since_entry = 0  # Track bars in position for minimum holding period
+    bars_since_entry = 0  # Track bars in position
     
     warmup = 60  # Warmup for HMA stability and Donchian
     
@@ -126,12 +126,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Minimum holding period of 3 bars to reduce churn
-            if bars_since_entry < 3:
-                signals[i] = position_side * SIZE
-                continue
-            
-            # Hold position
+            # Hold position (no minimum holding period for 12h - longer timeframe naturally reduces churn)
             signals[i] = position_side * SIZE
             continue
         
