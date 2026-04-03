@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #1982: 12h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation
-HYPOTHESIS: Donchian channel breakouts on 12h timeframe capture significant moves when aligned with 1d trend (EMA50) and confirmed by volume spikes. This structure works in both bull and bear markets by following institutional flow on higher timeframes. Uses discrete position sizing (0.25) to minimize fee churn. Target: 75-150 total trades over 4 years.
+Experiment #1983: 4h Donchian(20) Breakout + 12h/1d Trend Filter + Volume Confirmation
+HYPOTHESIS: Donchian channel breakouts capture institutional order flow when aligned with 12h/1d trend and volume spikes. 
+Strategy:
+- Primary: 4h Donchian(20) breakout (long at upper band, short at lower band)
+- HTF filters: 12h EMA(50) trend direction + 1d close > EMA(200) for regime filter
+- Volume confirmation: 4h volume > 2.0x 20-period average to avoid false breakouts
+- ATR stoploss: exit when price moves 2.5*ATR(14) against position
+- Position size: 0.25 (discrete level to minimize fee churn)
+Target: 75-200 total trades over 4 years (19-50/year) to avoid overtrading.
+Works in bull/bear markets by requiring trend alignment and volume confirmation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1982_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_1983_4h_donchian20_12h_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,26 +27,43 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA trend filter (Call ONCE before loop) ===
+    # === HTF: 12h data for EMA(50) trend filter (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    
+    # 12h EMA(50) for trend direction
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_12h = np.where(close_12h > ema_50_12h, 1, -1)
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
+    
+    # === HTF: 1d data for regime filter (close > EMA(200)) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_50_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # 1d EMA(200) for bull/bear regime
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
+    regime_1d = np.where(close_1d > ema_200_1d, 1, -1)  # 1=bull, -1=bear
+    regime_1d_aligned = align_htf_to_ltf(prices, df_1d, regime_1d)
     
-    # === 12h Indicators: Donchian(20) and Volume MA(20) ===
-    # Donchian channels: upper = max(high, 20), lower = min(low, 20)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donch_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donch_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # === 4h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
+    # Donchian channels
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume MA(20) for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    
+    # ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -50,84 +75,65 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for EMA(50) and Donchian(20)
+    warmup = 200  # sufficient for EMA(200) and Donchian(20)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(trend_12h_aligned[i]) or np.isnan(regime_1d_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic: ATR-based stoploss (2*ATR) and Donchian opposite exit ---
+        # --- Exit Logic ---
         if in_position:
             bars_since_entry += 1
             
-            # Calculate ATR(14) for stoploss
-            if i >= 14:
-                tr1 = high[i] - low[i]
-                tr2 = abs(high[i] - close[i-1])
-                tr3 = abs(low[i] - close[i-1])
-                tr = max(tr1, tr2, tr3)
-                # Simple ATR calculation: we'll use a rolling window approximation
-                # For efficiency, we use a simplified ATR proxy: average true range over last 14 bars
-                # In practice, we could precompute ATR, but for simplicity in exit we use a volatility-based stop
-                # Using 2% of price as ATR proxy for 12h timeframe (adjustable)
-                atr_proxy = 0.02 * price  # ~2% ATR for 12h
-                
-                if position_side > 0:  # Long position
-                    # Stoploss: 2*ATR below entry
-                    if price < entry_price - 2.0 * atr_proxy:
-                        in_position = False
-                        position_side = 0
-                        bars_since_entry = 0
-                        signals[i] = 0.0
-                        continue
-                    # Exit if price touches Donchian lower (opposite channel)
-                    elif price <= donch_lower[i]:
-                        in_position = False
-                        position_side = 0
-                        bars_since_entry = 0
-                        signals[i] = 0.0
-                        continue
-                else:  # Short position
-                    # Stoploss: 2*ATR above entry
-                    if price > entry_price + 2.0 * atr_proxy:
-                        in_position = False
-                        position_side = 0
-                        bars_since_entry = 0
-                        signals[i] = 0.0
-                        continue
-                    # Exit if price touches Donchian upper (opposite channel)
-                    elif price >= donch_upper[i]:
-                        in_position = False
-                        position_side = 0
-                        bars_since_entry = 0
-                        signals[i] = 0.0
-                        continue
+            # ATR-based stoploss
+            stoploss_hit = False
+            if position_side > 0:  # Long position
+                if price < entry_price - 2.5 * atr[i]:
+                    stoploss_hit = True
+            else:  # Short position
+                if price > entry_price + 2.5 * atr[i]:
+                    stoploss_hit = True
             
-            signals[i] = position_side * SIZE
+            # Exit on Donchian opposite touch (mean reversion)
+            donch_exit = False
+            if position_side > 0 and price <= donch_low[i]:
+                donch_exit = True
+            elif position_side < 0 and price >= donch_high[i]:
+                donch_exit = True
+            
+            if stoploss_hit or donch_exit:
+                in_position = False
+                position_side = 0
+                bars_since_entry = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1d trend alignment for bias filter
-        trend_bias = trend_1d_aligned[i]
+        # Require 12h trend alignment and 1d regime filter
+        trend_bias = trend_12h_aligned[i]
+        regime_filter = regime_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.8x average to reduce trades)
-        volume_spike = vol_ratio[i] > 1.8
+        # Volume confirmation: require significant spike (> 2.0x average)
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Long entry: price breaks above Donchian upper AND 1d trend up
-            if trend_bias > 0 and price > donch_upper[i]:
+            # Long entry: price breaks above Donchian upper band AND 12h trend up AND 1d bull regime
+            if trend_bias > 0 and regime_filter > 0 and price > donch_high[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian lower AND 1d trend down
-            elif trend_bias < 0 and price < donch_lower[i]:
+            # Short entry: price breaks below Donchian lower band AND 12h trend down AND 1d bear regime
+            elif trend_bias < 0 and regime_filter < 0 and price < donch_low[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
