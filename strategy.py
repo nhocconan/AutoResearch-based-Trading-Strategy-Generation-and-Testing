@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #225: 12h Donchian(20) Breakout + 1d HMA Trend + Volume Confirmation + ATR Stoploss
+Experiment #237: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike + ATR Stoploss
 
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d HMA trend direction capture swing momentum with institutional participation. Volume confirmation filters false breakouts. This strategy targets 12-37 trades/year (50-150 total over 4 years) on 12h timeframe to minimize fee drag while capturing medium-term trends in both bull and bear markets.
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d HMA trend direction capture medium-term momentum with institutional participation. Volume spike confirms breakout validity. This combination works in both bull and bear markets by following established trends while filtering false breakouts. Targets 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to balance opportunity with fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_hma_volume_1d_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_hma_volume_1d_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -51,12 +51,12 @@ def generate_signals(prices):
             if i >= sqrt_len - 1 and not np.isnan(raw_hma[i]):
                 hma_21[i] = wma(raw_hma[max(0, i-sqrt_len+1):i+1], sqrt_len)[-1]
         
-        # Align to 12h timeframe
+        # Align to 4h timeframe
         hma_21_aligned = align_htf_to_ltf(prices, df_1d, hma_21)
     else:
         hma_21_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators ===
+    # === 4h Indicators ===
     atr_14 = np.zeros(n)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
@@ -115,7 +115,7 @@ def generate_signals(prices):
                     stop_hit = True
             
             # Exit conditions: trend reversal or opposite Donchian touch
-            min_hold = (i - entry_bar) >= 2  # Minimum 2 bars hold (~1 day)
+            min_hold = (i - entry_bar) >= 3  # Minimum 3 bars hold (~12h)
             if min_hold:
                 if position_side > 0:
                     # Exit long: price touches lower Donchian OR breaks below 1d HMA
@@ -157,5 +157,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
