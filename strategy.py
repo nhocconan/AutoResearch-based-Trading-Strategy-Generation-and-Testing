@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #1206: 4h Donchian(20) Breakout + 1d Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture intermediate-term trends with optimal trade frequency. 
-Trend filter from 1d timeframe ensures alignment with higher-timeframe momentum. Volume confirmation (>1.5x average) 
-filters for institutional participation. Designed to work in both bull (breakouts continue) and bear (breakdowns continue) 
-markets by following the 1d trend direction. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #1207: 6h Donchian(20) Breakout + 1d Volume Spike + 1w Trend Filter
+HYPOTHESIS: Donchian(20) breakouts on 6h timeframe capture intermediate momentum with optimal trade frequency (target: 75-150/4 years). 
+Volume spike (>2.0x 20-period average) confirms institutional participation. Weekly trend filter (price > weekly EMA50) ensures alignment with higher-timeframe momentum, reducing false breakouts in choppy markets. 
+Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 1d volume confirmation and 1w trend. Uses ATR-based stoploss for risk control.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1206_4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "exp_1207_6h_donchian20_1d_vol_1w_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,24 +21,28 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for volume confirmation (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    # Simple trend: price > previous close = uptrend, < = downtrend
-    trend_1d = np.zeros(len(close_1d))
-    trend_1d[1:] = np.where(close_1d[1:] > close_1d[:-1], 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = np.ones(len(vol_1d))
+    vol_ratio_1d[20:] = vol_1d[20:] / vol_ma_1d[20:]
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    # === 4h Indicators: Donchian(20) ===
+    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1w = np.zeros(len(close_1w))
+    trend_1w[50:] = np.where(close_1w[50:] > ema_1w[50:], 1, -1)
+    trend_1w[0:50] = 1  # default to uptrend during warmup
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    
+    # === 6h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
-    
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -56,12 +59,12 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for Donchian and volume MA
+    warmup = 50  # sufficient for 1w EMA50 and Donchian
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(trend_1w_aligned[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -95,18 +98,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 2.0x average on 1d)
+        volume_spike = vol_ratio_1d_aligned[i] > 2.0
         
         if volume_spike:
-            # Breakout: price breaks above upper band OR below lower band
-            if price > donch_high[i] and trend_1d_aligned[i] > 0:  # 1d uptrend
+            # Breakout: price breaks above upper band in 1w uptrend OR below lower band in 1w downtrend
+            if price > donch_high[i] and trend_1w_aligned[i] > 0:  # 1w uptrend
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and trend_1d_aligned[i] < 0:  # 1d downtrend
+            elif price < donch_low[i] and trend_1w_aligned[i] < 0:  # 1w downtrend
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
