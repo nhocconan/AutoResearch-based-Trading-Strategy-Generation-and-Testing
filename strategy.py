@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #407: 6h Camarilla Pivot + 1d Volume Spike + 1w Trend Filter
+Experiment #417: 4h Donchian(20) Breakout + 1d Volume Spike + 1w Trend Filter
 
-HYPOTHESIS: 6h Camarilla pivot breakouts at R4/S4 levels with 1d volume confirmation (>2.0x average) 
-and 1w trend filter (price > EMA50 on weekly for longs, < EMA50 for shorts) captures strong momentum 
-breakouts in both bull and bear markets. Using 6h primary timeframe with 1d/1w HTF filters reduces 
-noise and overtrading. Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag 
-while maintaining statistical significance.
+HYPOTHESIS: Donchian channel breakouts on 4h timeframe, confirmed by 1d volume spike (>2x average) 
+and aligned with 1week trend (price > 1w EMA50 for longs, < for shorts), captures strong momentum 
+moves while filtering false breakouts. The 4h timeframe targets 20-50 trades/year (80-200 total over 4 years) 
+to minimize fee drag. Volume confirmation ensures institutional participation, and the 1w trend filter 
+aligns with higher timeframe direction, working in both bull (breakouts with trend) and bear (breakdowns 
+against trend) markets. Uses discrete position sizing (0.25) and ATR-based stoploss (2.5x) for risk control.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_camarilla_vol_trend_v1"
-timeframe = "6h"
+name = "mtf_4h_donchian20_1d_vol_1w_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,7 +25,7 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for volume spike calculation ===
+    # === HTF: 1d data for volume spike (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate volume ratio (current vs 20-period average) on 1d
@@ -38,10 +39,10 @@ def generate_signals(prices):
     else:
         vol_ratio_1d_aligned = np.full(n, 1.0)
     
-    # === HTF: 1w data for trend filter ===
+    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate EMA(50) on 1w close for trend filter
+    # Calculate EMA(50) on 1w close
     if len(df_1w) >= 50:
         close_1w = df_1w['close'].values
         ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
@@ -49,32 +50,14 @@ def generate_signals(prices):
     else:
         ema_50_1w_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Calculate Camarilla pivot levels from previous day ===
-    # Camarilla levels based on previous day's OHLC
-    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
-    # We need to get previous day's OHLC for each 6h bar
+    # === 4h Indicators: Donchian Channel (20) ===
+    # Calculate highest high and lowest low over past 20 periods (including current)
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # First, resample to daily to get OHLC (but we'll use the HTF data we already have)
-    # df_1d already contains daily OHLC
-    if len(df_1d) >= 1:
-        # Calculate Camarilla levels for each day
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        close_1d = df_1d['close'].values
-        
-        # Camarilla R4 and S4 levels
-        camarilla_r4_1d = close_1d + ((high_1d - low_1d) * 1.1 / 2)
-        camarilla_s4_1d = close_1d - ((high_1d - low_1d) * 1.1 / 2)
-        
-        # Align to 6h timeframe
-        camarilla_r4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4_1d)
-        camarilla_s4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4_1d)
-    else:
-        camarilla_r4_1d_aligned = np.full(n, np.nan)
-        camarilla_s4_1d_aligned = np.full(n, np.nan)
-    
-    # === Session filter: 00-23 UTC (trade all hours for 6h timeframe) ===
-    hours = prices.index.hour  # Pre-compute before loop
+    for i in range(20, n):
+        highest_high[i] = np.max(high[i-19:i+1])  # 20 periods: i-19 to i
+        lowest_low[i] = np.min(low[i-19:i+1])
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -84,16 +67,13 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
+    entry_bar = 0
     
-    warmup = 50  # Ensure enough data for HTF and indicator calculations
+    warmup = 100  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
-        # --- Session Filter: Trade all hours for 6h timeframe ---
-        hour = hours[i]
-        # No session filter for 6h - trade continuously
-        
         # --- Data Validity Check ---
-        if (np.isnan(camarilla_r4_1d_aligned[i]) or np.isnan(camarilla_s4_1d_aligned[i]) or 
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
@@ -114,8 +94,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at Camarilla S4 (trailing stop for longs)
-                if close[i] <= camarilla_s4_1d_aligned[i]:
+                # Take profit at Donchian upper band (trailing stop)
+                if close[i] <= highest_high[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -127,8 +107,8 @@ def generate_signals(prices):
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at Camarilla R4 (trailing stop for shorts)
-                if close[i] >= camarilla_r4_1d_aligned[i]:
+                # Take profit at Donchian lower band (trailing stop)
+                if close[i] >= lowest_low[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -139,29 +119,38 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Price breaks above Camarilla R4 with volume confirmation and uptrend
+        # Trend filter: price > 1w EMA50 for long bias, < for short bias
+        price_above_1w_ema = close[i] > ema_50_1w_aligned[i]
+        price_below_1w_ema = close[i] < ema_50_1w_aligned[i]
+        
+        # Volume confirmation: require volume spike (> 2.0x average)
+        volume_spike = vol_ratio_1d_aligned[i] > 2.0
+        
+        # Long: Break above Donchian upper band with volume and trend alignment
         long_condition = (
-            close[i] > camarilla_r4_1d_aligned[i] and  # Breakout above R4
-            vol_ratio_1d_aligned[i] > 2.0 and  # Volume spike confirmation
-            close[i] > ema_50_1w_aligned[i]   # Price above weekly EMA50 (uptrend)
+            close[i] > highest_high[i] and  # Break above 20-period high
+            volume_spike and 
+            price_above_1w_ema  # Trend alignment
         )
         
-        # Short: Price breaks below Camarilla S4 with volume confirmation and downtrend
+        # Short: Break below Donchian lower band with volume and trend alignment
         short_condition = (
-            close[i] < camarilla_s4_1d_aligned[i] and  # Breakdown below S4
-            vol_ratio_1d_aligned[i] > 2.0 and  # Volume spike confirmation
-            close[i] < ema_50_1w_aligned[i]   # Price below weekly EMA50 (downtrend)
+            close[i] < lowest_low[i] and  # Break below 20-period low
+            volume_spike and 
+            price_below_1w_ema  # Trend alignment
         )
         
         if long_condition:
             in_position = True
             position_side = 1
             entry_price = close[i]
+            entry_bar = i
             signals[i] = SIZE
         elif short_condition:
             in_position = True
             position_side = -1
             entry_price = close[i]
+            entry_bar = i
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
