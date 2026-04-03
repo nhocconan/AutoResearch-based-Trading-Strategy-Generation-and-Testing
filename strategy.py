@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #023: 4h Camarilla Pivot + Volume Spike + Chop Regime Filter
+Experiment #163: 4h Donchian(20) Breakout + 12h Trend Filter + Volume Spike + ATR Stoploss
 
-HYPOTHESIS: Camarilla pivot levels from 1d timeframe act as strong support/resistance zones.
-Price touching these levels with volume confirmation (>1.5x average) and in choppy markets 
-(Choppiness Index > 61.8) indicates high-probability mean-reversion bounces. This strategy 
-works in both bull and bear markets because it fades extreme moves at key levels rather than 
-chasing trends. Targets 20-40 trades/year on 4h timeframe (80-160 total over 4 years) to 
-minimize fee drag while capturing reversals.
+HYPOTHESIS: Donchian channel breakouts on 4h timeframe, filtered by 12h trend (price > EMA50) 
+and confirmed by volume spikes (>2x average), capture strong momentum moves. The 12h timeframe 
+provides a balance between noise reduction and trend relevance, avoiding the excessive lag of 1d 
+while filtering counter-trend moves. Volume confirmation ensures breakout validity. Targets 
+25-60 trades/year on 4h timeframe (100-240 total over 4 years) to minimize fee drag while 
+capturing high-probability trends in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_camarilla_vol_chop_v1"
+name = "mtf_4h_donchian_vol_trend_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,80 +25,35 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
+    # === HTF: 12h data for trend filter (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Camarilla levels from previous 1d bar
-    camarilla_h4 = np.full(n, np.nan)
-    camarilla_l4 = np.full(n, np.nan)
-    camarilla_h3 = np.full(n, np.nan)
-    camarilla_l3 = np.full(n, np.nan)
-    camarilla_h2 = np.full(n, np.nan)
-    camarilla_l2 = np.full(n, np.nan)
-    camarilla_h1 = np.full(n, np.nan)
-    camarilla_l1 = np.full(n, np.nan)
-    camarilla_p = np.full(n, np.nan)
-    
-    if len(df_1d) >= 2:
-        close_1d = df_1d['close'].values
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        
-        for i in range(1, len(df_1d)):
-            # Previous day's OHLC
-            prev_close = close_1d[i-1]
-            prev_high = high_1d[i-1]
-            prev_low = low_1d[i-1]
-            range_ = prev_high - prev_low
-            
-            # Camarilla levels
-            camarilla_p[i] = (prev_high + prev_low + prev_close) / 3
-            camarilla_h4[i] = camarilla_p[i] + range_ * 1.1 / 2
-            camarilla_l4[i] = camarilla_p[i] - range_ * 1.1 / 2
-            camarilla_h3[i] = camarilla_p[i] + range_ * 1.1 / 4
-            camarilla_l3[i] = camarilla_p[i] - range_ * 1.1 / 4
-            camarilla_h2[i] = camarilla_p[i] + range_ * 1.1 / 6
-            camarilla_l2[i] = camarilla_p[i] - range_ * 1.1 / 6
-            camarilla_h1[i] = camarilla_p[i] + range_ * 1.1 / 12
-            camarilla_l1[i] = camarilla_p[i] - range_ * 1.1 / 12
-        
-        # Align to 4h timeframe (shifted by 1 for completed bars only)
-        camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-        camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-        camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-        camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-        camarilla_h2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h2)
-        camarilla_l2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l2)
-        camarilla_h1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h1)
-        camarilla_l1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l1)
-        camarilla_p_aligned = align_htf_to_ltf(prices, df_1d, camarilla_p)
+    # Calculate EMA(50) on 12h close
+    if len(df_12h) >= 50:
+        close_12h = df_12h['close'].values
+        ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     else:
-        camarilla_h4_aligned = np.full(n, np.nan)
-        camarilla_l4_aligned = np.full(n, np.nan)
-        camarilla_h3_aligned = np.full(n, np.nan)
-        camarilla_l3_aligned = np.full(n, np.nan)
-        camarilla_h2_aligned = np.full(n, np.nan)
-        camarilla_l2_aligned = np.full(n, np.nan)
-        camarilla_h1_aligned = np.full(n, np.nan)
-        camarilla_l1_aligned = np.full(n, np.nan)
-        camarilla_p_aligned = np.full(n, np.nan)
+        ema_50_12h_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Choppiness Index (14) for regime filter ===
-    chop = np.full(n, np.nan)
-    if n >= 14:
-        tr = np.zeros(n)
-        tr[0] = high[0] - low[0]
-        for i in range(1, n):
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-        max_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-        min_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-        
-        # Avoid division by zero
-        denominator = max_high - min_low
-        chop_raw = 100 * np.log10(atr_sum / denominator) / np.log10(14)
-        chop = np.where(denominator > 0, chop_raw, 50.0)  # Neutral when no range
+    # === 4h Indicators: Donchian Channel (20) ===
+    donchian_h = np.full(n, np.nan)
+    donchian_l = np.full(n, np.nan)
+    donchian_m = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        donchian_h[i] = np.max(high[i-20:i])
+        donchian_l[i] = np.min(low[i-20:i])
+        donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
+    
+    # === 4h Indicators: ATR(14) for stoploss ===
+    atr_14 = np.full(n, np.nan)
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -115,46 +70,52 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     
-    warmup = 200  # Ensure enough data for HTF and indicators
+    warmup = 200  # Ensure enough data for HTF EMA50 and ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
-            np.isnan(chop[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- Regime Filter: Only trade in choppy markets (Choppiness > 61.8) ---
-        choppy_market = chop[i] > 61.8
+        # --- Trend Filter: Only trade in direction of 12h EMA50 ---
+        price_above_12h_ema = close[i] > ema_50_12h_aligned[i]
+        price_below_12h_ema = close[i] < ema_50_12h_aligned[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio[i] > 1.5
+        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = vol_ratio[i] > 2.0
         
-        # --- Price proximity to Camarilla levels (within 0.1%) ---
-        def is_near_level(price, level):
-            return abs(price - level) / level < 0.001
+        # --- Donchian Breakout Conditions ---
+        breakout_up = close[i] > donchian_h[i]
+        breakout_down = close[i] < donchian_l[i]
         
-        near_h4 = is_near_level(close[i], camarilla_h4_aligned[i])
-        near_l4 = is_near_level(close[i], camarilla_l4_aligned[i])
-        near_h3 = is_near_level(close[i], camarilla_h3_aligned[i])
-        near_l3 = is_near_level(close[i], camarilla_l3_aligned[i])
-        near_h2 = is_near_level(close[i], camarilla_h2_aligned[i])
-        near_l2 = is_near_level(close[i], camarilla_l2_aligned[i])
-        near_h1 = is_near_level(close[i], camarilla_h1_aligned[i])
-        near_l1 = is_near_level(close[i], camarilla_l1_aligned[i])
-        
-        # --- Exit Logic (Mean reversion: exit when price moves back toward pivot) ---
+        # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
-            # Long exit: price reaches or crosses pivot from below
-            if position_side > 0:
-                if close[i] >= camarilla_p_aligned[i]:
+            # ATR-based stoploss
+            if position_side > 0:  # Long position
+                stop_level = entry_price - 2.5 * atr_14[i]
+                if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-            # Short exit: price reaches or crosses pivot from above
-            else:
-                if close[i] <= camarilla_p_aligned[i]:
+                # Exit on Donchian middle line reversion (take profit)
+                if close[i] < donchian_m[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+            else:  # Short position
+                stop_level = entry_price + 2.5 * atr_14[i]
+                if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+                # Exit on Donchian middle line reversion (take profit)
+                if close[i] > donchian_m[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -165,11 +126,11 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Price near L4/L3/L2/L1 + volume spike + choppy market
-        long_condition = (near_l4 or near_l3 or near_l2 or near_l1) and volume_spike and choppy_market
+        # Long: Donchian breakout up + volume spike + price above 12h EMA50
+        long_condition = breakout_up and volume_spike and price_above_12h_ema
         
-        # Short: Price near H4/H3/H2/H1 + volume spike + choppy market
-        short_condition = (near_h4 or near_h3 or near_h2 or near_h1) and volume_spike and choppy_market
+        # Short: Donchian breakout down + volume spike + price below 12h EMA50
+        short_condition = breakout_down and volume_spike and price_below_12h_ema
         
         if long_condition:
             in_position = True
