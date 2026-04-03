@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #1327: 6h Elder Ray + Weekly Trend Regime
-HYPOTHESIS: Elder Ray (Bull/Bear Power) identifies institutional buying/selling pressure on 6h timeframe. 
-Weekly trend filter ensures alignment with dominant momentum direction. Strategy works in bull markets by taking longs when Bull Power > 0 and weekly uptrend, and in bear markets by taking shorts when Bear Power < 0 and weekly downtrend. 
-Volume confirmation filters for institutional participation. Target: 75-150 total trades over 4 years (19-37/year).
+Experiment #1327: 6h Camarilla Pivot + 1d/1w Trend + Volume Confirmation
+HYPOTHESIS: Camarilla pivot levels on 6h timeframe provide high-probability reversal/breakout zones. 
+Trend filter from 1d timeframe ensures alignment with intermediate-term momentum. 
+Weekly trend filter adds higher-timeframe bias. Volume confirmation (>1.3x average) filters for participation. 
+Long at S1/S2 in 1d uptrend + 1w uptrend; Short at R1/R2 in 1d downtrend + 1w downtrend. 
+Breakout continuation at R3/S3 with volume spike. Designed to work in both bull (buy dips) and bear (sell rallies) markets. 
+Uses ATR-based stoploss for risk management. Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1327_6h_elder_ray_weekly_trend_v1"
+name = "exp_1327_6h_camarilla_1d_1w_trend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -21,24 +24,46 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    # 1d trend: price > previous close = uptrend, < = downtrend
+    trend_1d = np.zeros(len(close_1d))
+    trend_1d[1:] = np.where(close_1d[1:] > close_1d[:-1], 1, -1)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    
+    # === HTF: 1w data for higher trend filter ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    # Weekly trend: EMA(21) slope
-    ema_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
+    # 1w trend: price > previous close = uptrend, < = downtrend
     trend_1w = np.zeros(len(close_1w))
-    trend_1w[21:] = np.where(ema_1w[21:] > ema_1w[:-21], 1, -1)  # Uptrend if EMA rising over 21 periods
+    trend_1w[1:] = np.where(close_1w[1:] > close_1w[:-1], 1, -1)
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # === 6h Indicators: Elder Ray ===
-    # Bull Power = High - EMA(13)
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power = high - ema_13
+    # === 6h Indicators: Camarilla Pivot Levels (based on previous bar) ===
+    # Camarilla uses previous period's OHLC
+    prev_close = np.roll(close, 1)
+    prev_high = np.roll(high, 1)
+    prev_low = np.roll(low, 1)
+    prev_close[0] = close[0]  # avoid NaN on first bar
+    prev_high[0] = high[0]
+    prev_low[0] = low[0]
     
-    # Bear Power = Low - EMA(13)
-    bear_power = low - ema_13
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_hl = prev_high - prev_low
     
-    # === 6h Indicators: Volume MA(20) for confirmation ===
+    # Camarilla levels
+    r3 = pivot + (range_hl * 1.1 / 4.0)
+    s3 = pivot - (range_hl * 1.1 / 4.0)
+    r4 = pivot + (range_hl * 1.1 / 2.0)
+    s4 = pivot - (range_hl * 1.1 / 2.0)
+    # Inner levels for reversal
+    r1 = pivot + (range_hl * 1.1 / 12.0)
+    s1 = pivot - (range_hl * 1.1 / 12.0)
+    r2 = pivot + (range_hl * 1.1 / 6.0)
+    s2 = pivot - (range_hl * 1.1 / 6.0)
+    
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -60,13 +85,13 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 21  # sufficient for EMA(13), EMA(21) weekly, and volume MA
+    warmup = 20  # sufficient for volume MA and ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(trend_1d_aligned[i]) or np.isnan(trend_1w_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
+            np.isnan(r1[i]) or np.isnan(s1[i]) or np.isnan(r3[i]) or np.isnan(s3[i])):
             signals[i] = 0.0
             continue
         
@@ -103,23 +128,46 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.3
         
         if volume_spike:
-            # Long: Bull Power > 0 (buying pressure) + weekly uptrend
-            if bull_power[i] > 0 and trend_1w_aligned[i] > 0:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = SIZE
-            # Short: Bear Power < 0 (selling pressure) + weekly downtrend
-            elif bear_power[i] < 0 and trend_1w_aligned[i] < 0:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-                signals[i] = -SIZE
-            else:
-                signals[i] = 0.0
-        else:
+            # 1d and 1w trend alignment
+            trend_1d_val = trend_1d_aligned[i]
+            trend_1w_val = trend_1w_aligned[i]
+            
+            # Long conditions: 1d uptrend + 1w uptrend
+            if trend_1d_val > 0 and trend_1w_val > 0:
+                # Reversal long at S1/S2 (mean reversion in trend)
+                if price <= s2[i] and price > s3[i]:
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
+                # Breakout long at R3 with volume (continuation)
+                elif price >= r3[i]:
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = SIZE
+            
+            # Short conditions: 1d downtrend + 1w downtrend
+            elif trend_1d_val < 0 and trend_1w_val < 0:
+                # Reversal short at R1/R2 (mean reversion in trend)
+                if price >= r2[i] and price < r3[i]:
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
+                # Breakout short at S3 with volume (continuation)
+                elif price <= s3[i]:
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                    signals[i] = -SIZE
+        
+        # Default: no signal
+        if not in_position:
             signals[i] = 0.0
     
     return signals
