@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #012: 12h Donchian(24) Breakout + 1d HMA Trend + Volume Confirmation + ATR Stoploss
+Experiment #013: 4h Donchian(20) Breakout + 12h HMA Trend + Volume Confirmation + ATR Stoploss
 
-HYPOTHESIS: Combining a price channel breakout (Donchian 24) on 12h timeframe with HTF trend confirmation (1d HMA) 
-and volume spike creates a high-probability entry signal. The strategy only trades in the direction of the 1d trend, 
-reducing whipsaws in ranging markets. ATR-based trailing stoploss manages risk. Designed to capture medium-term 
-trends in both bull and bear markets with controlled trade frequency (~12-37 trades/year) to minimize fee drag.
+HYPOTHESIS: Combining a price channel breakout (Donchian 20) with HTF trend confirmation (12h HMA) 
+and volume spike creates a high-probability entry signal. The strategy only trades in the direction 
+of the 12h trend, reducing whipsaws in ranging markets. ATR-based trailing stoploss manages risk. 
+Designed to capture medium-term trends in both bull and bear markets with controlled trade frequency 
+(~19-50 trades/year) to minimize fee drag.
 """
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_1d_hma_volume_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_12h_hma_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -57,16 +58,16 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d HMA for trend (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    hma_1d = calculate_hma(df_1d['close'].values, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # === HTF: 12h HMA for trend (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    hma_12h = calculate_hma(df_12h['close'].values, 21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # === 12h Indicators ===
+    # === 4h Indicators ===
     atr_14 = calculate_atr(high, low, close, period=14)
-    dc_upper_24 = pd.Series(high).rolling(window=24, min_periods=24).max().shift(1).values
-    dc_lower_24 = pd.Series(low).rolling(window=24, min_periods=24).min().shift(1).values
-    vol_ma_24 = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    dc_upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    dc_lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -83,20 +84,20 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if np.isnan(atr_14[i]) or np.isnan(hma_1d_aligned[i]) or np.isnan(dc_upper_24[i]) or np.isnan(dc_lower_24[i]) or np.isnan(vol_ma_24[i]):
+        if np.isnan(atr_14[i]) or np.isnan(hma_12h_aligned[i]) or np.isnan(dc_upper_20[i]) or np.isnan(dc_lower_20[i]) or np.isnan(vol_ma_20[i]):
             signals[i] = 0.0
             continue
         
         # --- HTF Trend Check ---
-        htf_bullish = close[i] > hma_1d_aligned[i]
-        htf_bearish = close[i] < hma_1d_aligned[i]
+        htf_bullish = close[i] > hma_12h_aligned[i]
+        htf_bearish = close[i] < hma_12h_aligned[i]
         
         # --- Price Channel Breakout ---
-        bullish_breakout = close[i] > dc_upper_24[i]
-        bearish_breakout = close[i] < dc_lower_24[i]
+        bullish_breakout = close[i] > dc_upper_20[i]
+        bearish_breakout = close[i] < dc_lower_20[i]
         
         # --- Volume Confirmation ---
-        vol_ok = volume[i] > vol_ma_24[i] * 2.0 if vol_ma_24[i] > 1e-10 else False  # Strict 2x volume spike
+        vol_ok = volume[i] > vol_ma_20[i] * 2.0 if vol_ma_20[i] > 1e-10 else False  # Strict 2x volume spike
         
         # --- Position Management (Exit Logic) ---
         stop_hit = False
