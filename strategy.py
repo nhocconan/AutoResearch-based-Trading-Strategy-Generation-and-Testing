@@ -1,77 +1,47 @@
 #!/usr/bin/env python3
 """
-Experiment #191: 6h ADX + Williams Alligator Combination
+Experiment #201: 4h Donchian(20) Breakout + 1d Volume Spike + ATR Stoploss
 
-HYPOTHESIS: Combining ADX trend strength with Williams Alligator (SMMA crossover) on 6h timeframe
-provides robust trend-following signals. ADX > 25 filters for trending markets, while Alligator
-jaw-teeth-lips alignment confirms direction. Uses 1d timeframe for HTF trend filter to avoid
-counter-trend trades. Target: 75-150 total trades over 4 years (19-37/year) - within winning range.
-Works in both bull and bear markets by only taking trades in direction of stronger trend (via HTF).
+HYPOTHESIS: Donchian(20) breakouts on 4h with volume confirmation (>2x 20-period average volume on 1d)
+captures strong momentum moves. Uses ATR-based stoploss (2.5*ATR) to manage risk. 
+Target: 75-200 total trades over 4 years (19-50/year) - within winning range for 4h.
+Works in bull/bear markets via volatility expansion breakouts that work regardless of trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_adx_alligator_1d_trend_v1"
-timeframe = "6h"
+name = "mtf_4h_donchian_breakout_1d_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
+    close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
-    close = prices["close"].values.astype(np.float64)
+    volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for trend filter ===
+    # === HTF: 1d data for volume spike filter ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    # 1d EMA(50) for HTF trend direction
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    htf_trend_up = ema_50_1d > np.roll(ema_50_1d, 1)  # Rising EMA50 = uptrend
-    htf_trend_down = ema_50_1d < np.roll(ema_50_1d, 1)  # Falling EMA50 = downtrend
-    htf_trend_up_aligned = align_htf_to_ltf(prices, df_1d, htf_trend_up)
-    htf_trend_down_aligned = align_htf_to_ltf(prices, df_1d, htf_trend_down)
+    volume_1d = df_1d['volume'].values
+    avg_vol_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (2.0 * avg_vol_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
     
-    # === 6h Indicators ===
-    # ADX(14) for trend strength
-    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    plus_dm = np.insert(plus_dm, 0, 0)
-    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    minus_dm = np.insert(minus_dm, 0, 0)
+    # === 4h Indicators ===
+    # Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
+    # ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    plus_di_14 = 100 * pd.Series(plus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    minus_di_14 = 100 * pd.Series(minus_dm).rolling(window=14, min_periods=14).mean().values / atr_14
-    dx = 100 * np.abs(plus_di_14 - minus_di_14) / (plus_di_14 + minus_di_14)
-    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean().values
-    
-    # Williams Alligator: SMMA(13,8), SMMA(8,5), SMMA(5,3)
-    def smma(source, length):
-        """Smoothed Moving Average"""
-        sma = pd.Series(source).rolling(window=length, min_periods=length).mean().values
-        smma_vals = np.full_like(source, np.nan, dtype=np.float64)
-        smma_vals[length-1] = sma[length-1]
-        for i in range(length, len(source)):
-            if not np.isnan(sma[i]):
-                smma_vals[i] = (smma_vals[i-1] * (length-1) + sma[i]) / length
-            else:
-                smma_vals[i] = smma_vals[i-1]
-        return smma_vals
-    
-    jaw = smma(close, 13)  # Blue line
-    teeth = smma(close, 8)  # Red line
-    lips = smma(close, 5)   # Green line
-    
-    # Alligator signals: Lips > Teeth > Jaw = UP, Lips < Teeth < Jaw = DOWN
-    alligator_up = (lips > teeth) & (teeth > jaw)
-    alligator_down = (lips < teeth) & (teeth < jaw)
+    tr[0] = tr1[0]  # First bar
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -87,44 +57,153 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(adx[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or np.isnan(htf_trend_up_aligned[i]) or 
-            np.isnan(htf_trend_down_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # --- ADX + Alligator Entry Logic ---
-        # Strong trend (ADX > 25) + Alligator alignment + HTF trend filter
-        strong_trend = adx[i] > 25
-        
-        # Long: ADX > 25 + Alligator bullish alignment + HTF uptrend
-        long_condition = strong_trend & alligator_up[i] & htf_trend_up_aligned[i]
-        # Short: ADX > 25 + Alligator bearish alignment + HTF downtrend
-        short_condition = strong_trend & alligator_down[i] & htf_trend_down_aligned[i]
+        # --- Donchian Breakout + Volume Confirmation ---
+        # Upper breakout: price breaks above Donchian high with volume spike
+        upper_breakout = (close[i] > donchian_high[i]) and vol_spike_1d_aligned[i]
+        # Lower breakout: price breaks below Donchian low with volume spike
+        lower_breakout = (close[i] < donchian_low[i]) and vol_spike_1d_aligned[i]
         
         # --- Position Management ---
         if in_position:
-            # Check for trend weakening or Alligator reversal
+            # Check stoploss: 2.5 * ATR against position
             if position_side > 0:  # Long
-                exit_condition = (adx[i] < 20) | ~alligator_up[i] | ~htf_trend_up_aligned[i]
+                if close[i] < entry_price - 2.5 * atr[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
             else:  # Short
-                exit_condition = (adx[i] < 20) | ~alligator_down[i] | ~htf_trend_down_aligned[i]
+                if close[i] > entry_price + 2.5 * atr[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
             
-            if exit_condition:
-                in_position = False
-                position_side = 0
-                signals[i] = 0.0
-            else:
-                signals[i] = position_side * SIZE
+            # Still in position
+            signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        if long_condition:
+        # Long: upper breakout + volume confirmation
+        if upper_breakout:
             in_position = True
             position_side = 1
             entry_price = close[i]
             signals[i] = SIZE
-        elif short_condition:
+        # Short: lower breakout + volume confirmation
+        elif lower_breakout:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            signals[i] = -SIZE
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #201: 4h Donchian(20) Breakout + 1d Volume Spike + ATR Stoploss
+
+HYPOTHESIS: Donchian(20) breakouts on 4h with volume confirmation (>2x 20-period average volume on 1d)
+captures strong momentum moves. Uses ATR-based stoploss (2.5*ATR) to manage risk. 
+Target: 75-200 total trades over 4 years (19-50/year) - within winning range for 4h.
+Works in bull/bear markets via volatility expansion breakouts that work regardless of trend.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "mtf_4h_donchian_breakout_1d_volume_atr_v1"
+timeframe = "4h"
+leverage = 1.0
+
+def generate_signals(prices):
+    close = prices["close"].values.astype(np.float64)
+    high = prices["high"].values.astype(np.float64)
+    low = prices["low"].values.astype(np.float64)
+    volume = prices["volume"].values.astype(np.float64)
+    n = len(close)
+    
+    # === HTF: 1d data for volume spike filter ===
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
+    avg_vol_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_spike_1d = volume_1d > (2.0 * avg_vol_1d)
+    vol_spike_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_spike_1d)
+    
+    # === 4h Indicators ===
+    # Donchian(20) channels
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # === Signals Initialization ===
+    signals = np.zeros(n)
+    SIZE = 0.25  # Discrete position sizing (25% of capital)
+    
+    # Position tracking state variables
+    in_position = False
+    position_side = 0
+    entry_price = 0.0
+    entry_bar = -1
+    
+    warmup = 100  # Ensure enough data for HTF and indicator calculations
+    
+    for i in range(warmup, n):
+        # --- Data Validity Check ---
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_spike_1d_aligned[i]) or np.isnan(atr[i])):
+            signals[i] = 0.0
+            continue
+        
+        # --- Donchian Breakout + Volume Confirmation ---
+        # Upper breakout: price breaks above Donchian high with volume spike
+        upper_breakout = (close[i] > donchian_high[i]) and vol_spike_1d_aligned[i]
+        # Lower breakout: price breaks below Donchian low with volume spike
+        lower_breakout = (close[i] < donchian_low[i]) and vol_spike_1d_aligned[i]
+        
+        # --- Position Management ---
+        if in_position:
+            # Check stoploss: 2.5 * ATR against position
+            if position_side > 0:  # Long
+                if close[i] < entry_price - 2.5 * atr[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+            else:  # Short
+                if close[i] > entry_price + 2.5 * atr[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+            
+            # Still in position
+            signals[i] = position_side * SIZE
+            continue
+        
+        # --- New Position Entry Logic (Only if Flat) ---
+        # Long: upper breakout + volume confirmation
+        if upper_breakout:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            signals[i] = SIZE
+        # Short: lower breakout + volume confirmation
+        elif lower_breakout:
             in_position = True
             position_side = -1
             entry_price = close[i]
