@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #1749: 4h Donchian(20) Breakout + 1d HMA Trend + Volume + ATR Stoploss
-HYPOTHESIS: 4h Donchian breakouts with 1d HMA trend alignment and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 1d timeframe filters out noise from shorter-term fluctuations, while the 4h Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 75-200 total trades over 4 years (19-50/year) by using tight entry conditions and multi-timeframe confluence.
+Experiment #1749: 4h Donchian(20) Breakout + 1d/1w HMA Trend + Volume + ATR Stoploss
+HYPOTHESIS: 4h Donchian breakouts with multi-timeframe trend alignment (1d and 1w HMA) and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 1d/1w timeframe filters out noise from shorter-term fluctuations, while the 4h Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 75-200 total trades over 4 years (19-50/year) by using tight entry conditions and multi-timeframe confluence.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1749_4h_donchian20_1d_hma_vol_v1"
+name = "exp_1749_4h_donchian20_1d_1w_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -35,6 +35,13 @@ def generate_signals(prices):
     hma_1d = hull_moving_average(close_1d, 21)
     trend_1d = np.where(close_1d > hma_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    
+    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    hma_1w = hull_moving_average(close_1w, 21)
+    trend_1w = np.where(close_1w > hma_1w, 1, -1)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
     # === 4h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -67,7 +74,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(trend_1d_aligned[i]) or np.isnan(trend_1w_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -100,8 +108,9 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1d trend alignment
-        trend_following = trend_1d_aligned[i] != 0  # Should always be ±1
+        # Require BOTH 1d and 1w trend alignment (confluence)
+        trend_following = (trend_1d_aligned[i] > 0 and trend_1w_aligned[i] > 0) or \
+                         (trend_1d_aligned[i] < 0 and trend_1w_aligned[i] < 0)
         
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
