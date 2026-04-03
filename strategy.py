@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #195: 6h Camarilla Pivot + Volume Spike + Weekly Trend Filter
-HYPOTHESIS: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) on 1d timeframe combined with volume spikes (>2x average) and weekly trend filter (price above/below weekly VWAP) capture high-probability reversals and continuations with optimal trade frequency for 6h. Weekly trend ensures alignment with higher timeframe momentum. Discrete position sizing (0.25) and ATR stoploss (2.5x) manage risk. Target: 75-150 total trades over 4 years. Works in bull/bear via mean reversion at extremes and breakout continuation with volume confirmation.
+Experiment #196: 12h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: Donchian breakouts on 12h timeframe aligned with 1d Camarilla pivot levels (S3/R3 for mean reversion, S4/R4 for continuation) capture high-probability moves with lower trade frequency suitable for 12h. Volume confirmation (>1.5x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) minimizes fee churn. Target: 75-150 total trades over 4 years. Works in both bull and bear by using breakout logic (continuation at R4/S4) and mean reversion (at R3/S3).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_195_6h_camarilla_pivot_volume_weekly_v1"
-timeframe = "6h"
+name = "exp_196_12h_donchian20_1d_camarilla_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -49,32 +49,24 @@ def generate_signals(prices):
             s3_1d[i] = s3
             s4_1d[i] = s4
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # === HTF: 1w data for weekly trend filter (VWAP) ===
-    df_1w = get_htf_data(prices, '1w')
+    # === 12h Indicators: Donchian(20) channels ===
+    donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate weekly VWAP
-    typical_price_1w = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3.0
-    vol_1w = df_1w['volume']
-    vwap_1w = (typical_price_1w * vol_1w).cumsum() / vol_1w.cumsum()
-    vwap_1w_values = vwap_1w.values
-    
-    # Align weekly VWAP to 6h timeframe
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1d, vwap_1w_values)  # Use 1d as bridge for alignment
-    
-    # === 6h Indicators: ATR(14) for stoploss ===
-    tr_6h = np.zeros(n)
-    tr_6h[0] = high[0] - low[0]
+    # === 12h Indicators: ATR(14) for stoploss ===
+    tr_12h = np.zeros(n)
+    tr_12h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
+        tr_12h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr_12h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
@@ -94,25 +86,25 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
+        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
+            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(r3_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
-            np.isnan(vwap_1w_aligned[i])):
+            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio[i] > 1.5
         
-        # --- Weekly Trend Filter ---
-        weekly_uptrend = price > vwap_1w_aligned[i]
-        weekly_downtrend = price < vwap_1w_aligned[i]
+        # --- Donchian Breakout Conditions ---
+        breakout_up = high[i] > donch_upper[i-1]
+        breakout_down = low[i] < donch_lower[i-1]
         
         # --- Camarilla Pivot Conditions ---
-        near_r3 = abs(price - r3_1d_aligned[i]) / price < 0.003
-        near_s3 = abs(price - s3_1d_aligned[i]) / price < 0.003
+        near_r3 = abs(price - r3_1d_aligned[i]) / price < 0.005
+        near_s3 = abs(price - s3_1d_aligned[i]) / price < 0.005
         break_r4 = price > r4_1d_aligned[i]
         break_s4 = price < s4_1d_aligned[i]
         
@@ -121,30 +113,28 @@ def generate_signals(prices):
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.5 * atr_14[i]
+                stop_level = entry_price - 2.0 * atr_14[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at R4 with volume spike
-                if break_r4 and volume_spike:
+                if break_s4 and volume_spike:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_level = entry_price + 2.5 * atr_14[i]
+                stop_level = entry_price + 2.0 * atr_14[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-                # Take profit at S4 with volume spike
-                if break_s4 and volume_spike:
+                if break_r4 and volume_spike:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -159,17 +149,17 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Require volume spike
+        # Require volume spike + breakout conditions
         if volume_spike:
-            # Long: near S3 (mean reversion) in weekly uptrend OR break S4 (continuation) in weekly downtrend
-            if (near_s3 and weekly_uptrend) or (break_s4 and weekly_downtrend):
+            # Long: breakout up AND (near R3 OR break R4)
+            if (breakout_up and (near_r3 or break_r4)) or (break_r4 and volume_spike):
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: near R3 (mean reversion) in weekly downtrend OR break R4 (continuation) in weekly uptrend
-            elif (near_r3 and weekly_downtrend) or (break_r4 and weekly_uptrend):
+            # Short: breakout down AND (near S3 OR break S4)
+            elif (breakout_down and (near_s3 or break_s4)) or (break_s4 and volume_spike):
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
