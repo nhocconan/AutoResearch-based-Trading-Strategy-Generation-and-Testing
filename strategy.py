@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #915: 6h Donchian(20) + 1w Trend + Volume Spike
-HYPOTHESIS: Donchian breakouts on 6h capture momentum, filtered by 1-week trend direction (EMA21 slope) and volume confirmation (>2.0x average). 
-Long when price breaks above Donchian upper AND 1w EMA rising AND volume spike. 
-Short when price breaks below Donchian lower AND 1w EMA falling AND volume spike. 
-Uses discrete position sizing (0.25) to minimize fee churn. Target: 75-150 total trades over 4 years (19-37/year).
+Experiment #915: 6h Donchian(20) breakout + 1w trend filter + volume confirmation
+HYPOTHESIS: Donchian breakouts on 6h capture medium-term momentum, filtered by 1w EMA trend direction 
+and volume spike (>2.0x average). Long when price breaks above Donchian upper AND 1w EMA rising 
+AND volume spike. Short when price breaks below Donchian lower AND 1w EMA falling AND volume spike. 
+Uses discrete position sizing (0.25) to limit drawdown. Target: 75-150 total trades over 4 years 
+(19-37/year) with ATR-based stoploss (2.0) and time-based exit (max 8 bars = ~2 days).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_915_6h_donchian20_1w_trend_vol_v1"
+name = "exp_915_6h_donchian20_1w_ema_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -65,7 +66,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = max(20, 20, 21)  # sufficient for Donchian, volume MA, EMA
+    warmup = max(20, 20, 14)  # sufficient for Donchian, volume MA, ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -100,7 +101,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 8 bars (~32h on 6h) to avoid overtrading
+            # Optional: time-based exit after 8 bars (~2 days on 6h) to avoid overtrading
             if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
