@@ -1,21 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #117: 4h Donchian(20) Breakout + 1d Volume Spike + 1w Trend Filter
+Experiment #260: 4h Donchian(20) Breakout + 1d Trend Filter + Volume Spike
 
-HYPOTHESIS: 4h Donchian channel breakouts filtered by 1-week EMA trend direction 
-and volume spikes (>1.8x 20-bar average) capture strong momentum moves with reduced 
-false breakouts. The 1-week EMA provides a robust, low-lag trend filter from higher 
-timeframe. 4h timeframe targets 19-50 trades/year (75-200 total over 4 years) to 
-minimize fee drag while capturing significant moves. Works in both bull (breakouts 
-with volume) and bear (failed breaks reverse sharply) markets. Uses ATR-based 
-stoploss for risk management.
+HYPOTHESIS: 4h Donchian channel breakouts filtered by 1d EMA trend and volume spikes (>2.0x average) capture strong momentum moves with reduced false breakouts. The 1d EMA provides a clean, higher timeframe trend filter. 4h timeframe targets 19-50 trades/year (75-200 total over 4 years) to minimize fee drag while capturing significant moves. Works in both bull (breakouts with volume) and bear (failed breaks reverse sharply) markets. Uses ATR-based stoploss for risk management.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_117_4h_donchian_1w_ema_volume_v1"
+name = "exp_260_4h_donchian_1d_ema_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,15 +20,12 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for volume MA and 1w data for EMA trend (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 20-period MA on 1d volume for spike detection
-    vol_ma_20_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-    
-    # Calculate EMA(50) on 1w close for trend filter
-    ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate EMA(50) on 1d data
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # === 4h Indicators: Donchian Channel (20) ===
     donchian_h = np.full(n, np.nan)
@@ -75,17 +66,17 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
-            np.isnan(ema_50_1w[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(atr_14[i]) or 
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- 1w EMA Trend Filter: Price > EMA = bullish bias, Price < EMA = bearish bias ---
-        price_above_ema = close[i] > ema_50_1w[i]
-        price_below_ema = close[i] < ema_50_1w[i]
+        # --- 1d EMA Trend Filter: Price > EMA = bullish bias, Price < EMA = bearish bias ---
+        price_above_ema = close[i] > ema_1d_aligned[i]
+        price_below_ema = close[i] < ema_1d_aligned[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.8x average) ---
-        volume_spike = vol_ratio[i] > 1.8
+        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
+        volume_spike = vol_ratio[i] > 2.0
         
         # --- Donchian Breakout Conditions ---
         breakout_up = close[i] > donchian_h[i]
@@ -137,10 +128,10 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Donchian breakout up + volume spike + price above 1w EMA
+        # Long: Donchian breakout up + volume spike + price above 1d EMA
         long_condition = breakout_up and volume_spike and price_above_ema
         
-        # Short: Donchian breakout down + volume spike + price below 1w EMA
+        # Short: Donchian breakout down + volume spike + price below 1d EMA
         short_condition = breakout_down and volume_spike and price_below_ema
         
         if long_condition:
