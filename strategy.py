@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #081: 4h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
-HYPOTHESIS: Price breaking 4h Donchian(20) channels with alignment to 1d weekly pivot levels (above/below pivot) and volume spike (>1.5x) captures medium-term momentum with proper trend context. Weekly pivot provides institutional reference point that works in both bull (breakouts above R1) and bear (breakdowns below S1) markets. Discrete sizing (0.25) and ATR(14) stoploss (2.0*ATR). Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #073: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation
+HYPOTHESIS: Price breaking 4h Donchian(20) channels with alignment to 12h HMA(21) trend and volume spike (>1.5x) captures medium-term momentum with proper trend context. The 12h HMA provides smoother trend filter than EMA, reducing whipsaws in choppy markets. Discrete sizing (0.30) and ATR(14) stoploss (2.0*ATR). Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_081_4h_donchian20_1d_weekly_pivot_vol_v1"
+name = "exp_073_4h_donchian20_12h_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,17 +19,23 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for weekly pivot (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
+    # === HTF: 12h data for HMA trend (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly pivot from prior week (using daily OHLC)
-    # Weekly pivot = (Prior Week High + Prior Week Low + Prior Week Close) / 3
-    # We'll use prior daily values to approximate weekly pivot
-    # For simplicity, using prior day's typical price as proxy (can be refined)
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    # Shift by 1 to use prior completed day's value (approximates prior weekly)
-    pivot_1d = typical_price.shift(1).values
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    # Calculate HMA(21) on 12h close
+    def calculate_hma(values, period):
+        if len(values) < period:
+            return np.full_like(values, np.nan)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma_half = pd.Series(values).ewm(span=half_period, adjust=False).mean()
+        wma_full = pd.Series(values).ewm(span=period, adjust=False).mean()
+        hma_raw = 2 * wma_half - wma_full
+        hma = pd.Series(hma_raw).ewm(span=sqrt_period, adjust=False).mean()
+        return hma.values
+    
+    hma_12h = calculate_hma(df_12h['close'].values, 21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
     # === 4h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
@@ -49,7 +55,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25
+    SIZE = 0.30
     
     # Position tracking state variables
     in_position = False
@@ -62,7 +68,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(pivot_1d_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(hma_12h_aligned[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -76,10 +82,10 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- Pivot Alignment: price relative to 1d pivot ---
-        # Above pivot = bullish bias, Below pivot = bearish bias
-        above_pivot = price > pivot_1d_aligned[i]
-        below_pivot = price < pivot_1d_aligned[i]
+        # --- HMA Trend Filter: price relative to 12h HMA ---
+        # Above HMA = bullish bias, Below HMA = bearish bias
+        above_hma = price > hma_12h_aligned[i]
+        below_hma = price < hma_12h_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -104,28 +110,20 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~24h on 4h) to avoid overtrading
-            if bars_since_entry > 6:
-                in_position = False
-                position_side = 0
-                bars_since_entry = 0
-                signals[i] = 0.0
-                continue
-            
             signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: breakout above upper channel AND above pivot (bullish bias)
-            if breakout_up and above_pivot:
+            # Long: breakout above upper channel AND above HMA (bullish bias)
+            if breakout_up and above_hma:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: breakout below lower channel AND below pivot (bearish bias)
-            elif breakout_down and below_pivot:
+            # Short: breakout below lower channel AND below HMA (bearish bias)
+            elif breakout_down and below_hma:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
