@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #520: 4h Donchian(20) breakout + 1d HTF trend filter + volume confirmation
+Experiment #521: 4h Donchian(20) breakout + 1d HTF trend filter + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 trend filter capture strong momentum while avoiding counter-trend trades. Volume confirmation (>1.5x average) filters weak breakouts. ATR-based stoploss (2.0) manages risk. Discrete position sizing (0.25) controls drawdown. Uses only 1d HTF (not 1w) to reduce overfitting and increase trade frequency to target 75-200 total trades over 4 years. Works in bull markets via breakout momentum and in bear markets via short breakouts with trend alignment.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_520_4h_donchian20_1d_ema_vol_v1"
+name = "exp_521_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
