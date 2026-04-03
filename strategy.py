@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
 """
 Experiment #804: 1d Donchian(20) + 1w HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: Daily Donchian breakouts capture medium-term momentum, filtered by 1-week HMA trend 
-and volume confirmation (>2.0x average). Long when price breaks above Donchian upper 
-AND 1w HMA rising AND volume spike. Short when price breaks below Donchian lower 
-AND 1w HMA falling AND volume spike. Works in bull/bear markets: in bull trends, 
-HMA rising filters for longs; in bear trends, HMA falling filters for shorts. 
-Uses discrete position sizing (0.25). Target: 30-100 total trades over 4 years (7-25/year).
+HYPOTHESIS: Daily Donchian breakouts filtered by weekly HMA trend direction and volume spikes.
+Works in bull/bear markets: weekly HMA trend defines primary direction, Donchian breakouts on 1d capture momentum in that direction with volume confirmation. Uses discrete sizing (0.25) and ATR stoploss. Target: 30-100 trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -111,8 +107,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 10 bars (~10d on 1d) to avoid overtrading
-            if bars_since_entry > 10:
+            # Optional: time-based exit after 8 bars (~8 days on 1d) to avoid overtrading
+            if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
