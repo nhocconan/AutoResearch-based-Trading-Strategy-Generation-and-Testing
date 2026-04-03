@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #230: 1d Donchian Breakout + Weekly Trend + Volume Spike
+Experiment #231: 6h Elder Ray Regime Volume Strategy
 
-HYPOTHESIS: Daily Donchian(20) breakouts with weekly trend filter (price > weekly EMA50) 
-and volume confirmation (>2x average) capture strong momentum moves in both bull and bear markets.
-In ranging markets (weekly ADX < 25), we fade breaks of Donchian bands with volume confirmation 
-and price deviation from weekly VWAP (>1.5 ATR). Weekly timeframe ensures we trade with the 
-higher-trend structure while daily provides timely entries. Target: 15-25 trades/year.
+HYPOTHESIS: Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) combined with 1d regime filter (ADX) and volume confirmation captures both trending moves and mean reversals in ranging markets. In trending markets (1d ADX > 25), we follow Elder Ray signals. In ranging markets (1d ADX < 25), we fade extreme Elder Ray readings with volume confirmation. This adaptive approach works in both bull (strong trends) and bear (failed reversals, range-bound) markets. 6h timeframe targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_230_1d_donchian_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "exp_231_6h_elder_ray_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,15 +20,16 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for trend and regime (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
+    # === HTF: 1d data for regime detection (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA50 for trend filter
-    ema50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Calculate 1d EMA50 for trend filter
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Calculate weekly ADX for regime detection
+    # Calculate 1d ADX for regime detection (trending vs ranging)
     def calculate_adx(high, low, close, period=14):
+        """Calculate ADX (Average Directional Index)"""
         plus_dm = np.zeros(len(high))
         minus_dm = np.zeros(len(high))
         tr = np.zeros(len(high))
@@ -49,6 +46,7 @@ def generate_signals(prices):
                 minus_dm[i] = 0
             tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
         
+        # Smoothed values
         atr = pd.Series(tr).ewm(span=period, min_periods=period, adjust=False).mean().values
         plus_di = 100 * pd.Series(plus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
         minus_di = 100 * pd.Series(minus_dm).ewm(span=period, min_periods=period, adjust=False).mean().values / atr
@@ -56,67 +54,29 @@ def generate_signals(prices):
         adx = pd.Series(dx).ewm(span=period, min_periods=period, adjust=False).mean().values
         return adx
     
-    adx_1w = calculate_adx(df_1w['high'].values, df_1w['low'].values, df_1w['close'].values)
-    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
+    adx_1d = calculate_adx(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Calculate weekly VWAP for mean reversion timing
-    typical_price_1w = (df_1w['high'].values + df_1w['low'].values + df_1w['close'].values) / 3.0
-    vwap_numerator = np.zeros(len(df_1w))
-    vwap_denominator = np.zeros(len(df_1w))
-    vwap_1w = np.full(len(df_1w), np.nan)
+    # === 6h Indicators: EMA13 for Elder Ray calculation ===
+    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
     
-    for i in range(len(df_1w)):
-        start_idx = max(0, i - 19)
-        vol_sum = df_1w['volume'].iloc[start_idx:i+1].sum()
-        if vol_sum > 0:
-            tp_sum = (typical_price_1w[start_idx:i+1] * df_1w['volume'].iloc[start_idx:i+1]).sum()
-            vwap_1w[i] = tp_sum / vol_sum
-        else:
-            vwap_1w[i] = typical_price_1w[i]
+    # Elder Ray components
+    bull_power = high - ema13  # High - EMA13
+    bear_power = low - ema13   # Low - EMA13
     
-    vwap_1w_aligned = align_htf_to_ltf(prices, df_1w, vwap_1w)
-    
-    # === 1d Indicators: Donchian channels (20-period) ===
-    def calculate_donchian(high, low, period=20):
-        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-        return upper, lower
-    
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    
-    # === 1d Indicators: ATR(14) for stoploss and normalization ===
-    tr_1d = np.zeros(n)
-    tr_1d[0] = high[0] - low[0]
+    # === 6h Indicators: ATR(14) for stoploss ===
+    tr_6h = np.zeros(n)
+    tr_6h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_1d[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     
-    atr_14 = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
-    vol_ratio[:20] = 1.0
-    
-    # === 1d Indicators: VWAP deviation for mean reversion ===
-    typical_price_1d = (high + low + close) / 3.0
-    vwap_numerator_1d = np.zeros(n)
-    vwap_denominator_1d = np.zeros(n)
-    vwap_1d = np.full(n, np.nan)
-    
-    for i in range(n):
-        start_idx = max(0, i - 19)
-        vol_sum = volume[start_idx:i+1].sum()
-        if vol_sum > 0:
-            tp_sum = (typical_price_1d[start_idx:i+1] * volume[start_idx:i+1]).sum()
-            vwap_1d[i] = tp_sum / vol_sum
-        else:
-            vwap_1d[i] = typical_price_1d[i]
-    
-    # VWAP deviation normalized by ATR
-    vwap_dev_1d = np.zeros(n)
-    vwap_dev_1d[14:] = (close[14:] - vwap_1d[14:]) / atr_14[14:]
-    vwap_dev_1d[:14] = 0.0
+    vol_ratio[:20] = 1.0  # Neutral for warmup
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -126,40 +86,34 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    bars_since_entry = 0
+    bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 100  # Warmup for stability
+    warmup = 100  # Warmup for 1d indicators stability
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(adx_1w_aligned[i]) or 
-            np.isnan(vwap_1w_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(atr_14[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(vwap_dev_1d[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
+            np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- Weekly Regime Filter ---
-        is_trending = adx_1w_aligned[i] > 25
-        is_ranging = adx_1w_aligned[i] < 25
+        # --- 1d Regime Filter: ADX > 25 = trending, ADX < 25 = ranging ---
+        is_trending = adx_1d_aligned[i] > 25
+        is_ranging = adx_1d_aligned[i] < 25
         
-        # --- Volume Confirmation ---
-        volume_spike = vol_ratio[i] > 2.0
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio[i] > 1.5
         
-        # --- Price Levels ---
+        # --- Price ---
         price = close[i]
-        upper = donchian_upper[i]
-        lower = donchian_lower[i]
-        weekly_ema50 = ema50_1w_aligned[i]
-        weekly_vwap = vwap_1w_aligned[i]
-        vwap_dev = vwap_dev_1d[i]
         
-        # --- Exit Logic ---
+        # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
             bars_since_entry += 1
             
             # ATR-based stoploss
-            if position_side > 0:  # Long
+            if position_side > 0:  # Long position
                 stop_level = entry_price - 2.5 * atr_14[i]
                 if low[i] < stop_level:
                     in_position = False
@@ -167,7 +121,14 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-            else:  # Short
+                # Exit on Elder Ray divergence in ranging markets
+                if is_ranging and bull_power[i] < 0 and volume_spike:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+            else:  # Short position
                 stop_level = entry_price + 2.5 * atr_14[i]
                 if high[i] > stop_level:
                     in_position = False
@@ -175,80 +136,69 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
-            
-            # Exit conditions based on regime
-            if is_trending:
-                # In trending markets: exit on Donchian opposite break
-                if position_side > 0 and price < lower:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-                elif position_side < 0 and price > upper:
-                    in_position = False
-                    position_side = 0
-                    bars_since_entry = 0
-                    signals[i] = 0.0
-                    continue
-            else:  # ranging
-                # In ranging markets: exit on mean reversion to weekly VWAP
-                if abs(vwap_dev) < 0.5:
+                # Exit on Elder Ray divergence in ranging markets
+                if is_ranging and bear_power[i] > 0 and volume_spike:
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
             
-            # Minimum holding period of 3 days to reduce churn
-            if bars_since_entry < 3:
+            # Minimum holding period of 2 bars to reduce churn
+            if bars_since_entry < 2:
                 signals[i] = position_side * SIZE
                 continue
             
+            # Hold position
             signals[i] = position_side * SIZE
             continue
         
-        # --- New Position Entry ---
-        # Trending market logic: Donchian breakouts with volume and weekly trend alignment
+        # --- New Position Entry Logic (Only if Flat) ---
+        # Trending market logic: Follow Elder Ray
         if is_trending:
-            # Long breakout: price > upper Donchian + volume spike + price > weekly EMA50
-            long_breakout = (price > upper) and volume_spike and (price > weekly_ema50)
+            # Long: Bull Power > 0 AND rising (momentum) AND above EMA50
+            long_trend = (bull_power[i] > 0) and (bull_power[i] > bull_power[i-1]) and (price > ema50_1d_aligned[i])
             
-            # Short breakout: price < lower Donchian + volume spike + price < weekly EMA50
-            short_breakout = (price < lower) and volume_spike and (price < weekly_ema50)
+            # Short: Bear Power < 0 AND falling (momentum) AND below EMA50
+            short_trend = (bear_power[i] < 0) and (bear_power[i] < bear_power[i-1]) and (price < ema50_1d_aligned[i])
             
-            if long_breakout:
+            # Require volume confirmation for trend entries
+            if long_trend and volume_spike:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif short_breakout:
+            elif short_trend and volume_spike:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = -SIZE
+            else:
+                signals[i] = 0.0
         
-        # Ranging market logic: fade Donchian breaks with volume and VWAP deviation
-        else:
-            # Long mean reversion: price < lower Donchian + volume spike + price below weekly VWAP
-            long_mr = (price < lower) and volume_spike and (vwap_dev < -1.5)
+        # Ranging market logic: Fade extreme Elder Ray readings
+        else:  # is_ranging
+            # Long: Bear Power extremely negative (oversold) AND volume spike
+            long_range = (bear_power[i] < -1.0 * atr_14[i]) and volume_spike
             
-            # Short mean reversion: price > upper Donchian + volume spike + price above weekly VWAP
-            short_mr = (price > upper) and volume_spike and (vwap_dev > 1.5)
+            # Short: Bull Power extremely positive (overbought) AND volume spike
+            short_range = (bull_power[i] > 1.0 * atr_14[i]) and volume_spike
             
-            if long_mr:
+            if long_range:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif short_mr:
+            elif short_range:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = -SIZE
+            else:
+                signals[i] = 0.0
     
     return signals
