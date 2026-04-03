@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #2094: 1h Donchian(20) breakout + 4h/1d trend filter + volume confirmation
-HYPOTHESIS: 1h Donchian breakouts with HTF trend alignment and volume confirmation 
-capture institutional order flow with precise entries. Using 4h/1d for signal direction 
-and 1h only for entry timing reduces whipsaw. Session filter (08-20 UTC) avoids 
-low-liquidity periods. Target: 60-150 total trades over 4 years (15-37/year).
+Experiment #2095: 6h Donchian(20) breakout + 1w Camarilla pivot + volume confirmation
+HYPOTHESIS: Combining 6h Donchian breakouts with weekly Camarilla pivot levels creates high-probability entries.
+- Primary: 6h Donchian(20) breakout with volume > 1.3x 20-bar average
+- HTF: 1w Camarilla pivot levels (R3/S3 for fade, R4/S4 for breakout continuation)
+- Logic: Long when price breaks above Donchian upper AND > weekly R3 AND volume spike
+         Short when price breaks below Donchian lower AND < weekly S3 AND volume spike
+- Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
+- Works in bull/bear markets by using weekly structure for context and 6f for precise timing.
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2094_1h_donchian20_4h_1d_trend_vol_v1"
-timeframe = "1h"
+name = "exp_2095_6h_donchian20_1w_camarilla_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,48 +24,36 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # Pre-compute session hours for efficiency (08-20 UTC)
-    hours = pd.DatetimeIndex(open_time).hour
+    # === HTF: 1w data for Camarilla pivot levels (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # === HTF: 4h data for Donchian trend (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Calculate weekly Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    # Range = H - L
+    # R4 = C + Range * 1.1/2
+    # R3 = C + Range * 1.1/4
+    # S3 = C - Range * 1.1/4
+    # S4 = C - Range * 1.1/2
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    r4_1w = close_1w + range_1w * 1.1 / 2.0
+    r3_1w = close_1w + range_1w * 1.1 / 4.0
+    s3_1w = close_1w - range_1w * 1.1 / 4.0
+    s4_1w = close_1w - range_1w * 1.1 / 2.0
     
-    # 4h Donchian(20) for trend direction
-    high_ma_4h = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_ma_4h = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
-    donchian_upper_4h = high_ma_4h
-    donchian_lower_4h = low_ma_4h
+    # Align weekly levels to 6h timeframe (shifted by 1 for completed bars only)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
     
-    # 4h trend: 1 if close > midpoint, -1 otherwise
-    midpoint_4h = (donchian_upper_4h + donchian_lower_4h) / 2
-    trend_4h = np.where(close_4h > midpoint_4h, 1, -1)
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
-    
-    # === HTF: 1d data for Donchian trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # 1d Donchian(20) for stronger trend filter
-    high_ma_1d = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    low_ma_1d = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    donchian_upper_1d = high_ma_1d
-    donchian_lower_1d = low_ma_1d
-    
-    # 1d trend: 1 if close > upper, -1 if close < lower, 0 otherwise (neutral)
-    trend_1d = np.where(close_1d > donchian_upper_1d, 1, 
-                       np.where(close_1d < donchian_lower_1d, -1, 0))
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
-    
-    # === 1h Indicators: Donchian(20) breakout, Volume MA(20), ATR(14) ===
-    # 1h Donchian channels
+    # === 6h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
+    # Donchian channels
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_upper = high_ma
@@ -83,7 +75,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -95,15 +87,9 @@ def generate_signals(prices):
     warmup = 50  # sufficient for all indicators
     
     for i in range(warmup, n):
-        # --- Session Filter: 08-20 UTC ---
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
         if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
-            np.isnan(trend_4h_aligned[i]) or np.isnan(trend_1d_aligned[i]) or
+            np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -144,30 +130,20 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require BOTH 4h and 1d trend alignment for strong bias filter
-        # Only trade when both HTF agree on direction (avoid chop)
-        trend_bias_4h = trend_4h_aligned[i]
-        trend_bias_1d = trend_1d_aligned[i]
-        
-        # Skip if HTF trends conflict or are neutral
-        if trend_bias_4h == 0 or trend_bias_1d == 0 or trend_bias_4h != trend_bias_1d:
-            signals[i] = 0.0
-            continue
-        
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 1.3x average)
+        volume_spike = vol_ratio[i] > 1.3
         
         if volume_spike:
-            # Long entry: price breaks above upper Donchian AND both HTF up
-            if trend_bias_4h > 0 and price > donchian_upper[i]:
+            # Long entry: price breaks above upper Donchian AND above weekly R3
+            if price > donchian_upper[i] and price > r3_1w_aligned[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below lower Donchian AND both HTF down
-            elif trend_bias_4h < 0 and price < donchian_lower[i]:
+            # Short entry: price breaks below lower Donchian AND below weekly S3
+            elif price < donchian_lower[i] and price < s3_1w_aligned[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
