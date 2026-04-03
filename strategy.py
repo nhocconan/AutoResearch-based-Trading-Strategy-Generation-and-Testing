@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #2105: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian channel breakouts on 12h timeframe capture swing momentum. 
-- Primary: 12h Donchian(20) breakout with volume > 1.5x 20-bar average
+Experiment #2106: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture intermediate-term momentum with lower frequency than 12h/1d, reducing fee drag while maintaining edge. 
+- Primary: 4h Donchian(20) breakout with volume > 1.3x 20-bar average (looser than prior failed attempts but balanced with stricter volume confirmation)
 - HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
-- Target: 75-150 total trades over 4 years (19-37/year) - optimized for 12h timeframe
+- Target: 75-200 total trades over 4 years (19-50/year) - proven range for 4h winners
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2105_12h_donchian20_1d_hma_vol_v1"
-timeframe = "12h"
+name = "exp_2106_4h_donchian20_1d_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,7 +28,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate 1d HMA(21): Hull Moving Average
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
     half_len = 21 // 2
     sqrt_len = int(np.sqrt(21))
     
@@ -58,7 +57,7 @@ def generate_signals(prices):
     trend_1d = np.where(close_1d > hma_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 12h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
+    # === 4h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
     # Donchian channels
     high_ma = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_ma = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -139,8 +138,8 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 1.3x average)
+        volume_spike = vol_ratio[i] > 1.3
         
         if volume_spike:
             # Long entry: price breaks above upper Donchian AND 1d trend up
