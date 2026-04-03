@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #1880: 4h Donchian Breakout + HMA Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts capture strong trending moves. Combined with 1d HMA(50) trend filter and volume confirmation (>1.5x average), this strategy enters only when price breaks out with institutional participation. ATR-based stoploss manages risk. Works in both bull and bear markets by following the 1d trend. Target: 75-200 total trades over 4 years (19-50/year) with position sizing of 0.25.
+Experiment #1881: 4h Donchian(20) breakout + HMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Donchian(20) breakouts capture strong momentum moves. Combined with HMA(21) trend filter (4h) and 1d EMA(50) for higher timeframe alignment, volume confirmation (>1.5x average), and ATR-based stoploss (2*ATR), this strategy avoids false breakouts and chops. Works in both bull and bear markets by following the 1d trend direction. Target: 75-200 total trades over 4 years (19-50/year) with discrete position sizing of 0.30.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1880_4h_donchian20_1d_hma_vol_v1"
+name = "exp_1881_4h_donchian20_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,33 +22,35 @@ def generate_signals(prices):
     # === HTF: 1d data for trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # 1d HMA(50) for trend direction
-    def calculate_hma(arr, period):
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        if half_period == 0 or sqrt_period == 0:
-            return arr.copy()
-        wma1 = pd.Series(arr).ewm(span=half_period, adjust=False).mean()
-        wma2 = pd.Series(arr).ewm(span=period, adjust=False).mean()
-        raw_hma = 2 * wma1 - wma2
-        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
-        return hma.values
-    
-    hma_50_1d = calculate_hma(close_1d, 50)
-    trend_1d = np.where(close_1d > hma_50_1d, 1, -1)
+    # 1d EMA(50) for trend direction
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_50_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 4h Indicators: Donchian Channel (20) ===
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 4h Indicators: HMA(21) for trend ===
+    def hma(series, period):
+        # Hull Moving Average: WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma = lambda s, p: pd.Series(s).ewm(span=p, adjust=False).mean().values
+        wma_half = wma(series, half)
+        wma_full = wma(series, period)
+        raw = 2 * wma_half - wma_full
+        return wma(raw, sqrt)
     
-    # === 4h Indicators: HMA(21) for entry confirmation ===
-    hma_21 = calculate_hma(close, 21)
+    hma_21 = hma(close, 21)
+    hma_trend = np.where(close > hma_21, 1, -1)
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Donchian(20) channels ===
+    def donchian_channels(high, low, period):
+        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        return upper, lower
+    
+    dc_upper, dc_lower = donchian_channels(high, low, 20)
+    
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -62,90 +64,87 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.30  # 30% position size
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
+    bars_since_entry = 0
     
-    warmup = 50  # sufficient for Donchian(20) and HMA(50) 1d
+    warmup = 50  # sufficient for Donchian(20), EMA(50), ATR(14)
     
     for i in range(warmup, n):
+        # --- Data Validity Check ---
+        if (np.isnan(hma_21[i]) or np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or
+            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            signals[i] = 0.0
+            continue
+        
         price = close[i]
         
-        # --- Exit Logic: ATR stoploss or reversal signal ---
+        # --- Exit Logic: ATR stoploss or trend reversal ---
         if in_position:
-            # Update highest/lowest since entry
-            if position_side > 0:  # Long
-                highest_since_entry = max(highest_since_entry, high[i])
-                # Stoploss: price drops 2.5*ATR from highest since entry
-                if price < highest_since_entry - 2.5 * atr[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
-                # Exit if price closes below HMA(21) (trend weakening)
-                elif price < hma_21[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
+            bars_since_entry += 1
+            
+            # Exit conditions
+            exit_signal = False
+            
+            if position_side > 0:  # Long position
+                # Stoploss: 2*ATR below entry
+                if price < entry_price - 2.0 * atr[i]:
+                    exit_signal = True
+                # Exit if 4h trend flips
+                elif hma_trend[i] < 0:
+                    exit_signal = True
                 # Exit if 1d trend flips
                 elif trend_1d_aligned[i] < 0:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
-            else:  # Short
-                lowest_since_entry = min(lowest_since_entry, low[i])
-                # Stoploss: price rises 2.5*ATR from lowest since entry
-                if price > lowest_since_entry + 2.5 * atr[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
-                # Exit if price closes above HMA(21) (trend weakening)
-                elif price > hma_21[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
+                    exit_signal = True
+            else:  # Short position
+                # Stoploss: 2*ATR above entry
+                if price > entry_price + 2.0 * atr[i]:
+                    exit_signal = True
+                # Exit if 4h trend flips
+                elif hma_trend[i] > 0:
+                    exit_signal = True
                 # Exit if 1d trend flips
                 elif trend_1d_aligned[i] > 0:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
+                    exit_signal = True
             
-            signals[i] = position_side * SIZE
+            if exit_signal:
+                in_position = False
+                position_side = 0
+                bars_since_entry = 0
+                signals[i] = 0.0
+            else:
+                signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic ---
         # Require 1d trend alignment for bias
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_ok = vol_ratio[i] > 1.5
+        # Require 4h HMA trend alignment
+        hma_bias = hma_trend[i]
         
-        if volume_ok:
-            # Long entry: price breaks above Donchian upper + 1d uptrend + price > HMA(21)
-            if trend_bias > 0 and price > highest_20[i] and price > hma_21[i]:
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
+        
+        # Only trade if 1d and 4h trends align
+        if trend_bias == hma_bias and volume_spike:
+            # Long: price breaks above Donchian upper channel
+            if price > dc_upper[i] and trend_bias > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
+                bars_since_entry = 0
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian lower + 1d downtrend + price < HMA(21)
-            elif trend_bias < 0 and price < lowest_20[i] and price < hma_21[i]:
+            # Short: price breaks below Donchian lower channel
+            elif price < dc_lower[i] and trend_bias < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
+                bars_since_entry = 0
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
