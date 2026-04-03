@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #1698: 1d Donchian(20) Breakout + 1w HMA Trend + Volume + ATR Stoploss (Revised)
-HYPOTHESIS: 1d Donchian breakouts with 1w HMA trend alignment and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 1w timeframe filters out noise from shorter-term fluctuations, while the 1d Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 50-100 total trades over 4 years (12-25/year) by using tight entry conditions and multi-timeframe confluence.
-REVISION: Added minimum holding period of 3 bars to prevent whipsaw and reduce trade frequency. Also relaxed volume confirmation to >1.3x average to increase signal frequency while maintaining quality.
+Experiment #1699: 6h Camarilla Pivot Fade/Breakout + 12h Trend + Volume Spike
+HYPOTHESIS: Camarilla pivot levels from 12h timeframe provide statistically significant support/resistance. 
+Fade at R3/S3 levels (mean reversion) and breakout continuation at R4/S4 levels (trend following) 
+with 12h EMA20 trend filter and volume confirmation (>1.8x average) captures both range-bound 
+and trending markets. 6h timeframe balances trade frequency and signal quality. Target: 75-150 
+total trades over 4 years (19-38/year) with discrete position sizing to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1698_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_1699_6h_camarilla12h_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,35 +21,42 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # HMA(21): Hull Moving Average
-    def hull_moving_average(arr, period):
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
-        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
-        raw_hma = 2 * wma_half - wma_full
-        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
-        return hma
-    hma_1w = hull_moving_average(close_1w, 21)
-    trend_1w = np.where(close_1w > hma_1w, 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # === HTF: 12h data for Camarilla pivots and trend (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === 1d Indicators: Donchian(20) ===
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels for 12h
+    # Pivot = (H + L + C) / 3
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # Camarilla levels: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4)
+    #                S3 = C - ((H-L) * 1.1/4), S4 = C - ((H-L) * 1.1/2)
+    r4_12h = close_12h + (range_12h * 1.1 / 2.0)
+    r3_12h = close_12h + (range_12h * 1.1 / 4.0)
+    s3_12h = close_12h - (range_12h * 1.1 / 4.0)
+    s4_12h = close_12h - (range_12h * 1.1 / 2.0)
+    
+    # Align Camarilla levels to 6h timeframe (shifted by 1 for completed bars only)
+    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
+    
+    # 12h EMA20 for trend filter
+    ema_12h = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -63,12 +73,13 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for Donchian and volume MA
+    warmup = 20  # sufficient for EMA and volume MA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(r4_12h_aligned[i]) or np.isnan(r3_12h_aligned[i]) or
+            np.isnan(s3_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -77,11 +88,6 @@ def generate_signals(prices):
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
             bars_since_entry += 1
-            
-            # Minimum holding period: 3 bars
-            if bars_since_entry < 3:
-                signals[i] = position_side * SIZE
-                continue
             
             if position_side > 0:  # Long position
                 # Stoploss: 2.0*ATR below entry
@@ -106,21 +112,35 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1w trend alignment
-        trend_following = trend_1w_aligned[i] != 0  # Should always be ±1
+        # Trend filter: price above/below 12h EMA20
+        uptrend = price > ema_12h_aligned[i]
+        downtrend = price < ema_12h_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.3x average)
-        volume_spike = vol_ratio[i] > 1.3
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
-        if trend_following and volume_spike:
-            # Breakout: price breaks above upper band OR below lower band
-            if price > donch_high[i] and trend_1w_aligned[i] > 0:  # Uptrend breakout
+        if volume_spike:
+            # Fade at R3/S3 (mean reversion) - counter-trend
+            if price <= r3_12h_aligned[i] and not uptrend:  # At R3 in downtrend -> short
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = -SIZE
+            elif price >= s3_12h_aligned[i] and not downtrend:  # At S3 in uptrend -> long
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and trend_1w_aligned[i] < 0:  # Downtrend breakdown
+            # Breakout continuation at R4/S4 (trend following)
+            elif price > r4_12h_aligned[i] and uptrend:  # Break above R4 in uptrend -> long
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+                signals[i] = SIZE
+            elif price < s4_12h_aligned[i] and downtrend:  # Break below S4 in downtrend -> short
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -132,3 +152,4 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+</file>
