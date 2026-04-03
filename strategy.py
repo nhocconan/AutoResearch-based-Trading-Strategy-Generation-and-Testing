@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #809: 4h Donchian(20) + 1d Trend Filter + Volume Spike + ATR Stoploss
-HYPOTHESIS: Donchian breakouts capture momentum, filtered by 1d EMA trend direction 
+Experiment #809: 4h Donchian(20) + 1d EMA Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: Donchian breakouts capture momentum, filtered by 1d EMA(50) trend direction 
 and volume confirmation (>2.0x average). Long when price breaks above Donchian upper 
-AND 1d EMA(50) rising AND volume spike. Short when price breaks below Donchian lower 
-AND 1d EMA(50) falling AND volume spike. Works in bull/bear markets: in bull trends, 
+AND 1d EMA rising AND volume spike. Short when price breaks below Donchian lower 
+AND 1d EMA falling AND volume spike. Works in bull/bear markets: in bull trends, 
 EMA rising filters for longs; in bear trends, EMA falling filters for shorts. 
 Uses discrete position sizing (0.25). Target: 75-200 total trades over 4 years (19-50/year).
 """
@@ -38,8 +38,12 @@ def generate_signals(prices):
     ema_trend_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_trend_1d)
     
     # === 4h Indicators: Donchian Channel (20) ===
-    upper_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lower_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    def donchian_channel(high, low, period):
+        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        return upper, lower
+    
+    upper_20, lower_20 = donchian_channel(high, low, 20)
     
     # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -63,7 +67,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for Donchian, volume MA, EMA
+    warmup = max(20, 20, 50)  # sufficient for Donchian, volume MA, EMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
