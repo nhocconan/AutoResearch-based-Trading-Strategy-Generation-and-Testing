@@ -2,7 +2,7 @@
 """
 Experiment #1448: 12h Donchian(20) Breakout + 1w Trend + Volume Confirmation
 HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture intermediate-term trends with low trade frequency (target: 50-150 total over 4 years). 
-Trend filter from 1w timeframe ensures alignment with higher-timeframe momentum. Volume confirmation (>1.5x average) filters for institutional participation. 
+Trend filter from 1w timeframe ensures alignment with higher-timeframe momentum, reducing false breakouts. Volume confirmation (>2.0x average) filters for institutional participation. 
 Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 1w trend direction. 
 Uses ATR-based stoploss for risk management. Target: 75-200 total trades over 4 years (19-50/year).
 """
@@ -95,8 +95,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 2.0x average)
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
