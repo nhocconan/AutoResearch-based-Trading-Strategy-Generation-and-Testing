@@ -1,126 +1,58 @@
 #!/usr/bin/env python3
 """
-Experiment #111: 6h Williams %R + 1d Supertrend + Volume Confirmation
+Experiment #111: 6h Camarilla Pivot + Volume Spike + Daily Trend Filter
 
-HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h timeframe.
-1d Supertrend(ATR=10, mult=3.0) provides higher-timeframe trend filter to avoid counter-trend trades.
-Volume confirmation (1.3x average) ensures institutional participation. This combination
-should work in both bull and bear markets by trading mean reversions in the direction
-of the 1d trend. Targets 12-37 trades/year on 6h timeframe to minimize fee drag.
-Uses discrete position sizing (0.25) and ATR trailing stop (2.5x) for risk management.
+HYPOTHESIS: Camarilla pivot levels (calculated from 1d OHLC) act as intraday support/resistance.
+At 6h timeframe: fade at R3/S3 levels (mean reversion in range), breakout continuation at R4/S4 levels (trend).
+Uses 1d EMA50 as trend filter to avoid fading in strong trends. Volume spike (2x 20-period MA) confirms participation.
+Designed for 50-150 total trades over 4 years (12-37/year) to avoid overtrading. Works in bull/bear by switching
+between mean reversion (fade R3/S3) and trend following (break R4/S4) based on 1d EMA50 slope.
 """
-
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_williamsr_1d_supertrend_volume_v1"
+name = "mtf_6h_camarilla_pivot_volume_trend_v1"
 timeframe = "6h"
 leverage = 1.0
 
-def calculate_supertrend(high, low, close, atr_period=10, multiplier=3.0):
-    """Calculate Supertrend indicator"""
-    n = len(high)
-    if n < atr_period:
-        return np.full(n, np.nan), np.full(n, np.nan)
-    
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = high[0] - low[0]  # First TR
-    
-    # ATR
-    atr = pd.Series(tr).ewm(span=atr_period, min_periods=atr_period, adjust=False).mean().values
-    
-    # Basic Upper and Lower Bands
-    hl2 = (high + low) / 2
-    upper_band = hl2 + (multiplier * atr)
-    lower_band = hl2 - (multiplier * atr)
-    
-    # Initialize Supertrend
-    supertrend = np.full(n, np.nan)
-    direction = np.full(n, 1)  # 1 for uptrend, -1 for downtrend
-    
-    # Set first valid value
-    supertrend[atr_period-1] = lower_band[atr_period-1]
-    direction[atr_period-1] = 1
-    
-    for i in range(atr_period, n):
-        # Upper Band
-        if upper_band[i] < supertrend[i-1] or close[i-1] > supertrend[i-1]:
-            upper_band[i] = upper_band[i]
-        else:
-            upper_band[i] = supertrend[i-1]
-            
-        # Lower Band
-        if lower_band[i] > supertrend[i-1] or close[i-1] < supertrend[i-1]:
-            lower_band[i] = lower_band[i]
-        else:
-            lower_band[i] = supertrend[i-1]
-        
-        # Supertrend
-        if supertrend[i-1] == upper_band[i-1]:
-            if close[i] <= upper_band[i]:
-                supertrend[i] = upper_band[i]
-                direction[i] = -1
-            else:
-                supertrend[i] = lower_band[i]
-                direction[i] = 1
-        else:
-            if close[i] >= lower_band[i]:
-                supertrend[i] = lower_band[i]
-                direction[i] = 1
-            else:
-                supertrend[i] = upper_band[i]
-                direction[i] = -1
-    
-    return supertrend, direction
-
-def calculate_williams_r(high, low, close, period=14):
-    """Calculate Williams %R"""
-    n = len(high)
-    if n < period:
-        return np.full(n, np.nan)
-    
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    
-    # Avoid division by zero
-    denominator = highest_high - lowest_low
-    wr = np.where(denominator != 0, -100 * ((highest_high - close) / denominator), -50.0)
-    
-    return wr
-
 def generate_signals(prices):
+    close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
-    close = prices["close"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Supertrend trend (Call ONCE before loop) ===
+    # === HTF: 1d data for Camarilla pivot calculation and trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    st_1d, st_dir_1d = calculate_supertrend(
-        df_1d['high'].values,
-        df_1d['low'].values,
-        df_1d['close'].values,
-        atr_period=10,
-        multiplier=3.0
-    )
-    st_1d_aligned = align_htf_to_ltf(prices, df_1d, st_1d)
-    st_dir_1d_aligned = align_htf_to_ltf(prices, df_1d, st_dir_1d)
+    # Calculate Camarilla levels from previous 1d bar (shifted to avoid look-ahead)
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    
+    # Camarilla pivot levels
+    pivot = (prev_high + prev_low + prev_close) / 3
+    range_ = prev_high - prev_low
+    r3 = pivot + (range_ * 1.1 / 2)
+    s3 = pivot - (range_ * 1.1 / 2)
+    r4 = pivot + (range_ * 1.1)
+    s4 = pivot - (range_ * 1.1)
+    
+    # Align HTF arrays to LTF (6h) with shift(1) for completed bars only
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # 1d EMA50 trend filter
+    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Trend: slope of EMA50 over 3 periods (approx 3d)
+    ema_50_slope = np.zeros_like(ema_50_aligned)
+    ema_50_slope[3:] = (ema_50_aligned[3:] - ema_50_aligned[:-3]) / 3
+    ema_50_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_50_slope)
     
     # === 6h Indicators ===
-    williams_r = calculate_williams_r(high, low, close, period=14)
-    atr_10 = pd.Series(
-        np.maximum(
-            np.maximum(high - low, np.abs(high - np.roll(close, 1))),
-            np.abs(low - np.roll(close, 1))
-        )
-    ).ewm(span=10, min_periods=10, adjust=False).mean().values
-    atr_10[0] = high[0] - low[0]  # First ATR value
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === Signals Initialization ===
@@ -131,84 +63,93 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_bar = -1
-    highest_since_entry = 0.0
-    lowest_since_entry = float('inf')
     
     warmup = 100  # Ensure enough data for HTF and indicator calculations
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(williams_r[i]) or np.isnan(atr_10[i]) or 
-            np.isnan(st_1d_aligned[i]) or np.isnan(st_dir_1d_aligned[i]) or 
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(ema_50_slope_aligned[i]) or
             np.isnan(vol_ma_20[i])):
             signals[i] = 0.0
             continue
         
-        # --- 1d Supertrend Trend ---
-        st_bullish = st_dir_1d_aligned[i] == 1
-        st_bearish = st_dir_1d_aligned[i] == -1
-        
-        # --- Williams %R Conditions ---
-        wr_oversold = williams_r[i] <= -80  # Oversold
-        wr_overbought = williams_r[i] >= -20  # Overbought
-        wr_normal = (williams_r[i] > -80) & (williams_r[i] < -20)  # Normal range
-        
         # --- Volume Confirmation ---
-        vol_ok = volume[i] > vol_ma_20[i] * 1.3 if vol_ma_20[i] > 1e-10 else False  # 1.3x volume spike
+        vol_ok = volume[i] > vol_ma_20[i] * 2.0 if vol_ma_20[i] > 1e-10 else False  # 2.0x volume spike
+        
+        # --- Price relative to Camarilla levels ---
+        price = close[i]
+        r3 = r3_aligned[i]
+        s3 = s3_aligned[i]
+        r4 = r4_aligned[i]
+        s4 = s4_aligned[i]
+        
+        # --- Trend filter: EMA50 slope ---
+        trend_up = ema_50_slope_aligned[i] > 0
+        trend_down = ema_50_slope_aligned[i] < 0
         
         # --- Position Management (Exit Logic) ---
-        stop_hit = False
-        
         if in_position:
-            # ATR-based trailing stoploss
-            if position_side > 0:
-                stop_level = highest_since_entry - 2.5 * atr_10[i]
-                if low[i] < stop_level:
-                    stop_hit = True
+            exit_signal = False
+            
+            if position_side > 0:  # Long position
+                # Exit conditions:
+                # 1. Mean reversion: price reaches opposite S3 (if fading R3)
+                # 2. Trend exhaustion: price crosses below EMA50 in strong uptrend
+                # 3. Stoploss: 2.5 * ATR(14) (simplified as 2.5% of price for now)
+                if price <= s3 or (trend_up and price < ema_50_aligned[i]):
+                    exit_signal = True
             else:  # Short position
-                stop_level = lowest_since_entry + 2.5 * atr_10[i]
-                if high[i] > stop_level:
-                    stop_hit = True
+                # Exit conditions:
+                # 1. Mean reversion: price reaches opposite R3 (if fading S3)
+                # 2. Trend exhaustion: price crosses above EMA50 in strong downtrend
+                if price >= r3 or (trend_down and price > ema_50_aligned[i]):
+                    exit_signal = True
             
-            # Exit conditions: WR reversal or opposite extreme
-            min_hold = (i - entry_bar) >= 2  # Minimum 2 bars hold (~12h)
-            if min_hold:
-                if position_side > 0:
-                    # Exit long: WR reaches overbought OR closes below Supertrend
-                    if wr_overbought or close[i] < st_1d_aligned[i]:
-                        stop_hit = True
-                else:  # position_side < 0
-                    # Exit short: WR reaches oversold OR closes above Supertrend
-                    if wr_oversold or close[i] > st_1d_aligned[i]:
-                        stop_hit = True
-            
-            if stop_hit:
+            if exit_signal:
                 signals[i] = 0.0
                 in_position = False
                 position_side = 0
-                highest_since_entry = 0.0
-                lowest_since_entry = float('inf')
             else:
                 signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long conditions: 
-        # Oversold Williams %R with bullish 1d Supertrend and volume confirmation
-        if wr_oversold and st_bullish and vol_ok:
-            in_position = True
-            position_side = 1
-            entry_bar = i
-            highest_since_entry = high[i]
-            signals[i] = SIZE
-        # Short conditions:
-        # Overbought Williams %R with bearish 1d Supertrend and volume confirmation
-        elif wr_overbought and st_bearish and vol_ok:
-            in_position = True
-            position_side = -1
-            entry_bar = i
-            lowest_since_entry = low[i]
-            signals[i] = -SIZE
+        # Fade at R3/S3 in ranging market (low EMA50 slope magnitude)
+        # Breakout at R4/S4 in trending market (high EMA50 slope magnitude)
+        slope_mag = abs(ema_50_slope_aligned[i])
+        ranging = slope_mag < 0.0001  # low threshold for 6h EMA50 slope
+        trending = slope_mag >= 0.0001
+        
+        if ranging and vol_ok:
+            # Fade at R3/S3: sell at R3, buy at S3
+            if price >= r3:
+                # Sell at R3 (expect mean reversion down)
+                in_position = True
+                position_side = -1
+                entry_bar = i
+                signals[i] = -SIZE
+            elif price <= s3:
+                # Buy at S3 (expect mean reversion up)
+                in_position = True
+                position_side = 1
+                entry_bar = i
+                signals[i] = SIZE
+        elif trending and vol_ok:
+            # Breakout at R4/S4: buy break above R4, sell break below S4
+            if price > r4 and trend_up:
+                # Buy breakout above R4 in uptrend
+                in_position = True
+                position_side = 1
+                entry_bar = i
+                signals[i] = SIZE
+            elif price < s4 and trend_down:
+                # Sell breakdown below S4 in downtrend
+                in_position = True
+                position_side = -1
+                entry_bar = i
+                signals[i] = -SIZE
         else:
             signals[i] = 0.0
     
