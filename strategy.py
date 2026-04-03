@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #1415: 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 6h timeframe capture medium-term trends with moderate trade frequency (target: 75-200 total over 4 years). 
-Weekly pivot direction (price vs weekly pivot point) filters for alignment with higher-timeframe structure. 
-Volume confirmation (>1.7x average) ensures institutional participation. 
-Designed to work in both bull (breakouts continue with weekly bullish bias) and bear (breakdowns continue with weekly bearish bias) markets. 
-Uses ATR-based stoploss for risk management. Target: 100-250 total trades over 4 years (25-62/year).
+Experiment #1415: 6h Donchian(20) Breakout + 1w Pivot Direction + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 6h timeframe capture intermediate-term momentum with controlled trade frequency. 
+Trend filter derived from 1w Camarilla pivot levels (price above/below weekly pivot) ensures alignment with higher-timeframe structure. 
+Volume confirmation (>2.0x average) filters for institutional participation and reduces false breakouts. 
+Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following weekly directional bias from pivot levels. 
+Uses ATR-based stoploss for risk management. Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
@@ -23,24 +23,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for weekly pivot points (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === HTF: 1w data for pivot-based trend filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot points from daily OHLC (using prior week's data)
-    # For simplicity, we use prior day's OHLC as proxy for weekly pivot (more stable)
-    # Actual weekly pivot would require grouping by week, but prior day works as HTF filter
-    pp_1d = (high_1d[:-2] + low_1d[:-2] + close_1d[:-2]) / 3.0  # shift(2) for prior day
-    # Align to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp_1d)
+    # Calculate weekly Camarilla pivot levels
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    # Camarilla levels: R3 = pivot + 1.1 * range/2, S3 = pivot - 1.1 * range/2
+    r3_1w = pivot_1w + 1.1 * range_1w / 2.0
+    s3_1w = pivot_1w - 1.1 * range_1w / 2.0
     
-    # Weekly trend: price above/below pivot point
-    weekly_trend = np.zeros(len(pp_aligned))
-    weekly_trend[~np.isnan(pp_aligned)] = np.where(
-        close[~np.isnan(pp_aligned)] > pp_aligned[~np.isnan(pp_aligned)], 1, -1
-    )
+    # Trend: price above R3 = bullish (1), below S3 = bearish (-1), between = neutral (0)
+    trend_1w = np.zeros(len(close_1w))
+    trend_1w = np.where(close_1w > r3_1w, 1, trend_1w)
+    trend_1w = np.where(close_1w < s3_1w, -1, trend_1w)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
     # === 6h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -73,7 +73,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(weekly_trend[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -107,19 +107,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.7x average)
-        volume_spike = vol_ratio[i] > 1.7
+        # Volume confirmation: require volume spike (> 2.0x average)
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
-            # Only trade in direction of weekly pivot trend
-            if price > donch_high[i] and weekly_trend[i] > 0:  # weekly bullish bias
+            if price > donch_high[i] and trend_1w_aligned[i] > 0:  # 1w bullish bias (above R3)
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and weekly_trend[i] < 0:  # weekly bearish bias
+            elif price < donch_low[i] and trend_1w_aligned[i] < 0:  # 1w bearish bias (below S3)
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -131,3 +130,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
