@@ -4,7 +4,7 @@ Experiment #909: 4h Donchian(20) + 1d HMA Trend + Volume Spike + ATR Stoploss
 HYPOTHESIS: Donchian breakouts on 4h capture momentum, filtered by 1d HMA trend direction 
 and volume confirmation (>1.8x average). Long when price breaks above Donchian upper 
 AND 1d HMA rising AND volume spike. Short when price breaks below Donchian lower 
-AND 1d HMA falling AND volume spike. Uses discrete position sizing (0.28) to balance 
+AND 1d HMA falling AND volume spike. Uses discrete position sizing (0.25) to balance 
 risk and reward. Target: 100-200 total trades over 4 years (25-50/year).
 """
 
@@ -67,7 +67,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.28  # 28% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
