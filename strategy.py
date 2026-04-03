@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #020: 4h Donchian(20) Breakout + 1d Trend + Volume Spike (Revised)
+Experiment #021: 4h Donchian(20) Breakout + 1d Trend + Volume Spike (Revised)
 
 HYPOTHESIS: 4h Donchian breakouts aligned with 1d trend (price above/below 50-period EMA) 
 and volume confirmation (2x average volume) capture strong momentum moves. 
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian_1d_trend_volume_v1"
+name = "mtf_4h_donchian_1d_trend_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
