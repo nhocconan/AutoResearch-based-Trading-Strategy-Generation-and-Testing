@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #466: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend capture medium-term momentum with lower trade frequency than 6h. Volume confirmation (>1.8x average) filters false breakouts. Designed to work in bull markets via breakouts with trend and bear markets via mean reversion at extremes (when price violates Donchian opposite side). Discrete position sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years.
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend capture swing momentum while avoiding counter-trend noise. Volume confirmation (>1.8x average) ensures institutional participation. Uses 4h timeframe with 1d HTF to target 75-200 trades over 4 years. Discrete position sizing (0.25) minimizes fee churn. ATR-based stoploss (2.5x) manages risk. Designed to work in bull markets (breakouts with trend) and bear markets (mean reversion via trend filter preventing false breakouts).
 """
 
 import numpy as np
@@ -31,10 +31,10 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 4h Indicators: Volume MA(30) for spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_ratio = np.ones(n)  # default to 1.0 for warmup period
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    vol_ratio[30:] = volume[30:] / vol_ma[30:]
     
     # === 4h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
@@ -53,7 +53,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 60  # sufficient for 20-period indicators + HTF warmup
+    warmup = 80  # sufficient for 30-period volume MA + 50-period EMA + HTF warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -83,8 +83,8 @@ def generate_signals(prices):
             bars_since_entry += 1
             
             if position_side > 0:  # Long position
-                # Stoploss: 2.0*ATR below entry
-                stop_level = entry_price - 2.0 * atr[i]
+                # Stoploss: 2.5*ATR below entry
+                stop_level = entry_price - 2.5 * atr[i]
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
@@ -92,8 +92,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                # Stoploss: 2.0*ATR above entry
-                stop_level = entry_price + 2.0 * atr[i]
+                # Stoploss: 2.5*ATR above entry
+                stop_level = entry_price + 2.5 * atr[i]
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
@@ -134,3 +134,4 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+</think>
