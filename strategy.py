@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #046: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: Price breaking 4h Donchian(20) channels with 1d EMA(50) trend alignment and volume spike (>1.6x) captures medium-term momentum. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0*ATR). Designed to work in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend) by requiring trend alignment. Target: 100-200 total trades over 4 years (25-50/year) to balance opportunity and fee drag.
+Experiment #039: 6h Williams %R + 12h EMA(50) trend + volume confirmation
+HYPOTHESIS: Williams %R identifies short-term overbought/oversold conditions on 6h,
+while 12h EMA(50) provides medium-term trend filter. Volume spike confirms momentum.
+In bull markets: buy when Williams %R < -80 (oversold) in uptrend with volume.
+In bear markets: sell when Williams %R > -20 (overbought) in downtrend with volume.
+This mean-reversion-with-trend approach works in both regimes by requiring trend alignment.
+Target: 75-200 total trades over 4 years (19-50/year) to balance frequency and edge.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_046_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_039_6h_williamsr_12h_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,23 +24,29 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA trend filter (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
+    # === HTF: 12h data for EMA trend filter (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate EMA(50) on 1d close
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate EMA(50) on 12h close
+    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # === 4h Indicators: Donchian Channel (20) ===
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # === 6h Indicators: Williams %R(14) ===
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.full(n, -50.0)  # default neutral
+    for i in range(14, n):
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
+        else:
+            williams_r[i] = -50.0
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)  # default to 1.0 for warmup period
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -57,25 +68,23 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(ema_1d_aligned[i]) or
-            np.isnan(atr[i])):
+            np.isnan(williams_r[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(ema_12h_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.6x average) ---
-        volume_spike = vol_ratio[i] > 1.6
+        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
+        volume_spike = vol_ratio[i] > 1.5
         
-        # --- Donchian Breakout Conditions ---
-        breakout_up = price > highest_high[i]
-        breakout_down = price < lowest_low[i]
+        # --- Williams %R Conditions ---
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
         
-        # --- Trend Filter: 1d EMA alignment ---
-        # Uptrend: price above 1d EMA
-        # Downtrend: price below 1d EMA
-        uptrend = price > ema_1d_aligned[i]
-        downtrend = price < ema_1d_aligned[i]
+        # --- Trend Filter: 12h EMA alignment ---
+        uptrend = price > ema_12h_aligned[i]
+        downtrend = price < ema_12h_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -100,7 +109,7 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 8 bars (~32h on 4h) to avoid overtrading
+            # Optional: time-based exit after 8 bars (~4 days on 6h) to avoid overtrading
             if bars_since_entry > 8:
                 in_position = False
                 position_side = 0
@@ -113,15 +122,15 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: breakout above upper channel AND uptrend
-            if breakout_up and uptrend:
+            # Long: Williams %R oversold AND uptrend
+            if oversold and uptrend:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: breakout below lower channel AND downtrend
-            elif breakout_down and downtrend:
+            # Short: Williams %R overbought AND downtrend
+            elif overbought and downtrend:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
