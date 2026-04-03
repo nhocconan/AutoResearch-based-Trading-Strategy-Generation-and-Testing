@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #090: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts with weekly HMA trend alignment and volume confirmation (>1.5x) captures medium-term momentum while minimizing overtrading. Uses discrete sizing (0.25) and ATR stoploss (2.0*ATR). Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
+Experiment #096: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
+HYPOTHESIS: On 12h timeframe, combining Donchian(20) breakouts with 1d EMA50 trend filter and volume confirmation (>1.5x) captures medium-term momentum while reducing false signals. Uses discrete sizing (0.25) and ATR stoploss (2.0*ATR). Target: 50-150 total trades over 4 years (12-37/year). Works in both bull (breakouts with trend) and bear (short breakdowns against trend) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_090_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_096_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,21 +19,21 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA(21) trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # === HTF: 1d data for EMA50 trend (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # === 1d Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: Donchian Channel (20) ===
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)  # default to 1.0 for warmup period
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -55,7 +55,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(hma_1w_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(ema_50_aligned[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -69,10 +69,9 @@ def generate_signals(prices):
         breakout_up = price > highest_high[i]
         breakout_down = price < lowest_low[i]
         
-        # --- HMA Trend Alignment: price relative to 1w HMA ---
-        # Above HMA = bullish bias, Below HMA = bearish bias
-        above_hma = price > hma_1w_aligned[i]
-        below_hma = price < hma_1w_aligned[i]
+        # --- 1d EMA50 Trend Filter ---
+        above_ema = price > ema_50_aligned[i]
+        below_ema = price < ema_50_aligned[i]
         
         # --- Exit Logic: ATR-based stoploss ---
         if in_position:
@@ -97,20 +96,28 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
+            # Optional: time-based exit after 8 bars (~4 days on 12h) to avoid overtrading
+            if bars_since_entry > 8:
+                in_position = False
+                position_side = 0
+                bars_since_entry = 0
+                signals[i] = 0.0
+                continue
+            
             signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic ---
         if volume_spike:
-            # Long: breakout above upper channel AND above HMA (bullish bias)
-            if breakout_up and above_hma:
+            # Long: breakout above upper channel AND price above 1d EMA50 (bullish trend)
+            if breakout_up and above_ema:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: breakout below lower channel AND below HMA (bearish bias)
-            elif breakout_down and below_hma:
+            # Short: breakout below lower channel AND price below 1d EMA50 (bearish trend)
+            elif breakout_down and below_ema:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -122,16 +129,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-def calculate_hma(values, period):
-    """Calculate Hull Moving Average"""
-    values = pd.Series(values)
-    half_period = int(period / 2)
-    sqrt_period = int(np.sqrt(period))
-    
-    wma_half = values.ewm(span=half_period, adjust=False).mean()
-    wma_full = values.ewm(span=period, adjust=False).mean()
-    raw_hma = 2 * wma_half - wma_full
-    hma = raw_hma.ewm(span=sqrt_period, adjust=False).mean()
-    
-    return hma.values
