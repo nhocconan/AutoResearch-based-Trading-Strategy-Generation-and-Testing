@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #2096: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 12h timeframe reduces noise and overtrading while capturing medium-term trends. 
+HYPOTHESIS: Donchian channel breakouts on 12h capture medium-term institutional order flow. 
 - Primary: 12h Donchian(20) breakout with volume > 1.5x 20-bar average
 - HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
 - Works in bull/bear markets by following 1d institutional trend with precise 12h entries.
-Target: 50-150 total trades over 4 years (12-37/year).
+Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
