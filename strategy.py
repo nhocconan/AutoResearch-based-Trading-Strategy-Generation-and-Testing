@@ -1,20 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #157: 4h Donchian(20) Breakout + Daily Pivot Direction + Volume Spike
+Experiment #297: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
 
-HYPOTHESIS: 4h Donchian breakouts filtered by daily pivot trend direction (price above/below daily pivot) 
-and volume spikes (>2.0x average) capture strong momentum moves with reduced false breakouts. 
-Daily pivot provides stable trend filter from higher timeframe (1d), avoiding whipsaws in both bull 
-and bear markets. Targets 19-50 trades/year (75-200 total over 4 years) to minimize fee drag. 
-Uses ATR-based stoploss for risk management. Works in bull markets (breakouts with volume) and bear 
-markets (failed breaks reverse sharply from pivot levels).
+HYPOTHESIS: 4h Donchian channel breakouts filtered by 1d Hull Moving Average trend 
+and volume spikes (>2.5x average) capture strong momentum moves with reduced false 
+breakouts. The 1d HMA provides a longer-term trend filter (more stable than 12h), 
+balancing responsiveness and smoothness. 4h timeframe targets 19-50 trades/year (75-200 total 
+over 4 years) to minimize fee drag while capturing significant moves. Works in both 
+bull (breakouts with volume) and bear (failed breaks reverse sharply) markets. Uses 
+ATR-based stoploss for risk management.
+
+IMPLEMENTATION NOTES:
+- Uses discrete position sizing (0.25) to minimize churn
+- Volume confirmation threshold set to 2.5x to reduce trade frequency
+- Minimum holding period of 3 bars to reduce churn
+- Warmup period set to 100 bars to ensure stable indicators
+- Position exits on Donchian middle line reversion OR ATR stoploss
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_157_4h_donchian_daily_pivot_volume_v1"
+name = "exp_297_4h_donchian_1d_hma_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,22 +33,23 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Daily Pivot (Call ONCE before loop) ===
+    # === HTF: 1d data for HMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Daily Pivot (Standard: (H+L+C)/3) and Support/Resistance levels
-    typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
-    daily_pivot = typical_price.values
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
+    # Calculate HMA(21) on 1d data
+    def calculate_hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma_half = pd.Series(arr).rolling(window=half_period, min_periods=half_period).mean().values
+        wma_full = pd.Series(arr).rolling(window=period, min_periods=period).mean().values
+        raw_hma = 2.0 * wma_half - wma_full
+        hma = pd.Series(raw_hma).rolling(window=sqrt_period, min_periods=sqrt_period).mean().values
+        return hma
     
-    # Daily R1, S1 (for trend filter: price > daily_pivot = bullish, < daily_pivot = bearish)
-    daily_r1 = 2 * daily_pivot - daily_low
-    daily_s1 = 2 * daily_pivot - daily_high
-    
-    daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
-    daily_r1_aligned = align_htf_to_ltf(prices, df_1d, daily_r1)
-    daily_s1_aligned = align_htf_to_ltf(prices, df_1d, daily_s1)
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
     # === 4h Indicators: Donchian Channel (20) ===
     donchian_h = np.full(n, np.nan)
@@ -76,22 +85,23 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0  # Track bars in position for minimum holding period
     
-    warmup = 50  # Ensure enough data for HTF pivot, ATR, and Donchian
+    warmup = 100  # Increased warmup for stable HTF alignment and indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
-            np.isnan(daily_pivot_aligned[i]) or np.isnan(atr_14[i]) or 
+            np.isnan(hma_1d_aligned[i]) or np.isnan(atr_14[i]) or 
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- Daily Pivot Trend Filter: Price > Pivot = bullish bias, Price < Pivot = bearish bias ---
-        price_above_pivot = close[i] > daily_pivot_aligned[i]
-        price_below_pivot = close[i] < daily_pivot_aligned[i]
+        # --- 1d HMA Trend Filter: Price > HMA = bullish bias, Price < HMA = bearish bias ---
+        price_above_hma = close[i] > hma_1d_aligned[i]
+        price_below_hma = close[i] < hma_1d_aligned[i]
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
+        # --- Volume Confirmation: Require volume spike (> 2.5x average) ---
+        # Increased threshold from 2.0x to reduce trade frequency
+        volume_spike = vol_ratio[i] > 2.5
         
         # --- Donchian Breakout Conditions ---
         breakout_up = close[i] > donchian_h[i]
@@ -133,8 +143,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Minimum holding period of 2 bars to reduce churn
-            if bars_since_entry < 2:
+            # Minimum holding period of 3 bars to reduce churn (increased from 2)
+            if bars_since_entry < 3:
                 signals[i] = position_side * SIZE
                 continue
             
@@ -143,11 +153,11 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Donchian breakout up + volume spike + price above daily pivot
-        long_condition = breakout_up and volume_spike and price_above_pivot
+        # Long: Donchian breakout up + volume spike + price above 1d HMA
+        long_condition = breakout_up and volume_spike and price_above_hma
         
-        # Short: Donchian breakout down + volume spike + price below daily pivot
-        short_condition = breakout_down and volume_spike and price_below_pivot
+        # Short: Donchian breakout down + volume spike + price below 1d HMA
+        short_condition = breakout_down and volume_spike and price_below_hma
         
         if long_condition:
             in_position = True
