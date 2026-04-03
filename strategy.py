@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #068: 12h Donchian(20) Breakout + Weekly Trend Filter + Volume Spike
+Experiment #214: 1h HTF(4h/1d) Trend + Volume + Session Filter
 
-HYPOTHESIS: Donchian channel breakouts on 12h timeframe, filtered by weekly trend direction 
-(price above/below weekly HMA(21) = bullish/bearish bias), volume spikes (>2.0x average), 
-and ATR-based stoploss capture strong momentum moves with reduced false breakouts. 
-Weekly trend filter ensures trades align with higher-timeframe momentum, reducing whipsaws. 
-12h timeframe targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag 
-while capturing significant moves. Works in both bull (breakouts with volume) and bear 
-(failed breaks reverse sharply) by using weekly trend as regime filter.
+HYPOTHESIS: Use 4h EMA(21) trend direction and 1d higher high/low structure for bias, 
+enter on 1h pullbacks with volume confirmation during active UTC 08-20 session. 
+This captures swing trades in trends while avoiding chop and low-liquidity periods. 
+Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag. 
+Discrete sizing (0.20) reduces turnover costs. Works in bull (trend continuation) 
+and bear (trend reversals on higher timeframe structure).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_068_12h_donchian_weekly_trend_volume_v1"
-timeframe = "12h"
+name = "exp_214_1h_htf_trend_volume_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,120 +23,102 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
+    open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1w data for weekly trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
+    # Precompute session hours (08-20 UTC) ONCE before loop
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate weekly HMA(21) for trend direction
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-    def wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, 'valid') / weights.sum()
+    # === HTF: 4h EMA(21) for trend direction (Call ONCE before loop) ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) >= 21:
+        ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+        ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)  # auto shift(1)
+    else:
+        ema_4h_aligned = np.full(n, np.nan)
     
-    def hma(values, window):
-        half_window = window // 2
-        sqrt_window = int(np.sqrt(window))
-        if half_window < 1 or sqrt_window < 1:
-            return np.full_like(values, np.nan)
-        wma_half = np.full_like(values, np.nan)
-        wma_full = np.full_like(values, np.nan)
-        for i in range(len(values)):
-            if i >= half_window - 1:
-                wma_half[i] = wma(values[i - half_window + 1:i + 1], half_window)
-            if i >= window - 1:
-                wma_full[i] = wma(values[i - window + 1:i + 1], window)
-        wma_diff = 2 * wma_half - wma_full
-        hma_values = np.full_like(values, np.nan)
-        for i in range(len(values)):
-            if i >= window - 1 and i >= sqrt_window - 1 + window - 1:
-                start_idx = i - sqrt_window + 1
-                if start_idx >= 0 and start_idx < len(wma_diff):
-                    hma_values[i] = wma(wma_diff[start_idx:i + 1], sqrt_window)
-        return hma_values
+    # === HTF: 1d Higher High/Low Structure for bias ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 2:
+        # Higher High: today's high > yesterday's high
+        hh = df_1d['high'].values > np.roll(df_1d['high'].values, 1)
+        # Higher Low: today's low > yesterday's low
+        hl = df_1d['low'].values > np.roll(df_1d['low'].values, 1)
+        # Lower High: today's high < yesterday's high
+        lh = df_1d['high'].values < np.roll(df_1d['high'].values, 1)
+        # Lower Low: today's low < yesterday's low
+        ll = df_1d['low'].values < np.roll(df_1d['low'].values, 1)
+        
+        # Bullish structure: HH and HL
+        bull_struct = hh & hl
+        # Bearish structure: LH and LL
+        bear_struct = lh & ll
+        
+        # Align to 1h timeframe with shift(1) for completed days only
+        bull_struct_aligned = align_htf_to_ltf(prices, df_1d, bull_struct.astype(float))
+        bear_struct_aligned = align_htf_to_ltf(prices, df_1d, bear_struct.astype(float))
+    else:
+        bull_struct_aligned = np.full(n, np.nan)
+        bear_struct_aligned = np.full(n, np.nan)
     
-    weekly_hma = hma(df_1w['close'].values, 21)
-    weekly_hma_aligned = align_htf_to_ltf(prices, df_1w, weekly_hma)
+    # === 1h Indicators: EMA(21) for dynamic support/resistance ===
+    ema_21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
     
-    # === 12h Indicators: Donchian Channel (20) ===
-    donchian_h = np.full(n, np.nan)
-    donchian_l = np.full(n, np.nan)
-    donchian_m = np.full(n, np.nan)
-    
-    for i in range(20, n):
-        donchian_h[i] = np.max(high[i-20:i])
-        donchian_l[i] = np.min(low[i-20:i])
-        donchian_m[i] = (donchian_h[i] + donchian_l[i]) / 2
-    
-    # === 12h Indicators: ATR(14) for stoploss ===
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 1h Indicators: Volume MA(20) for confirmation ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
-    vol_ratio[:20] = 1.0  # Neutral for warmup
+    vol_ratio[:20] = 1.0
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # Discrete position sizing (25% of capital)
+    SIZE = 0.20  # Discrete position sizing (20% of capital)
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
     
-    warmup = 50  # Ensure enough data for HTF weekly HMA, ATR, and Donchian
+    warmup = 50  # Ensure enough data for all indicators
     
     for i in range(warmup, n):
+        # --- Session Filter: Only trade during active UTC 08-20 ---
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+        
         # --- Data Validity Check ---
-        if (np.isnan(donchian_h[i]) or np.isnan(donchian_l[i]) or 
-            np.isnan(weekly_hma_aligned[i]) or np.isnan(atr_14[i]) or 
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_21[i]) or 
+            np.isnan(bull_struct_aligned[i]) or np.isnan(bear_struct_aligned[i]) or 
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- Weekly Trend Filter: Price above weekly HMA = bullish bias, below = bearish bias ---
-        price_above_weekly_hma = close[i] > weekly_hma_aligned[i]
-        price_below_weekly_hma = close[i] < weekly_hma_aligned[i]
+        # --- HTF Trend Bias: 4h EMA direction + 1d structure ---
+        # Bullish bias: price above 4h EMA AND bullish 1d structure
+        bullish_bias = (close[i] > ema_4h_aligned[i]) and (bull_struct_aligned[i] > 0.5)
+        # Bearish bias: price below 4h EMA AND bearish 1d structure
+        bearish_bias = (close[i] < ema_4h_aligned[i]) and (bear_struct_aligned[i] > 0.5)
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio[i] > 2.0
+        # --- 1h Pullback Entry: Price near 21 EMA with volume ---
+        # Pullback to EMA: price within 0.5% of EMA(21)
+        near_ema = abs(close[i] - ema_21[i]) / ema_21[i] < 0.005
+        # Volume confirmation: above average volume
+        volume_ok = vol_ratio[i] > 1.5
         
-        # --- Donchian Breakout Conditions ---
-        breakout_up = close[i] > donchian_h[i]
-        breakout_down = close[i] < donchian_l[i]
-        
-        # --- Exit Logic (ATR-based stoploss) ---
+        # --- Exit Logic: Trailing stop via signal reversal ---
         if in_position:
-            # ATR-based stoploss
-            if position_side > 0:  # Long position
-                stop_level = entry_price - 2.5 * atr_14[i]
-                if low[i] < stop_level:
+            # Long exit: bearish bias OR price breaks below EMA with volume
+            if position_side > 0:
+                if bearish_bias or (close[i] < ema_21[i] and volume_ok):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Exit on Donchian middle line reversion (take profit)
-                if close[i] < donchian_m[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
-            else:  # Short position
-                stop_level = entry_price + 2.5 * atr_14[i]
-                if high[i] > stop_level:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
-                # Exit on Donchian middle line reversion (take profit)
-                if close[i] > donchian_m[i]:
+            # Short exit: bullish bias OR price breaks above EMA with volume
+            else:
+                if bullish_bias or (close[i] > ema_21[i] and volume_ok):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -148,11 +129,10 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: Donchian breakout up + volume spike + price above weekly HMA
-        long_condition = breakout_up and volume_spike and price_above_weekly_hma
-        
-        # Short: Donchian breakout down + volume spike + price below weekly HMA
-        short_condition = breakout_down and volume_spike and price_below_weekly_hma
+        # Long: Bullish bias + pullback to EMA + volume confirmation
+        long_condition = bullish_bias and near_ema and volume_ok
+        # Short: Bearish bias + pullback to EMA + volume confirmation
+        short_condition = bearish_bias and near_ema and volume_ok
         
         if long_condition:
             in_position = True
