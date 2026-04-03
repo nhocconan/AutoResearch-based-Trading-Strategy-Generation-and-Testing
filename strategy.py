@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #108: 12h Donchian(20) Breakout + 1w HMA Trend + Volume Confirmation
+Experiment #109: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Confirmation + Chop Regime Filter
 
-HYPOTHESIS: 12h Donchian breakouts aligned with 1w HMA trend capture swing momentum
-with lower whipsaw than 1d HMA. 1w HMA (21) filters for long-term trend direction
-while being responsive to major regime changes. Volume confirmation (1.5x average)
-ensures institutional participation. Discrete position sizing (0.25) and ATR trailing stop
-(2.5x) manage risk. Targets 12-37 trades/year on 12h timeframe to minimize fee drag.
-Works in bull/bear markets by trading breakouts in direction of 1w HMA trend.
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d HMA(21) trend capture swing momentum
+while avoiding counter-trend whipsaws. Volume confirmation (1.5x average) ensures
+institutional participation. Chop regime filter (Bollinger Band Width percentile) avoids
+range-bound markets where breakouts fail. Discrete position sizing (0.25) and ATR trailing
+stop (2.5x) manage risk. Targets 25-40 trades/year on 4h timeframe (100-160 total over 4 years)
+to minimize fee drag while maintaining statistical significance. Works in bull/bear markets
+by trading breakouts in direction of 1d HMA trend only when market is trending (CHOP < 50).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_12h_donchian_hma_1w_volume_v1"
-timeframe = "12h"
+name = "mtf_4h_donchian_hma_1d_volume_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_hma(close, period):
@@ -53,12 +54,26 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # === HTF: 1d data for HMA trend and Chop regime (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    hma_1d = calculate_hma(df_1d['close'].values, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # === 12h Indicators ===
+    # Chop regime: Bollinger Band Width percentile (lower = trending, higher = ranging)
+    # Using 20-period BBW on 1d, lookback 50 periods for percentile
+    close_1d = df_1d['close'].values
+    bb_mid = pd.Series(close_1d).rolling(window=20, min_periods=20).mean().values
+    bb_std = pd.Series(close_1d).rolling(window=20, min_periods=20).std().values
+    bb_upper = bb_mid + 2 * bb_std
+    bb_lower = bb_mid - 2 * bb_std
+    bbw = (bb_upper - bb_lower) / bb_mid  # Bollinger Band Width
+    # Percentile of BBW over 50 periods (lower percentile = tighter bands = trending)
+    bbw_percentile = pd.Series(bbw).rolling(window=50, min_periods=10).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
+    ).values
+    bbw_percentile_aligned = align_htf_to_ltf(prices, df_1d, bbw_percentile)
+    
+    # === 4h Indicators ===
     atr_14 = np.zeros(n)
     tr = np.zeros(n)
     tr[0] = high[0] - low[0]
@@ -86,13 +101,17 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(atr_14[i]) or np.isnan(dc_upper_20[i]) or np.isnan(dc_lower_20[i]) or 
-            np.isnan(vol_ma_20[i]) or np.isnan(hma_1w_aligned[i])):
+            np.isnan(vol_ma_20[i]) or np.isnan(hma_1d_aligned[i]) or np.isnan(bbw_percentile_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- 1w HMA Trend ---
-        hma_bullish = close[i] > hma_1w_aligned[i]
-        hma_bearish = close[i] < hma_1w_aligned[i]
+        # --- 1d HMA Trend ---
+        hma_bullish = close[i] > hma_1d_aligned[i]
+        hma_bearish = close[i] < hma_1d_aligned[i]
+        
+        # --- Chop Regime Filter: Only trade when market is trending (CHOP < 50) ---
+        # bbw_percentile_aligned < 0.5 means BBW is below median = tighter bands = trending
+        chop_ok = bbw_percentile_aligned[i] < 0.5
         
         # --- Price Channel Breakout ---
         bullish_breakout = close[i] > dc_upper_20[i]
@@ -116,15 +135,15 @@ def generate_signals(prices):
                     stop_hit = True
             
             # Exit conditions: trend reversal or opposite Donchian touch
-            min_hold = (i - entry_bar) >= 3  # Minimum 3 bars hold (~1.5 days)
+            min_hold = (i - entry_bar) >= 3  # Minimum 3 bars hold (~12h)
             if min_hold:
                 if position_side > 0:
                     # Exit long: price touches lower Donchian OR breaks below HMA
-                    if close[i] <= dc_lower_20[i] or close[i] < hma_1w_aligned[i]:
+                    if close[i] <= dc_lower_20[i] or close[i] < hma_1d_aligned[i]:
                         stop_hit = True
                 else:  # position_side < 0
                     # Exit short: price touches upper Donchian OR breaks above HMA
-                    if close[i] >= dc_upper_20[i] or close[i] > hma_1w_aligned[i]:
+                    if close[i] >= dc_upper_20[i] or close[i] > hma_1d_aligned[i]:
                         stop_hit = True
             
             if stop_hit:
@@ -139,16 +158,16 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic (Only if Flat) ---
         # Long conditions: 
-        # Breakout above upper Donchian with bullish 1w HMA trend and volume confirmation
-        if bullish_breakout and hma_bullish and vol_ok:
+        # Breakout above upper Donchian with bullish 1d HMA trend, volume confirmation, AND trending regime
+        if bullish_breakout and hma_bullish and vol_ok and chop_ok:
             in_position = True
             position_side = 1
             entry_bar = i
             highest_since_entry = high[i]
             signals[i] = SIZE
         # Short conditions:
-        # Breakout below lower Donchian with bearish 1w HMA trend and volume confirmation
-        elif bearish_breakout and hma_bearish and vol_ok:
+        # Breakout below lower Donchian with bearish 1d HMA trend, volume confirmation, AND trending regime
+        elif bearish_breakout and hma_bearish and vol_ok and chop_ok:
             in_position = True
             position_side = -1
             entry_bar = i
