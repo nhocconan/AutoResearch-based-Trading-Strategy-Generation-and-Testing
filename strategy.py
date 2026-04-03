@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #037: 4h Donchian(20) Breakout + HMA Trend + Volume Spike + ATR Stoploss
+Experiment #055: 6h Williams %R + ADX Trend + Volume Confirmation
 
-HYPOTHESIS: Donchian(20) breakouts on 4h capture institutional participation in trends.
-Confirmed by 4h HMA(21/55) trend alignment and 1d volume spike (>2.0x average).
-Uses discrete position sizing (0.30) and ATR(14) stoploss (2.5x) to manage drawdown.
-HTF: 1d for volume confirmation, 1w for regime filter (optional). Target: 75-200 trades over 4 years.
-Works in both bull (breakout continuation) and bear (breakdown continuation) markets.
+HYPOTHESIS: Williams %R identifies overbought/oversold conditions on 6h timeframe.
+Combined with ADX > 25 for trend strength and volume > 1.5x average for confirmation,
+this strategy captures trend continuations from extreme levels. Uses discrete 
+position sizing (0.25) and avoids choppy markets (ADX < 20) to minimize false signals.
+Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) 
+markets by requiring trend alignment. Target: 75-175 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian20_hma_vol_v1"
-timeframe = "4h"
+name = "mtf_6h_williamsr_adx_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,119 +23,164 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # Pre-compute session hours (08-20 UTC) - open_time is already datetime64[ms]
-    hours = pd.DatetimeIndex(open_time).hour
+    # Pre-compute session hours (00-23 UTC) - trade all hours on 6h
+    # No session filter needed for 6h as it captures major sessions
     
-    # === HTF: 1d data for volume spike confirmation (Call ONCE before loop) ===
+    # === HTF: 1d data for trend context (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate volume ratio (current vs 20-period average) on 1d
-    if len(df_1d) >= 20:
-        vol_1d = df_1d['volume'].values
-        vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-        vol_ratio_1d = np.zeros(len(vol_1d))
-        vol_ratio_1d[20:] = vol_1d[20:] / vol_ma_20[20:]
-        vol_ratio_1d[:20] = 1.0  # Neutral for warmup
-        vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # Calculate EMA(50) on 1d close for trend filter
+    if len(df_1d) >= 50:
+        close_1d = df_1d['close'].values
+        ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     else:
-        vol_ratio_1d_aligned = np.full(n, 1.0)
+        ema_50_1d_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian(20) and HMA(21,55) ===
-    # Donchian(20) channels
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    # === 6h Williams %R(14) ===
+    lookback = 14
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
+    for i in range(lookback - 1, n):
+        start_idx = i - lookback + 1
+        end_idx = i + 1
+        highest_high[i] = np.max(high[start_idx:end_idx])
+        lowest_low[i] = np.min(low[start_idx:end_idx])
+    
+    williams_r = np.full(n, np.nan)
+    for i in range(lookback - 1, n):
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
+        else:
+            williams_r[i] = -50  # Neutral when no range
+    
+    # === 6h ADX(14) for trend strength ===
+    # Calculate True Range
+    tr = np.zeros(n)
+    tr[0] = high[0] - low[0]
+    for i in range(1, n):
+        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    
+    # Calculate Directional Movement
+    dm_plus = np.zeros(n)
+    dm_minus = np.zeros(n)
+    for i in range(1, n):
+        up_move = high[i] - high[i-1]
+        down_move = low[i-1] - low[i]
+        if up_move > down_move and up_move > 0:
+            dm_plus[i] = up_move
+        else:
+            dm_plus[i] = 0
+        if down_move > up_move and down_move > 0:
+            dm_minus[i] = down_move
+        else:
+            dm_minus[i] = 0
+    
+    # Smoothed TR, DM+, DM-
+    tr_period = 14
+    tr_sum = np.zeros(n)
+    dm_plus_sum = np.zeros(n)
+    dm_minus_sum = np.zeros(n)
+    
+    # Initial sums
+    if n >= tr_period:
+        tr_sum[tr_period-1] = np.sum(tr[1:tr_period])
+        dm_plus_sum[tr_period-1] = np.sum(dm_plus[1:tr_period])
+        dm_minus_sum[tr_period-1] = np.sum(dm_minus[1:tr_period])
+        
+        # Wilder's smoothing
+        for i in range(tr_period, n):
+            tr_sum[i] = tr_sum[i-1] - (tr_sum[i-1] / tr_period) + tr[i]
+            dm_plus_sum[i] = dm_plus_sum[i-1] - (dm_plus_sum[i-1] / tr_period) + dm_plus[i]
+            dm_minus_sum[i] = dm_minus_sum[i-1] - (dm_minus_sum[i-1] / tr_period) + dm_minus[i]
+    
+    # Calculate DI+ and DI-
+    di_plus = np.full(n, np.nan)
+    di_minus = np.full(n, np.nan)
+    for i in range(tr_period-1, n):
+        if tr_sum[i] != 0:
+            di_plus[i] = (dm_plus_sum[i] / tr_sum[i]) * 100
+            di_minus[i] = (dm_minus_sum[i] / tr_sum[i]) * 100
+        else:
+            di_plus[i] = 0
+            di_minus[i] = 0
+    
+    # Calculate DX and ADX
+    dx = np.full(n, np.nan)
+    for i in range(tr_period-1, n):
+        if di_plus[i] + di_minus[i] != 0:
+            dx[i] = abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i]) * 100
+        else:
+            dx[i] = 0
+    
+    adx = np.full(n, np.nan)
+    adx_period = 14
+    if n >= 2 * adx_period - 1:
+        # Initial ADX is average of first adx_period DX values
+        adx[2*adx_period-2] = np.mean(dx[adx_period-1:2*adx_period-1])
+        # Wilder's smoothing for ADX
+        for i in range(2*adx_period-1, n):
+            adx[i] = (adx[i-1] * (adx_period - 1) + dx[i]) / adx_period
+    
+    # === 6h Volume Ratio (current vs 20-period average) ===
+    vol_ratio = np.full(n, np.nan)
     if n >= 20:
-        for i in range(20, n):
-            donchian_high[i] = np.max(high[i-20:i])
-            donchian_low[i] = np.min(low[i-20:i])
-    
-    # HMA(21) and HMA(55) for trend
-    def hma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        half = period // 2
-        sqrt = int(np.sqrt(period))
-        wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean()
-        wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean()
-        raw = 2 * wma2 - wma1
-        hma_val = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
-        return hma_val.values
-    
-    hma_21 = hma(close, 21)
-    hma_55 = hma(close, 55)
+        vol_ma = np.zeros(n)
+        for i in range(19, n):
+            vol_ma[i] = np.mean(volume[i-19:i+1])
+        vol_ratio[19:] = volume[19:] / vol_ma[19:]
+        vol_ratio[:19] = 1.0  # Neutral for warmup
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # Discrete position sizing (30% of capital)
+    SIZE = 0.25  # Discrete position sizing (25% of capital)
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
-    max_favorable_price = 0.0  # For trailing stop logic
     
-    warmup = max(100, 55)  # Ensure enough data for HMA(55)
+    warmup = max(50, 2*adx_period-1, 20)  # Ensure enough data for all indicators
     
     for i in range(warmup, n):
-        # --- Session Filter: Only trade 08-20 UTC ---
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(hma_21[i]) or np.isnan(hma_55[i]) or 
-            np.isnan(vol_ratio_1d_aligned[i])):
+        if (np.isnan(ema_50_1d_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(adx[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
-        # --- Trend Filter: HMA21 > HMA55 for uptrend, < for downtrend ---
-        hma_uptrend = hma_21[i] > hma_55[i]
-        hma_downtrend = hma_21[i] < hma_55[i]
+        # --- Trend Filter: Only trade in alignment with 1d EMA50 ---
+        price_above_1d_ema = close[i] > ema_50_1d_aligned[i]
+        price_below_1d_ema = close[i] < ema_50_1d_aligned[i]
         
-        # --- Volume Confirmation: Require volume spike (> 2.0x average) ---
-        volume_spike = vol_ratio_1d_aligned[i] > 2.0
+        # --- Volume Confirmation: Require volume > 1.5x average ---
+        volume_confirm = vol_ratio[i] > 1.5
         
-        # --- Exit Logic (Trailing stop based on ATR) ---
+        # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
             # Calculate ATR(14) for stoploss
-            tr = np.zeros(i+1)
-            tr[0] = high[0] - low[0]
+            tr_i = np.zeros(i+1)
+            tr_i[0] = high[0] - low[0]
             for j in range(1, i+1):
-                tr[j] = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
-            atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().iloc[-1]
+                tr_i[j] = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            atr_14 = pd.Series(tr_i).ewm(span=14, min_periods=14, adjust=False).mean().iloc[-1]
             
             if position_side > 0:  # Long position
-                # Update max favorable price
-                max_favorable_price = max(max_favorable_price, high[i])
-                # Trailing stop: 2.5 * ATR below max favorable price
-                stop_level = max_favorable_price - 2.5 * atr_14
+                stop_level = entry_price - 2.5 * atr_14
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                    max_favorable_price = 0.0
                     continue
             else:  # Short position
-                # Update max favorable price (lowest for shorts)
-                if max_favorable_price == 0.0:
-                    max_favorable_price = low[i]
-                else:
-                    max_favorable_price = min(max_favorable_price, low[i])
-                # Trailing stop: 2.5 * ATR above max favorable price
-                stop_level = max_favorable_price + 2.5 * atr_14
+                stop_level = entry_price + 2.5 * atr_14
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                    max_favorable_price = 0.0
                     continue
             
             # Hold position
@@ -142,33 +188,35 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long when price breaks above Donchian High with volume and HMA uptrend
+        # Long when Williams %R < -80 (oversold) with volume and trend alignment
         long_condition = (
-            close[i] > donchian_high[i] and 
-            volume_spike and 
-            hma_uptrend
+            williams_r[i] < -80 and 
+            volume_confirm and 
+            price_above_1d_ema and
+            adx[i] > 25  # Strong trend
         )
         
-        # Short when price breaks below Donchian Low with volume and HMA downtrend
+        # Short when Williams %R > -20 (overbought) with volume and trend alignment
         short_condition = (
-            close[i] < donchian_low[i] and 
-            volume_spike and 
-            hma_downtrend
+            williams_r[i] > -20 and 
+            volume_confirm and 
+            price_below_1d_ema and
+            adx[i] > 25  # Strong trend
         )
         
         if long_condition:
             in_position = True
             position_side = 1
             entry_price = close[i]
-            max_favorable_price = high[i]
             signals[i] = SIZE
         elif short_condition:
             in_position = True
             position_side = -1
             entry_price = close[i]
-            max_favorable_price = low[i]
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
     
     return signals
+
+</think>
