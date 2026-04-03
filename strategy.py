@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #2146: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture medium-term momentum with daily trend filter.
+HYPOTHESIS: 4h Donchian breakouts with daily trend filter capture swing momentum while avoiding whipsaws.
 - Primary: 4h Donchian(20) breakout with volume > 1.5x 20-bar average (balanced for trade frequency)
 - HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
 - Target: 75-200 total trades over 4 years (19-50/year) - optimized for 4h timeframe
-- Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets
+- Works in bull markets via trend-following breakouts and bear markets via mean reversion at channel extremes
 """
 
 import numpy as np
@@ -66,7 +66,7 @@ def generate_signals(prices):
     donchian_upper = high_ma
     donchian_lower = low_ma
     
-    # Volume MA for spike detection (moderate threshold for optimal trade frequency)
+    # Volume MA for spike detection (moderate threshold for balance)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -140,7 +140,7 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average - balanced for trade frequency)
+        # Volume confirmation: require volume spike (> 1.5x average - balanced threshold)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
