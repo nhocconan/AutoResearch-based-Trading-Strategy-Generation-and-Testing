@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #714: 1h EMA Pullback with 4h/1d Trend Filter and Volume Spike
-HYPOTHESIS: Buy pullbacks to 21 EMA in 4h/1d uptrend with volume spike (>2.0x average);
-Sell rallies to 21 EMA in 4h/1d downtrend with volume spike. Uses 08-20 UTC session filter
-to avoid low-liquidity hours. Target: 75-150 total trades over 4 years (19-37/year).
-Position size fixed at 0.20 to minimize fee churn. Stoploss at 2*ATR.
+Experiment #715: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
+HYPOTHESIS: Donchian(20) breakouts on 6h capture strong momentum. Filtered by weekly pivot (from 1w data) direction to align with higher timeframe structure and volume spike (>1.8x average) to avoid false breakouts. Works in bull/bear via weekly pivot bias: long only when price > weekly pivot, short only when price < weekly pivot. ATR(14) stoploss at 2x ATR manages risk. Discrete position sizing (0.25) minimizes fee churn. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_714_1h_ema_pullback_4h_1d_trend_vol_v1"
-timeframe = "1h"
+name = "exp_715_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,43 +19,36 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h and 1d data for trend filters (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # === HTF: 1w data for weekly pivot calculation (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # Calculate 21 EMA on 4h close
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
+    # Calculate weekly pivot point (standard: (H+L+C)/3)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
-    # Calculate 21 EMA on 1d close
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=21, min_periods=21, adjust=False).mean().values
+    # === 6h Indicators: Donchian(20) channels ===
+    donchian_period = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
     
-    # Align HTF EMAs to 1h timeframe (with shift(1) for completed bars only)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === 6h Indicators: Volume MA(20) for spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.ones(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1h Indicators: EMA(21), ATR(14), Volume MA(20) ===
-    ema_21 = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
-    
-    # True Range and ATR
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
     tr[0] = high[0] - low[0]
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # Volume MA(20) for spike detection
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
-    
-    # Precompute session hours (08-20 UTC) using DatetimeIndex
-    hours = prices.index.hour  # prices.index is DatetimeIndex from parquet
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -66,17 +56,13 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = max(21, 20)  # sufficient for EMA and volume MA
+    warmup = max(20, 20, 14)  # Donchian(20), Vol MA(20), ATR(14)
     
     for i in range(warmup, n):
-        # --- Session Filter: Only trade 08-20 UTC ---
-        if hours[i] < 8 or hours[i] > 20:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
-        if (np.isnan(ema_21[i]) or np.isnan(atr[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(pivot_1w_aligned[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -105,31 +91,30 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
+            # Optional: time-based exit after 6 bars (~24h on 6h) to avoid overtrading
+            if bars_since_entry > 6:
+                in_position = False
+                position_side = 0
+                bars_since_entry = 0
+                signals[i] = 0.0
+                continue
+            
             signals[i] = position_side * SIZE
             continue
         
         # --- New Position Entry Logic ---
-        # Volume spike filter: require > 2.0x average volume
-        volume_spike = vol_ratio[i] > 2.0
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Get trend from 4h and 1d EMA alignment
-            # Uptrend: price > both EMAs
-            # Downtrend: price < both EMAs
-            is_uptrend = price > ema_4h_aligned[i] and price > ema_1d_aligned[i]
-            is_downtrend = price < ema_4h_aligned[i] and price < ema_1d_aligned[i]
-            
-            # Long: Pullback to EMA in uptrend with volume spike
-            # Allow small tolerance (0.1%) for EMA touch
-            ema_touch_long = abs(price - ema_21[i]) / ema_21[i] < 0.001
-            if is_uptrend and ema_touch_long:
+            # Long: Price breaks above Donchian high + price > weekly pivot (bullish bias)
+            if high[i] > donchian_high[i-1] and price > pivot_1w_aligned[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            # Short: Rally to EMA in downtrend with volume spike
-            elif is_downtrend and ema_touch_long:  # same tolerance for EMA touch
+            # Short: Price breaks below Donchian low + price < weekly pivot (bearish bias)
+            elif low[i] < donchian_low[i-1] and price < pivot_1w_aligned[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
