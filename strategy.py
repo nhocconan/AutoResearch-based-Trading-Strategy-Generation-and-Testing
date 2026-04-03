@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #1818: 1d Donchian(20) Breakout + 1w HMA Trend + Volume + ATR Stoploss
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA trend and volume confirmation (>1.5x average) capture medium-term swings in both bull and bear markets. The 1w timeframe filters out noise from shorter-term fluctuations, while the 1d Donchian provides clear breakout levels. Position size fixed at 0.25 to balance return and drawdown. Target: 30-100 total trades over 4 years (7-25/year) by using tight entry conditions and multi-timeframe confluence.
+Experiment #1819: 6h Donchian(20) Breakout + 12h ADX Trend + Volume Spike
+HYPOTHESIS: 6h Donchian breakouts aligned with 12h ADX > 25 (trending market) and volume > 1.5x average capture strong momentum moves while avoiding choppy conditions. The 12h ADX filter ensures we only trade during trending regimes (works in both bull and bear), while volume confirmation adds validity to breakouts. Position size fixed at 0.25 to manage drawdown. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1818_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_1819_6h_donchian20_12h_adx_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,32 +19,57 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # HMA(21): Hull Moving Average
-    def hull_moving_average(arr, period):
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
-        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
-        raw_hma = 2 * wma_half - wma_full
-        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
-        return hma
-    hma_1w = hull_moving_average(close_1w, 21)
-    trend_1w = np.where(close_1w > hma_1w, 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # === HTF: 12h data for ADX trend filter (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # === 1d Indicators: Donchian(20) ===
+    # ADX(14) calculation
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr = np.concatenate([[high[0] - low[0]], tr])
+        
+        # Directional Movement
+        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                           np.maximum(high[1:] - high[:-1], 0), 0)
+        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                            np.maximum(low[:-1] - low[1:], 0), 0)
+        dm_plus = np.concatenate([[0], dm_plus])
+        dm_minus = np.concatenate([[0], dm_minus])
+        
+        # Smoothed values
+        atr = pd.Series(tr).ewm(span=period, adjust=False).mean().values
+        dm_plus_smooth = pd.Series(dm_plus).ewm(span=period, adjust=False).mean().values
+        dm_minus_smooth = pd.Series(dm_minus).ewm(span=period, adjust=False).mean().values
+        
+        # Directional Indicators
+        di_plus = 100 * dm_plus_smooth / atr
+        di_minus = 100 * dm_minus_smooth / atr
+        
+        # DX and ADX
+        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+        adx = pd.Series(dx).ewm(span=period, adjust=False).mean().values
+        
+        return adx, di_plus, di_minus
+    
+    adx_12h, _, _ = calculate_adx(high_12h, low_12h, close_12h, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # === 6h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -66,7 +91,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(adx_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -99,21 +124,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1w trend alignment
-        trend_following = trend_1w_aligned[i] != 0  # Should always be ±1
+        # Require 12h ADX > 25 (trending market)
+        trending = adx_12h_aligned[i] > 25
         
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
-        if trend_following and volume_spike:
+        if trending and volume_spike:
             # Breakout: price breaks above upper band OR below lower band
-            if price > donch_high[i] and trend_1w_aligned[i] > 0:  # Uptrend breakout
+            if price > donch_high[i]:  # Bullish breakout
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 bars_since_entry = 0
                 signals[i] = SIZE
-            elif price < donch_low[i] and trend_1w_aligned[i] < 0:  # Downtrend breakdown
+            elif price < donch_low[i]:  # Bearish breakdown
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
