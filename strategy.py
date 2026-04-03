@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #1657: 4h Donchian(20) Breakout + 1d HMA Trend + Volume + ATR Stoploss
-HYPOTHESIS: 4h Donchian breakouts with 1d HMA trend alignment and volume confirmation (>1.5x average) capture swing moves in both bull and bear markets. The 1d timeframe filters out 4h noise, while Donchian(20) provides clear breakout levels. Volume confirmation reduces false breakouts. ATR-based stoploss manages risk. Target: 75-200 total trades over 4 years (19-50/year) by using tight entry conditions (trend + volume + breakout confluence).
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d HMA trend and volume confirmation capture medium-term swings. The 1d timeframe filters noise, while 4h Donchian provides clear breakout levels. Position size 0.25 balances return/drawdown. Target: 75-200 total trades over 4 years (19-50/year) via tight entry conditions.
 """
 
 import numpy as np
