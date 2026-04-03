@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #125: 12h Donchian Breakout + 1d Volume Confirmation + ATR Stoploss
+Experiment #108: 12h Donchian Breakout + 1d Volume Confirmation + ATR Stoploss
 
 HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture medium-term trends, confirmed by 1d volume spikes (>2x average) to ensure institutional participation. ATR-based stoploss (2.5x) manages risk. This strategy targets 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while participating in both bull and bear markets. The 12h timeframe reduces noise and overtrading common in lower timeframes.
 """
