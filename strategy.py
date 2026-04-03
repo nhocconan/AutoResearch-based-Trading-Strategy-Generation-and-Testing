@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #421: 4h Donchian(20) Breakout + 1d Volume Confirmation + ATR Stoploss
+Experiment #412: 12h Donchian(20) Breakout + 1d Volume Confirmation + ATR Stoploss
 
-HYPOTHESIS: Donchian channel breakouts on 4h timeframe, confirmed by 1d volume spike (>2.0x average),
+HYPOTHESIS: Donchian channel breakouts on 12h timeframe, confirmed by 1d volume spike (>2.0x average),
 provide high-probability trend continuation entries. The strategy uses discrete position sizing (0.25)
-and ATR-based stoploss (2.5x ATR) to manage risk. Targets 20-50 trades/year on 4h timeframe
-(80-200 total over 4 years) to minimize fee drag while capturing strong trending moves.
+and ATR-based stoploss (2.5x ATR) to manage risk. Targets 12-37 trades/year on 12h timeframe
+(50-150 total over 4 years) to minimize fee drag while capturing strong trending moves.
 Works in both bull and bear markets by trading breakouts in direction of 1d trend (price > EMA50).
 """
 
@@ -13,8 +13,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_4h_donchian20_1d_vol_breakout_v1"
-timeframe = "4h"
+name = "mtf_12h_donchian20_1d_vol_breakout_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -46,8 +46,8 @@ def generate_signals(prices):
     else:
         ema_50_1d_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators ===
-    # Calculate Donchian channels (20-period) on 4h
+    # === 12h Indicators ===
+    # Calculate Donchian channels (20-period) on 12h
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -142,3 +142,4 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+</trading_assistant>
