@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #272: 12h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
+Experiment #132: 12h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
 
 HYPOTHESIS: 12h Donchian channel breakouts filtered by 1d Hull Moving Average trend 
 and volume spikes (>2.0x average) capture strong momentum moves with reduced false 
@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_272_12h_donchian_1d_hma_volume_v1"
+name = "exp_132_12h_donchian_1d_hma_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
