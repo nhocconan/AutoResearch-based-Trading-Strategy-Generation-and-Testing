@@ -1,53 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #110: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA trend (21-period) capture significant moves while avoiding whipsaws. Volume confirmation (>1.5x average) filters weak breakouts. ATR stoploss (2.0x) manages risk. Discrete position sizing (0.25) minimizes fee churn. Target: 30-100 total trades over 4 years.
+Experiment #111: 6h Williams %R + 1d EMA filter + volume confirmation
+HYPOTHESIS: Williams %R(14) extreme readings (>80 for oversold, <20 for overbought) on 6h timeframe, aligned with 1d EMA50 trend filter and volume confirmation (>1.3x average), captures mean reversion in ranging markets and continuation in trending markets. Discrete position sizing (0.25) with ATR(14) stoploss (2.0x) manages risk. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_110_1d_donchian20_1w_hma_volume_v1"
-timeframe = "1d"
+name = "exp_111_6h_williamsr_1d_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
-
-def calculate_hma(arr, period):
-    """Hull Moving Average"""
-    half_period = int(period / 2)
-    sqrt_period = int(np.sqrt(period))
-    
-    if half_period < 1:
-        half_period = 1
-    if sqrt_period < 1:
-        sqrt_period = 1
-        
-    # WMA function
-    def wma(values, window):
-        weights = np.arange(1, window + 1, dtype=np.float64)
-        return np.convolve(values, weights, mode='valid') / weights.sum()
-    
-    # Convert to series for easier handling
-    arr_series = pd.Series(arr)
-    
-    # Calculate WMAs
-    wma_half = wma(arr_series.values, half_period)
-    wma_full = wma(arr_series.values, period)
-    
-    # Align arrays (WMA reduces length)
-    raw_hma = 2.0 * wma_half - wma_full
-    
-    # Final WMA
-    hma_result = wma(raw_hma, sqrt_period)
-    
-    # Create result array with NaN padding
-    result = np.full_like(arr, np.nan, dtype=np.float64)
-    start_idx = period - 1  # Approximate offset
-    end_idx = start_idx + len(hma_result)
-    if end_idx <= len(arr):
-        result[start_idx:end_idx] = hma_result
-        
-    return result
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
@@ -56,27 +19,31 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
+    # === HTF: 1d data for EMA50 trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate HMA(21) on weekly close
-    hma_21_1w = calculate_hma(df_1w['close'].values, 21)
+    # Calculate EMA50 on 1d
+    ema50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align to daily timeframe
-    hma_21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_21_1w)
+    # === 6h Indicators: Williams %R(14) ===
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    williams_r = np.full(n, np.nan)
+    for i in range(14, n):
+        if highest_high_14[i] != lowest_low_14[i]:
+            williams_r[i] = (highest_high_14[i] - close[i]) / (highest_high_14[i] - lowest_low_14[i]) * -100
+        else:
+            williams_r[i] = -50  # neutral when range is zero
     
-    # === 1d Indicators: Donchian(20) channels ===
-    donch_upper = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_lower = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 1d Indicators: ATR(14) for stoploss ===
-    tr_1d = np.zeros(n)
-    tr_1d[0] = high[0] - low[0]
+    # === 6h Indicators: ATR(14) for stoploss ===
+    tr_6h = np.zeros(n)
+    tr_6h[0] = high[0] - low[0]
     for i in range(1, n):
-        tr_1d[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+        tr_6h[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+    atr_14 = pd.Series(tr_6h).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.zeros(n)
     vol_ratio[20:] = volume[20:] / vol_ma_20[20:]
@@ -92,29 +59,27 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 60
+    warmup = 50
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or
-            np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(hma_21_1w_aligned[i])):
+        if (np.isnan(williams_r[i]) or np.isnan(atr_14[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(ema50_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Volume Confirmation: Require volume spike (> 1.5x average) ---
-        volume_spike = vol_ratio[i] > 1.5
+        # --- Volume Confirmation: Require volume spike (> 1.3x average) ---
+        volume_spike = vol_ratio[i] > 1.3
         
-        # --- Donchian Breakout Conditions ---
-        breakout_up = high[i] > donch_upper[i-1]
-        breakout_down = low[i] < donch_lower[i-1]
+        # --- Williams %R Extreme Conditions ---
+        oversold = williams_r[i] > 80   # Note: Williams %R is inverted, >80 = oversold
+        overbought = williams_r[i] < 20 # <20 = overbought
         
-        # --- Weekly HMA Trend Filter ---
-        # Long only when price above weekly HMA, short only when below
-        trend_long = price > hma_21_1w_aligned[i]
-        trend_short = price < hma_21_1w_aligned[i]
+        # --- 1d EMA50 Trend Filter ---
+        price_above_ema = price > ema50_1d_aligned[i]
+        price_below_ema = price < ema50_1d_aligned[i]
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -128,9 +93,23 @@ def generate_signals(prices):
                     bars_since_entry = 0
                     signals[i] = 0.0
                     continue
+                # Take profit when Williams %R reaches overbought territory
+                if williams_r[i] < 30 and volume_spike:  # exited overbought
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
             else:  # Short position
                 stop_level = entry_price + 2.0 * atr_14[i]
                 if high[i] > stop_level:
+                    in_position = False
+                    position_side = 0
+                    bars_since_entry = 0
+                    signals[i] = 0.0
+                    continue
+                # Take profit when Williams %R reaches oversold territory
+                if williams_r[i] > 70 and volume_spike:  # exited oversold
                     in_position = False
                     position_side = 0
                     bars_since_entry = 0
@@ -145,13 +124,15 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        if breakout_up and volume_spike and trend_long:
+        # Long: Oversold + price above 1d EMA50 (bullish alignment) + volume spike
+        if oversold and price_above_ema and volume_spike:
             in_position = True
             position_side = 1
             entry_price = close[i]
             bars_since_entry = 0
             signals[i] = SIZE
-        elif breakout_down and volume_spike and trend_short:
+        # Short: Overbought + price below 1d EMA50 (bearish alignment) + volume spike
+        elif overbought and price_below_ema and volume_spike:
             in_position = True
             position_side = -1
             entry_price = close[i]
