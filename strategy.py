@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #2252: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 12h Donchian breakouts capture swing momentum with 1d HMA trend filter.
-Volume spike (>1.8x) confirms breakout strength. ATR(14) trailing stop (2x) manages risk.
-Designed for 12h timeframe to limit trades (target: 50-150 over 4 years) and work in both bull/bear markets.
-- Bull: trend filter aligns with upward momentum
-- Bear: trend filter enables short entries on breakdowns, volume spike avoids false signals
+HYPOTHESIS: 12h Donchian breakouts capture medium-term swings with daily trend filter.
+- Primary: 12h Donchian(20) breakout with volume > 1.5x 20-bar average (moderate to target 50-150 trades)
+- HTF: 1d HMA(21) trend filter (only trade in direction of daily trend)
+- Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian touch
+- Designed for 12h timeframe to work in both bull (trend following) and bear (mean reversion at extremes)
+- Uses discrete position sizing (0.25) to minimize fee churn
 """
 
 import numpy as np
@@ -64,7 +65,7 @@ def generate_signals(prices):
     donchian_upper = high_ma
     donchian_lower = low_ma
     
-    # Volume MA for spike detection
+    # Volume MA for spike detection (moderate threshold to target 50-150 trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -80,7 +81,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.25  # 25% position size - balances return and drawdown
     
     # Position tracking state variables
     in_position = False
@@ -138,8 +139,8 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.8x average)
-        volume_spike = vol_ratio[i] > 1.8
+        # Volume confirmation: require volume spike (> 1.5x average - moderate for trade frequency)
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
             # Long entry: price breaks above upper Donchian AND 1d trend up
@@ -164,4 +165,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-</file>
