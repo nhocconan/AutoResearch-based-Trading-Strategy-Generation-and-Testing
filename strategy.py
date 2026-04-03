@@ -125,5 +125,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
