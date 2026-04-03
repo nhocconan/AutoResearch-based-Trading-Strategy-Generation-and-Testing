@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #1480: 4h Donchian(20) Breakout + 1d Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 4h capture medium-term swings with 1d trend filter for direction.
-Volume confirmation (>1.8x average) ensures institutional participation. Uses ATR-based stoploss for risk management.
-Designed for 19-50 trades/year (75-200 total over 4 years) by using tight entry conditions.
-Works in bull/bear markets by following 1d trend direction. Uses ATR-based stoploss for risk management.
+Experiment #1482: 12h Donchian(20) Breakout + 1d/1w Trend + Volume Confirmation
+HYPOTHESIS: 12h Donchian(20) breakouts with 1d and 1w trend alignment capture medium-term swings.
+Volume confirmation (>1.8x average) ensures institutional participation. Designed for 12-37 trades/year
+(50-150 total over 4 years) by using tight entry conditions and dual timeframe trend filter to avoid whipsaws.
+Works in bull/bear markets by requiring alignment between 1d and 1w trends. Uses ATR-based stoploss for risk management.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1480_4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "exp_1482_12h_donchian20_1d_1w_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,16 +31,24 @@ def generate_signals(prices):
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 4h Indicators: Donchian(20) ===
+    # === HTF: 1w data for stronger trend filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    # EMA(50) for 1w trend
+    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1w = np.where(close_1w > ema_1w, 1, -1)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    
+    # === 12h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -57,13 +65,13 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 50  # sufficient for EMA(50), Donchian(20) and volume MA(20)
+    warmup = 20  # sufficient for Donchian and volume MA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
-            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i])):
+            np.isnan(trend_1d_aligned[i]) or np.isnan(trend_1w_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -96,10 +104,13 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
+        # Require BOTH 1d and 1w trend alignment for stronger filter
+        trend_aligned = (trend_1d_aligned[i] == trend_1w_aligned[i])
+        
         # Volume confirmation: require volume spike (> 1.8x average)
         volume_spike = vol_ratio[i] > 1.8
         
-        if volume_spike:
+        if trend_aligned and volume_spike:
             # Breakout: price breaks above upper band OR below lower band
             if price > donch_high[i] and trend_1d_aligned[i] > 0:  # Uptrend breakout
                 in_position = True
@@ -119,4 +130,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-</export>
+
+</think>
