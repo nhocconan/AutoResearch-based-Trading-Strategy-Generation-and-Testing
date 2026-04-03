@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-Experiment #1253: 4h Donchian(20) Breakout + 12h Trend + Volume Spike
-HYPOTHESIS: Donchian(20) breakouts on 4h capture intermediate trends. 12h timeframe trend filter ensures alignment with higher momentum while avoiding noise. Volume spike (>2.0x average) confirms institutional participation. Designed for both bull (breakouts continue) and bear (breakdowns continue) markets by following 12h trend. Target: 75-200 total trades over 4 years.
+Experiment #1253: 4h Donchian(20) Breakout + 12h Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe with 12h trend filter (price > SMA50) 
+and volume confirmation (>1.5x average) will capture intermediate-term trends with optimal 
+trade frequency. The 12h trend filter ensures alignment with higher-timeframe momentum, 
+reducing false breakouts. Designed to work in both bull (breakouts continue) and bear 
+(breakdowns continue) markets by following the 12h trend direction. Target: 75-200 total 
+trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -22,9 +27,10 @@ def generate_signals(prices):
     # === HTF: 12h data for trend filter (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
-    # Trend: price > previous close = uptrend (1), < = downtrend (-1)
+    # Trend filter: price > SMA50 = uptrend, < = downtrend
+    sma_50 = pd.Series(close_12h).rolling(window=50, min_periods=50).mean().values
     trend_12h = np.zeros(len(close_12h))
-    trend_12h[1:] = np.where(close_12h[1:] > close_12h[:-1], 1, -1)
+    trend_12h[50:] = np.where(close_12h[50:] > sma_50[50:], 1, -1)
     trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
     # === 4h Indicators: Donchian(20) ===
@@ -53,7 +59,7 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    warmup = 20  # sufficient for Donchian and volume MA
+    warmup = 50  # sufficient for SMA50, Donchian and volume MA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -92,8 +98,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
             # Breakout: price breaks above upper band OR below lower band
