@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #071: 6h Volume-Weighted RSI with 1d Trend Filter and ATR Stop
+Experiment #055: 6h Ichimoku Cloud + 1d ADX Trend Filter
 
-HYPOTHESIS: Volume-weighted RSI(14) on 6h timeframe, combined with 1d trend filter (price > EMA50 for long, < EMA50 for short) 
-and ATR-based stoploss, creates a robust momentum strategy. Volume weighting prevents false signals during low-participation 
-moves, while the 1d trend filter ensures alignment with higher timeframe direction. Targets 15-25 trades/year on 6h 
-timeframe (60-100 total over 4 years) to minimize fee drag while capturing high-probability momentum shifts.
+HYPOTHESIS: Ichimoku cloud (TK cross + price vs cloud) provides high-probability
+trend signals on 6h timeframe. 1d ADX > 25 filters for strong trending conditions
+to avoid whipsaws in ranging markets. Volume confirmation ensures institutional
+participation. Works in both bull and bear markets by following established trends
+with strict filters to minimize false signals.
+Target: 75-150 trades over 4 years (19-37/year) with discrete sizing (0.25).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "mtf_6h_vwrsi_trend_stop_v1"
+name = "mtf_6h_ichimoku_adx_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,44 +25,99 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for ADX and volume confirmation (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate EMA(50) on 1d close
-    if len(df_1d) >= 50:
+    # Calculate ADX(14) on 1d
+    if len(df_1d) >= 14:
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
         close_1d = df_1d['close'].values
-        ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+        
+        # True Range and Directional Movement
+        up_move = high_1d[1:] - high_1d[:-1]
+        down_move = low_1d[:-1] - low_1d[1:]
+        
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        # True Range
+        tr1 = high_1d[1:] - low_1d[1:]
+        tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+        tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        
+        # Smoothing (Wilder's smoothing = EMA with alpha=1/period)
+        def wilder_smoothing(data, period):
+            result = np.zeros_like(data)
+            result[period-1] = np.mean(data[:period])
+            for i in range(period, len(data)):
+                result[i] = (result[i-1] * (period-1) + data[i]) / period
+            return result
+        
+        if len(tr) >= 14:
+            atr = wilder_smoothing(tr, 14)
+            if len(atr) >= 14:
+                plus_di = 100 * wilder_smoothing(plus_dm, 14) / atr
+                minus_di = 100 * wilder_smoothing(minus_dm, 14) / atr
+                dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+                adx = wilder_smoothing(dx, 14)
+                # Prepend zeros for alignment
+                adx_full = np.zeros(len(close_1d))
+                adx_full[14:] = adx[13:]  # Adjust for Wilder's smoothing offset
+                adx_full[:14] = 20.0  # Neutral for warmup
+                adx_aligned = align_htf_to_ltf(prices, df_1d, adx_full)
+            else:
+                adx_aligned = np.full(n, 20.0)
+        else:
+            adx_aligned = np.full(n, 20.0)
     else:
-        ema_50_1d_aligned = np.full(n, np.nan)
+        adx_aligned = np.full(n, 20.0)
     
-    # === 6h Indicators ===
-    # Calculate Volume-Weighted RSI(14)
-    vwrsi = np.full(n, np.nan)
+    # Calculate volume ratio on 1d
+    if len(df_1d) >= 20:
+        vol_1d = df_1d['volume'].values
+        vol_ma_20 = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+        vol_ratio_1d = np.zeros(len(vol_1d))
+        vol_ratio_1d[20:] = vol_1d[20:] / vol_ma_20[20:]
+        vol_ratio_1d[:20] = 1.0
+        vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    else:
+        vol_ratio_1d_aligned = np.full(n, 1.0)
     
-    # Need at least 15 periods for RSI calculation (14 for gains/losses + 1 for initial)
-    if n >= 15:
-        # Calculate price changes
-        delta = np.diff(close, prepend=close[0])
-        
-        # Separate gains and losses
-        gains = np.where(delta > 0, delta, 0.0)
-        losses = np.where(delta < 0, -delta, 0.0)
-        
-        # Volume-weight the gains and losses
-        vol_gains = gains * volume
-        vol_losses = losses * volume
-        
-        # Calculate average gains and losses using Wilder's smoothing (EWM with alpha=1/period)
-        avg_vol_gain = pd.Series(vol_gains).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-        avg_vol_loss = pd.Series(vol_losses).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
-        
-        # Calculate RS and RSI
-        rs = np.divide(avg_vol_gain, avg_vol_loss, out=np.full_like(avg_vol_gain, np.nan), where=avg_vol_loss!=0)
-        vwrsi = 100 - (100 / (1 + rs))
-        
-        # For first 14 values, RSI is not defined
-        vwrsi[:14] = np.nan
+    # === 6h Ichimoku Cloud Components ===
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    period_tenkan = 9
+    if n >= period_tenkan:
+        max_high_9 = pd.Series(high).rolling(window=period_tenkan, min_periods=period_tenkan).max().values
+        min_low_9 = pd.Series(low).rolling(window=period_tenkan, min_periods=period_tenkan).min().values
+        tenkan = (max_high_9 + min_low_9) / 2
+    else:
+        tenkan = np.full(n, np.nan)
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    period_kijun = 26
+    if n >= period_kijun:
+        max_high_26 = pd.Series(high).rolling(window=period_kijun, min_periods=period_kijun).max().values
+        min_low_26 = pd.Series(low).rolling(window=period_kijun, min_periods=period_kijun).min().values
+        kijun = (max_high_26 + min_low_26) / 2
+    else:
+        kijun = np.full(n, np.nan)
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = (tenkan + kijun) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    period_senkou_b = 52
+    if n >= period_senkou_b:
+        max_high_52 = pd.Series(high).rolling(window=period_senkou_b, min_periods=period_senkou_b).max().values
+        min_low_52 = pd.Series(low).rolling(window=period_senkou_b, min_periods=period_senkou_b).min().values
+        senkou_b = (max_high_52 + min_low_52) / 2
+    else:
+        senkou_b = np.full(n, np.nan)
+    
+    # Chikou Span (Lagging Span): close plotted 26 periods behind
+    chikou = np.roll(close, -26)  # Will be handled in logic
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -71,17 +128,15 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     
-    warmup = 50  # Ensure enough data for HTF and indicator calculations
+    warmup = 100  # Ensure enough data for indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(vwrsi[i]) or np.isnan(ema_50_1d_aligned[i])):
+        if (np.isnan(adx_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i]) or 
+            np.isnan(tenkan[i]) or np.isnan(kijun[i]) or np.isnan(senkou_a[i]) or 
+            np.isnan(senkou_b[i])):
             signals[i] = 0.0
             continue
-        
-        # --- Regime Filter: Only trade in alignment with 1d trend ---
-        price_above_1d_ema = close[i] > ema_50_1d_aligned[i]
-        price_below_1d_ema = close[i] < ema_50_1d_aligned[i]
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
@@ -112,32 +167,38 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Long: VWRSI crosses above 30 (oversold recovery) in uptrend
-        # Short: VWRSI crosses below 70 (overbought rejection) in downtrend
+        # Determine conditions
+        # Price above/below cloud
+        cloud_top = max(senkou_a[i], senkou_b[i])
+        cloud_bottom = min(senkou_a[i], senkou_b[i])
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
         
-        # Need previous VWRSI value for crossover detection
-        if i > 0 and not np.isnan(vwrsi[i-1]):
-            long_condition = (
-                vwrsi[i-1] <= 30 and vwrsi[i] > 30 and price_above_1d_ema  # Bullish crossover from oversold
-            )
-            
-            short_condition = (
-                vwrsi[i-1] >= 70 and vwrsi[i] < 70 and price_below_1d_ema  # Bearish crossover from overbought
-            )
-        else:
-            long_condition = False
-            short_condition = False
+        # TK Cross
+        tk_cross_bull = tenkan[i] > kijun[i]
+        tk_cross_bear = tenkan[i] < kijun[i]
         
-        if long_condition:
+        # ADX trend strength (1d)
+        strong_trend = adx_aligned[i] > 25
+        
+        # Volume confirmation (1d)
+        volume_spike = vol_ratio_1d_aligned[i] > 1.5
+        
+        # Long conditions: bullish TK cross + price above cloud + strong trend + volume
+        if tk_cross_bull and price_above_cloud and strong_trend and volume_spike:
             in_position = True
             position_side = 1
             entry_price = close[i]
             signals[i] = SIZE
-        elif short_condition:
+        
+        # Short conditions: bearish TK cross + price below cloud + strong trend + volume
+        elif tk_cross_bear and price_below_cloud and strong_trend and volume_spike:
             in_position = True
             position_side = -1
             entry_price = close[i]
             signals[i] = -SIZE
+        
+        # No signal
         else:
             signals[i] = 0.0
     
