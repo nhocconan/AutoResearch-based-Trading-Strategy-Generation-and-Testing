@@ -1,83 +1,80 @@
 #!/usr/bin/env python3
 """
-Experiment #024: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
+Experiment #027: 6h Elder Ray Power + 1d ADX Regime Filter
 
-HYPOTHESIS: Daily Donchian channel breakouts (20-period) with weekly HMA(21) trend filter and 
-volume spike confirmation creates a low-frequency, high-edge strategy for BTC/ETH/SOL. 
-The 1d timeframe minimizes fee drag while capturing major trend moves. Weekly HMA ensures 
-we only trade in the direction of the higher timeframe trend, avoiding counter-trend 
-whipsaws. Volume confirmation filters out breakouts lacking institutional participation. 
-ATR-based stoploss manages risk. Targets 7-25 trades/year (30-100 total over 4 years) 
-to overcome fee drag in bear markets like 2025.
+HYPOTHESIS: Elder Ray Index (Bull Power = High - EMA13, Bear Power = Low - EMA13) 
+measures bull/bear strength relative to trend. Combined with 1d ADX regime filter 
+(ADX > 25 = trending market), this captures strong directional moves while 
+avoiding choppy markets. The 6h timeframe provides sufficient signal quality 
+to minimize fee drag, targeting 50-150 total trades over 4 years (12-37/year). 
+Works in both bull (buy strength) and bear (sell weakness) markets by fading 
+extreme power readings when trend is confirmed.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "donchian_1d_hma_1w_volume_v1"
-timeframe = "1d"
+name = "mtf_6h_elder_ray_power_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
-    volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
+    # === HTF: 1d data for ADX regime filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate HMA(21) on 1w close
-    if len(df_1w) >= 21:
-        close_1w = df_1w['close'].values
-        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
+    # Calculate ADX(14) on 1d
+    if len(df_1d) >= 14:
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
+        close_1d = df_1d['close'].values
         
-        def wma(arr, period):
-            if len(arr) < period:
-                return np.full(len(arr), np.nan)
-            weights = np.arange(1, period + 1)
-            return np.convolve(arr, weights / weights.sum(), mode='valid')
+        # True Range
+        tr1 = high_1d - low_1d
+        tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+        tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]  # First period
         
-        wma_half = wma(close_1w, half_len)
-        wma_full = wma(close_1w, 21)
-        if len(wma_half) >= half_len and len(wma_full) >= 21:
-            raw_hma = 2 * wma_half[-len(wma_full):] - wma_full
-            hma_21 = wma(raw_hma, sqrt_len)
-            # Pad to match original length
-            hma_21_padded = np.full(len(close_1w), np.nan)
-            hma_21_padded[half_len:half_len+len(hma_21)] = hma_21
-            hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21_padded)
-        else:
-            hma_21_aligned = np.full(n, np.nan)
+        # Directional Movement
+        dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                          np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+        dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                           np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+        dm_plus[0] = 0
+        dm_minus[0] = 0
+        
+        # Smoothed values
+        tr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+        dm_plus_14 = pd.Series(dm_plus).ewm(span=14, min_periods=14, adjust=False).mean().values
+        dm_minus_14 = pd.Series(dm_minus).ewm(span=14, min_periods=14, adjust=False).mean().values
+        
+        # Directional Indicators
+        di_plus = 100 * dm_plus_14 / tr_14
+        di_minus = 100 * dm_minus_14 / tr_14
+        
+        # DX and ADX
+        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+        adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
+        
+        adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     else:
-        hma_21_aligned = np.full(n, np.nan)
+        adx_aligned = np.full(n, 20.0)  # Default to ranging market
     
-    # === 1d Indicators ===
-    # Donchian Channel (20-period)
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
+    # === 6h Indicators: EMA13 for Elder Ray ===
+    if n >= 13:
+        ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    else:
+        ema_13 = close.copy()
     
-    for i in range(lookback, n):
-        highest_high[i] = np.max(high[i-lookback:i])
-        lowest_low[i] = np.min(low[i-lookback:i])
-    
-    # Volume ratio (current vs 20-period average)
-    vol_ma_20 = np.full(n, np.nan)
-    for i in range(20, n):
-        vol_ma_20[i] = np.mean(volume[i-20:i])
-    volume_ratio = np.divide(volume, vol_ma_20, out=np.full(n, 1.0), where=vol_ma_20!=0)
-    
-    # ATR(14) for stoploss
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # Elder Ray Power
+    bull_power = high - ema_13   # Bull Power = High - EMA
+    bear_power = low - ema_13    # Bear Power = Low - EMA
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -87,42 +84,56 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    entry_atr = 0.0
     
-    warmup = max(100, lookback, 20)  # Ensure enough data
+    warmup = 50  # Ensure enough data for EMA13 and HTF ADX
     
     for i in range(warmup, n):
-        # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(hma_21_aligned[i]) or np.isnan(volume_ratio[i]) or
-            np.isnan(atr_14[i])):
+        # Skip if ADX data not ready
+        if np.isnan(adx_aligned[i]):
             signals[i] = 0.0
+            continue
+        
+        # --- Regime Filter: Only trade when ADX > 25 (trending market) ---
+        is_trending = adx_aligned[i] > 25.0
+        
+        if not is_trending:
+            # In ranging markets, stay flat to avoid whipsaw
+            signals[i] = 0.0
+            in_position = False
+            position_side = 0
             continue
         
         # --- Exit Logic (ATR-based stoploss) ---
         if in_position:
+            # Calculate ATR(14) for stoploss
+            tr = np.zeros(i+1)
+            tr[0] = high[0] - low[0]
+            for j in range(1, i+1):
+                tr[j] = max(high[j] - low[j], abs(high[j] - close[j-1]), abs(low[j] - close[j-1]))
+            atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().iloc[-1]
+            
             if position_side > 0:  # Long position
-                stop_level = entry_price - 2.5 * entry_atr
+                stop_level = entry_price - 2.5 * atr_14
                 if low[i] < stop_level:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Exit if price re-enters Donchian channel (failed breakout)
-                if close[i] <= highest_high[i]:
+                # Exit when bull power weakens (fading strength)
+                if bull_power[i] < 0:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
             else:  # Short position
-                stop_level = entry_price + 2.5 * entry_atr
+                stop_level = entry_price + 2.5 * atr_14
                 if high[i] > stop_level:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Exit if price re-enters Donchian channel (failed breakdown)
-                if close[i] >= lowest_low[i]:
+                # Exit when bear power weakens (fading weakness)
+                if bear_power[i] > 0:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -133,38 +144,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic (Only if Flat) ---
-        # Volume confirmation: require > 1.8x average volume
-        volume_confirm = volume_ratio[i] > 1.8
+        # Long: Strong bull power (price significantly above EMA) in uptrend
+        long_condition = bull_power[i] > 0 and bull_power[i] > np.percentile(bull_power[max(0, i-50):i+1], 80)
         
-        # Trend filter: HMA direction
-        hma_rising = hma_21_aligned[i] > hma_21_aligned[i-1]
-        hma_falling = hma_21_aligned[i] < hma_21_aligned[i-1]
-        
-        # Long: Donchian breakout above upper band with volume and uptrend
-        long_condition = (
-            close[i] > highest_high[i] and  # Breakout above Donchian high
-            volume_confirm and
-            hma_rising
-        )
-        
-        # Short: Donchian breakdown below lower band with volume and downtrend
-        short_condition = (
-            close[i] < lowest_low[i] and  # Breakdown below Donchian low
-            volume_confirm and
-            hma_falling
-        )
+        # Short: Strong bear power (price significantly below EMA) in downtrend
+        short_condition = bear_power[i] < 0 and bear_power[i] < np.percentile(bear_power[max(0, i-50):i+1], 20)
         
         if long_condition:
             in_position = True
             position_side = 1
             entry_price = close[i]
-            entry_atr = atr_14[i]
             signals[i] = SIZE
         elif short_condition:
             in_position = True
             position_side = -1
             entry_price = close[i]
-            entry_atr = atr_14[i]
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
