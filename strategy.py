@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #1296: 12h Donchian(20) Breakout + 1d Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture intermediate-term trends with optimal trade frequency for 12h (target: 50-150 trades over 4 years). 
-Trend filter from 1d timeframe ensures alignment with higher-timeframe momentum. Volume confirmation (>1.5x average) filters for institutional participation. 
-Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 1d trend direction.
+Experiment #1297: 4h Donchian(20) Breakout + 1d Trend + Volume Confirmation + Chop Filter
+HYPOTHESIS: Donchian(20) breakouts on 4h capture intermediate-term trends with optimal trade frequency. 
+Trend filter from 1d ensures alignment with higher-timeframe momentum. Volume confirmation (>1.8x average) 
+filters institutional participation. Choppiness Index filter (CHOP > 61.8) avoids whipsaw in ranging markets. 
+Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets by following the 1d trend direction. 
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_1296_12h_donchian20_1d_trend_vol_v1"
-timeframe = "12h"
+name = "exp_1297_4h_donchian20_1d_trend_vol_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,16 +31,36 @@ def generate_signals(prices):
     trend_1d[1:] = np.where(close_1d[1:] > close_1d[:-1], 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 12h Indicators: Donchian(20) ===
+    # === HTF: 1d data for Choppiness Index (regime filter) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    # True Range for 1d
+    tr_1d = np.zeros(len(close_1d))
+    for i in range(1, len(close_1d)):
+        tr_1d[i] = max(high_1d[i] - low_1d[i], abs(high_1d[i] - close_1d[i-1]), abs(low_1d[i] - close_1d[i-1]))
+    tr_1d[0] = high_1d[0] - low_1d[0]
+    atr_1d = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # Highest high and lowest low over 14 periods
+    hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+    ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+    # Choppiness Index: CHOP = 100 * log10(sum(ATR14) / (HH14 - LL14)) / log10(14)
+    sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+    hh_ll_diff = hh_1d - ll_1d
+    chop_1d = np.full(len(close_1d), 50.0)  # default neutral
+    mask = (hh_ll_diff > 0) & ~np.isnan(sum_atr_14) & ~np.isnan(hh_ll_diff)
+    chop_1d[mask] = 100 * np.log10(sum_atr_14[mask] / hh_ll_diff[mask]) / np.log10(14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
+    # === 4h Indicators: Donchian(20) ===
     donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr = np.zeros(n)
     for i in range(1, n):
         tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
@@ -61,7 +83,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
             np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i])):
+            np.isnan(atr[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -94,10 +116,12 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
+        # Regime filter: only trade in ranging markets (CHOP > 61.8) to avoid whipsaw in strong trends
+        ranging_market = chop_1d_aligned[i] > 61.8
         
-        if volume_spike:
+        if volume_spike and ranging_market:
             # Breakout: price breaks above upper band OR below lower band
             if price > donch_high[i] and trend_1d_aligned[i] > 0:  # 1d uptrend
                 in_position = True
