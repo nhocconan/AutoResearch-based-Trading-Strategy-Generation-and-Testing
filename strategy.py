@@ -4,7 +4,7 @@ Experiment #652: 12h Donchian(20) breakout + 1d EMA alignment + volume confirmat
 HYPOTHESIS: 12h Donchian breakouts aligned with daily EMA(50) trend capture institutional participation with low overtrading risk.
 Volume confirmation ensures breakout validity. Designed for 12h to hit 50-150 total trades over 4 years (12-37/year).
 Uses 1d EMA for bull/bear agnostic trend filter and ATR-based stoploss for risk control.
-Target: 12-37 trades/year per symbol with Sharpe > 0 on test.
+Target: 12-37 trades/year per symbol with Sharpe > 0.5 on test.
 """
 
 import numpy as np
@@ -104,8 +104,8 @@ def generate_signals(prices):
                     signals[i] = 0.0
                     continue
             
-            # Optional: time-based exit after 6 bars (~72h on 12h) to avoid overtrading
-            if bars_since_entry > 6:
+            # Optional: time-based exit after 4 bars (~48h on 12h) to avoid overtrading
+            if bars_since_entry > 4:
                 in_position = False
                 position_side = 0
                 bars_since_entry = 0
