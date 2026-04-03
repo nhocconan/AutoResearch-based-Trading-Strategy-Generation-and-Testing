@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #021: 4h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation
-HYPOTHESIS: Price breaking 4h Donchian(20) channels with 1d HMA(21) trend alignment and volume spike (>1.5x) captures momentum with controlled frequency. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0) to manage risk. Target: 75-200 total trades over 4 years (19-50/year) for statistical validity and low fee drag. This version uses 1d HTF trend instead of 12h to reduce noise and improve signal quality.
+Experiment #017: 4h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation
+HYPOTHESIS: Price breaking 4h Donchian(20) channels with 1d HMA(21) trend alignment and volume spike (>1.5x) captures momentum with controlled frequency. Uses discrete sizing (0.25) and ATR(14) stoploss (2.0) to manage risk. Target: 75-200 total trades over 4 years (19-50/year) for statistical validity and low fee drift. Works in both bull (breakouts with trend) and bear (short breakdowns with trend) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_021_4h_donchian20_1d_hma_vol_v1"
+name = "exp_017_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
