@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4164: 1d Donchian(20) breakout + 1w EMA(50) trend filter + volume confirmation + ATR stoploss
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA(50) trend capture medium-term momentum with reduced whipsaw vs lower timeframes. Volume confirmation (>1.5x average) filters false breakouts. ATR trailing stop (2.0x) manages risk. Works in bull/bear as weekly EMA adapts to trend. Target: 30-100 total trades over 4 years (7-25/year).
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA(50) trend capture medium-term momentum with reduced whipsaw. Volume spike (>2.0x) filters false breakouts. ATR trailing stop (2.5x) manages risk. Weekly EMA provides smoother trend than daily, reducing noise in choppy markets. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -72,8 +72,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -81,8 +81,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -91,8 +91,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.5x average) to filter noise
-        volume_spike = vol_ratio[i] > 1.5
+        # Require volume spike (> 2.0x average) to filter noise
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # Donchian breakout logic
