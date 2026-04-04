@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #3894: 1h Donchian(20) breakout + 4h EMA(50) trend + volume confirmation + session filter
-HYPOTHESIS: 1h Donchian breakouts aligned with 4h EMA trend capture swings while avoiding counter-trend whipsaw.
-Volume > 1.5x MA(30) confirms participation. Session filter (08-20 UTC) reduces noise.
-Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+Experiment #3895: 6h Donchian(20) breakout + 1w EMA-50 trend + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts aligned with 1w EMA-50 trend capture medium-term momentum with reduced whipsaw. 
+Volume > 1.5x MA(30) confirms participation. ATR(14) trailing stop (2.0x) manages risk. 
+In bull markets (price above 1w EMA), buy breakouts; in bear markets (price below 1w EMA), short breakdowns.
+Target: 75-200 trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3894_1h_donchian20_4h_ema_vol_session_v1"
-timeframe = "1h"
+name = "exp_3895_6h_donchian20_1w_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,38 +20,34 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 4h data for EMA trend ===
-    df_4h = get_htf_data(prices, '4h')
+    # === HTF: 1w data for EMA trend ===
+    df_1w = get_htf_data(prices, '1w')
     ema_period = 50
-    ema_values = pd.Series(df_4h['close'].values).ewm(span=ema_period, adjust=False).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_4h, ema_values)
+    ema_values = pd.Series(df_1w['close'].values).ewm(span=ema_period, adjust=False).mean().values
+    ema_aligned = align_htf_to_ltf(prices, df_1w, ema_values)
     
-    # === 1h Indicators: Donchian Channel(20) for breakout ===
+    # === 6h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 1h Indicators: Volume MA(30) for spike detection ===
+    # === 6h Indicators: Volume MA(30) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[30:] = volume[30:] / vol_ma[30:]
     
-    # === 1h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 6h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === Session filter: 08-20 UTC (precompute hours array) ===
-    hours = pd.DatetimeIndex(open_time).hour
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -65,13 +62,6 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(ema_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
-            signals[i] = 0.0
-            continue
-        
-        # --- Session Filter ---
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        if not in_session:
             signals[i] = 0.0
             continue
         
@@ -114,8 +104,8 @@ def generate_signals(prices):
         # Require volume spike (> 1.5x average) to filter noise
         volume_spike = vol_ratio[i] > 1.5
         
-        if volume_spike and in_session:
-            # Determine trend: bullish if price above 4h EMA, bearish if below
+        if volume_spike:
+            # Determine trend: bullish if price above 1w EMA, bearish if below
             bullish = price > ema_aligned[i]
             bearish = price < ema_aligned[i]
             
@@ -144,5 +134,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
