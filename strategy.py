@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 exp_6497_4h_donchian20_1d_ema_vol_v2
-Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation, optimized for higher trade frequency.
-Uses daily EMA(50) as trend filter: long only when price > EMA50, short only when price < EMA50.
-Donchian(20) breakout provides entry timing, volume confirmation filters weak breakouts.
-Designed to work in both bull and bear markets by using 1d EMA as trend filter and Donchian breakouts for momentum.
-Target: 150-250 trades over 4 years (38-63/year) to stay within profitable range while ensuring statistical validity.
+Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+Uses tighter volume threshold (2.2x) and adds ATR-based stoploss to reduce whipsaws.
+Designed for fewer, higher-quality trades (target: 50-100 total over 4 years) to overcome fee drift.
+Uses 4h primary timeframe per experiment instructions.
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
@@ -15,11 +14,13 @@ name = "exp_6497_4h_donchian20_1d_ema_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
-# Parameters - slightly relaxed to increase trade frequency within optimal range
+# Parameters
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 1.5  # Reduced from 1.8 to increase volume confirmation rate
+VOL_THRESHOLD = 2.2  # volume must be 2.2x its 20-period MA (tighter)
+ATR_PERIOD = 14
+ATR_STOP_MULT = 2.5  # stoploss at 2.5x ATR
 SIGNAL_SIZE = 0.25   # 25% position size
 
 def generate_signals(prices):
@@ -50,16 +51,26 @@ def generate_signals(prices):
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
+    # ATR for stoploss
+    tr1 = pd.Series(high).rolling(2).apply(lambda x: x[1] - x[0], raw=True).abs().values
+    tr2 = pd.Series(high).rolling(2).apply(lambda x: abs(x[1] - close[int(x.index[0])] if len(x)==2 else 0), raw=True).values
+    tr3 = pd.Series(low).rolling(2).apply(lambda x: abs(close[int(x.index[0])] if len(x)==2 else 0 - x[1]), raw=True).values
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    # Fix first element
+    tr[0] = high[0] - low[0]
+    atr = pd.Series(tr).rolling(window=ATR_PERIOD, min_periods=ATR_PERIOD).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, EMA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA data not available
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if EMA or ATR data not available
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(atr[i]):
             continue
             
         # Long conditions: price breaks above Donchian HIGH + above 1d EMA + volume spike
@@ -72,25 +83,38 @@ def generate_signals(prices):
         short_trend = close[i] < ema_1d_aligned[i]  # price below 1d EMA (bearish trend)
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Exit conditions: simple midpoint reversal
+        # Manage existing positions
         if position == 1:  # long position
+            # Check stoploss
+            if close[i] <= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
             # Exit if price drops below midpoint of channel
-            exit_long = close[i] < (donchian_high[i-1] + donchian_low[i-1]) / 2
-            # Or if price breaks below Donchian low (strong reversal)
-            exit_long = exit_long or close[i] < donchian_low[i-1]
-            if exit_long:
+            midpoint = (donchian_high[i-1] + donchian_low[i-1]) / 2
+            if close[i] < midpoint:
                 signals[i] = 0.0
                 position = 0
                 continue
+            # Otherwise hold
+            signals[i] = SIGNAL_SIZE
+            continue
+            
         elif position == -1:  # short position
-            # Exit if price rises above midpoint of channel
-            exit_short = close[i] > (donchian_high[i-1] + donchian_low[i-1]) / 2
-            # Or if price breaks above Donchian high (strong reversal)
-            exit_short = exit_short or close[i] > donchian_high[i-1]
-            if exit_short:
+            # Check stoploss
+            if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
+            # Exit if price rises above midpoint of channel
+            midpoint = (donchian_high[i-1] + donchian_low[i-1]) / 2
+            if close[i] > midpoint:
+                signals[i] = 0.0
+                position = 0
+                continue
+            # Otherwise hold
+            signals[i] = -SIGNAL_SIZE
+            continue
         
         # Enter new positions only if flat
         if position == 0:
@@ -98,14 +122,16 @@ def generate_signals(prices):
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
+                stop_price = entry_price - ATR_STOP_MULT * atr[i]
             elif short_breakout and short_trend and short_volume:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
+                stop_price = entry_price + ATR_STOP_MULT * atr[i]
             else:
                 signals[i] = 0.0
         else:
-            # Hold current position
+            # Should not reach here due to continue statements above
             signals[i] = position * SIGNAL_SIZE
     
     return signals
