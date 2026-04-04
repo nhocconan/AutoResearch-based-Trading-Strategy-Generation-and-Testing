@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Experiment #5745: 12h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation
-HYPOTHESIS: Donchian breakouts aligned with daily EMA trend capture sustained moves while avoiding counter-trend whipsaws.
-Volume > 2.0x average confirms breakout strength. ATR trailing stop (2.5x) manages risk. Discrete sizing 0.25 minimizes fees.
+HYPOTHESIS: Donchian breakouts on 12h aligned with 1d EMA trend capture sustained moves while avoiding counter-trend whipsaws.
+Volume > 1.8x average confirms breakout strength. ATR trailing stop (2.0x) manages risk. Discrete sizing 0.25 minimizes fees.
 Target: 12-37 trades/year (50-150 total over 4 years). Works in bull/bear via 1d trend filter.
 """
 
@@ -84,7 +84,7 @@ def generate_signals(prices):
         if in_position:
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
-                stop_price = highest_since_entry - 2.5 * atr[i]
+                stop_price = highest_since_entry - 2.0 * atr[i]
                 # Exit: stoploss OR price breaks below 1d EMA (trend change)
                 if price <= stop_price or price <= ema_1d_aligned[i]:
                     in_position = False
@@ -94,7 +94,7 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                stop_price = lowest_since_entry + 2.5 * atr[i]
+                stop_price = lowest_since_entry + 2.0 * atr[i]
                 # Exit: stoploss OR price breaks above 1d EMA (trend change)
                 if price >= stop_price or price >= ema_1d_aligned[i]:
                     in_position = False
@@ -107,7 +107,7 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 2.0
+        volume_confirmed = volume_ratio[i] > 1.8
         
         # 1d EMA bias: long above EMA, short below EMA
         long_bias = price > ema_1d_aligned[i]
