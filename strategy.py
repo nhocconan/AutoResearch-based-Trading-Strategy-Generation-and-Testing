@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #6415: 6h Donchian(20) breakout + 1w trend filter + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts filtered by weekly trend (price above/below weekly EMA50) and volume confirmation (>2.0x avg) capture strong momentum moves while avoiding false breakouts in choppy markets. Weekly EMA50 acts as a dynamic trend filter: long only when price > weekly EMA50, short only when price < weekly EMA50. This avoids counter-trend trades that fail in strong trends. Volume confirmation ensures breakouts have institutional participation. Discrete sizing (0.25) balances profit potential and drawdown control. Target: 75-200 trades over 4 years. Works in bull via upward breakouts with volume, in bear via downward breakouts with volume, and avoids ranging markets via trend filter.
+Experiment #6416: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts with volume confirmation (>2.0x avg) and 1d EMA50 trend filter capture institutional order flow. In trending markets, price breaks Donchian levels with continuation bias. In ranging markets, false breakouts are filtered by volume and EMA condition. Discrete sizing (0.25) balances profit potential and drawdown control. Target: 75-150 trades over 4 years. Works in bull via EMA-up breakouts, in bear via EMA-down breakdowns, and ranges via volume/EMA filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6415_6h_donchian20_1w_ema_vol_v1"
-timeframe = "6h"
+name = "exp_6416_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,24 +22,23 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 1:
-        # Calculate weekly EMA50 for trend filter
-        weekly_ema50 = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
+    # === HTF: 1d data for EMA50 trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        weekly_ema50_aligned = np.full(n, np.nan)
+        ema_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20-period) ===
+    # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation ===
+    # === 12h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 6h Indicators: ATR(14) for trailing stop ===
+    # === 12h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -58,7 +57,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50) + 1  # Donchian, volume avg, ATR, weekly EMA lookback + 1
+    warmup = max(20, 20, 14, 50) + 1  # Donchian, volume avg, ATR, EMA lookback + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (22:00-23:59 UTC) ---
@@ -70,7 +69,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(weekly_ema50_aligned[i])):
+            np.isnan(ema_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -84,8 +83,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks below Donchian low (failed breakout)
-                # 3. Price crosses below weekly EMA50 (trend change)
-                if price <= stop_price or price <= donchian_low[i] or price < weekly_ema50_aligned[i]:
+                # 3. Price closes below EMA (trend change)
+                if price <= stop_price or price <= donchian_low[i] or close[i] < ema_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -97,8 +96,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks above Donchian high (failed breakout)
-                # 3. Price crosses above weekly EMA50 (trend change)
-                if price >= stop_price or price >= donchian_high[i] or price > weekly_ema50_aligned[i]:
+                # 3. Price closes above EMA (trend change)
+                if price >= stop_price or price >= donchian_high[i] or close[i] > ema_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -110,16 +109,13 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 2.0  # Volume filter
+        ema_uptrend = close[i] > ema_aligned[i]
+        ema_downtrend = close[i] < ema_aligned[i]
         
-        # Trend filter from weekly EMA50
-        uptrend = price > weekly_ema50_aligned[i]
-        downtrend = price < weekly_ema50_aligned[i]
-        
-        # Entry logic:
-        # Long: breakout above Donchian high + volume + uptrend filter
-        # Short: breakdown below Donchian low + volume + downtrend filter
-        long_entry = breakout_up and volume_confirmed and uptrend
-        short_entry = breakout_down and volume_confirmed and downtrend
+        # Long: EMA uptrend + upward breakout + volume
+        # Short: EMA downtrend + downward breakout + volume
+        long_entry = ema_uptrend and breakout_up and volume_confirmed
+        short_entry = ema_downtrend and breakout_down and volume_confirmed
         
         if long_entry:
             in_position = True
