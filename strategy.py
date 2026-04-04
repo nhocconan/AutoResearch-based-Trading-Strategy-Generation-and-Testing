@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #5733: 4h Donchian(20) breakout + 12h HMA(21) trend + volume confirmation
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts with volume > 1.8x average and aligned 
-with 12h Hull Moving Average(21) direction capture high-probability trend continuation moves. 
-The 12h HMA provides a smooth trend filter that adapts to both bull and bear markets while 
-reducing lag. Volume confirms breakout strength. ATR trailing stop (2.5x) manages risk. 
-Discrete sizing (0.25) minimizes fee churn. Target: 19-50 trades/year.
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts with volume > 2.0x average and aligned 
+with 12h HMA(21) direction (price above HMA = bullish, below = bearish) capture high-probability 
+trend continuation moves. The 12h HMA provides a smooth trend filter that reduces whipsaw in 
+both bull and bear markets. Volume confirms breakout strength. ATR trailing stop (2.5x) manages 
+risk. Discrete sizing (0.25) minimizes fee churn. Target: 19-50 trades/year.
 """
 
 import numpy as np
@@ -15,34 +15,6 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 name = "exp_5733_4h_donchian20_12h_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
-
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average"""
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA of half period
-    weights_half = np.arange(1, half_period + 1)
-    wma_half = pd.Series(close).rolling(window=half_period, min_periods=half_period).apply(
-        lambda x: np.dot(x, weights_half) / weights_half.sum(), raw=True
-    ).values
-    
-    # WMA of full period
-    weights_full = np.arange(1, period + 1)
-    wma_full = pd.Series(close).rolling(window=period, min_periods=period).apply(
-        lambda x: np.dot(x, weights_full) / weights_full.sum(), raw=True
-    ).values
-    
-    # Raw HMA: 2*WMA(half) - WMA(full)
-    raw_hma = 2 * wma_half - wma_full
-    
-    # Final WMA of sqrt period
-    weights_sqrt = np.arange(1, sqrt_period + 1)
-    hma = pd.Series(raw_hma).rolling(window=sqrt_period, min_periods=sqrt_period).apply(
-        lambda x: np.dot(x, weights_sqrt) / weights_sqrt.sum(), raw=True
-    ).values
-    
-    return hma
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
@@ -57,7 +29,15 @@ def generate_signals(prices):
     # === HTF: 12h data for HMA(21) trend filter ===
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) >= 21:
-        hma_12h = calculate_hma(df_12h['close'].values, 21)
+        # Calculate HMA(21) on 12h close
+        close_12h = df_12h['close'].values
+        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+        half_len = 21 // 2
+        sqrt_len = int(np.sqrt(21))
+        wma_half = pd.Series(close_12h).ewm(span=half_len, adjust=False).mean().values
+        wma_full = pd.Series(close_12h).ewm(span=21, adjust=False).mean().values
+        raw_hma = 2 * wma_half - wma_full
+        hma_12h = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False).mean().values
     else:
         hma_12h = np.full(len(df_12h), np.nan)
     
@@ -136,7 +116,7 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.8
+        volume_confirmed = volume_ratio[i] > 2.0
         
         # 12h HMA bias: long above HMA, short below HMA
         long_bias = price > hma_12h_aligned[i]
