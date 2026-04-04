@@ -2,8 +2,10 @@
 """
 Experiment #2689: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts with 1d EMA trend alignment and volume spikes capture
-institutional participation with optimal frequency for 4h timeframe. Uses 1d for signal
-direction, 4h only for entry timing. Target: 75-200 total trades over 4 years.
+institutional participation with optimal frequency (target: 75-200 trades over 4 years).
+Uses 1d for signal direction (HTF), 4h only for entry timing. Designed to work in both
+bull and bear markets by requiring trend alignment and volume confirmation to avoid
+whipsaws. ATR-based trailing stoploss manages risk.
 """
 
 import numpy as np
