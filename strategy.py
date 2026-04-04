@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4695: 6h Donchian(20) Breakout + 1w Trend Filter + Volume Confirmation
-HYPOTHESIS: 6h price breaking Donchian(20) channels with volume confirmation (>1.8x avg volume) and aligned with 1-week EMA50 trend captures major momentum moves while minimizing whipsaws. The weekly EMA50 provides a reliable, slow-moving trend filter that reduces false signals in choppy markets. This strategy targets 12-37 trades/year on 6h timeframe to avoid fee drag while maintaining statistical significance. Works in both bull (breakouts with volume) and bear (short breakdowns with volume) markets by following the higher timeframe trend.
+Experiment #4695: 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
+HYPOTHESIS: 6h price breaking Donchian(20) channels with volume confirmation (>1.8x avg volume) and aligned with weekly pivot direction (price above/below weekly pivot) captures momentum while minimizing whipsaws. Weekly pivot provides structural support/resistance from higher timeframe, reducing false breakouts in choppy markets. This strategy targets 12-37 trades/year on 6h timeframe to avoid fee drag while maintaining statistical significance. Works in both bull (breakouts with volume above weekly pivot) and bear (breakdowns with volume below weekly pivot) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4695_6h_donchian20_1w_ema_vol_v1"
+name = "exp_4695_6h_donchian20_weekly_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -19,20 +19,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1w data for EMA50 trend filter (call ONCE before loop)
+    # Precompute HTF: 1w data for weekly pivot
     df_1w = get_htf_data(prices, '1w')
     
-    # === 1w Indicators: EMA50 for trend filter ===
-    if len(df_1w) >= 50:
-        ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # === 1w Indicators: Weekly Pivot (standard calculation) ===
+    if len(df_1w) >= 1:
+        # Weekly pivot: (weekly_high + weekly_low + weekly_close) / 3
+        weekly_high = df_1w['high'].values
+        weekly_low = df_1w['low'].values
+        weekly_close = df_1w['close'].values
+        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     else:
-        ema_1w = np.full(len(df_1w), np.nan)
+        weekly_pivot = np.array([])
     
-    # Align HTF EMA50 to 6h timeframe
-    if len(ema_1w) > 0:
-        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align HTF weekly pivot to 6h timeframe
+    if len(weekly_pivot) > 0:
+        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     else:
-        ema_1w_aligned = np.full(n, np.nan)
+        weekly_pivot_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian(20) from prior 20 bars ===
     # Use prior 20 bars' high/low (shifted by 1 to avoid look-ahead)
@@ -66,12 +70,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50)  # Donchian, Volume MA, ATR, EMA warmup
+    warmup = max(20, 20, 14)  # Donchian, Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -108,19 +112,19 @@ def generate_signals(prices):
         breakout_long = price > donchian_high[i] and vol_breakout
         breakout_short = price < donchian_low[i] and vol_breakout
         
-        # 1w EMA50 trend filter: only trade in direction of higher timeframe trend
-        trend_filter_long = price > ema_1w_aligned[i]
-        trend_filter_short = price < ema_1w_aligned[i]
+        # Weekly pivot direction filter: only trade in direction of weekly pivot
+        pivot_filter_long = price > weekly_pivot_aligned[i]
+        pivot_filter_short = price < weekly_pivot_aligned[i]
         
-        # Final entry conditions: breakout + volume + trend filter
-        if breakout_long and trend_filter_long:
+        # Final entry conditions: breakout + volume + pivot filter
+        if breakout_long and pivot_filter_long:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif breakout_short and trend_filter_short:
+        elif breakout_short and pivot_filter_short:
             in_position = True
             position_side = -1
             entry_price = close[i]
