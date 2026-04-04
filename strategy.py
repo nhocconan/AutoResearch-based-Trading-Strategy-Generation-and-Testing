@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Experiment #6364: 1d Donchian(20) breakout + 1w EMA(50) trend filter + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts with volume confirmation (>1.8x avg) and weekly EMA(50) trend filter capture institutional momentum on higher timeframes. 
-In bull markets, weekly EMA(50) acts as dynamic support for long breakouts; in bear markets, as resistance for short breakdowns. 
+HYPOTHESIS: Daily Donchian breakouts with volume confirmation (>1.8x avg) and weekly EMA(50) trend filter capture medium-term momentum. 
+The weekly EMA acts as a dynamic trend filter - in bull markets it supports long breakouts, in bear markets it resists short breakdowns.
 Volume confirmation filters false breakouts. Discrete sizing (0.25) minimizes fee churn. Target: 30-100 trades over 4 years.
 """
 
@@ -137,5 +137,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
