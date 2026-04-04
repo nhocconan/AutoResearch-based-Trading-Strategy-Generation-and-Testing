@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #5039: 6h Donchian(20) Breakout + 12h Volume Regime + ATR Stoploss
-HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts filtered by 12h volume regime (high/low volume environment) capture sustainable moves while avoiding choppy periods. High volume regime (>1.5x 50-period MA) confirms institutional participation and trend strength. Low volume regime (<0.8x) avoids false breakouts in chop. Designed for 12-37 trades/year on 6h to minimize fee drag. Works in bull (breakouts with volume) and bear (breakdowns with volume) markets. ATR(14) trailing stop (2.5x) manages risk.
+Experiment #5039: 6h Donchian(20) Breakout + 12h HTF Trend Filter + Volume Spike + ATR Stoploss
+HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts aligned with 12h EMA trend (EMA20/EMA50) capture strong momentum with lower frequency. The 12h EMA acts as a trend filter: only take longs when price > EMA20 > EMA50 (bullish alignment) and shorts when price < EMA20 < EMA50 (bearish alignment). Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. Designed for 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5039_6h_donchian20_12h_vol_regime_v1"
+name = "exp_5039_6h_donchian20_12h_ema_trend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -19,19 +19,29 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 12h data for volume regime
+    # Precompute HTF: 12h data for EMA trend filter
     df_12h = get_htf_data(prices, '12h')
     
-    # === 12h Indicators: Volume Regime Filter ===
-    if len(df_12h) >= 50:
-        vol_12h = df_12h['volume'].values.astype(np.float64)
-        vol_ma_12h = pd.Series(vol_12h).rolling(window=50, min_periods=50).mean().values
-        vol_ratio_12h = np.ones(len(vol_12h))
-        vol_ratio_12h[50:] = vol_12h[50:] / vol_ma_12h[50:]
+    # === 12h Indicators: EMA20 and EMA50 for trend alignment ===
+    if len(df_12h) >= 50:  # Need sufficient data for EMA50
+        close_12h = df_12h['close'].values
+        ema20_12h = pd.Series(close_12h).ewm(span=20, min_periods=20, adjust=False).mean().values
+        ema50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+        
+        # Trend conditions: bullish = price > EMA20 > EMA50, bearish = price < EMA20 < EMA50
+        ema20_gt_ema50 = ema20_12h > ema50_12h
+        ema20_lt_ema50 = ema20_12h < ema50_12h
+        
         # Align to 6h timeframe
-        vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+        ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
+        ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+        ema20_gt_ema50_aligned = align_htf_to_ltf(prices, df_12h, ema20_gt_ema50.astype(np.float64))
+        ema20_lt_ema50_aligned = align_htf_to_ltf(prices, df_12h, ema20_lt_ema50.astype(np.float64))
     else:
-        vol_ratio_12h_aligned = np.full(n, np.nan)
+        ema20_12h_aligned = np.full(n, np.nan)
+        ema50_12h_aligned = np.full(n, np.nan)
+        ema20_gt_ema50_aligned = np.full(n, np.nan)
+        ema20_lt_ema50_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -60,12 +70,14 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 50, 14)  # Donchian, Volume MA, 12h Vol MA, ATR warmup
+    warmup = max(20, 20, 14, 50)  # Donchian, Volume MA, ATR, EMA50 warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(vol_ratio_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema20_12h_aligned[i]) or np.isnan(ema50_12h_aligned[i]) or
+            np.isnan(ema20_gt_ema50_aligned[i]) or np.isnan(ema20_lt_ema50_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -76,8 +88,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -85,8 +97,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -95,13 +107,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filters: 6h spike (>1.5x) AND 12h regime (>1.0 = normal/high volume)
-        vol_confirm_6h = vol_ratio[i] > 1.5
-        vol_regime_12h = vol_ratio_12h_aligned[i] > 1.0  # Avoid low volume chop
+        # Volume filter: confirmation (>1.5x)
+        vol_confirm = vol_ratio[i] > 1.5
         
-        # Donchian breakout conditions
-        breakout_long = (price >= high_roll[i]) and vol_confirm_6h and vol_regime_12h
-        breakout_short = (price <= low_roll[i]) and vol_confirm_6h and vol_regime_12h
+        # Trend alignment from 12h
+        bullish_trend = bool(ema20_gt_ema50_aligned[i] == 1.0)
+        bearish_trend = bool(ema20_lt_ema50_aligned[i] == 1.0)
+        
+        # Donchian breakout conditions with 12h EMA trend filter
+        # Long: Donchian breakout above high_roll AND bullish trend alignment AND volume
+        # Short: Donchian breakdown below low_roll AND bearish trend alignment AND volume
+        breakout_long = (price >= high_roll[i]) and bullish_trend and vol_confirm
+        breakout_short = (price <= low_roll[i]) and bearish_trend and vol_confirm
         
         # Final entry conditions
         if breakout_long:
