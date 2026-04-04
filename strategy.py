@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #5229: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Spike
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 1d EMA(50) trend capture momentum bursts with lower overtrading risk than 1h. Volume > 2.0x average confirms institutional participation. Designed for 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
+Experiment #5229: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 1d EMA(50) trend capture institutional momentum with proper filtering to avoid overtrading. Volume > 1.8x average confirms participation. Designed for 25-40 trades/year on 4h timeframe (100-160 total over 4 years) to minimize fee drag. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
@@ -34,7 +34,7 @@ def generate_signals(prices):
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation (2.0x spike) ===
+    # === 4h Indicators: Volume confirmation (1.8x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -92,8 +92,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>2.0x)
-        vol_confirm = vol_ratio[i] > 2.0
+        # Volume filter: confirmation (>1.8x)
+        vol_confirm = vol_ratio[i] > 1.8
         
         # Donchian breakout conditions with 1d EMA trend filter
         # Long: Donchian breakout above + price > 1d EMA (uptrend)
@@ -120,3 +120,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
