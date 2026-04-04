@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #5936: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA trend (EMA50 above/below price) 
-capture high-probability trend continuation moves across bull/bear markets. 
-Volume confirmation filters weak breakouts. ATR trailing stop manages risk.
-Target: 75-150 total trades over 4 years (19-37/year) on 12h timeframe.
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA200 trend capture major trend moves with low frequency.
+Volume confirmation filters false breakouts. ATR trailing stop manages risk. Designed for 12h timeframe
+to target 50-150 total trades over 4 years (12-37/year) with Sharpe > 0 on BTC/ETH/SOL.
 """
 
 import numpy as np
@@ -25,11 +24,11 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for EMA trend ===
+    # === HTF: 1d data for EMA200 trend ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
+    if len(df_1d) >= 200:
         close_1d = pd.Series(df_1d['close'].values)
-        ema_1d = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d = close_1d.ewm(span=200, min_periods=200, adjust=False).mean().values
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
         ema_1d_aligned = np.full(n, np.nan)
@@ -61,7 +60,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50)  # Donchian, volume avg, ATR, EMA lookback
+    warmup = max(20, 20, 14, 200)  # Donchian, volume avg, ATR, EMA lookback
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -108,7 +107,7 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # Trend filter: price above/below 1d EMA50
+        # Trend filter: price above/below 1d EMA200
         uptrend = price > ema_1d_aligned[i]
         downtrend = price < ema_1d_aligned[i]
         
