@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #2652: 12h Donchian(20) breakout + 1d EMA trend + volume spike
-HYPOTHESIS: 12h Donchian breakouts with 1d trend alignment and volume spikes capture
-swing momentum. Using 12h as primary timeframe reduces trade frequency to avoid fee drag,
-while 1d EMA provides robust trend filter. Volume confirmation ensures institutional
-participation. Designed to work in both bull (breakouts) and bear (mean reversion via stops).
-Target: 50-150 total trades over 4 years (12-37/year).
+Experiment #2652: 12h Donchian(20) breakout + 1d/1w EMA trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts with 1d/1w EMA trend alignment and volume spikes capture
+institutional participation on higher timeframe. Uses 1d/1w for signal direction, 12h only for
+entry timing. Target: 75-150 total trades over 4 years. Works in bull (breakouts with trend) and
+bear (mean reversion from extremes with volume confirmation).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2652_12h_donchian20_1d_ema_vol_v1"
+name = "exp_2652_12h_donchian20_1d_1w_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -31,6 +30,15 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    
+    # === HTF: 1w data for EMA trend (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w EMA(50)
+    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1w = np.where(close_1w > ema_1w, 1, -1)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
     # === 12h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
@@ -57,7 +65,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(trend_1d_aligned[i]) or
+        if (np.isnan(trend_1d_aligned[i]) or np.isnan(trend_1w_aligned[i]) or
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
@@ -103,10 +111,12 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1d trend alignment for bias filter
+        # Require both 1d and 1w trend alignment for bias filter (more stringent)
         trend_bias_1d = trend_1d_aligned[i]
+        trend_bias_1w = trend_1w_aligned[i]
         
-        if trend_bias_1d == 0:
+        # Only trade when both timeframes agree
+        if trend_bias_1d == 0 or trend_bias_1w == 0 or trend_bias_1d != trend_bias_1w:
             signals[i] = 0.0
             continue
         
@@ -114,16 +124,16 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Long entry: price breaks above Donchian high with uptrend on 1d
-            if trend_bias_1d > 0 and price > highest_20[i]:
+            # Long entry: price breaks above Donchian high with uptrend on both 1d and 1w
+            if trend_bias_1d > 0 and trend_bias_1w > 0 and price > highest_20[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with downtrend on 1d
-            elif trend_bias_1d < 0 and price < lowest_20[i]:
+            # Short entry: price breaks below Donchian low with downtrend on both 1d and 1w
+            elif trend_bias_1d < 0 and trend_bias_1w < 0 and price < lowest_20[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -136,5 +146,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
