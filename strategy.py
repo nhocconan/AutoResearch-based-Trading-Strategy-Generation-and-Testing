@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #3486: 4h Donchian Breakout + 1d Trend Filter + Volume Spike + ATR Stop
-HYPOTHESIS: 4h Donchian(20) breakouts with volume confirmation and 1d EMA(50) trend alignment capture medium-term momentum. 4h timeframe reduces trade frequency vs lower TFs, minimizing fee drag. Works in bull (trend continuation) and bear (mean reversion from extremes) via price channels. Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #3486: 4h Donchian(20) Breakout + 1d EMA(50) Trend + Volume Spike (4h) + ATR Stoploss
+HYPOTHESIS: 4h Donchian breakouts with volume confirmation and 1d EMA trend filter capture medium-term momentum.
+Works in bull markets via trend continuation and bear markets via mean reversion from extremes (price re-enters channel).
+Target: 75-200 total trades over 4 years (19-50/year). Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
@@ -27,7 +29,7 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === 4h Indicators: Donchian channels (20-period) ===
+    # === 4h Indicators: Donchian channels (20-period) for entry/exit ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
@@ -46,7 +48,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.25  # 25% position size (discrete level)
     
     # Position tracking state variables
     in_position = False
@@ -104,7 +106,6 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # 4h Donchian breakout: long above highest, short below lowest
             # 1d EMA trend filter: only long above EMA, short below EMA
             price_vs_ema = price - ema_1d_aligned[i]
             
