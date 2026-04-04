@@ -5,6 +5,7 @@ Hypothesis: 1d Donchian(20) breakout with 1w EMA50 as trend filter and volume co
 Uses weekly EMA50 for strong trend identification that works in both bull/bear markets.
 Volume spike (2.0x 20-period MA) confirms breakout strength.
 Designed for 30-100 total trades over 4 years with discrete sizing (0.25) to minimize fee drag.
+Primary timeframe: 1d, HTF: 1w.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
