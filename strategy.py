@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-exp_6537_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA200 as trend filter and volume confirmation.
-In bull markets: long when price > 1d EMA200 and breaks above Donchian high with volume > 2.0x MA.
-In bear markets: short when price < 1d EMA200 and breaks below Donchian low with volume > 2.0x MA.
-Uses volume spike (2.0x) to confirm breakout strength and avoid false signals.
-Designed for low-frequency, high-conviction trades targeting 75-200 total trades over 4 years.
+exp_6537_4h_donchian20_1d_ema_vol_v2
+Hypothesis: 4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation (2.5x).
+Uses higher volume threshold (2.5x) to reduce false breakouts and lower trade frequency.
+In bull markets: long when price > 1d EMA200 and breaks above Donchian high with volume > 2.5x MA.
+In bear markets: short when price < 1d EMA200 and breaks below Donchian low with volume > 2.5x MA.
+Designed for 75-200 total trades over 4 years with improved win rate via volume filter.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6537_4h_donchian20_1d_ema_vol_v1"
+name = "exp_6537_4h_donchian20_1d_ema_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,7 +20,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 200
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 2.0  # volume must be 2.0x its 20-period MA for confirmation
+VOL_THRESHOLD = 2.5  # Increased from 2.0 to reduce trade frequency
 SIGNAL_SIZE = 0.25   # 25% position size
 
 def generate_signals(prices):
