@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #2739: 6h Donchian(20) breakout + 12h EMA trend + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts with 12h EMA trend alignment and volume spikes capture
-institutional participation with lower frequency than 1h/4h strategies. Uses 12h for signal
-direction, 6h only for entry timing. Target: 75-150 total trades over 4 years.
+Experiment #2739: 6h Camarilla Pivot Breakout with 12h Trend Filter and Volume Confirmation
+HYPOTHESIS: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) from 12h/1d
+combined with 6h volume spikes and 12h EMA trend filter capture institutional order flow
+at key support/resistance. Works in both bull/bear by fading extremes in ranging markets
+and continuing trends at extreme levels. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2739_6h_donchian20_12h_ema_vol_v1"
+name = "exp_2739_6h_camarilla_12h_ema_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -21,21 +22,38 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for EMA trend (Call ONCE before loop) ===
+    # === HTF: 12h data for Camarilla pivots and EMA trend (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     
-    # Calculate 12h EMA(50)
+    # Calculate 12h EMA(50) for trend filter
     ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
     trend_12h = np.where(close_12h > ema_12h, 1, -1)
     trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
-    # === 6h Indicators: Donchian(20) channels, Volume MA(20) ===
-    # Donchian channels (20-period high/low)
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Calculate Camarilla pivot levels for 12h (using previous 12h bar's OHLC)
+    # Camarilla: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
+    # We use the previous completed 12h bar to avoid look-ahead
+    prev_close_12h = np.roll(close_12h, 1)
+    prev_high_12h = np.roll(high_12h, 1)
+    prev_low_12h = np.roll(low_12h, 1)
+    # First value will be invalid (rolled), but alignment will handle this
     
-    # Volume MA for spike detection
+    # Calculate Camarilla levels
+    camarilla_r4 = prev_close_12h + ((prev_high_12h - prev_low_12h) * 1.1 / 2)
+    camarilla_r3 = prev_close_12h + ((prev_high_12h - prev_low_12h) * 1.1 / 4)
+    camarilla_s3 = prev_close_12h - ((prev_high_12h - prev_low_12h) * 1.1 / 4)
+    camarilla_s4 = prev_close_12h - ((prev_high_12h - prev_low_12h) * 1.1 / 2)
+    
+    # Align Camarilla levels to 6h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_s4)
+    
+    # === 6h Indicators: Volume MA for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -56,7 +74,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(trend_12h_aligned[i]) or
-            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
@@ -68,15 +87,15 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2*ATR below highest since entry (using Donchian width as ATR proxy)
-                donchian_width = highest_20[i] - lowest_20[i]
-                atr_estimate = donchian_width * 0.15  # approximate ATR from channel width
+                # Exit if price drops 2*ATR below highest since entry (using Camarilla width as ATR proxy)
+                camarilla_width = camarilla_r4_aligned[i] - camarilla_s4_aligned[i]
+                atr_estimate = camarilla_width * 0.15  # approximate ATR from pivot width
                 if price < highest_since_entry - 2.0 * atr_estimate:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below Donchian low (mean reversion)
-                elif price < lowest_20[i]:
+                # Exit if price breaks below S3 (mean reversion target)
+                elif price < camarilla_s3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -85,14 +104,14 @@ def generate_signals(prices):
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 # Exit if price rises 2*ATR above lowest since entry
-                donchian_width = highest_20[i] - lowest_20[i]
-                atr_estimate = donchian_width * 0.15
+                camarilla_width = camarilla_r4_aligned[i] - camarilla_s4_aligned[i]
+                atr_estimate = camarilla_width * 0.15
                 if price > lowest_since_entry + 2.0 * atr_estimate:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above Donchian high (mean reversion)
-                elif price > highest_20[i]:
+                # Exit if price breaks above R3 (mean reversion target)
+                elif price > camarilla_r3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -104,20 +123,38 @@ def generate_signals(prices):
         # Require 12h trend alignment for bias filter
         trend_bias = trend_12h_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 1.8x average to reduce frequency)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Long entry: price breaks above Donchian high with uptrend on 12h
-            if trend_bias > 0 and price > highest_20[i]:
+            # Mean reversion entries at extreme levels (R3/S3) - fade the move
+            # Long: price drops to S3 with downtrend on 12h (expect bounce)
+            if trend_bias < 0 and price <= camarilla_s3_aligned[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with downtrend on 12h
-            elif trend_bias < 0 and price < lowest_20[i]:
+            # Short: price rises to R3 with uptrend on 12h (expect pullback)
+            elif trend_bias > 0 and price >= camarilla_r3_aligned[i]:
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                signals[i] = -SIZE
+            # Breakout entries at extreme levels (R4/S4) - continue the move
+            # Long: price breaks above R4 with uptrend on 12h
+            elif trend_bias > 0 and price >= camarilla_r4_aligned[i]:
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                signals[i] = SIZE
+            # Short: price breaks below S4 with downtrend on 12h
+            elif trend_bias < 0 and price <= camarilla_s4_aligned[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -130,5 +167,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
