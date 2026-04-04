@@ -1,45 +1,45 @@
 #!/usr/bin/env python3
 """
-exp_6583_4h_donchian20_12h_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-Uses 4h primary timeframe (target: 75-200 total trades over 4 years). 12h EMA50 provides
-clear trend direction that works in both bull and bear markets (above EMA50 = bullish bias,
-below = bearish bias). Volume confirmation ensures breakouts have conviction.
-Discrete sizing (0.25) minimizes fee churn. Includes ATR-based stoploss and time-based exit.
+exp_6584_1d_donchian20_1w_hma_vol_v1
+Hypothesis: 1d Donchian(20) breakout with 1w HMA21 trend filter and volume confirmation.
+Primary timeframe = 1d (target: 30-100 total trades over 4 years). 1w HMA21 provides
+smooth trend direction that works in both bull and bear markets. Volume confirmation
+ensures breakouts have conviction. Discrete sizing (0.25) minimizes fee churn.
+Includes ATR-based stoploss and max hold of 20 bars (~20 days).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6583_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_6584_1d_donchian20_1w_hma_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+HMA_PERIOD = 21
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0  # Volume threshold for confirmation
 SIGNAL_SIZE = 0.25      # 25% position size
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5  # Stoploss at 2.5 * ATR
-MAX_HOLD_BARS = 30      # Max hold: ~30 * 4h = 5 days
+MAX_HOLD_BARS = 20      # Max hold: ~20 days
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 12h for EMA50
-    df_12h = get_htf_data(prices, '12h')
+    # Load HTF data ONCE before loop - using 1w for HMA21
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False).mean().values
+    # Calculate 1w HMA21
+    close_1w = df_1w['close'].values
+    hma_1w = calculate_hma(close_1w, HMA_PERIOD)
     
-    # Align to LTF (4h) with shift(1) for completed bars only
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align to LTF (1d) with shift(1) for completed bars only
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -73,7 +73,7 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(hma_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -98,23 +98,23 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Determine trend bias from 12h EMA50
-        # Price above EMA50: bullish bias (favor longs)
-        # Price below EMA50: bearish bias (favor shorts)
-        bullish_bias = close[i] > ema_12h_aligned[i]
-        bearish_bias = close[i] < ema_12h_aligned[i]
+        # Determine trend bias from 1w HMA21
+        # Price above HMA: bullish bias (favor longs)
+        # Price below HMA: bearish bias (favor shorts)
+        bullish_bias = close[i] > hma_1w_aligned[i]
+        bearish_bias = close[i] < hma_1w_aligned[i]
         
         # Long conditions: 
         # 1. Break above Donchian HIGH (breakout)
         # 2. Volume confirmation
-        # 3. Bullish bias from 12h EMA50
+        # 3. Bullish bias from 1w HMA21
         long_breakout = close[i] > donchian_high[i-1]
         long_volume = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Short conditions:
         # 1. Break below Donchian LOW (breakdown)
         # 2. Volume confirmation
-        # 3. Bearish bias from 12h EMA50
+        # 3. Bearish bias from 1w HMA21
         short_breakout = close[i] < donchian_low[i-1]
         short_volume = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
@@ -137,3 +137,20 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+def calculate_hma(values, period):
+    """Calculate Hull Moving Average"""
+    if len(values) < period:
+        return np.full_like(values, np.nan)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    # WMA of half period
+    wma_half = pd.Series(values).ewm(span=half_period, adjust=False).mean().values
+    # WMA of full period
+    wma_full = pd.Series(values).ewm(span=period, adjust=False).mean().values
+    # Raw HMA
+    raw_hma = 2 * wma_half - wma_full
+    # Final HMA (WMA of raw with sqrt period)
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
+    return hma
