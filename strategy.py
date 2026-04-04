@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4339: 6h Camarilla Pivot + 12h Trend + Volume Spike
-HYPOTHESIS: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) from 12h timeframe provide institutional support/resistance. 
-In ranging markets (ADX<25): fade extreme moves at R3/S3 with volume confirmation. 
-In trending markets (ADX>=25): breakout continuation at R4/S4 with volume spike. 
-Uses 12h for pivot calculation (more stable than 1d) and 6h for execution. 
-Target: 75-150 total trades over 4 years (19-37/year) with position size 0.25.
-Works in bull via R4 breakouts, in bear via S4 breakdowns, and in range via R3/S3 reversals.
+Experiment #4341: 4h Donchian20 + 1d EMA + Volume Spike + ATR Stoploss
+HYPOTHESIS: Donchian(20) breakouts on 4h capture intermediate-term momentum when aligned with 1d EMA trend and confirmed by volume spikes (>1.5x average). Works in bull via upside breakouts above rising EMA, in bear via downside breakouts below falling EMA. Volume confirmation filters false breakouts. ATR-based trailing stop limits drawdown. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4339_6h_camarilla_12h_trend_vol_v1"
-timeframe = "6h"
+name = "exp_4341_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,92 +23,27 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 12h data for Camarilla pivots and ADX ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 2:
-        # Calculate typical price for pivot
-        typical_price = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3.0
-        
-        # Camarilla pivot levels (based on previous day's range)
-        # R4 = Close + ((High - Low) * 1.1/2)
-        # R3 = Close + ((High - Low) * 1.1/4)
-        # S3 = Close - ((High - Low) * 1.1/4)
-        # S4 = Close - ((High - Low) * 1.1/2)
-        prev_close = df_12h['close'].shift(1)
-        prev_high = df_12h['high'].shift(1)
-        prev_low = df_12h['low'].shift(1)
-        prev_range = prev_high - prev_low
-        
-        r4 = prev_close + (prev_range * 1.1 / 2.0)
-        r3 = prev_close + (prev_range * 1.1 / 4.0)
-        s3 = prev_close - (prev_range * 1.1 / 4.0)
-        s4 = prev_close - (prev_range * 1.1 / 2.0)
-        
-        # Calculate ADX for regime filter (12h)
-        period = 14
-        alpha = 1.0 / period
-        
-        # True Range components
-        high_low = df_12h['high'] - df_12h['low']
-        high_close = np.abs(df_12h['high'] - df_12h['close'].shift(1))
-        low_close = np.abs(df_12h['low'] - df_12h['close'].shift(1))
-        tr_12h = np.maximum(high_low, np.maximum(high_close, low_close))
-        
-        # Directional Movement
-        up_move = df_12h['high'].diff()
-        down_move = df_12h['low'].diff().mul(-1)
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        # Smoothed values
-        atr_12h = np.zeros(len(df_12h))
-        plus_dm_smooth = np.zeros(len(df_12h))
-        minus_dm_smooth = np.zeros(len(df_12h))
-        
-        # Initial values
-        if len(df_12h) >= period:
-            atr_12h[period-1] = np.mean(tr_12h.iloc[:period])
-            plus_dm_smooth[period-1] = np.mean(plus_dm.iloc[:period])
-            minus_dm_smooth[period-1] = np.mean(minus_dm.iloc[:period])
-            
-            # Wilder's smoothing
-            for i in range(period, len(df_12h)):
-                atr_12h[i] = atr_12h[i-1] * (1 - alpha) + alpha * tr_12h.iloc[i]
-                plus_dm_smooth[i] = plus_dm_smooth[i-1] * (1 - alpha) + alpha * plus_dm.iloc[i]
-                minus_dm_smooth[i] = minus_dm_smooth[i-1] * (1 - alpha) + alpha * minus_dm.iloc[i]
-        
-        # Avoid division by zero
-        plus_di_12h = np.where(atr_12h != 0, 100 * plus_dm_smooth / atr_12h, 0)
-        minus_di_12h = np.where(atr_12h != 0, 100 * minus_dm_smooth / atr_12h, 0)
-        dx_12h = np.where((plus_di_12h + minus_di_12h) != 0, 
-                          100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h), 0)
-        
-        adx_12h = np.full(len(df_12h), np.nan)
-        if len(df_12h) >= 2*period-1:
-            adx_12h[2*period-2] = np.nanmean(dx_12h.iloc[period-1:2*period-1])
-            for i in range(2*period-1, len(df_12h)):
-                adx_12h[i] = adx_12h[i-1] * (1 - alpha) + alpha * dx_12h.iloc[i]
-        
-        # Align HTF arrays to LTF
-        r4_aligned = align_htf_to_ltf(prices, df_12h, r4.values)
-        r3_aligned = align_htf_to_ltf(prices, df_12h, r3.values)
-        s3_aligned = align_htf_to_ltf(prices, df_12h, s3.values)
-        s4_aligned = align_htf_to_ltf(prices, df_12h, s4.values)
-        adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # === Precompute HTF: 1d EMA for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        r4_aligned = np.full(n, np.nan)
-        r3_aligned = np.full(n, np.nan)
-        s3_aligned = np.full(n, np.nan)
-        s4_aligned = np.full(n, np.nan)
-        adx_12h_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Donchian Channels (20) ===
+    # Donchian Upper = max(high, lookback=20)
+    # Donchian Lower = min(low, lookback=20)
+    lookback = 20
+    donch_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    donch_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    
+    # === 4h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -131,13 +61,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 14, 2*14)  # vol MA, ATR, ADX
+    warmup = max(lookback, 20, 14, 50)  # Donchian, vol MA, ATR, EMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(s4_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or 
-            np.isnan(adx_12h_aligned[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -154,8 +83,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -163,8 +92,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -176,39 +105,34 @@ def generate_signals(prices):
         # Require volume confirmation (> 1.5x average) to filter noise
         volume_confirm = vol_ratio[i] > 1.5
         
-        # Regime filter: ADX < 25 = ranging (mean reversion), ADX >= 25 = trending (breakout)
-        ranging_market = adx_12h_aligned[i] < 25.0
-        trending_market = adx_12h_aligned[i] >= 25.0
+        # Trend filter: price relative to 1d EMA
+        price_above_ema = price > ema_1d_aligned[i]
+        price_below_ema = price < ema_1d_aligned[i]
         
-        if volume_confirm:
-            if ranging_market:
-                # Mean reversion at extreme levels (R3/S3)
-                long_entry = price <= s3_aligned[i]  # Price at or below S3
-                short_entry = price >= r3_aligned[i]  # Price at or above R3
-            elif trending_market:
-                # Breakout continuation at stronger levels (R4/S4)
-                long_entry = price >= r4_aligned[i]  # Price breaks above R4
-                short_entry = price <= s4_aligned[i]  # Price breaks below S4
-            else:
-                long_entry = False
-                short_entry = False
-            
-            if long_entry:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = SIZE
-            elif short_entry:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = -SIZE
-            else:
-                signals[i] = 0.0
+        # Donchian breakout conditions
+        breakout_up = price > donch_high[i-1]  # Break above previous period's high
+        breakout_down = price < donch_low[i-1]  # Break below previous period's low
+        
+        # Long conditions: Upside breakout + price above 1d EMA + volume
+        long_entry = breakout_up and price_above_ema and volume_confirm
+        
+        # Short conditions: Downside breakout + price below 1d EMA + volume
+        short_entry = breakout_down and price_below_ema and volume_confirm
+        
+        if long_entry:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = SIZE
+        elif short_entry:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = -SIZE
         else:
             signals[i] = 0.0
     
