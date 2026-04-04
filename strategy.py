@@ -1,34 +1,33 @@
 #!/usr/bin/env python3
 """
-exp_6705_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
-In bull markets: buy breakouts above 20-period high when price > 1d EMA50 and volume > 1.5x MA.
-In bear markets: sell breakdowns below 20-period low when price < 1d EMA50 and volume > 1.5x MA.
-Uses discrete position sizing (0.25) to minimize fee churn. Designed for 12h timeframe to capture
-medium-term swings with <30 trades/year, avoiding overtrading while maintaining edge in both
-regimes via trend filter. ATR-based stoploss manages risk.
+exp_6706_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
+Uses 20-period Donchian channels on 4h for breakout signals, filtered by 1-day EMA50 trend direction.
+Volume spike confirms institutional participation. ATR-based stoploss manages risk.
+Designed for 4h timeframe to capture medium-term swings with tight entry conditions
+(~25-50 trades/year) to minimize fee drag in both bull and bear markets.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6705_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_6706_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5
+VOL_SPIKE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop - using 1d for EMA trend filter
@@ -45,9 +44,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period high/low)
-    high_ma = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    low_ma = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    donchian_upper = highest_high
+    donchian_lower = lowest_low
     
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
@@ -84,16 +85,16 @@ def generate_signals(prices):
                 position = 0
                 continue
                 
-        # Determine trend from 1d EMA50
+        # Determine trend from 1-day EMA50
         uptrend = close[i] > ema_1d_aligned[i]
         downtrend = close[i] < ema_1d_aligned[i]
         
         # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_SPIKE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Breakout/breakdown signals
-        long_breakout = uptrend and (close[i] > high_ma[i]) and vol_confirmed
-        short_breakdown = downtrend and (close[i] < low_ma[i]) and vol_confirmed
+        # Donchian breakout signals
+        long_breakout = close[i] > donchian_upper[i-1] and uptrend and vol_confirmed
+        short_breakout = close[i] < donchian_lower[i-1] and downtrend and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
@@ -101,7 +102,7 @@ def generate_signals(prices):
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-            elif short_breakdown:
+            elif short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
