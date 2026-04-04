@@ -2,9 +2,10 @@
 """
 Experiment #4196: 12h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
 HYPOTHESIS: Donchian channel breakouts on 12h timeframe capture momentum when aligned with 1d EMA(50) trend
-and confirmed by volume (>1.8x average). The 1d EMA provides long-term trend bias that adapts to
-both bull and bear markets by identifying the prevailing direction. Discrete position sizing (0.25) limits
-fee churn, targeting 50-150 total trades over 4 years (12-37/year).
+and confirmed by volume (>1.5x average). The 1d EMA provides long-term trend bias that adapts to
+both bull and bear markets. Discrete position sizing (0.25) limits fee churn, targeting 75-150 total trades
+over 4 years (19-37/year). Works in bull markets via breakouts with trend, and in bear markets via
+short breakouts against trend.
 """
 
 import numpy as np
@@ -97,8 +98,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 1.5x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.5
         
         if volume_confirm:
             # Donchian breakout conditions
