@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #2350: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
+Experiment #2350: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
 HYPOTHESIS: Daily Donchian breakouts with weekly trend alignment and volume spikes capture 
 institutional participation during trend acceleration. Works in bull markets (breakouts with volume) 
 and bear markets (breakdowns with volume). Uses discrete position sizing (0.25) to limit fee drag 
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2350_1d_donchian20_1w_hma_vol_v1"
+name = "exp_2350_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -22,24 +22,13 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
+    # === HTF: 1w data for EMA trend (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate 1w HMA(21)
-    def calculate_hma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
-        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
-        raw_hma = 2 * wma_half - wma_full
-        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
-        return hma
-    
-    hma_1w = calculate_hma(close_1w, 21)
-    trend_1w = np.where(close_1w > hma_1w, 1, -1)
+    # Calculate 1w EMA(50)
+    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1w = np.where(close_1w > ema_1w, 1, -1)
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
     # === 1d Indicators: Donchian(20) channels, Volume MA(20) ===
@@ -142,3 +131,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
