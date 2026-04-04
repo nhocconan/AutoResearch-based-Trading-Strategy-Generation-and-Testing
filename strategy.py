@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #4650: 1d Donchian(20) Breakout from 1w HTF + Volume Confirmation + ATR Stoploss
-HYPOTHESIS: Daily price breaking Donchian(20) channels calculated from prior 1w data with volume confirmation (>1.5x avg) captures strong momentum breakouts across market regimes. Uses 1w HTF for structure, discrete sizing (0.25), and ATR trailing stop (2.0x). Target: 7-25 trades/year on 1d timeframe.
+Experiment #4651: 6h Donchian(20) Breakout + 1d Camarilla Pivot Fade + Volume Confirmation
+HYPOTHESIS: 6h price breaking Donchian(20) channels (from prior 20 1d bars) with volume confirmation captures momentum. 
+Fade at 1d Camarilla R3/S3 levels for mean reversion in ranging markets. Works in bull (breakouts) and bear (fades at pivot resistance/support).
+Target: 12-37 trades/year on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4650_1d_donchian20_1w_vol_v1"
-timeframe = "1d"
+name = "exp_4651_6h_donchian20_camarilla_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,36 +21,63 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1w data for Donchian channels
-    df_1w = get_htf_data(prices, '1w')
+    # Precompute HTF: 1d data for Donchian and Camarilla
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Donchian(20) from prior 1w OHLC (shifted by 1 to avoid look-ahead)
-    if len(df_1w) >= 20:
-        # Use prior 20 weeks' high/low (shifted by 1)
-        ph = np.concatenate([[np.nan] * 20, df_1w['high'].values[:-20]])  # prior 20 weeks high
-        pl = np.concatenate([[np.nan] * 20, df_1w['low'].values[:-20]])   # prior 20 weeks low
+    # === 1d Indicators: Donchian(20) from prior 20 days ===
+    if len(df_1d) >= 20:
+        # Use prior 20 days' high/low (shifted by 1)
+        ph = np.concatenate([[np.nan] * 20, df_1d['high'].values[:-20]])  # prior 20 days high
+        pl = np.concatenate([[np.nan] * 20, df_1d['low'].values[:-20]])   # prior 20 days low
         
-        # Rolling max/min of prior 20 weeks
+        # Rolling max/min of prior 20 days
         donchian_high = pd.Series(ph).rolling(window=20, min_periods=20).max().values
         donchian_low = pd.Series(pl).rolling(window=20, min_periods=20).min().values
     else:
-        donchian_high = np.full(n, np.nan)
-        donchian_low = np.full(n, np.nan)
+        donchian_high = np.full(len(df_1d), np.nan)
+        donchian_low = np.full(len(df_1d), np.nan)
     
-    # Align Donchian levels to 1d timeframe
+    # === 1d Indicators: Camarilla Pivot Levels (from prior 1d OHLC) ===
+    if len(df_1d) >= 1:
+        # Prior day's OHLC (shifted by 1 to avoid look-ahead)
+        ph_1d = np.concatenate([[np.nan], df_1d['high'].values[:-1]])
+        pl_1d = np.concatenate([[np.nan], df_1d['low'].values[:-1]])
+        pc_1d = np.concatenate([[np.nan], df_1d['close'].values[:-1]])
+        
+        # Camarilla levels: based on prior day's range
+        rng = ph_1d - pl_1d
+        camarilla_h5 = pc_1d + 1.1 * rng / 2  # R4 equivalent
+        camarilla_h4 = pc_1d + 1.1 * rng / 4  # R3
+        camarilla_h3 = pc_1d + 1.1 * rng / 6  # R2
+        camarilla_l3 = pc_1d - 1.1 * rng / 6  # S2
+        camarilla_l4 = pc_1d - 1.1 * rng / 4  # S3
+        camarilla_l5 = pc_1d - 1.1 * rng / 2  # S4
+    else:
+        camarilla_h3 = camarilla_h4 = camarilla_h5 = np.full(len(df_1d), np.nan)
+        camarilla_l3 = camarilla_l4 = camarilla_l5 = np.full(len(df_1d), np.nan)
+    
+    # Align HTF indicators to 6h timeframe
     if len(donchian_high) > 0:
-        dh_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-        dl_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+        dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+        dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+        camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+        camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+        camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+        camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     else:
         dh_aligned = np.full(n, np.nan)
         dl_aligned = np.full(n, np.nan)
+        camarilla_h3_aligned = np.full(n, np.nan)
+        camarilla_h4_aligned = np.full(n, np.nan)
+        camarilla_l3_aligned = np.full(n, np.nan)
+        camarilla_l4_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: Volume MA(20) for confirmation ===
+    # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -108,6 +137,11 @@ def generate_signals(prices):
         breakout_long = price > dh_aligned[i] and vol_breakout
         breakout_short = price < dl_aligned[i] and vol_breakout
         
+        # Fade conditions: price reaches Camarilla H3/L3 (R3/S3) with volume confirmation
+        fade_long = price <= camarilla_l3_aligned[i] and vol_breakout  # Mean reversion long at S3
+        fade_short = price >= camarilla_h3_aligned[i] and vol_breakout  # Mean reversion short at R3
+        
+        # Priority: breakouts take precedence over fades (stronger signal)
         if breakout_long:
             in_position = True
             position_side = 1
@@ -122,9 +156,21 @@ def generate_signals(prices):
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = -SIZE
+        elif fade_long:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = SIZE
+        elif fade_short:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = -SIZE
         else:
             signals[i] = 0.0
     
     return signals
-
-</0>
