@@ -4,6 +4,7 @@ Experiment #5943: 4h Donchian(20) breakout + 12h trend filter + volume confirmat
 HYPOTHESIS: Donchian breakouts on 4h aligned with 12h trend (price vs EMA50) capture sustained moves.
 Volume >1.5x average confirms breakout strength. ATR trailing stop manages risk.
 Designed for fewer trades (target 75-200/4 years) to reduce fee drag and work in both bull/bear markets.
+Uses 12h HTF for trend filter to reduce noise and false breakouts.
 """
 
 import numpy as np
