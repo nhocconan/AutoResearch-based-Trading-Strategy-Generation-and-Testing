@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-exp_6468_12h_donchian20_1w_pivot_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1w pivot direction filter and volume confirmation.
-Uses weekly pivot points to determine bias: long only when price above weekly pivot,
-short only when below. Volume confirmation filters weak breakouts.
-Target: 75-200 trades over 4 years (19-50/year).
-Works in bull (breakouts with volume) and bear (short breakdowns with volume).
+exp_6468_12h_donchian20_1w_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
+Uses 1w EMA for stronger trend alignment to reduce whipsaw in bear markets. Volume confirmation filters false breakouts.
+Target: 50-150 trades over 4 years (12-37/year). Designed for 12h timeframe with HTF=1w.
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6468_12h_donchian20_1w_pivot_vol_v1"
+name = "exp_6468_12h_donchian20_1w_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 1.8  # volume must be 1.8x its 20-period MA
+VOL_THRESHOLD = 1.8  # volume must be 1.8x its 20-period MA (stricter for fewer trades)
 SIGNAL_SIZE = 0.25   # 25% position size
 
 def generate_signals(prices):
@@ -26,19 +25,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop: weekly for pivot bias
+    # Load HTF data ONCE before loop (1w for trend filter)
     df_1w = get_htf_data(prices, '1w')
-    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    pivot = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pivot - low_1w
-    s1 = 2 * pivot - high_1w
+    # Calculate 1w EMA(50) on close
+    close_1w = pd.Series(df_1w['close'].values)
+    ema_1w = close_1w.ewm(span=EMA_PERIOD, min_periods=EMA_PERIOD, adjust=False).mean().values
     # Align to LTF (12h) with shift(1) for completed bars only
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -58,21 +51,21 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if pivot not available (first bar)
-        if np.isnan(pivot_aligned[i]):
+        # Skip if EMA not available (first EMA_PERIOD bars)
+        if np.isnan(ema_1w_aligned[i]):
             continue
             
-        # Long conditions: price breaks above Donchian HIGH + above weekly pivot + volume spike
+        # Long conditions: price breaks above Donchian HIGH + above 1w EMA + volume spike
         long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
-        long_bias = close[i] > pivot_aligned[i]        # price above weekly pivot (bullish bias)
+        long_trend = close[i] > ema_1w_aligned[i]      # price above 1w EMA
         long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Short conditions: price breaks below Donchian LOW + below weekly pivot + volume spike
+        # Short conditions: price breaks below Donchian LOW + below 1w EMA + volume spike
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
-        short_bias = close[i] < pivot_aligned[i]       # price below weekly pivot (bearish bias)
+        short_trend = close[i] < ema_1w_aligned[i]     # price below 1w EMA
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Exit conditions: ATR-based stoploss approximation
@@ -99,11 +92,11 @@ def generate_signals(prices):
         
         # Enter new positions only if flat
         if position == 0:
-            if long_breakout and long_bias and long_volume:
+            if long_breakout and long_trend and long_volume:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-            elif short_breakout and short_bias and short_volume:
+            elif short_breakout and short_trend and short_volume:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
