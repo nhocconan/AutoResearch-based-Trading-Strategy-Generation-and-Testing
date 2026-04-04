@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #2649: 4h Donchian(20) breakout + 1d/1w EMA trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts with 1d/1w trend alignment and volume spikes capture
-institutional participation while minimizing overtrading. Uses 1d/1w for signal direction,
-4h only for entry timing. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #2651: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts aligned with 1d weekly pivot bias (price above/below weekly pivot) 
+and volume confirmation capture institutional participation. Uses 1d for signal direction, 6h only 
+for entry timing. Target: 75-150 total trades over 4 years. Works in bull/bear via pivot bias filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2649_4h_donchian20_1d_1w_ema_vol_v1"
-timeframe = "4h"
+name = "exp_2651_6h_donchian20_1d_weekly_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,25 +21,34 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
+    # === HTF: 1d data for weekly pivot calculation (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(50)
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # Calculate weekly pivot points from prior week (using prior 5 trading days)
+    # Need at least 5 days of data
+    if len(high_1d) < 5:
+        # Not enough data, return zeros
+        return np.zeros(n)
     
-    # === HTF: 1w data for EMA trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Rolling window of 5 days (1 week) for high, low, close
+    # Weekly high = max of prior 5 days high
+    weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().shift(1).values
+    # Weekly low = min of prior 5 days low
+    weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().shift(1).values
+    # Weekly close = close of prior 5th day (shift by 5 then get last of window)
+    weekly_close = pd.Series(close_1d).rolling(window=5, min_periods=5).apply(lambda x: x[-1], raw=True).shift(1).values
     
-    # Calculate 1w EMA(50)
-    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1w = np.where(close_1w > ema_1w, 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
-    # === 4h Indicators: Donchian(20) channels, Volume MA(20) ===
+    # Bias: 1 if price > weekly_pivot (bullish bias), -1 if price < weekly_pivot (bearish bias)
+    bias_1d = np.where(close_1d > weekly_pivot, 1, -1)
+    bias_1d_aligned = align_htf_to_ltf(prices, df_1d, bias_1d)
+    
+    # === 6h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -60,11 +69,11 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 50  # sufficient for all indicators
+    warmup = 50  # sufficient for all indicators (20 + 30 buffer)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(trend_1d_aligned[i]) or np.isnan(trend_1w_aligned[i]) or
+        if (np.isnan(bias_1d_aligned[i]) or
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
@@ -110,29 +119,26 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require both 1d and 1w trend alignment for bias filter (more stringent)
-        trend_bias_1d = trend_1d_aligned[i]
-        trend_bias_1w = trend_1w_aligned[i]
-        
-        # Only trade when both timeframes agree
-        if trend_bias_1d == 0 or trend_bias_1w == 0 or trend_bias_1d != trend_bias_1w:
+        # Require 1d weekly pivot bias for direction filter
+        bias = bias_1d_aligned[i]
+        if bias == 0:
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Long entry: price breaks above Donchian high with uptrend on both 1d and 1w
-            if trend_bias_1d > 0 and trend_bias_1w > 0 and price > highest_20[i]:
+            # Long entry: price breaks above Donchian high with bullish bias from weekly pivot
+            if bias > 0 and price > highest_20[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with downtrend on both 1d and 1w
-            elif trend_bias_1d < 0 and trend_bias_1w < 0 and price < lowest_20[i]:
+            # Short entry: price breaks below Donchian low with bearish bias from weekly pivot
+            elif bias < 0 and price < lowest_20[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -145,3 +151,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+}
