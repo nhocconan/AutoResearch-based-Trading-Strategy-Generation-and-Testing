@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-exp_6513_4h_donchian20_12h_pivot_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 12h Camarilla pivot direction filter and volume confirmation.
-Uses 12h Camarilla pivot levels (R3, S3) to determine bias: long when price > R3, short when price < S3.
-Donchian(20) breakout provides entry timing in the direction of 12h pivot bias, volume confirmation filters weak breakouts.
-Designed to work in both bull and bear markets by using 12h Camarilla levels as structural support/resistance.
-Target: 75-200 trades over 4 years (19-50/year).
+exp_6511_6h_donchian20_1d_pivot_vol_v1
+Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot levels as directional filter and volume confirmation.
+In bull markets: long when price > 1d pivot and breaks Donchian high with volume.
+In bear markets: short when price < 1d pivot and breaks Donchian low with volume.
+Uses 1d Camarilla pivots (calculated from prior 1d OHLC) to define institutional support/resistance.
+Volume confirmation ensures breakouts have conviction. Designed for low-frequency, high-conviction trades.
+Target: 75-150 total trades over 4 years (19-38/year) to minimize fee drag.
 """
+
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6513_4h_donchian20_12h_pivot_vol_v1"
-timeframe = "4h"
+name = "exp_6511_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
@@ -26,22 +28,32 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 12h for Camarilla pivot levels
-    df_12h = get_htf_data(prices, '12h')
+    # Load HTF data ONCE before loop - using 1d for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h Camarilla pivot levels (based on previous 12h bar's OHLC)
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1d Camarilla pivot levels (based on prior day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Camarilla levels: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
-    camarilla_high = high_12h - low_12h
-    r3 = close_12h + camarilla_high * 1.1 / 4
-    s3 = close_12h - camarilla_high * 1.1 / 4
+    # Camarilla levels: based on previous day's range
+    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
+    # S4 = close - 1.5*(high-low), S3 = close - 1.1*(high-low), etc.
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    range_hl = high_1d - low_1d
     
-    # Align to LTF (4h) with shift(1) for completed bars only
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    # Key levels: R3, S3 for fade; R4, S4 for breakout
+    r3 = close_1d + 1.1 * range_hl
+    s3 = close_1d - 1.1 * range_hl
+    r4 = close_1d + 1.5 * range_hl
+    s4 = close_1d - 1.5 * range_hl
+    
+    # Align to LTF (6h) with shift(1) for completed bars only
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -64,33 +76,35 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if pivot data not available
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        # Skip if HTF data not available
+        if np.isnan(pivot_aligned[i]):
             continue
             
-        # Determine bias from 12h Camarilla levels
-        long_bias = close[i] > r3_aligned[i]  # price above R3 = bullish bias
-        short_bias = close[i] < s3_aligned[i]  # price below S3 = bearish bias
-        
-        # Long conditions: price breaks above Donchian HIGH + long bias + volume spike
+        # Long conditions: price > pivot (bullish bias) + breaks above Donchian HIGH + volume spike
+        long_bias = close[i] > pivot_aligned[i]  # price above daily pivot (bullish)
         long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
         long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Short conditions: price breaks below Donchian LOW + short bias + volume spike
+        # Short conditions: price < pivot (bearish bias) + breaks below Donchian LOW + volume spike
+        short_bias = close[i] < pivot_aligned[i]  # price below daily pivot (bearish)
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Exit conditions: pivot level reversal
+        # Exit conditions: pivot reversal or midpoint reversal
         if position == 1:  # long position
-            # Exit if price drops below S3 (bearish bias)
-            exit_long = close[i] < s3_aligned[i]
+            # Exit if price drops back below pivot (trend change)
+            exit_long = close[i] < pivot_aligned[i]
+            # Or if price drops below midpoint of channel
+            exit_long = exit_long or close[i] < (donchian_high[i-1] + donchian_low[i-1]) / 2
             if exit_long:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            # Exit if price rises above R3 (bullish bias)
-            exit_short = close[i] > r3_aligned[i]
+            # Exit if price rises back above pivot (trend change)
+            exit_short = close[i] > pivot_aligned[i]
+            # Or if price rises above midpoint of channel
+            exit_short = exit_short or close[i] > (donchian_high[i-1] + donchian_low[i-1]) / 2
             if exit_short:
                 signals[i] = 0.0
                 position = 0
@@ -98,11 +112,11 @@ def generate_signals(prices):
         
         # Enter new positions only if flat
         if position == 0:
-            if long_breakout and long_bias and long_volume:
+            if long_bias and long_breakout and long_volume:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-            elif short_breakout and short_bias and short_volume:
+            elif short_bias and short_breakout and short_volume:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
