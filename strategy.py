@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #3055: 6h Donchian Breakout + Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: 6h Donchian(20) breakouts capture medium-term trends with controlled trade frequency. 
-Weekly pivot direction (price vs 1w Camarilla pivot) filters for institutional bias: only take longs when 
-price > weekly pivot (bullish bias), shorts when price < weekly pivot (bearish bias). Volume spike (>2.0x 
-20-period average) confirms breakout strength. ATR-based trailing stop (2.5x) manages risk. Target: 
-50-150 total trades over 4 years (12-37/year). Designed to work in both bull (trend continuation) and 
+HYPOTHESIS: 6h Donchian(20) breakouts capture medium-term trends. Weekly pivot direction (price vs weekly Camarilla pivot) 
+filters for institutional bias: only take longs when price > weekly pivot (bullish bias), shorts when price < weekly pivot 
+(bearish bias). Volume spike (>2.0x 20-period average) confirms breakout strength. ATR-based trailing stop (2.5x) manages 
+risk. Target: 50-150 total trades over 4 years (12-37/year). Designed to work in both bull (trend continuation) and 
 bear (mean reversion from extremes) markets by using price channels and volatility filters.
 """
 
