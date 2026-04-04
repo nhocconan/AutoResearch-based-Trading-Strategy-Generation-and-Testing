@@ -2,8 +2,8 @@
 """
 Experiment #2793: 4h Donchian(20) breakout + 12h EMA trend + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA trend and volume spikes capture
-strong momentum moves while avoiding whipsaws. The 12h trend filter provides robust bias
-for both bull and bear markets, reducing counter-trend entries. 4h timeframe balances
+strong momentum moves while minimizing whipsaws. The 12h trend filter provides robust
+bias for both bull and bear markets, reducing counter-trend entries. 4h timeframe balances
 trade frequency and trend capture, targeting 75-200 total trades over 4 years.
 """
 
