@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #2856: 12h Donchian(20) Breakout + Volume Spike + 1d Trend Filter
-HYPOTHESIS: Donchian channel breakouts on 12h timeframe capture significant price moves. 
-Volume confirmation ensures breakout legitimacy, while 1d EMA(50) trend filter aligns 
-trades with higher timeframe momentum. This combination reduces false breakouts and 
-works in both bull and bear markets by trading in the direction of the daily trend. 
-Target: 75-150 total trades over 4 years.
+Experiment #2856: 12h Donchian Breakout + Volume Spike + 1d Trend Filter
+HYPOTHESIS: 12h Donchian(20) breakouts with volume confirmation and 1d EMA50 trend filter capture medium-term momentum in both bull and bear markets. The 12h timeframe reduces trade frequency to avoid fee drag while Donchian channels provide objective breakout levels. Volume confirmation ensures breakouts have participation, and 1d trend filter avoids counter-trend trades. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -23,19 +19,22 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(50) for trend
+    # Calculate 1d EMA(50) for trend filter
     ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     trend_1d = np.where(close_1d > ema_1d, 1, -1)  # 1 = uptrend, -1 = downtrend
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     # === 12h Indicators: Donchian(20) channels ===
-    # Calculate rolling max/min for Donchian channels
-    high_roll_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian upper = max(high, lookback=20)
+    # Donchian lower = min(low, lookback=20)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -57,8 +56,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(high_roll_max[i]) or np.isnan(low_roll_min[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or
+            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -76,8 +75,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below Donchian low (trend reversal)
-                elif price < low_roll_min[i]:
+                # Exit if price breaks below Donchian lower (stop loss)
+                elif price < donchian_lower[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -91,8 +90,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above Donchian high (trend reversal)
-                elif price > high_roll_max[i]:
+                # Exit if price breaks above Donchian upper (stop loss)
+                elif price > donchian_upper[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -108,16 +107,16 @@ def generate_signals(prices):
             # Get daily trend bias
             trend_bias = trend_1d_aligned[i]
             
-            # Long entry: price breaks above Donchian high in daily uptrend
-            if trend_bias > 0 and price > high_roll_max[i]:
+            # Long entry: price breaks above Donchian upper in daily uptrend
+            if trend_bias > 0 and price > donchian_upper[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low in daily downtrend
-            elif trend_bias < 0 and price < low_roll_min[i]:
+            # Short entry: price breaks below Donchian lower in daily downtrend
+            elif trend_bias < 0 and price < donchian_lower[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
