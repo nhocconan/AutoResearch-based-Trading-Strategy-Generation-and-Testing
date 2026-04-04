@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4326: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 4h timeframe capture swing momentum when aligned with 1d EMA50 trend (price > EMA50 for longs, < EMA50 for shorts) and confirmed by volume (>2.0x average). Uses 1d EMA for smoother trend filter (less whipsaw than shorter periods) while targeting 75-200 total trades over 4 years (19-50/year). ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 75-200 total trades over 4 years (19-50/year). Works in bull via breakout continuation, in bear via shorting breakdowns.
+Experiment #4327: 6h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 6h timeframe capture swing momentum when aligned with 1d EMA50 trend (price > EMA50 for longs, < EMA50 for shorts) and confirmed by volume (>2.0x average). Uses 1d EMA for smoother trend filter (less whipsaw than shorter periods) while targeting 50-150 total trades over 4 years (12-37/year). ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 50-150 total trades over 4 years (12-37/year). Works in bull via breakout continuation, in bear via shorting breakdowns.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4326_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_4327_6h_donchian20_1d_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,7 +31,7 @@ def generate_signals(prices):
     else:
         ema_1d_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 6h Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -39,12 +39,12 @@ def generate_signals(prices):
     
     donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
