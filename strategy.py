@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #6068: 12h Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1w HMA trend capture medium-term swing moves with proper trend alignment. Volume >1.5x average confirms participation. Works in bull markets (breakouts above rising HMAs) and bear markets (breakdowns below falling HMAs). Target: 50-150 trades over 4 years (12-37/year). Discrete sizing (0.25) minimizes fee drag.
+HYPOTHESIS: 12h Donchian breakouts aligned with 1-week HMA trend capture major swing moves with proper trend alignment. Volume >1.5x average confirms participation. Works in bull markets (breakouts above rising HMA) and bear markets (breakdowns below falling HMA). Target: 50-150 trades over 4 years (12-37/year). Discrete sizing (0.25) minimizes fee drag.
 """
 
 import numpy as np
@@ -25,30 +25,18 @@ def generate_signals(prices):
     # === HTF: 1w data for HMA trend ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 21:
-        # Calculate HMA(21): WMA(2*WMA(n/2) - WMA(n)) where WMA = weighted moving average
-        def wma(arr, period):
-            if len(arr) < period:
-                return np.full_like(arr, np.nan)
-            weights = np.arange(1, period + 1)
-            return np.convolve(arr, weights / weights.sum(), mode='valid')
+        # Hull Moving Average (HMA) calculation
+        def calculate_hma(series, period):
+            half_period = period // 2
+            sqrt_period = int(np.sqrt(period))
+            wma_half = pd.Series(series).ewm(span=half_period, adjust=False).mean()
+            wma_full = pd.Series(series).ewm(span=period, adjust=False).mean()
+            hma_raw = 2 * wma_half - wma_full
+            hma = pd.Series(hma_raw).ewm(span=sqrt_period, adjust=False).mean()
+            return hma.values
         
-        close_1w = df_1w['close'].values
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        
-        wma_half = wma(close_1w, half_len)
-        wma_full = wma(close_1w, 21)
-        wma_sqrt = wma(close_1w, sqrt_len)
-        
-        # Handle array alignment for HMA calculation
-        raw_hma = 2 * wma_half - wma_full
-        hma_1w = wma(raw_hma, sqrt_len)
-        
-        # Pad the beginning with NaN to match original length
-        hma_1w_padded = np.full(len(close_1w), np.nan)
-        hma_1w_padded[(len(close_1w) - len(hma_1w)):] = hma_1w
-        
-        hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_padded)
+        hma_1w = calculate_hma(df_1w['close'].values, 21)
+        hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     else:
         hma_1w_aligned = np.full(n, np.nan)
     
