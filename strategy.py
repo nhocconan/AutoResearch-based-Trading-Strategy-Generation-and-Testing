@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #5275: 6h Williams %R + 1d Volume Spike + 1w Trend Filter
-HYPOTHESIS: On 6h timeframe, Williams %R identifies oversold/overbought conditions, filtered by 1d volume spikes (institutional interest) and 1w EMA50 trend direction. In bull 1w trend (price > EMA50), we go long when %R < -80 and volume > 1.5x 20-period average. In bear 1w trend (price < EMA50), we go short when %R > -20 and volume > 1.5x 20-period average. Uses discrete position sizing (0.25) to balance profit potential with drawdown control. Designed for 15-30 trades/year on 6h timeframe (60-120 total over 4 years) to minimize fee drag. Works in bull markets by buying the dip with volume confirmation and in bear markets by selling the rally with volume confirmation.
+Experiment #5276: 12h Donchian(20) Breakout + 1d EMA50 Trend + Volume Spike
+HYPOTHESIS: On 12h timeframe, Donchian channel breakouts capture strong momentum moves. 
+Filtering by 1d EMA50 ensures we trade with the higher timeframe trend, reducing whipsaws. 
+Volume confirmation (current volume > 1.5 * 20-period average) ensures breakouts have conviction. 
+ATR-based stoploss (signal → 0 when price moves 2*ATR against position) manages risk. 
+Designed for 12-30 trades/year on 12h timeframe (50-120 total over 4 years) to minimize fee drag. 
+Works in bull markets by catching breakouts above upper channel and in bear markets by catching 
+breakdowns below lower channel, while avoiding false breakouts in low-volume or choppy conditions.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5275_6h_williamsr_1d_volspike_1w_trend_v1"
-timeframe = "6h"
+name = "exp_5276_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,33 +23,38 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
     # Precompute session hours once (open_time is already datetime64[ms])
-    hours = pd.DatetimeIndex(open_time).hour
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for trend filter (EMA50) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 50:
-        ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, min_periods=50, adjust=False).mean().shift(1).values
-        ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-    else:
-        ema_50_1w_aligned = np.full(n, np.nan)
-    
-    # === HTF: 1d data for volume spike detection ===
+    # === HTF: 1d data for EMA50 trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 20:
-        vol_ma_20 = pd.Series(df_1d['volume']).rolling(window=20, min_periods=20).mean().shift(1).values
-        vol_ma_20_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_20)
+    if len(df_1d) >= 50:
+        ema_50 = pd.Series(df_1d['close']).ewm(span=50, min_periods=50, adjust=False).mean().shift(1).values
+        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     else:
-        vol_ma_20_aligned = np.full(n, np.nan)
+        ema_50_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Williams %R (14-period) ===
-    # %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    williams_r = (highest_high - close) / (highest_high - lowest_low + 1e-10) * -100
+    # === 12h Indicators: Donchian Channel (20-period) ===
+    # Upper channel: 20-period high
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Lower channel: 20-period low
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === 12h Indicators: ATR (14-period) for stoploss ===
+    # True Range
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # === 12h Indicators: Volume Spike Filter ===
+    # 20-period average volume
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume spike: current volume > 1.5 * 20-period average
+    volume_spike = volume > (1.5 * vol_ma)
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -54,73 +65,79 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     
-    warmup = max(14, 20, 50)  # Williams %R, volume MA, EMA50 warmup
+    warmup = max(20, 50, 14, 20)  # Donchian, EMA50, ATR, volume MA warmup
     
     for i in range(warmup, n):
-        # --- Session Filter: 00-24 UTC (6h timeframe, less restrictive) ---
-        # 6h candles already filter to specific sessions, so we can use full day
+        # --- Session Filter: Avoid low liquidity periods (optional) ---
+        hour = hours[i]
+        # Trade all hours for 12h timeframe (less restrictive)
         
         # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(williams_r[i]) or 
-            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ma_20_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ratio = volume[i] / vol_ma_20_aligned[i] if vol_ma_20_aligned[i] > 0 else 0
+        vol_ok = volume_spike[i] if not np.isnan(volume_spike[i]) else False
         
-        # --- Exit Logic: Close position when Williams %R reverses or volume drops ---
+        # --- Exit Logic: Close position on reversal or stoploss ---
         if in_position:
-            # Check for Williams %R reversal (exit extreme zone)
-            williams_r_extreme_long = williams_r[i] < -80  # Still oversold
-            williams_r_extreme_short = williams_r[i] > -20  # Still overbought
-            
-            # Check volume condition (still elevated)
-            volume_spike = vol_ratio > 1.5
-            
-            # Check trend consistency
-            trend_bullish = price > ema_50_1w_aligned[i]
-            trend_bearish = price < ema_50_1w_aligned[i]
-            
-            # Exit conditions:
-            # 1. Williams %R exits extreme zone (mean reversion signal)
-            # 2. Volume drops below spike level
-            # 3. Trend changes (price crosses 1w EMA50)
+            # Stoploss: 2 * ATR against position
             if position_side > 0:  # Long position
-                if (williams_r[i] >= -80) or (not volume_spike) or (not trend_bullish):
+                stop_price = entry_price - 2.0 * atr[i]
+                if price < stop_price:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                else:
-                    signals[i] = SIZE
+                    continue
+                # Exit on Donchian reversal (price closes below lower channel)
+                if price < donchian_low[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+                # Exit on trend change (price crosses 1d EMA50)
+                if price < ema_50_aligned[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+                signals[i] = SIZE
             else:  # Short position
-                if (williams_r[i] <= -20) or (not volume_spike) or (not trend_bearish):
+                stop_price = entry_price + 2.0 * atr[i]
+                if price > stop_price:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                else:
-                    signals[i] = -SIZE
+                    continue
+                # Exit on Donchian reversal (price closes above upper channel)
+                if price > donchian_high[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+                # Exit on trend change (price crosses 1d EMA50)
+                if price > ema_50_aligned[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+                signals[i] = -SIZE
             continue
         
         # --- New Position Entry Logic ---
-        # Williams %R extreme levels
-        williams_r_oversold = williams_r[i] < -80
-        williams_r_overbought = williams_r[i] > -20
+        # Long entry: price breaks above upper Donchian channel + uptrend + volume spike
+        long_entry = (price > donchian_high[i]) and (price > ema_50_aligned[i]) and vol_ok
+        # Short entry: price breaks below lower Donchian channel + downtrend + volume spike
+        short_entry = (price < donchian_low[i]) and (price < ema_50_aligned[i]) and vol_ok
         
-        # Volume spike confirmation (institutional interest)
-        volume_spike = vol_ratio > 1.5
-        
-        # Trend filter from 1w
-        trend_bullish = price > ema_50_1w_aligned[i]
-        trend_bearish = price < ema_50_1w_aligned[i]
-        
-        # Entry conditions: Williams %R extreme + volume spike + trend alignment
-        if williams_r_oversold and volume_spike and trend_bullish:
+        if long_entry:
             in_position = True
             position_side = 1
             entry_price = close[i]
             signals[i] = SIZE
-        elif williams_r_overbought and volume_spike and trend_bearish:
+        elif short_entry:
             in_position = True
             position_side = -1
             entry_price = close[i]
