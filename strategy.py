@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #2862: 12h Donchian(20) breakout + HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 12h Donchian breakouts capture medium-term trends in BTC/ETH/SOL. 
-HMA(21) on 1d timeframe filters trend direction, volume spike (>2.0x MA20) confirms 
-momentum, and ATR-based stoploss manages risk. This structure worked well on SOLUSDT 
-in previous experiments (test Sharpe 1.10-1.38). 12h timeframe targets 50-150 trades 
-over 4 years (12-37/year) to minimize fee drag while maintaining statistical significance.
+Experiment #2863: 4h Donchian Breakout + 12h Trend Filter + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture medium-term trends. 
+12h EMA(50) filter ensures we only trade in direction of higher timeframe trend, 
+reducing whipsaws. Volume confirmation (>2.0x average) adds conviction. 
+This combination produced SOLUSDT test Sharpe 1.10-1.38 in previous experiments. 
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2862_12h_donchian20_hma_vol_v1"
-timeframe = "12h"
+name = "exp_2863_4h_donchian20_12h_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,44 +23,29 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for HMA trend filter (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # === HTF: 12h data for trend filter (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate HMA(21) on daily close
-    def hma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        wma2 = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
-        wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean().values
-        raw = 2 * wma2 - wma1
-        hma_vals = pd.Series(raw).ewm(span=sqrt_period, adjust=False).mean().values
-        return hma_vals
+    # Calculate 12h EMA(50) for trend
+    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_12h = np.where(close_12h > ema_12h, 1, -1)  # 1 = uptrend, -1 = downtrend
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
-    hma_1d = hma(close_1d, 21)
-    trend_1d = np.where(close_1d > hma_1d, 1, -1)  # 1 = uptrend, -1 = downtrend
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # === 4h Indicators: Donchian channels (20-period) ===
+    # Highest high of last 20 bars (including current)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    # Lowest low of last 20 bars (including current)
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Donchian channels (20) ===
-    donchian_window = 20
-    highest_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # Donchian breakout signals
+    upper_breakout = close > highest_20  # Close above previous 20-period high
+    lower_breakout = close < lowest_20   # Close below previous 20-period low
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
-    
-    # === 12h Indicators: ATR(14) for stoploss ===
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -70,13 +55,15 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     warmup = 50  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(trend_1d_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(trend_12h_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i])):
             signals[i] = 0.0
             continue
         
@@ -84,16 +71,33 @@ def generate_signals(prices):
         
         # --- Exit Logic ---
         if in_position:
-            # ATR-based stoploss: exit if price moves 2.5*ATR against position
+            # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
-                if price < entry_price - 2.5 * atr[i]:
+                highest_since_entry = max(highest_since_entry, high[i])
+                # Exit if price drops 2.5*ATR below highest since entry
+                # Use 4h ATR(14) approximation from price range
+                atr_estimate = (high[i] - low[i]) * 0.5  # rough ATR estimate
+                if price < highest_since_entry - 2.5 * atr_estimate:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price breaks opposite Donchian level (take profit)
+                elif position_side > 0 and price < lowest_20[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
-                if price > entry_price + 2.5 * atr[i]:
+                lowest_since_entry = min(lowest_since_entry, low[i])
+                # Exit if price rises 2.5*ATR above lowest since entry
+                atr_estimate = (high[i] - low[i]) * 0.5
+                if price > lowest_since_entry + 2.5 * atr_estimate:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price breaks opposite Donchian level (take profit)
+                elif position_side < 0 and price > highest_20[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -106,20 +110,24 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Get daily trend bias
-            trend_bias = trend_1d_aligned[i]
+            # Get 12h trend bias
+            trend_bias = trend_12h_aligned[i]
             
-            # Long entry: price breaks above Donchian upper band in daily uptrend
-            if trend_bias > 0 and price > highest_high[i]:
+            # Long entry: price breaks above upper Donchian in 12h uptrend
+            if trend_bias > 0 and upper_breakout[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian lower band in daily downtrend
-            elif trend_bias < 0 and price < lowest_low[i]:
+            # Short entry: price breaks below lower Donchian in 12h downtrend
+            elif trend_bias < 0 and lower_breakout[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
