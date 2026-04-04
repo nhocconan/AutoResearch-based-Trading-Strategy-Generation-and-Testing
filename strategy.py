@@ -2,10 +2,8 @@
 """
 Experiment #2743: 4h Donchian(20) breakout + 12h EMA trend + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts with 12h EMA trend alignment and volume spikes capture
-institutional participation with controlled frequency. Uses 12h for signal direction,
-4h only for entry timing. Target: 75-200 total trades over 4 years (19-50/year).
-Works in bull markets via trend-following breakouts and in bear markets via
-short opportunities on downside breaks with volume confirmation.
+institutional participation with proven edge across BTC/ETH/SOL. Uses 12h for signal
+direction, 4h only for entry timing. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
