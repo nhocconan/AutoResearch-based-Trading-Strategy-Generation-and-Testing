@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4186: 4h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation
-HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture significant momentum moves 
-when aligned with higher timeframe trend (1d EMA50) and confirmed by volume spikes 
-(>1.5x average). Uses discrete position sizing (0.25) to limit fee churn and targets 
-75-200 total trades over 4 years (19-50/year). Works in both bull/bear markets via 
-trend filter that only allows breakouts in direction of higher timeframe trend.
+HYPOTHESIS: Donchian channel breakouts on 4h capture momentum when aligned with 1d trend (EMA50) and confirmed by volume (>1.5x average). Uses discrete position sizing (0.25) to limit fee churn. Targets 75-200 total trades over 4 years. Works in bull/bear markets via trend filter that only allows breakouts in direction of higher timeframe trend.
 """
 
 import numpy as np
@@ -105,7 +101,7 @@ def generate_signals(prices):
             breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
             breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
             
-            # Trend filter: price above HTF EMA = bullish bias, price below = bearish bias
+            # Trend filter: price above/below 1d EMA50
             bullish_trend = price > ema_1d_aligned[i]
             bearish_trend = price < ema_1d_aligned[i]
             
@@ -135,3 +131,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
