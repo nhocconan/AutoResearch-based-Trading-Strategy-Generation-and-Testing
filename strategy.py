@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4223: 4h Donchian(20) breakout + 12h HMA(21) trend filter + volume confirmation
-HYPOTHESIS: Donchian breakouts on 4h timeframe capture medium-term momentum when aligned with 12h HMA21 trend filter (price > HMA21 for longs, < HMA21 for shorts) and confirmed by volume (>1.6x average). Uses 12h for signal direction, 4h for entry timing and execution. ATR-based trailing stop (2.0x) for risk management. Position size 0.25 targets 75-200 total trades over 4 years (19-50/year). Works in both bull and bear by requiring volume confirmation and trend alignment to filter false breakouts.
+Experiment #4223: 4h Donchian(20) breakout + 12h HMA(21) trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 4h timeframe capture swing momentum when aligned with 12h HMA21 trend (price > HMA21 for longs, < HMA21 for shorts) and confirmed by volume (>1.5x average). Uses 12h HMA for direction, 4h only for entry/exit timing. ATR-based trailing stop (2.0x) for risk management. Position size 0.25 targets 75-200 total trades over 4 years (19-50/year). Works in bull via breakout continuation, in bear via shorting breakdowns. HMA provides smoother trend than EMA with less lag.
 """
 
 import numpy as np
@@ -27,32 +27,24 @@ def generate_signals(prices):
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) >= 21:
         # Hull Moving Average: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        def wma(values, period):
-            weights = np.arange(1, period + 1)
+        half_len = 21 // 2
+        sqrt_len = int(np.sqrt(21))
+        
+        def wma(values, window):
+            weights = np.arange(1, window + 1)
             return np.convolve(values, weights, 'valid') / weights.sum()
         
-        close_12h = df_12h['close'].values
-        half_len = len(close_12h) // 2
-        sqrt_len = int(np.sqrt(len(close_12h)))
+        # Calculate WMA components
+        wma_half = np.array([wma(close[i:i+half_len], half_len) if i+half_len <= len(close) else np.nan 
+                            for i in range(len(close))])
+        wma_full = np.array([wma(close[i:i+21], 21) if i+21 <= len(close) else np.nan 
+                            for i in range(len(close))])
         
-        if half_len > 0 and sqrt_len > 0:
-            wma_half = np.array([wma(close_12h[i:i+half_len], half_len) 
-                                for i in range(len(close_12h) - half_len + 1)])
-            wma_full = np.array([wma(close_12h[i:i+len(close_12h)], len(close_12h)) 
-                                for i in range(len(close_12h) - len(close_12h) + 1)])
-            wma_diff = 2 * wma_half - wma_full[-len(wma_half):] if len(wma_half) == len(wma_full[-len(wma_half):]) else np.array([])
-            hma_12h = np.array([wma(wma_diff[i:i+sqrt_len], sqrt_len) 
-                               for i in range(len(wma_diff) - sqrt_len + 1)]) if len(wma_diff) >= sqrt_len else np.array([])
-            
-            # Pad to match original length
-            hma_padded = np.full(len(close_12h), np.nan)
-            start_idx = half_len - 1
-            end_idx = start_idx + len(hma_12h)
-            if end_idx <= len(close_12h) and len(hma_12h) > 0:
-                hma_padded[start_idx:end_idx] = hma_12h
-            hma_12h = hma_padded
-        else:
-            hma_12h = np.full(len(close_12h), np.nan)
+        # HMA = WMA(2*WMA_half - WMA_full, sqrt_len)
+        raw_hma = 2 * wma_half - wma_full
+        hma_values = np.array([wma(raw_hma[i:i+sqrt_len], sqrt_len) if i+sqrt_len <= len(raw_hma) else np.nan 
+                              for i in range(len(raw_hma))])
+        hma_12h = hma_values
         
         hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     else:
@@ -130,8 +122,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.6x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.6
+        # Require volume confirmation (> 1.5x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.5
         
         if volume_confirm:
             # Donchian breakout conditions (using previous bar's levels)
