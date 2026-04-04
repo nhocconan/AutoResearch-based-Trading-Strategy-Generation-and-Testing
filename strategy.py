@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #4680: 4h Donchian(20) Breakout + 1d EMA Trend Filter + Volume Confirmation
-HYPOTHESIS: 4h price breaking Donchian(20) channels (from prior 20 4h bars) with volume confirmation and aligned with 1d EMA50 trend captures momentum in both bull and bear markets. 1d EMA50 acts as a dynamic trend filter: only take longs when price > EMA50, shorts when price < EMA50. This avoids counter-trend whipsaws. Target: 19-50 trades/year on 4h timeframe.
+Experiment #4681: 4h Donchian(20) Breakout + 1d Camarilla Pivot + Volume + ATR Stoploss
+HYPOTHESIS: 4h price breaking Donchian(20) channels (from prior 20 1d bars) with volume confirmation captures momentum.
+Breakouts above 1d Camarilla H4 (R3) or below L4 (S3) with volume confirm continuation.
+Works in bull (breakouts) and bear (breakdowns) by trading both directions.
+Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4680_4h_donchian20_1d_ema_vol_v1"
+name = "exp_4681_4h_donchian20_camarilla_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,29 +22,47 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for EMA50 trend filter
+    # Precompute HTF: 1d data for Donchian and Camarilla
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d Indicators: EMA50 for trend filter ===
-    if len(df_1d) >= 50:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # === 1d Indicators: Donchian(20) from prior 20 days ===
+    if len(df_1d) >= 20:
+        # Use prior 20 days' high/low (shifted by 1)
+        ph = np.concatenate([[np.nan] * 20, df_1d['high'].values[:-20]])  # prior 20 days high
+        pl = np.concatenate([[np.nan] * 20, df_1d['low'].values[:-20]])   # prior 20 days low
+        
+        # Rolling max/min of prior 20 days
+        donchian_high = pd.Series(ph).rolling(window=20, min_periods=20).max().values
+        donchian_low = pd.Series(pl).rolling(window=20, min_periods=20).min().values
     else:
-        ema_1d = np.full(len(df_1d), np.nan)
+        donchian_high = np.full(len(df_1d), np.nan)
+        donchian_low = np.full(len(df_1d), np.nan)
     
-    # Align HTF EMA50 to 4h timeframe
-    if len(ema_1d) > 0:
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === 1d Indicators: Camarilla Pivot Levels (from prior 1d OHLC) ===
+    if len(df_1d) >= 1:
+        # Prior day's OHLC (shifted by 1 to avoid look-ahead)
+        ph_1d = np.concatenate([[np.nan], df_1d['high'].values[:-1]])
+        pl_1d = np.concatenate([[np.nan], df_1d['low'].values[:-1]])
+        pc_1d = np.concatenate([[np.nan], df_1d['close'].values[:-1]])
+        
+        # Camarilla levels: based on prior day's range
+        rng = ph_1d - pl_1d
+        camarilla_h4 = pc_1d + 1.1 * rng / 4  # R3
+        camarilla_l4 = pc_1d - 1.1 * rng / 4  # S3
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        camarilla_h4 = camarilla_l4 = np.full(len(df_1d), np.nan)
     
-    # === 4h Indicators: Donchian(20) from prior 20 bars ===
-    # Use prior 20 bars' high/low (shifted by 1 to avoid look-ahead)
-    ph = np.concatenate([[np.nan] * 20, high[:-20]])  # prior 20 bars high
-    pl = np.concatenate([[np.nan] * 20, low[:-20]])   # prior 20 bars low
-    
-    # Rolling max/min of prior 20 bars
-    donchian_high = pd.Series(ph).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(pl).rolling(window=20, min_periods=20).min().values
+    # Align HTF indicators to 4h timeframe
+    if len(donchian_high) > 0:
+        dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+        dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+        camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+        camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    else:
+        dh_aligned = np.full(n, np.nan)
+        dl_aligned = np.full(n, np.nan)
+        camarilla_h4_aligned = np.full(n, np.nan)
+        camarilla_l4_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,12 +87,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 14, 50)  # Donchian, Volume MA, ATR warmup
+    warmup = max(20, 14)  # Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(dh_aligned[i]) or np.isnan(dl_aligned[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -104,23 +125,37 @@ def generate_signals(prices):
         # Volume filter: confirmation for breakouts (>1.5x)
         vol_breakout = vol_ratio[i] > 1.5
         
-        # Donchian breakout conditions
-        breakout_long = price > donchian_high[i] and vol_breakout
-        breakout_short = price < donchian_low[i] and vol_breakout
+        # Breakout conditions: price breaks Donchian high/low with volume confirmation
+        breakout_long = price > dh_aligned[i] and vol_breakout
+        breakout_short = price < dl_aligned[i] and vol_breakout
         
-        # 1d EMA50 trend filter: only trade in direction of higher timeframe trend
-        trend_filter_long = price > ema_1d_aligned[i]
-        trend_filter_short = price < ema_1d_aligned[i]
+        # Continuation breakout: price breaks Camarilla H4/L4 (R3/S3) with volume confirmation
+        continuation_long = price > camarilla_h4_aligned[i] and vol_breakout
+        continuation_short = price < camarilla_l4_aligned[i] and vol_breakout
         
-        # Final entry conditions: breakout + volume + trend filter
-        if breakout_long and trend_filter_long:
+        # Priority: continuation breakouts > Donchian breakouts (stronger signal)
+        if continuation_long:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif breakout_short and trend_filter_short:
+        elif continuation_short:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = -SIZE
+        elif breakout_long:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = SIZE
+        elif breakout_short:
             in_position = True
             position_side = -1
             entry_price = close[i]
