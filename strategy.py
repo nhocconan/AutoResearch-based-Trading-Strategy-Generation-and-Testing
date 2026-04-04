@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #4201: 4h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation
-HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture momentum when aligned with 1d EMA(50) trend
+Experiment #4202: 12h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation
+HYPOTHESIS: Donchian channel breakouts on 12h timeframe capture momentum when aligned with 1d EMA(50) trend
 and confirmed by volume (>1.5x average). The 1d EMA filter ensures we trade with the higher timeframe trend,
-avoiding counter-trend whipsaws. Discrete position sizing (0.25) limits fee churn, targeting 75-200 total trades
-over 4 years (19-50/year). Works in both bull and bear markets by trading with the 1d trend direction.
+avoiding counter-trend whipsaws. Discrete position sizing (0.25) limits fee churn, targeting 75-150 total trades
+over 4 years (19-37/year). Works in both bull and bear markets by trading with the 1d trend direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4201_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_4202_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,7 +30,7 @@ def generate_signals(prices):
     else:
         ema_1d_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -38,12 +38,12 @@ def generate_signals(prices):
     
     donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
