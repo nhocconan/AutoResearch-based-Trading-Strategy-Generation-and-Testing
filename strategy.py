@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #6010: 1d Donchian(20) breakout + 1w HTF EMA(50) trend filter + volume confirmation
+Experiment #6010: 1d Donchian(20) breakout + 1w EMA(50) trend filter + volume confirmation
 HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA50 capture sustained trends across bull/bear markets.
 Volume >1.5x average confirms breakout strength. Designed for low trade frequency (7-25/year) to minimize fee drag.
-Uses 0.25 position sizing and ATR-based trailing stops. Works in both bull (breakouts with trend) and bear
-(breakdowns with trend) regimes.
+Uses 0.25 position sizing and ATR-based trailing stops.
 """
 
 import numpy as np
@@ -25,7 +24,7 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for EMA(50) long-term trend filter ===
+    # === HTF: 1w data for EMA(50) trend filter ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 50:
         ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
@@ -107,8 +106,7 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # Multi-timeframe trend filter: 
-        # 1w EMA50 for long-term trend
+        # Multi-timeframe trend filter: 1w EMA50 for long-term trend
         above_1w_ema = price > ema_1w_aligned[i]
         below_1w_ema = price < ema_1w_aligned[i]
         
