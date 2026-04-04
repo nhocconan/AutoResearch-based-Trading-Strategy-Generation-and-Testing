@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Experiment #3091: 6h Donchian Breakout + 1d Weekly Pivot Direction + Volume Confirmation
+Experiment #3091: 6h Donchian Breakout + 1d Weekly Pivot + Volume Confirmation
 HYPOTHESIS: 6h Donchian(20) breakouts capture medium-term swings with controlled frequency. 
-1d weekly pivot levels (R4/S4) provide institutional reference points for breakout/breakdown confirmation. 
-Volume spike (>2.0x 20-period average) validates momentum. ATR-based trailing stop (2.5x) manages risk. 
-Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year). Designed to work in 
-bull markets via breakout continuation at weekly extremes and bear markets via mean reversion from 
-overbought/oversold conditions using volatility expansion filters.
+1d weekly pivot levels (calculated from prior week) provide institutional reference points: 
+breakouts above R1/R2 or below S1/S2 with volume confirmation indicate strong momentum. 
+Weekly pivot context filters false breakouts in ranging markets. ATR-based trailing stop 
+manages risk. Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year). 
+Works in bull markets via trend continuation and bear markets via mean reversion from 
+extreme pivot levels (R4/S4 as breakout/continuation signals).
 """
 
 import numpy as np
@@ -26,30 +27,42 @@ def generate_signals(prices):
     
     # === HTF: 1d data for weekly pivot levels (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points from prior week's OHLC (using 1d data)
-    # Pivot = (H + L + C) / 3
-    # R1 = 2*P - L, S1 = 2*P - H
-    # R2 = P + (H - L), S2 = P - (H - L)
-    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-    # R4 = R3 + (H - L), S4 = S3 - (H - L)
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d
-    s1_1d = 2 * pivot_1d - high_1d
-    r2_1d = pivot_1d + (high_1d - low_1d)
-    s2_1d = pivot_1d - (high_1d - low_1d)
-    r3_1d = high_1d + 2 * (pivot_1d - low_1d)
-    s3_1d = low_1d - 2 * (high_1d - pivot_1d)
-    r4_1d = r3_1d + (high_1d - low_1d)
-    s4_1d = s3_1d - (high_1d - low_1d)
+    # Calculate weekly pivot points from prior week's OHLC
+    # Using simplified weekly: approximate with rolling 5-day (1 week) 
+    # For production, would use actual weekly aggregation, but 5-day rolling approximates
+    lookback_week = 5
+    if len(high_1d) >= lookback_week:
+        weekly_high = pd.Series(high_1d).rolling(window=lookback_week, min_periods=lookback_week).max().values
+        weekly_low = pd.Series(low_1d).rolling(window=lookback_week, min_periods=lookback_week).min().values
+        weekly_close = pd.Series(close_1d).rolling(window=lookback_week, min_periods=lookback_week).mean().values
+        
+        pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+        r1 = 2 * pivot - weekly_low
+        s1 = 2 * pivot - weekly_high
+        r2 = pivot + (weekly_high - weekly_low)
+        s2 = pivot - (weekly_high - weekly_low)
+        r3 = weekly_high + 2 * (pivot - weekly_low)
+        s3 = weekly_low - 2 * (weekly_high - pivot)
+        r4 = r3 + (r2 - r1)
+        s4 = s3 - (s1 - s2)
+    else:
+        # Not enough data for weekly calculation
+        pivot = r1 = r2 = r3 = r4 = s1 = s2 = s3 = s4 = np.full_like(close_1d, np.nan)
     
-    # Align weekly pivot levels to 6h timeframe (shifted by 1 for completed weekly bar)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Align weekly pivot levels to 6h timeframe (shifted by 1 for completed weekly bars only)
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
     
     # === 6h Indicators: Donchian channels (20-period) ===
     lookback = 20
@@ -84,8 +97,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(pivot_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or 
-            np.isnan(s4_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -129,22 +142,28 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Long entry: price breaks above Donchian high AND above weekly R4 (bullish breakout)
-            if price > highest_high[i] and price > r4_1d_aligned[i]:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = SIZE
-            # Short entry: price breaks below Donchian low AND below weekly S4 (bearish breakdown)
-            elif price < lowest_low[i] and price < s4_1d_aligned[i]:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = -SIZE
+            # Long entry: price breaks above Donchian high AND above weekly R1 (bullish bias)
+            # Strong long: above R2 (continuation), cautious long: above R1 (breakout)
+            if price > highest_high[i] and price > r1_6h[i]:
+                # Additional confirmation: not excessively overextended (below R4)
+                if price < r4_6h[i] or np.isnan(r4_6h[i]):
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    highest_since_entry = high[i]
+                    lowest_since_entry = low[i]
+                    signals[i] = SIZE
+            # Short entry: price breaks below Donchian low AND below weekly S1 (bearish bias)
+            # Strong short: below S2 (continuation), cautious short: below S1 (breakout)
+            elif price < lowest_low[i] and price < s1_6h[i]:
+                # Additional confirmation: not excessively overextended (above S4)
+                if price > s4_6h[i] or np.isnan(s4_6h[i]):
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    highest_since_entry = high[i]
+                    lowest_since_entry = low[i]
+                    signals[i] = -SIZE
             else:
                 signals[i] = 0.0
         else:
