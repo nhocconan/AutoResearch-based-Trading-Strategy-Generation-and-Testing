@@ -2,7 +2,7 @@
 """
 Experiment #2293: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation + ATR stoploss
 HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture swing momentum with 12h trend filter.
-- Primary: 4h Donchian(20) breakout with volume > 2.0x 20-bar average (strict to limit trades)
+- Primary: 4h Donchian(20) breakout with volume > 1.8x 20-bar average (strict to limit trades)
 - HTF: 12h HMA(21) trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
 - Target: 75-200 total trades over 4 years (19-50/year) - optimized for 4h timeframe
@@ -140,8 +140,8 @@ def generate_signals(prices):
         # Require 12h trend alignment for bias filter
         trend_bias = trend_12h_aligned[i]
         
-        # Volume confirmation: require volume spike (> 2.0x average - strict to limit trades)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average - strict to limit trades)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
             # Long entry: price breaks above upper Donchian AND 12h trend up
@@ -166,5 +166,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
