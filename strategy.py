@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #3506: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 trend and volume spikes capture medium-term momentum with controlled frequency. 
-1d EMA50 provides robust trend filter (bullish when price > EMA50, bearish when price < EMA50). 
-Volume confirmation ensures breakout strength. ATR-based trailing stop manages risk. 
-Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-Uses 1d for trend filter and pivot-like bias, 4h for entry timing and risk management.
-Works in bull (continuation from EMA support) and bear (continuation from EMA resistance) via price channels.
+Experiment #3506: 4h Donchian Breakout + 1d Trend Filter + Volume Confirmation
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 1d EMA50 trend and volume spikes capture medium-term momentum. 
+The 1d EMA50 provides a robust trend filter that works in both bull and bear markets - price above EMA50 favors longs, below favors shorts. 
+Volume confirmation ensures breakouts have institutional participation. Position size 0.25. Target: 100-180 total trades over 4 years (25-45/year).
+Uses 1d for trend filter, 4h only for entry timing and risk management. Includes ATR-based trailing stop for risk management.
 """
 
 import numpy as np
@@ -30,8 +28,8 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate 1d EMA50
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # === 4h Indicators: Donchian channels (20-period) for entry timing ===
     lookback_4h = 20
@@ -61,12 +59,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback_4h, 20, 14)  # sufficient for all indicators
+    warmup = max(lookback_4h, 50, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high_4h[i]) or np.isnan(lowest_low_4h[i]) or
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -101,7 +99,7 @@ def generate_signals(prices):
         
         if volume_spike:
             # Determine trend bias from 1d EMA50
-            price_vs_ema = price - ema_1d_aligned[i]
+            price_vs_ema = price - ema_50_1d_aligned[i]
             
             # Long entry: price breaks above 4h Donchian high with bullish trend (above EMA50)
             if (price > highest_high_4h[i] and 
