@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #6173: 4h Donchian(20) breakout + 12h EMA20 trend + volume confirmation + ATR trailing stop
-HYPOTHESIS: Donchian breakouts aligned with 12h EMA trend capture structural moves with reduced noise.
-Volume > 2.0x average confirms strong participation. ATR trailing stop manages risk.
-Discrete sizing (0.30) balances return and fee drag. Target: 75-200 trades over 4 years.
+Experiment #6173: 4h Donchian(20) breakout + 12h EMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA trend capture structural moves in both bull and bear markets.
+Price above 12h EMA20 = bullish bias (favor longs), below = bearish bias (favor shorts).
+Volume >1.8x average confirms strong participation. ATR trailing stop manages risk.
+Discrete sizing (0.25) minimizes fee churn. Target: 75-200 trades over 4 years.
 Timeframe: 4h. HTF: 12h for EMA20 trend filter.
 """
 
@@ -51,7 +52,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size (discrete level)
+    SIZE = 0.25  # 25% position size (discrete level)
     
     # Position tracking state variables
     in_position = False
@@ -105,7 +106,7 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 2.0  # Volume filter for stronger signals
+        volume_confirmed = volume_ratio[i] > 1.8  # Volume filter for stronger signals
         
         # Multi-timeframe trend filter: price relative to 12h EMA20
         bullish_bias = price > ema_12h_aligned[i]  # Above EMA20 = bullish
