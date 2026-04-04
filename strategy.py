@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5545: 12h Donchian(20) breakout + 1d EMA(50) + volume confirmation
-HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts with volume > 1.5x average and aligned with 
-1d EMA(50) direction capture high-probability trend continuation moves. The 1d EMA(50) provides 
-robust trend filtering that works across bull/bear regimes, while volume confirmation filters 
-false breakouts. Target: 12-37 trades/year (50-150 total over 4 years).
+Experiment #5546: 4h Donchian(20) breakout + 1d EMA(50) + volume confirmation + ATR trailing stop
+HYPOTHESIS: Donchian(20) breakouts on 4h with volume > 1.5x 20-bar average and aligned with 1d EMA(50) trend capture high-probability trends. Uses ATR(14) trailing stop (2*ATR) and session filter (avoid 21-23 UTC). Target: 19-50 trades/year (75-200 total over 4 years). Works in bull/bear via 1d EMA trend filter and volatility-based stops.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5545_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_5546_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,20 +29,20 @@ def generate_signals(prices):
         ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
         # Trend direction: 1 = uptrend (price above EMA), -1 = downtrend (price below EMA)
         trend_1d = np.where(df_1d['close'].values > ema_1d, 1, -1)
-        # Align to LTF (12h) with shift(1) for completed bars only
+        # Align to LTF (4h) with shift(1) for completed bars only
         trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     else:
         trend_1d_aligned = np.full(n, 0)  # neutral if insufficient data
     
-    # === 12h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation ===
+    # === 4h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 12h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -132,3 +129,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
