@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Experiment #2304: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Daily Donchian channel breakouts capture swing momentum with weekly trend filter.
-- Primary: 1d Donchian(20) breakout with volume > 2.0x 20-bar average (very strict to limit trades)
+HYPOTHESIS: Daily Donchian channel breakouts with weekly trend filter capture medium-term swings.
+- Primary: 1d Donchian(20) breakout with volume > 1.6x 20-bar average (tight to limit trades)
 - HTF: 1w HMA(21) trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
 - Target: 30-100 total trades over 4 years (7-25/year) - optimized for 1d timeframe
@@ -30,7 +30,6 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     
     # Calculate 1w HMA(21): Hull Moving Average
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
     half_len = 21 // 2
     sqrt_len = int(np.sqrt(21))
     
@@ -67,7 +66,7 @@ def generate_signals(prices):
     donchian_upper = high_ma
     donchian_lower = low_ma
     
-    # Volume MA for spike detection (very strict threshold to limit trades)
+    # Volume MA for spike detection (tight threshold to limit trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -141,8 +140,8 @@ def generate_signals(prices):
         # Require 1w trend alignment for bias filter
         trend_bias = trend_1w_aligned[i]
         
-        # Volume confirmation: require volume spike (> 2.0x average - very strict to limit trades)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.6x average - tight to limit trades)
+        volume_spike = vol_ratio[i] > 1.6
         
         if volume_spike:
             # Long entry: price breaks above upper Donchian AND 1w trend up
@@ -167,3 +166,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
