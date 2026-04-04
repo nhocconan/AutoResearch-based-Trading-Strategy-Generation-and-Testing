@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4217: 4h Donchian(20) breakout + 1d/1w EMA filter + volume confirmation
-HYPOTHESIS: Donchian breakouts on 4h timeframe capture momentum when aligned with 1d EMA50 and 1w EMA200 trend filters (price > both EMAs for longs, < both for shorts) and confirmed by volume (>1.5x average). Uses 1d/1w for signal direction, 4h only for entry timing. ATR-based trailing stop (2.0x) for risk management. Discrete position sizing (0.25) targets 75-200 total trades over 4 years (19-50/year).
+HYPOTHESIS: Donchian breakouts on 4h timeframe capture momentum when aligned with 1d EMA50 and 1w EMA200 trend filters (price > both EMAs for longs, < both for shorts) and confirmed by volume (>1.5x average). Uses 1d/1w for signal direction, 4h only for entry timing. ATR-based trailing stop (2.0x) for risk management. Targets 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -17,11 +17,7 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
-    
-    # Precompute session hours once (open_time is already datetime64[ms])
-    hours = pd.DatetimeIndex(open_time).hour
     
     # === Precompute HTF: 1d EMA50 and 1w EMA200 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
@@ -75,12 +71,6 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(ema_1w_aligned[i])):
-            signals[i] = 0.0
-            continue
-        
-        # --- Session Filter: 08-20 UTC ---
-        hour = hours[i]
-        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
