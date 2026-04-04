@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4121: 4h Donchian(20) breakout + 1d Camarilla pivot levels + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) 
-and volume confirmation capture institutional order flow. Camarilla levels act as natural support/resistance - 
-take mean reversion trades at R3/S3 and breakout continuation at R4/S4. Works in bull/bear by using price 
-action relative to pivot levels. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #4121: 4h Donchian(20) breakout + 1d EMA filter + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA trend (1d EMA50) and volume confirmation capture institutional order flow. Daily EMA acts as dynamic support/resistance filter - only take breakouts in direction of daily trend. Works in bull/bear by using daily EMA as trend filter. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4121_4h_donchian20_1d_camarilla_vol_v1"
+name = "exp_4121_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,35 +19,14 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d Camarilla pivot levels ===
+    # === HTF: 1d EMA50 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 2:
-        # Calculate Camarilla levels for each 1d bar
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
+    if len(df_1d) >= 1:
         close_1d = df_1d['close'].values
-        
-        # Camarilla formula: range = high - low
-        # R4 = close + range * 1.1/2
-        # R3 = close + range * 1.1/4
-        # S3 = close - range * 1.1/4
-        # S4 = close - range * 1.1/2
-        range_1d = high_1d - low_1d
-        r4_1d = close_1d + range_1d * 1.1 / 2
-        r3_1d = close_1d + range_1d * 1.1 / 4
-        s3_1d = close_1d - range_1d * 1.1 / 4
-        s4_1d = close_1d - range_1d * 1.1 / 2
-        
-        # Align to 4h timeframe (shifted by 1 for completed bars only)
-        r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-        r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-        s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-        s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+        ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        r4_1d_aligned = np.full(n, np.nan)
-        r3_1d_aligned = np.full(n, np.nan)
-        s3_1d_aligned = np.full(n, np.nan)
-        s4_1d_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -80,14 +56,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 10)  # DC lookback, vol MA buffer
+    warmup = max(lookback_dc + 1, 20 + 10, 50 + 10)  # DC lookback, vol MA buffer, EMA buffer
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
-            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i])):
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -125,30 +100,24 @@ def generate_signals(prices):
             breakout_up = price > highest_high[i-1]
             breakout_down = price < lowest_low[i-1]
             
-            # Camarilla level conditions
-            # Mean reversion: price at R3/S3 levels
-            # Breakout continuation: price breaks R4/S4 levels
+            # Daily EMA trend filter
+            price_above_daily_ema = price > ema_1d_aligned[i]
+            price_below_daily_ema = price < ema_1d_aligned[i]
             
-            # Long conditions:
-            # 1. Mean reversion long: price near S3 and bouncing up
-            long_mean_rev = (price <= s3_1d_aligned[i] * 1.002) and (price > low[i]) and breakout_up
-            # 2. Breakout continuation long: price breaks above R4
-            long_breakout = price > r4_1d_aligned[i] and breakout_up
+            # Long conditions: Donchian breakout up + price above daily EMA
+            long_entry = breakout_up and price_above_daily_ema
             
-            # Short conditions:
-            # 1. Mean reversion short: price near R3 and bouncing down
-            short_mean_rev = (price >= r3_1d_aligned[i] * 0.998) and (price < high[i]) and breakout_down
-            # 2. Breakout continuation short: price breaks below S4
-            short_breakout = price < s4_1d_aligned[i] and breakout_down
+            # Short conditions: Donchian breakout down + price below daily EMA
+            short_entry = breakout_down and price_below_daily_ema
             
-            if long_mean_rev or long_breakout:
+            if long_entry:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            elif short_mean_rev or short_breakout:
+            elif short_entry:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
