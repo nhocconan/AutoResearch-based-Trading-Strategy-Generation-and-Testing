@@ -4,7 +4,7 @@ exp_6828_12h_donchian20_1w_ema_vol_v1
 Hypothesis: 12h Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation.
 In bull markets (price > weekly EMA50): long breakouts only. In bear markets (price < weekly EMA50): short breakouts only.
 Weekly EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
-Designed for 12h timeframe to capture major swings with ~12-37 trades/year (50-150 total over 4 years).
+Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year) with discrete position sizing.
 Works in both bull and bear markets by aligning with weekly trend direction.
 """
 
@@ -23,7 +23,7 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 15  # ~7.5 months (12h bars)
+MAX_HOLD_BARS = 15  # ~7.5 days (12h bars)
 EMA_PERIOD = 50
 
 def generate_signals(prices):
