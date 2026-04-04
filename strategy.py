@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4132: 12h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with daily EMA(50) trend capture intermediate-term momentum while avoiding counter-trend noise. Daily EMA(50) provides dynamic support/resistance that works in both bull and bear markets. Volume confirmation filters false breakouts. Using 12h timeframe reduces trade frequency vs 4h, lowering fee drag while maintaining sufficient trades for statistical significance.
+Experiment #4133: 4h Donchian(20) breakout + 12h EMA(50) trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA(50) trend capture intermediate-term momentum while reducing noise. The 12h EMA provides a smoother trend filter than shorter periods, adapting to both bull and bear markets. Volume confirmation (>1.5x average) filters false breakouts. Using 4h timeframe targets 75-200 trades over 4 years (19-50/year) to balance statistical significance with low fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4132_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_4133_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,26 +19,26 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d EMA(50) for trend direction ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
-        close_1d = df_1d['close'].values
-        ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === HTF: 12h EMA(50) for trend direction ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) >= 50:
+        close_12h = df_12h['close'].values
+        ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        ema_12h_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel(20) for breakout ===
+    # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 12h Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(20) for volatility and stoploss ===
+    # === 4h Indicators: ATR(20) for volatility and stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -62,7 +62,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_1d_aligned[i])):
+            np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -100,14 +100,14 @@ def generate_signals(prices):
             breakout_up = price > highest_high[i-1]
             breakout_down = price < lowest_low[i-1]
             
-            # Daily EMA trend filter
-            above_ema = price > ema_1d_aligned[i]
-            below_ema = price < ema_1d_aligned[i]
+            # 12h EMA trend filter
+            above_ema = price > ema_12h_aligned[i]
+            below_ema = price < ema_12h_aligned[i]
             
-            # Long conditions: Donchian breakout up + above daily EMA
+            # Long conditions: Donchian breakout up + above 12h EMA
             long_entry = breakout_up and above_ema
             
-            # Short conditions: Donchian breakout down + below daily EMA
+            # Short conditions: Donchian breakout down + below 12h EMA
             short_entry = breakout_down and below_ema
             
             if long_entry:
