@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3720: 4h Donchian(20) breakout + 1d EMA200 trend + volume spike
-HYPOTHESIS: 4h Donchian breakouts capture intermediate-term momentum, with 1d EMA200 providing structural trend bias to filter false breakouts. Volume spike confirms breakout authenticity. This combination avoids whipsaw in ranging markets and works in both bull (breakouts with trend) and bear (breakouts against trend filtered by EMA) regimes. Position size 0.25 manages drawdown from 2022 crash while allowing profit accumulation. Target: 75-200 trades over 4 years.
+Experiment #3721: 4h Donchian(20) breakout + 1d EMA200 trend + volume spike + ATR trailing stop
+HYPOTHESIS: 4h Donchian breakouts capture intermediate-term momentum, with 1d EMA200 providing structural trend bias to filter false breakouts. Volume spike (>2.0x) confirms breakout authenticity. ATR-based trailing stop (2.5x) manages risk. This combination avoids whipsaw in ranging markets and works in both bull (breakouts with trend) and bear (breakouts against trend filtered by EMA) regimes. Position size 0.25 manages drawdown from 2022 crash while allowing profit accumulation. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3720_4h_donchian20_1d_ema_vol_v1"
+name = "exp_3721_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
