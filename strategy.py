@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 exp_6753_4h_donchian20_12h_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation.
+Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
 In bull markets (price > 12h EMA50): long breakouts only. In bear markets (price < 12h EMA50): short breakouts only.
 12h EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
-Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
+Designed for 4h timeframe to capture major swings with ~19-50 trades/year (75-200 total over 4 years).
+Uses discrete position sizing (0.25) to minimize fee churn. ATR-based stoploss and time-based exit for risk control.
 Works in both bull and bear markets by aligning with 12h trend direction.
 """
 
@@ -31,7 +32,7 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 12h for EMA
+    # Load HTF data ONCE before loop - using 12h for trend filter
     df_12h = get_htf_data(prices, '12h')
     
     # Calculate 12h EMA50
@@ -128,5 +129,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
