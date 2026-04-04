@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #2480: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: Donchian channel breakouts with daily trend alignment and volume spikes capture 
+HYPOTHESIS: Donchian breakouts with daily EMA trend filter and volume spikes capture 
 institutional participation during trend acceleration. Works in bull markets (breakouts with volume) 
-and bear markets (breakdowns with volume). Uses discrete position sizing (0.25) to limit fee drag 
-and ensure statistical significance with 75-200 total trades over 4 years.
+and bear markets (breakdowns with volume). Uses discrete position sizing (0.25) and 
+strict volume confirmation (>2.0x average) to limit trades to 75-200 over 4 years.
 """
 
 import numpy as np
@@ -131,5 +131,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</p>
