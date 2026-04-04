@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4311: 6h Donchian(20) breakout + 1d Weekly Pivot direction + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h timeframe capture swing momentum when aligned with 1d Weekly Pivot levels (price above weekly pivot for longs, below for shorts) and confirmed by volume (>2.0x average). Uses weekly pivot for structural support/resistance (more reliable than EMAs in ranging markets) while targeting 75-150 total trades over 4 years (19-37/year). ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 75-150 total trades. Works in bull via breakout continuation above weekly pivot, in bear via shorting breakdowns below weekly pivot.
+Experiment #4311: 6h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 6h timeframe capture swing momentum when aligned with 1d EMA50 trend (price > EMA50 for longs, < EMA50 for shorts) and confirmed by volume (>2.0x average). Uses 1d EMA for smoother trend filter (less whipsaw than shorter periods) while targeting 75-200 total trades over 4 years (19-50/year). ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 75-200 total trades over 4 years (19-50/year). Works in bull via breakout continuation, in bear via shorting breakdowns.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4311_6h_donchian20_1d_weekly_pivot_vol_v1"
+name = "exp_4311_6h_donchian20_1d_ema_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,25 +23,13 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1d data for Weekly Pivot calculation ===
+    # === Precompute HTF: 1d EMA50 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 5:  # Need at least a week for weekly pivot
-        # Calculate Weekly Pivot: (Weekly High + Weekly Low + Weekly Close) / 3
-        # Resample 1d data to weekly using actual Friday closes (Binance weekly candles)
-        df_1d_copy = df_1d.copy()
-        df_1d_copy.index = pd.to_datetime(df_1d_copy['open_time'])
-        weekly = df_1d_copy.resample('W-FRI', label='left', closed='left').agg({
-            'high': 'max',
-            'low': 'min',
-            'close': 'last'
-        })
-        weekly_pivot = (weekly['high'] + weekly['low'] + weekly['close']) / 3.0
-        # Align weekly pivot to 1d timeframe (forward fill within week)
-        weekly_pivot_1d = weekly_pivot.reindex(df_1d_copy.index, method='ffill').values
-        # Align 1d weekly pivot to 6h timeframe
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot_1d)
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        weekly_pivot_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
@@ -74,12 +62,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
+    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, 1d EMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(weekly_pivot_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -123,15 +111,15 @@ def generate_signals(prices):
             breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
             breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
             
-            # Weekly Pivot filter
-            price_above_pivot = price > weekly_pivot_aligned[i]
-            price_below_pivot = price < weekly_pivot_aligned[i]
+            # 1d EMA50 trend filter
+            price_above_ema = price > ema_1d_aligned[i]
+            price_below_ema = price < ema_1d_aligned[i]
             
-            # Long conditions: Donchian breakout up + price above weekly pivot
-            long_entry = breakout_up and price_above_pivot
+            # Long conditions: Donchian breakout up + price above EMA50
+            long_entry = breakout_up and price_above_ema
             
-            # Short conditions: Donchian breakout down + price below weekly pivot
-            short_entry = breakout_dn and price_below_pivot
+            # Short conditions: Donchian breakout down + price below EMA50
+            short_entry = breakout_dn and price_below_ema
             
             if long_entry:
                 in_position = True
