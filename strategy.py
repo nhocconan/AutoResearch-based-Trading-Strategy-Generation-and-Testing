@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #6122: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA50 trend capture structural moves
-with minimal whipsaw. Volume >1.5x average confirms strong participation.
-ATR trailing stop manages risk. Discrete sizing (0.25) minimizes fee churn.
-Target: 50-150 total trades over 4 years (12-37/year). Timeframe: 12h. HTF: 1d for EMA50 trend filter.
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA50 trend capture structural moves with minimal whipsaw.
+Volume >1.5x average confirms strong participation. ATR trailing stop manages risk.
+Discrete sizing (0.30) minimizes fee churn. Target: 50-150 trades over 4 years.
+Timeframe: 12h. HTF: 1d for EMA50 trend filter.
 """
 
 import numpy as np
@@ -52,7 +52,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size (discrete level)
+    SIZE = 0.30  # 30% position size (discrete level)
     
     # Position tracking state variables
     in_position = False
