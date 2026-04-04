@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #6196: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR trailing stop
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA trend capture medium-term momentum across market cycles.
-Volume >2.0x average confirms institutional participation. ATR trailing stop manages risk in both bull and bear markets.
-Discrete sizing (0.25) minimizes fee drag while maintaining exposure. Target: 75-150 trades over 4 years (19-38/year).
+Experiment #6196: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA trend capture medium-term momentum 
+while avoiding noise. Volume >2.0x average confirms institutional participation. 
+ATR trailing stop manages risk. Discrete sizing (0.25) balances return and fee drag. 
+Target: 50-150 trades over 4 years (12-37/year).
 Timeframe: 12h. HTF: 1d for EMA trend filter.
 """
 
