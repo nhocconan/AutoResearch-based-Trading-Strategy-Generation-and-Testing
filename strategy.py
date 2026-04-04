@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4581: 4h Donchian(20) Breakout + 1d HTF EMA Trend + Volume Spike + Chop Filter
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with 1d EMA(50) trend, confirmed by volume spikes (>1.8x average) and low choppiness (CHOP < 38.2 = trending regime), capture medium-term momentum. Uses discrete position sizing (0.25) and ATR trailing stop (2.0x) to target 19-50 trades/year. Works in bull/bear via trend filter and volatility-adjusted stops. Adding chop filter reduces whipsaws in ranging markets, improving test generalization.
+Experiment #4582: 12h Donchian(20) Breakout + 1d HTF EMA Trend + Volume Spike
+HYPOTHESIS: 12h Donchian(20) breakouts aligned with 1d EMA(50) trend, confirmed by volume spikes (>1.8x average), capture medium-term momentum. Uses discrete position sizing (0.25) and ATR trailing stop (2.0x) to target 12-37 trades/year. Works in bull/bear via trend filter and volatility-adjusted stops. Based on proven DB patterns for 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4581_4h_donchian20_1d_ema_vol_chop_v1"
-timeframe = "4h"
+name = "exp_4582_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,40 +28,29 @@ def generate_signals(prices):
     else:
         ema_1d = np.array([])
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     if len(ema_1d) > 0:
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
         ema_1d_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel(20) ===
+    # === 12h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # === 4h Indicators: Choppiness Index(14) for regime filter ===
-    # CHOP = 100 * log10(sum(ATR(14)) / log10(highest_high - lowest_low)) / log10(N)
-    # Simplified: CHOP = 100 * log10(rolling_sum(TR,14) / (rolling_max(high,14) - rolling_min(low,14))) / log10(14)
-    tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
-    hh = high_series.rolling(window=14, min_periods=14).max().values
-    ll = low_series.rolling(window=14, min_periods=14).min().values
-    chop_raw = np.ones(n) * 50.0  # default to neutral
-    mask = (hh - ll) > 0
-    chop_raw[mask] = 100 * np.log10(tr_sum[mask] / (hh[mask] - ll[mask])) / np.log10(14)
-    chop = chop_raw  # higher = more choppy, lower = more trending
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -74,12 +63,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50, 14)  # Donchian, vol MA, ATR, EMA, CHOP warmup
+    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, EMA warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(chop[i])):
+            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -111,8 +100,6 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         # Require volume confirmation (> 1.8x average) to filter noise
         volume_confirm = vol_ratio[i] > 1.8
-        # Require trending regime (CHOP < 38.2) to avoid whipsaws in ranging markets
-        trending_regime = chop[i] < 38.2
         
         # Higher timeframe trend filter: bullish when price > EMA, bearish when price < EMA
         htf_bullish = price > ema_1d_aligned[i]
@@ -122,11 +109,11 @@ def generate_signals(prices):
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
         breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
         
-        # Long conditions: upward breakout in bullish HTF trend + volume confirmation + trending regime
-        long_entry = breakout_up and htf_bullish and volume_confirm and trending_regime
+        # Long conditions: upward breakout in bullish HTF trend + volume confirmation
+        long_entry = breakout_up and htf_bullish and volume_confirm
         
-        # Short conditions: downward breakout in bearish HTF trend + volume confirmation + trending regime
-        short_entry = breakout_down and htf_bearish and volume_confirm and trending_regime
+        # Short conditions: downward breakout in bearish HTF trend + volume confirmation
+        short_entry = breakout_down and htf_bearish and volume_confirm
         
         if long_entry:
             in_position = True
@@ -146,3 +133,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
