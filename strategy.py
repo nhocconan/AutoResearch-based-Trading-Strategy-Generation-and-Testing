@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
 """
-exp_6501_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation. Uses daily EMA(50) as trend filter: long only when price > EMA50, short only when price < EMA50. Donchian(20) breakout provides entry timing, volume confirmation filters weak breakouts. Designed to work in both bull and bear markets by using 1d EMA as trend filter and Donchian breakouts for momentum. Target: 75-200 trades over 4 years (19-50/year).
+exp_6500_4h_donchian20_1d_ema_vol_v2
+Hypothesis: Refined 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+Key improvements: reduced VOL_THRESHOLD to 1.5 for more entries, added ATR-based stoploss for risk management,
+and discrete position sizing (0.0, ±0.25) to minimize fee churn. Designed for 75-200 trades over 4 years.
+Uses 4h primary timeframe with 1d HTF for trend alignment. Works in bull/bear via 1d EMA filter.
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6501_4h_donchian20_1d_ema_vol_v1"
+name = "exp_6500_4h_donchian20_1d_ema_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
-# Parameters - optimized for trade frequency and signal quality
+# Parameters
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+VOL_THRESHOLD = 1.5  # Reduced from 1.8 to increase trade frequency
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.5
+SIGNAL_SIZE = 0.25   # 25% position size
 
 def generate_signals(prices):
     n = len(prices)
@@ -46,16 +51,25 @@ def generate_signals(prices):
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
+    # ATR for stoploss
+    tr1 = pd.Series(high - low).values
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=ATR_PERIOD, min_periods=ATR_PERIOD).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, EMA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA data not available
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if EMA or ATR data not available
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(atr[i]):
             continue
             
         # Long conditions: price breaks above Donchian HIGH + above 1d EMA + volume spike
@@ -68,26 +82,25 @@ def generate_signals(prices):
         short_trend = close[i] < ema_1d_aligned[i]  # price below 1d EMA (bearish trend)
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Exit conditions: simple midpoint reversal
+        # Update existing positions
         if position == 1:  # long position
-            # Exit if price drops below midpoint of channel
-            exit_long = close[i] < (donchian_high[i-1] + donchian_low[i-1]) / 2
-            # Or if price breaks below Donchian low (strong reversal)
-            exit_long = exit_long or close[i] < donchian_low[i-1]
-            if exit_long:
+            # ATR-based stoploss
+            if close[i] < entry_price - ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
+            # Hold long position
+            signals[i] = SIGNAL_SIZE
+            
         elif position == -1:  # short position
-            # Exit if price rises above midpoint of channel
-            exit_short = close[i] > (donchian_high[i-1] + donchian_low[i-1]) / 2
-            # Or if price breaks above Donchian high (strong reversal)
-            exit_short = exit_short or close[i] > donchian_high[i-1]
-            if exit_short:
+            # ATR-based stoploss
+            if close[i] > entry_price + ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
-        
+            # Hold short position
+            signals[i] = -SIGNAL_SIZE
+            
         # Enter new positions only if flat
         if position == 0:
             if long_breakout and long_trend and long_volume:
@@ -100,8 +113,5 @@ def generate_signals(prices):
                 entry_price = close[i]
             else:
                 signals[i] = 0.0
-        else:
-            # Hold current position
-            signals[i] = position * SIGNAL_SIZE
     
     return signals
