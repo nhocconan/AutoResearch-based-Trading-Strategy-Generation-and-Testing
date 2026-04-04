@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #5120: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 1d HMA(21) trend capture strong momentum with fewer false signals. 
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 1d HMA(21) trend capture strong momentum with proper trend filter. 
 Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. 
-Using 1d HTF (instead of 12h) provides stronger trend filter, reducing trade frequency to target 19-50/year. 
-Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend). 
-Discrete position sizing (0.25) minimizes fee churn.
+Using 1d HTF for trend (more stable than 12h) should reduce false signals and keep trade count in target range (75-200 over 4 years).
+Designed for 19-50 trades/year on 4h timeframe to minimize fee drag. Works in bull markets (breakouts with trend) 
+and bear markets (breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
