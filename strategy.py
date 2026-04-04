@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
 exp_6698_1d_donchian20_1w_ema_vol_v1
-Hypothesis: 1d Donchian(20) breakout with 1-week EMA trend filter and volume confirmation.
-In bull markets: buy breakouts above 20-day high when price > weekly EMA50 and volume > 1.5x average.
-In bear markets: sell breakdowns below 20-day low when price < weekly EMA50 and volume > 1.5x average.
-Uses discrete position sizing (0.25) to minimize fee drag. Target: 15-25 trades/year.
-Works in both regimes by only trading with the weekly trend.
+Hypothesis: Daily Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
+In bull markets: buy breakouts above 20-day high when price > weekly EMA50.
+In bear markets: sell breakdowns below 20-day low when price < weekly EMA50.
+Weekly EMA filter ensures we only trade with the higher timeframe trend.
+Volume confirmation avoids false breakouts. Designed for 1d timeframe to capture
+multi-week trends while minimizing fee drag (~10-25 trades/year expected).
+Works in both bull and bear by trading with the weekly trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -18,7 +20,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+WEEKLY_EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -33,9 +35,9 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop - using 1w for EMA trend filter
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly EMA50 for trend filter
+    # Calculate weekly EMA50
     close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    ema_1w = pd.Series(close_1w).ewm(span=WEEKLY_EMA_PERIOD, adjust=False, min_periods=WEEKLY_EMA_PERIOD).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate LTF indicators
@@ -45,8 +47,8 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Donchian channels (20-day high/low)
-    high_roll = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    low_roll = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    high_ma = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    low_ma = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
@@ -63,14 +65,9 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD)
+    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD)
     
     for i in range(start, n):
-        # Skip if HTF data not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-            continue
-            
         # Check stoploss
         if position == 1:  # long position
             if close[i] <= entry_price - ATR_STOP_MULTIPLIER * atr[i]:
@@ -82,17 +79,21 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 continue
+                
+        # Skip if indicators not ready
+        if (np.isnan(high_ma[i]) or np.isnan(low_ma[i]) or 
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
+            
+        # Volume confirmation
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD
         
-        # Breakout conditions with trend and volume filters
-        bullish_trend = close[i] > ema_1w_aligned[i]
-        bearish_trend = close[i] < ema_1w_aligned[i]
-        high_volume = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD
-        
-        # Long breakout: price above 20-day high + weekly uptrend + volume
-        long_breakout = (close[i] > high_roll[i]) and bullish_trend and high_volume
-        
-        # Short breakdown: price below 20-day low + weekly downtrend + volume
-        short_breakout = (close[i] < low_roll[i]) and bearish_trend and high_volume
+        # Breakout conditions with weekly EMA filter
+        # Long: price breaks above 20-day high AND above weekly EMA50 (uptrend)
+        long_breakout = (close[i] > high_ma[i]) and vol_confirmed and (close[i] > ema_1w_aligned[i])
+        # Short: price breaks below 20-day low AND below weekly EMA50 (downtrend)
+        short_breakout = (close[i] < low_ma[i]) and vol_confirmed and (close[i] < ema_1w_aligned[i])
         
         # Enter new positions only if flat
         if position == 0:
