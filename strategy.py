@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4097: 4h Donchian(20) breakout + 1d EMA(50) + 1w EMA(200) trend filter + volume confirmation
-HYPOTHESIS: Donchian breakouts on 4h aligned with both 1d EMA(50) (medium-term) and 1w EMA(200) (long-term) trend direction and volume confirmation capture strong continuation moves while minimizing trades. Dual timeframe trend filter (1d+1w) provides robust regime adaptation for both bull and bear markets by only allowing breakouts when aligned with intermediate AND long-term trends. Target: 100-200 total trades over 4 years (25-50/year).
+Experiment #4097: 4h Donchian(20) breakout + 1d HTF trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 4h aligned with 1d EMA(50) trend direction and volume confirmation capture continuation moves while minimizing trades. The 1d EMA(50) provides a medium-term trend filter that works in both bull and bear markets by only allowing breakouts in the direction of the intermediate trend. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4097_4h_donchian20_1d_ema50_1w_ema200_vol_v1"
+name = "exp_4097_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,21 +19,13 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d EMA(50) for intermediate trend ===
+    # === HTF: 1d EMA(50) for trend direction ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 1:
-        ema_50_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+        ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     else:
-        ema_50_1d_aligned = np.full(n, np.nan)
-    
-    # === HTF: 1w EMA(200) for long-term trend ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 1:
-        ema_200_1w = pd.Series(df_1w['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-        ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
-    else:
-        ema_200_1w_aligned = np.full(n, np.nan)
+        ema_50_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -69,7 +61,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_200_1w_aligned[i])):
+            np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -103,21 +95,19 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Dual HTF trend bias: 
-            price_above_1d_ema = price > ema_50_1d_aligned[i]
-            price_below_1d_ema = price < ema_50_1d_aligned[i]
-            price_above_1w_ema = price > ema_200_1w_aligned[i]
-            price_below_1w_ema = price < ema_200_1w_aligned[i]
+            # HTF 1d EMA(50) trend bias: 
+            price_above_ema = price > ema_50_aligned[i]
+            price_below_ema = price < ema_50_aligned[i]
             
             # Breakout logic: 
             breakout_up = price > highest_high[i-1]
             breakout_down = price < lowest_low[i-1]
             
-            # Long conditions: above BOTH 1d EMA(50) AND 1w EMA(200) + upper Donchian breakout
-            long_entry = breakout_up and price_above_1d_ema and price_above_1w_ema
+            # Long conditions: above 1d EMA(50) + upper Donchian breakout
+            long_entry = breakout_up and price_above_ema
             
-            # Short conditions: below BOTH 1d EMA(50) AND 1w EMA(200) + lower Donchian breakout
-            short_entry = breakout_down and price_below_1d_ema and price_below_1w_ema
+            # Short conditions: below 1d EMA(50) + lower Donchian breakout
+            short_entry = breakout_down and price_below_ema
             
             if long_entry:
                 in_position = True
