@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #3981: 4h Donchian(20) breakout + 1d/1w EMA trend + volume confirmation + ATR trailing stop
-HYPOTHESIS: 4h Donchian breakouts aligned with both 1d and 1w EMA trends capture strong multi-week momentum while avoiding counter-trend whipsaws. Volume > 2.0x MA(20) confirms institutional participation. Dual timeframe alignment (1d + 1w) reduces false signals in ranging markets. ATR(14) trailing stop (2.5x) manages risk during volatile regimes. Discrete sizing (0.25) minimizes fee drag. Target: 75-200 trades over 4 years (19-50/year). Works in bull/bear via multi-timeframe EMA regime filter.
+Experiment #3981: 4h Donchian(20) breakout + 1d/1w EMA trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with multi-timeframe EMA trend (1d EMA50 + 1w EMA200) capture major swings while avoiding false breakouts in choppy markets. Volume > 2.0x MA(20) confirms strength. ATR(14) trailing stop (2.5x) manages risk. Discrete sizing (0.25) reduces fee drag. Target: 75-200 trades over 4 years (19-50/year). Works in bull/bear via multi-timeframe EMA regime filter.
 """
 
 import numpy as np
@@ -19,15 +19,15 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d EMA200 for intermediate trend ===
+    # === HTF: 1d EMA50 for short-term trend ===
     df_1d = get_htf_data(prices, '1d')
-    ema_1d_200 = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
+    ema_1d_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
-    # === HTF: 1w EMA50 for long-term trend ===
+    # === HTF: 1w EMA200 for long-term trend ===
     df_1w = get_htf_data(prices, '1w')
-    ema_1w_50 = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1w_50_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_50)
+    ema_1w_200 = pd.Series(df_1w['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_1w_200_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_200)
     
     # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -57,12 +57,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20, 200, 50)  # DC lookback, vol MA, EMA200, EMA50
+    warmup = max(lookback_dc + 1, 20, 50, 200)  # DC lookback, vol MA, EMA50, EMA200
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_1d_200_aligned[i]) or np.isnan(ema_1w_50_aligned[i]) or
+            np.isnan(ema_1d_50_aligned[i]) or np.isnan(ema_1w_200_aligned[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -107,10 +107,9 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Determine trend: bullish if price above BOTH 1d EMA200 AND 1w EMA50
-            # Bearish if price below BOTH 1d EMA200 AND 1w EMA50
-            bullish = price > ema_1d_200_aligned[i] and price > ema_1w_50_aligned[i]
-            bearish = price < ema_1d_200_aligned[i] and price < ema_1w_50_aligned[i]
+            # Determine multi-timeframe trend: bullish if price above both EMAs, bearish if below both
+            bullish = price > ema_1d_50_aligned[i] and price > ema_1w_200_aligned[i]
+            bearish = price < ema_1d_50_aligned[i] and price < ema_1w_200_aligned[i]
             
             # Long entry: breakout above Donchian upper band in bullish regime
             long_breakout = price > highest_high[i-1] and bullish
