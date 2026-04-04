@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #2678: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts with weekly EMA trend alignment and volume spikes capture
-institutional participation with low frequency suitable for 1d timeframe. Uses 1w for signal
-direction, 1d only for entry timing. Target: 30-100 total trades over 4 years.
+Experiment #2678: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
+HYPOTHESIS: 1d Donchian breakouts with 1w HMA trend alignment and volume spikes capture
+institutional participation on daily timeframe. Uses 1w for signal direction, 1d only for
+entry timing. Target: 30-100 total trades over 4 years (7-25/year). Designed to work in
+both bull (breakouts with trend) and bear (mean reversion from extremes) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2678_1d_donchian20_1w_ema_vol_v1"
+name = "exp_2678_1d_donchian20_1w_hma_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -21,13 +22,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for EMA trend (Call ONCE before loop) ===
+    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate 1w EMA(50)
-    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1w = np.where(close_1w > ema_1w, 1, -1)
+    # Calculate 1w HMA(21)
+    def hma(series, period):
+        if len(series) < period:
+            return np.full_like(series, np.nan)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma1 = pd.Series(series).ewm(span=half_period, adjust=False).mean()
+        wma2 = pd.Series(series).ewm(span=period, adjust=False).mean()
+        raw_hma = 2 * wma1 - wma2
+        hma_result = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
+        return hma_result.values
+    
+    hma_1w = hma(close_1w, 21)
+    trend_1w = np.where(close_1w > hma_1w, 1, -1)
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
     # === 1d Indicators: Donchian(20) channels, Volume MA(20) ===
