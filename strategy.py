@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4388: 12h Donchian Breakout + Weekly EMA Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 12h aligned with weekly EMA50 trend (price > EMA50 = long bias, < EMA50 = short bias) and confirmed by volume spikes (>1.8x average) capture institutional momentum with minimal false signals. Weekly EMA50 provides structural trend filter from higher timeframe, reducing whipsaws. Works in bull via upward breakouts with long bias, in bear via downward breakouts with short bias. Volume confirmation filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
+HYPOTHESIS: Donchian(20) breakouts on 12h aligned with weekly EMA50 trend (price > EMA50 = long bias, < EMA50 = short bias) and confirmed by volume spikes (>2.0x average) capture institutional momentum with minimal false signals. Weekly EMA50 provides structural trend filter from higher timeframe, reducing whipsaws. Works in bull via upward breakouts with long bias, in bear via downward breakouts with short bias. Volume confirmation filters low-conviction moves. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
 """
 
 import numpy as np
@@ -101,8 +101,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = vol_ratio[i] > 2.0
         
         # Weekly EMA50 bias: price > EMA50 = long bias, price < EMA50 = short bias
         long_bias = price > ema_1w_aligned[i]
