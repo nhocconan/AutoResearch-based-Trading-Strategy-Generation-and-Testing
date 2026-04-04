@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #3793: 4h Donchian(20) breakout + 12h HMA(21) trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 4h Donchian breakouts capture medium-term swings with 12h HMA(21) filtering trend direction. Volume > 1.5x MA(20) confirms institutional participation. ATR-based trailing stop limits drawdown. Works in bull markets (breakouts above resistance with uptrend) and bear markets (breakdowns below support with downtrend). Discrete position sizing (0.25) minimizes fee drag. Target: 75-200 trades over 4 years.
+Experiment #3793: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: 4h Donchian breakouts capture swing moves with 12h HMA(21) filtering counter-trend noise and volume (>1.5x MA) confirming institutional participation. Works in bull markets (breakouts above resistance with HMA up) and bear markets (breakdowns below support with HMA down). Discrete position sizing (0.25) minimizes fee drag. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
@@ -19,7 +19,7 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for HMA(21) trend filter (Call ONCE before loop) ===
+    # === HTF: 12h data for HMA trend filter (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
@@ -27,12 +27,12 @@ def generate_signals(prices):
     def calculate_hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma_half = pd.Series(arr).ewm(span=half, adjust=False).mean().values
         wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
         hma = 2 * wma_half - wma_full
-        hma = pd.Series(hma).ewm(span=sqrt_period, adjust=False).mean().values
+        hma = pd.Series(hma).ewm(span=sqrt, adjust=False).mean().values
         return hma
     
     hma_12h = calculate_hma(close_12h, 21)
@@ -48,15 +48,6 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
-    def true_range(high, low, prev_close):
-        return np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
-    
-    prev_close = np.roll(close, 1)
-    prev_close[0] = close[0]
-    tr = true_range(high, low, prev_close)
-    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
     SIZE = 0.25  # 25% position size
@@ -68,13 +59,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20, 14)  # sufficient for all indicators
+    warmup = max(lookback_dc + 1, 20)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(hma_12h_aligned[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr_14[i])):
+            np.isnan(hma_12h_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -86,50 +76,65 @@ def generate_signals(prices):
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
                 # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.0 * atr_14[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                # Exit if price breaks below Donchian lower band (trend reversal)
-                elif price < lowest_low[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
+                # Calculate ATR(14) for exit condition
+                if i >= 14:
+                    prev_close = close[i-1]
+                    tr = max(high[i] - low[i], abs(high[i] - prev_close), abs(low[i] - prev_close))
+                    atr_14 = tr  # Simplified: use current TR as ATR proxy for exit
+                    if price < highest_since_entry - 2.0 * atr_14:
+                        in_position = False
+                        position_side = 0
+                        signals[i] = 0.0
+                    # Exit if price breaks below Donchian lower band (trend reversal)
+                    elif price < lowest_low[i]:
+                        in_position = False
+                        position_side = 0
+                        signals[i] = 0.0
+                    else:
+                        signals[i] = SIZE
                 else:
-                    signals[i] = SIZE
+                    signals[i] = SIZE  # Hold until enough data for ATR
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.0 * atr_14[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                # Exit if price breaks above Donchian upper band (trend reversal)
-                elif price > highest_high[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
+                if i >= 14:
+                    prev_close = close[i-1]
+                    tr = max(high[i] - low[i], abs(high[i] - prev_close), abs(low[i] - prev_close))
+                    atr_14 = tr  # Simplified: use current TR as ATR proxy for exit
+                    if price > lowest_since_entry + 2.0 * atr_14:
+                        in_position = False
+                        position_side = 0
+                        signals[i] = 0.0
+                    # Exit if price breaks above Donchian upper band (trend reversal)
+                    elif price > highest_high[i]:
+                        in_position = False
+                        position_side = 0
+                        signals[i] = 0.0
+                    else:
+                        signals[i] = -SIZE
                 else:
-                    signals[i] = -SIZE
+                    signals[i] = -SIZE  # Hold until enough data for ATR
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.5x average)
+        # Require volume spike (> 1.5x average) AND HMA trend alignment
         volume_spike = vol_ratio[i] > 1.5
+        hma_uptrend = hma_12h_aligned[i] > hma_12h_aligned[i-1] if i > 0 else False
+        hma_downtrend = hma_12h_aligned[i] < hma_12h_aligned[i-1] if i > 0 else False
         
         if volume_spike:
-            # Long entry: Price breaks above Donchian upper band AND 12h HMA trending up
+            # Long entry: Price breaks above Donchian upper band AND HMA trending up
             if (price > highest_high[i-1] and  # Breakout above previous period's high
-                hma_12h_aligned[i] > hma_12h_aligned[i-1]):  # 12h HMA rising (uptrend)
+                hma_uptrend):                  # HMA trending up (bullish bias)
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Price breaks below Donchian lower band AND 12h HMA trending down
+            # Short entry: Price breaks below Donchian lower band AND HMA trending down
             elif (price < lowest_low[i-1] and    # Breakout below previous period's low
-                  hma_12h_aligned[i] < hma_12h_aligned[i-1]):  # 12h HMA falling (downtrend)
+                  hma_downtrend):                # HMA trending down (bearish bias)
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
