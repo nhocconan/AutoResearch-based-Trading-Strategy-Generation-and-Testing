@@ -132,4 +132,4 @@ def generate_signals(prices):
     
     return signals
 
-</reasoning>
+</think>
