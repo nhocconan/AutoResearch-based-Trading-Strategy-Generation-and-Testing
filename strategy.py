@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4226: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 4h timeframe capture medium-term momentum when aligned with 1d EMA50 trend (price > EMA50 for longs, < EMA50 for shorts) and confirmed by volume (>2.0x average). Uses 1d EMA for direction, 4h only for entry/exit timing. ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 75-200 total trades over 4 years (19-50/year). Works in bull via breakout continuation, in bear via shorting breakdowns. Target timeframe: 4h.
+Experiment #4227: 6h Donchian(20) breakout + 1d pivot direction + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts capture swing momentum when aligned with 1d Camarilla pivot direction (price > pivot for longs, < pivot for shorts) and confirmed by volume (>1.5x average). Uses 1d pivot for regime, 6h only for entry timing. ATR-based trailing stop (2.0x) for risk management. Position size 0.25 targets 75-150 total trades over 4 years (19-37/year). Works in bull via breakout continuation, in bear via shorting breakdowns.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4226_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_4227_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,15 +23,33 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1d EMA50 for trend filter ===
+    # === Precompute HTF: 1d Camarilla Pivot Levels ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    if len(df_1d) >= 1:
+        # Calculate Camarilla pivots from previous day's OHLC
+        prev_close = df_1d['close'].shift(1).values
+        prev_high = df_1d['high'].shift(1).values
+        prev_low = df_1d['low'].shift(1).values
+        pivot = (prev_high + prev_low + prev_close) / 3.0
+        range_hl = prev_high - prev_low
+        r3 = pivot + range_hl * 1.1 / 2.0
+        s3 = pivot - range_hl * 1.1 / 2.0
+        r4 = pivot + range_hl * 1.1
+        s4 = pivot - range_hl * 1.1
+        # Align to 6h timeframe (shifted by 1 for completed day only)
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        pivot_aligned = np.full(n, np.nan)
+        r3_aligned = np.full(n, np.nan)
+        s3_aligned = np.full(n, np.nan)
+        r4_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 6h Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -39,12 +57,12 @@ def generate_signals(prices):
     
     donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -62,12 +80,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, 1d EMA
+    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -84,8 +103,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -93,8 +112,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -103,23 +122,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 2.0x average) to filter noise
-        volume_confirm = vol_ratio[i] > 2.0
+        # Require volume confirmation (> 1.5x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.5
         
         if volume_confirm:
             # Donchian breakout conditions (using previous bar's levels)
             breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
             breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
             
-            # 1d EMA50 trend filter
-            price_above_ema = price > ema_1d_aligned[i]
-            price_below_ema = price < ema_1d_aligned[i]
+            # 1d Pivot regime filter
+            price_above_pivot = price > pivot_aligned[i]
+            price_below_pivot = price < pivot_aligned[i]
             
-            # Long conditions: Donchian breakout up + price above EMA50
-            long_entry = breakout_up and price_above_ema
+            # Long conditions: Donchian breakout up + price above pivot
+            long_entry = breakout_up and price_above_pivot
             
-            # Short conditions: Donchian breakout down + price below EMA50
-            short_entry = breakout_dn and price_below_ema
+            # Short conditions: Donchian breakout down + price below pivot
+            short_entry = breakout_dn and price_below_pivot
             
             if long_entry:
                 in_position = True
