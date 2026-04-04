@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4882: 12h Donchian(20) Breakout + 1d HMA Trend + Volume Spike (Optimized)
-HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts in direction of 1d HMA21 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) trailing stop (2.5x) to limit downside. Optimized for 12-37 trades/year on 12h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend) by requiring both trend alignment and volume spike, reducing false breakouts.
+Experiment #4882: 12h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts in direction of 1d HMA21 trend with volume confirmation (>1.5x average) capture strong momentum moves. Uses ATR(14) trailing stop (2.0x) to limit downside. Designed for 12-37 trades/year on 12h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 """
 
 import numpy as np
@@ -22,29 +22,33 @@ def generate_signals(prices):
     # Precompute HTF: 1d data for HMA21 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d Indicators: HMA21 for trend filter (vectorized) ===
+    # === 1d Indicators: HMA21 for trend filter ===
     if len(df_1d) >= 21:
-        close_1d = df_1d['close'].values.astype(np.float64)
-        half_len = len(close_1d) // 2
-        sqrt_len = int(np.sqrt(len(close_1d)))
+        # Hull Moving Average calculation
+        half_len = len(df_1d) // 2
+        sqrt_len = int(np.sqrt(len(df_1d)))
         
-        # Vectorized WMA using convolution
+        # WMA function
         def wma(values, window):
-            if len(values) < window:
-                return np.full(len(values), np.nan)
-            weights = np.arange(1, window + 1, dtype=np.float64)
-            weights_sum = weights.sum()
-            result = np.convolve(values, weights, 'valid') / weights_sum
-            # Pad with NaN for beginning
-            return np.concatenate([np.full(window-1, np.nan), result])
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, 'valid') / weights.sum()
         
-        wma_half = wma(close_1d, half_len)
-        wma_full = wma(close_1d, len(close_1d))
-        wma_sqrt = wma(close_1d, sqrt_len)
+        close_1d = df_1d['close'].values
+        wma_half = np.array([wma(close_1d[i:i+half_len], half_len)[-1] 
+                            if i+half_len <= len(close_1d) else np.nan 
+                            for i in range(len(close_1d))])
+        wma_full = np.array([wma(close_1d[i:i+len(close_1d)], len(close_1d))[-1] 
+                            if i+len(close_1d) <= len(close_1d) else np.nan 
+                            for i in range(len(close_1d))])
+        wma_sqrt = np.array([wma(close_1d[i:i+sqrt_len], sqrt_len)[-1] 
+                            if i+sqrt_len <= len(close_1d) else np.nan 
+                            for i in range(len(close_1d))])
         
         # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
         hma_raw = 2 * wma_half - wma_full
-        hma_1d = wma(hma_raw, sqrt_len)
+        hma_1d = np.array([wma(hma_raw[i:i+sqrt_len], sqrt_len)[-1] 
+                          if i+sqrt_len <= len(hma_raw) else np.nan 
+                          for i in range(len(hma_raw))])
     else:
         hma_1d = np.full(len(df_1d), np.nan)
     
@@ -58,11 +62,10 @@ def generate_signals(prices):
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation (2x spike) ===
+    # === 12h Indicators: Volume confirmation (1.5x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
-    valid_ma = ~np.isnan(vol_ma) & (vol_ma > 0)
-    vol_ratio[valid_ma] = volume[valid_ma] / vol_ma[valid_ma]
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
@@ -98,8 +101,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -107,8 +110,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -117,8 +120,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>2.0x)
-        vol_confirm = vol_ratio[i] > 2.0
+        # Volume filter: confirmation (>1.5x)
+        vol_confirm = vol_ratio[i] > 1.5
         
         # Donchian breakout conditions with trend alignment
         breakout_long = (price >= high_roll[i]) and (price > hma_1d_aligned[i]) and vol_confirm
@@ -143,5 +146,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
