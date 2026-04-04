@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #3029: 4h Donchian(20) Breakout + 1d Volume Spike + ADX Regime Filter
-HYPOTHESIS: Donchian(20) breakouts on 4h capture medium-term trends. Volume spike (>2.0x 20-period average)
-confirms breakout strength. ADX(14) > 25 ensures trending regime (avoids chop). Only long when price > 1d EMA50,
-short when price < 1d EMA50. This combination filters false breakouts while capturing strong trends in both
-bull and bear markets. Target: 75-200 total trades over 4 years.
+Experiment #3029: 4h Donchian Breakout + 1d HMA Trend + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 4h capture medium-term trends with strong momentum. 
+1d HMA(21) provides higher timeframe trend filter: only take longs when price > 1d HMA, 
+shorts when price < 1d HMA. Volume spike (>2.0x 20-period average) confirms breakout 
+strength. This combination filters false breakouts in choppy markets while capturing 
+strong trends. Uses discrete position sizing (0.25) to minimize fee churn. 
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3029_4h_donchian20_1d_vol_adx_v1"
+name = "exp_3029_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,41 +24,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA50 trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for HMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1d close
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate HMA(21) on 1d close
+    def calculate_hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean()
+        wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean()
+        raw = 2 * wma2 - wma1
+        hma = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
+        return hma.values
     
-    # === HTF: 1d data for ADX regime filter ===
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # Calculate ADX(14) on 1d data
-    def calculate_adx(high, low, close, period=14):
-        if len(high) < period + 1:
-            return np.full_like(high, np.nan)
-        plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
-                           np.maximum(high[1:] - high[:-1], 0), 0)
-        minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
-                            np.maximum(low[:-1] - low[1:], 0), 0)
-        tr = np.maximum(high[1:] - low[1:], 
-                        np.maximum(np.abs(high[1:] - close[:-1]), 
-                                   np.abs(low[1:] - close[:-1])))
-        tr = np.concatenate([[np.nan], tr])
-        
-        plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean() / \
-                  pd.Series(tr).ewm(alpha=1/period, adjust=False).mean()
-        minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean() / \
-                   pd.Series(tr).ewm(alpha=1/period, adjust=False).mean()
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False).mean()
-        return adx.values
-    
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    hma_1d = calculate_hma(close_1d, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
     # === 4h Indicators: Donchian channels (20-period) ===
     lookback = 20
@@ -84,8 +69,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+            np.isnan(hma_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -127,16 +111,15 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) AND trending regime (ADX > 25)
+        # Require volume spike (> 2.0x average) for confirmation
         volume_spike = vol_ratio[i] > 2.0
-        trending_regime = adx_1d_aligned[i] > 25
         
-        if volume_spike and trending_regime:
-            # Get 1d EMA trend filter
-            price_vs_ema = price - ema_1d_aligned[i]
+        if volume_spike:
+            # Get 1d HMA trend
+            price_vs_hma = price - hma_1d_aligned[i]
             
             # Long entry: price breaks above Donchian high with bullish 1d trend
-            if price > highest_high[i] and price_vs_ema > 0:
+            if price > highest_high[i] and price_vs_hma > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
@@ -144,7 +127,7 @@ def generate_signals(prices):
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
             # Short entry: price breaks below Donchian low with bearish 1d trend
-            elif price < lowest_low[i] and price_vs_ema < 0:
+            elif price < lowest_low[i] and price_vs_hma < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -157,5 +140,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
