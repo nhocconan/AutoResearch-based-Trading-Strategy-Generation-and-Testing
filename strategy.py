@@ -2,10 +2,10 @@
 """
 Experiment #5482: 12h Donchian(20) breakout + 1d EMA200 trend + volume confirmation
 HYPOTHESIS: On 12h timeframe, price breaking above/below the 20-period Donchian channel with 
-volume > 1.8x average and aligned with 1-day EMA200 trend (price above EMA200 = bullish, 
+volume > 2.0x average and aligned with 1-day EMA200 trend (price above EMA200 = bullish, 
 below = bearish) captures strong momentum moves while avoiding false breakouts. Daily EMA200 
-provides long-term trend filter from higher timeframe, reducing whipsaws in both bull and 
-bear markets. Discrete position sizing (0.25) and ATR-based stoploss (2.5x ATR) control risk. 
+provides long-term trend filter from higher timeframe, reducing whipsaws in both bull and bear 
+markets. Discrete position sizing (0.30) and ATR-based stoploss (2.5x ATR) control risk. 
 Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while maintaining 
 statistical significance. Works in bull markets via breakouts above rising EMA200 alignment 
 and in bear markets via short breakdowns below falling EMA200 alignment.
@@ -66,7 +66,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.30  # 30% position size
     
     # Position tracking state variables
     in_position = False
@@ -133,8 +133,8 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]  # Break above previous period's high
         breakout_down = price < donchian_low[i-1]  # Break below previous period's low
         
-        # Volume confirmation: current volume > 1.8x average volume
-        volume_confirmed = volume_ratio[i] > 1.8
+        # Volume confirmation: current volume > 2.0x average volume
+        volume_confirmed = volume_ratio[i] > 2.0
         
         # Entry conditions
         if breakout_up and volume_confirmed and price_above_ema[i]:
