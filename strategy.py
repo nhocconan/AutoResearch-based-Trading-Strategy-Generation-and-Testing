@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4458: 1d Donchian(20) Breakout + 1w HMA21 Trend + Volume Confirmation
-HYPOTHESIS: Daily Donchian(20) breakouts aligned with weekly HMA21 trend direction and confirmed by volume (>1.8x average) capture institutional momentum with minimal false signals. Weekly trend filter provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Targets 30-100 total trades over 4 years (7-25/year) with position size 0.25.
+Experiment #4458: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Confirmation
+HYPOTHESIS: 1d Donchian(20) breakouts aligned with 1w HMA(21) trend direction and confirmed by volume (>1.5x average) capture institutional momentum with minimal false signals. Weekly EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 30-100 total trades over 4 years (7-25/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4458_1d_donchian20_1w_hma21_vol_v1"
+name = "exp_4458_1d_donchian20_1w_hma_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -23,20 +23,20 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1w HMA21 for trend bias ===
+    # === Precompute HTF: 1w HMA(21) for trend bias ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 21:
         close_1w = pd.Series(df_1w['close'].values)
-        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
         half_len = 21 // 2
         sqrt_len = int(np.sqrt(21))
         wma_half = close_1w.ewm(span=half_len, adjust=False).mean()
         wma_full = close_1w.ewm(span=21, adjust=False).mean()
         raw_hma = 2 * wma_half - wma_full
-        hma_21 = raw_hma.ewm(span=sqrt_len, adjust=False).mean().values
-        hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
+        hma_1w = raw_hma.ewm(span=sqrt_len, adjust=False).mean().values
+        hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     else:
-        hma_21_aligned = np.full(n, np.nan)
+        hma_1w_aligned = np.full(n, np.nan)
     
     # === 1d Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
@@ -72,7 +72,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(hma_21_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(hma_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -108,12 +108,12 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 1.5x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.5
         
-        # Weekly HMA bias: price > HMA = long bias, price < HMA = short bias
-        long_bias = price > hma_21_aligned[i]
-        short_bias = price < hma_21_aligned[i]
+        # 1w HMA bias: price > HMA = long bias, price < HMA = short bias
+        long_bias = price > hma_1w_aligned[i]
+        short_bias = price < hma_1w_aligned[i]
         
         # Donchian breakout conditions
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
