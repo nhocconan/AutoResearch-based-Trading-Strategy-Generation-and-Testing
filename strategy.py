@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #5975: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h aligned with weekly pivot bias (price above/below weekly pivot = bullish/bearish)
-capture sustained moves with lower noise. Weekly pivot provides structural bias more resilient to intraday noise than daily.
-Volume >1.5x average confirms breakout strength. ATR trailing stop manages risk. Target 75-200 trades over 4 years.
-Works in both bull/bear: weekly pivot bias prevents counter-trend entries, volume confirmation avoids false breakouts.
+Experiment #5975: 6h Donchian(20) breakout + 1w Camarilla pivot levels + volume confirmation
+HYPOTHESIS: Donchian breakouts on 6h aligned with weekly Camarilla levels (R3/S3 for mean reversion,
+R4/S4 for breakout continuation) capture sustained moves. Weekly Camarilla provides structural
+support/resistance more reliable than daily in ranging/weak trending markets. Volume >1.5x average
+confirms breakout strength. ATR trailing stop manages risk. Target 75-200 trades over 4 years.
+Works in bull/bear: Camarilla levels adapt to volatility, volume confirmation avoids false breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5975_6h_donchian20_1d_weekly_pivot_vol_v1"
+name = "exp_5975_6h_donchian20_1w_camarilla_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -25,22 +26,40 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for weekly pivot levels (using prior week's OHLC) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 5:  # Need at least 5 days for weekly calculation
-        # Calculate weekly OHLC from daily data
-        # We'll compute weekly pivot using the prior week's high, low, close
-        weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(1).values
-        weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(1).values
-        weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().shift(1).values
+    # === HTF: 1w data for weekly Camarilla levels ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 1:  # Need at least 1 week for calculation
+        # Calculate weekly OHLC
+        weekly_high = df_1w['high'].values
+        weekly_low = df_1w['low'].values
+        weekly_close = df_1w['close'].values
         
-        # Weekly pivot point: (weekly_high + weekly_low + weekly_close) / 3
-        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+        # Camarilla pivot levels for weekly timeframe
+        # R4 = Close + ((High - Low) * 1.1/2)
+        # R3 = Close + ((High - Low) * 1.1/4)
+        # S3 = Close - ((High - Low) * 1.1/4)
+        # S4 = Close - ((High - Low) * 1.1/2)
+        camarilla_r4 = weekly_close + ((weekly_high - weekly_low) * 1.1 / 2)
+        camarilla_r3 = weekly_close + ((weekly_high - weekly_low) * 1.1 / 4)
+        camarilla_s3 = weekly_close - ((weekly_high - weekly_low) * 1.1 / 4)
+        camarilla_s4 = weekly_close - ((weekly_high - weekly_low) * 1.1 / 2)
+        
+        # For breakout logic: use R4/S4 as breakout levels, R3/S3 as pullback levels
+        breakout_level_up = camarilla_r4
+        breakout_level_down = camarilla_s4
         
         # Align to 6h timeframe with shift(1) for completed weekly bars only
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+        breakout_up_aligned = align_htf_to_ltf(prices, df_1w, breakout_level_up)
+        breakout_down_aligned = align_htf_to_ltf(prices, df_1w, breakout_level_down)
+        
+        # For mean reversion logic: use R3/S3
+        mean_rev_up_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+        mean_rev_down_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
     else:
-        weekly_pivot_aligned = np.full(n, np.nan)
+        breakout_up_aligned = np.full(n, np.nan)
+        breakout_down_aligned = np.full(n, np.nan)
+        mean_rev_up_aligned = np.full(n, np.nan)
+        mean_rev_down_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -69,7 +88,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 5) + 1  # Donchian, volume avg, ATR, weekly lookback + 1
+    warmup = max(20, 20, 14, 1) + 1  # Donchian, volume avg, ATR, weekly lookback + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -81,7 +100,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(weekly_pivot_aligned[i])):
+            np.isnan(breakout_up_aligned[i]) or np.isnan(breakout_down_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -93,7 +112,8 @@ def generate_signals(prices):
                 highest_since_entry = max(highest_since_entry, high[i])
                 stop_price = highest_since_entry - 2.5 * atr[i]
                 # Exit: stoploss OR price breaks below Donchian low (failed breakout)
-                if price <= stop_price or price <= donchian_low[i]:
+                # OR mean reversion signal at R3 (weekly)
+                if price <= stop_price or price <= donchian_low[i] or price <= mean_rev_up_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -103,7 +123,8 @@ def generate_signals(prices):
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 stop_price = lowest_since_entry + 2.5 * atr[i]
                 # Exit: stoploss OR price breaks above Donchian high (failed breakout)
-                if price >= stop_price or price >= donchian_high[i]:
+                # OR mean reversion signal at S3 (weekly)
+                if price >= stop_price or price >= donchian_high[i] or price >= mean_rev_down_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -116,15 +137,17 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # Weekly pivot bias: price above/below weekly pivot
-        above_pivot = price > weekly_pivot_aligned[i]
-        below_pivot = price < weekly_pivot_aligned[i]
+        # Weekly Camarilla levels: 
+        # Breakout: price breaks above R4 or below S4 with volume
+        # Mean reversion alternative: pullback to R3/S3 in opposite direction (not used for entry here)
+        above_breakout = price > breakout_up_aligned[i]
+        below_breakout = price < breakout_down_aligned[i]
         
         # Entry conditions: 
-        # Long: breakout up with volume AND above weekly pivot
-        # Short: breakout down with volume AND below weekly pivot
-        long_setup = breakout_up and volume_confirmed and above_pivot
-        short_setup = breakout_down and volume_confirmed and below_pivot
+        # Long: Donchian breakout up with volume AND price above weekly R4 (strong breakout)
+        # Short: Donchian breakout down with volume AND price below weekly S4 (strong breakout)
+        long_setup = breakout_up and volume_confirmed and above_breakout
+        short_setup = breakout_down and volume_confirmed and below_breakout
         
         if long_setup:
             in_position = True
