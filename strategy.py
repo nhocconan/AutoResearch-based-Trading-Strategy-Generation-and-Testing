@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #5570: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts with volume > 2.0x average and aligned 
-with weekly HMA21 trend (price above HMA21 = bullish bias, below = bearish bias) capture 
-high-probability trend moves. Weekly HMA provides structural trend filter from higher timeframe, 
-reducing false breakouts in ranging markets. ATR-based trailing stop limits drawdown. 
-Target: 7-25 trades/year (30-100 total over 4 years) with discrete position sizing (0.25) 
-to minimize fee drag. Works in bull (breakouts with HMA support) and bear (breakouts with HMA resistance).
+Experiment #5571: 6h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts with volume > 1.8x average and aligned 
+with daily Camarilla pivot levels (breakout at R4/S4 = continuation, rejection at R3/S3 = mean reversion) 
+capture high-probability trend moves in both bull and bear markets. Daily pivot provides structural 
+support/resistance from higher timeframe, reducing false breakouts. ATR-based trailing stop limits 
+drawdown. Target: 12-37 trades/year (50-150 total over 4 years) with discrete position sizing (0.25) 
+to minimize fee drag. Works in bull (breakouts with pivot support) and bear (breakouts with pivot resistance).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5570_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_5571_6h_donchian20_1d_camarilla_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,33 +27,46 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for HMA21 trend ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 21:
-        # Calculate HMA21 on weekly close
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
+    # === HTF: 1d data for Camarilla pivot levels ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 2:
+        # Calculate Camarilla pivot levels from previous day
+        # R4 = C + ((H-L) * 1.1/2)
+        # R3 = C + ((H-L) * 1.1/4)
+        # S3 = C - ((H-L) * 1.1/4)
+        # S4 = C - ((H-L) * 1.1/2)
+        # where C = (H+L+Close)/3 (typical price)
+        h_1d = df_1d['high'].values
+        l_1d = df_1d['low'].values
+        c_1d = (h_1d + l_1d + df_1d['close'].values) / 3.0
+        rng_1d = h_1d - l_1d
         
-        wma_half = pd.Series(df_1w['close'].values).ewm(span=half_len, adjust=False).mean().values
-        wma_full = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False).mean().values
-        hma_raw = 2 * wma_half - wma_full
-        hma_21 = pd.Series(hma_raw).ewm(span=sqrt_len, adjust=False).mean().values
+        r4 = c_1d + (rng_1d * 1.1 / 2.0)
+        r3 = c_1d + (rng_1d * 1.1 / 4.0)
+        s3 = c_1d - (rng_1d * 1.1 / 4.0)
+        s4 = c_1d - (rng_1d * 1.1 / 2.0)
         
-        # Align to LTF (1d) with shift(1) for completed bars only
-        hma_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
+        # Align to LTF (6h) with shift(1) for completed bars only
+        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     else:
         # Neutral values if insufficient data
-        hma_aligned = np.full(n, np.nan)
+        r4_aligned = np.full(n, np.nan)
+        r3_aligned = np.full(n, np.nan)
+        s3_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: Donchian Channel (20-period) ===
+    # === 6h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume confirmation ===
+    # === 6h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 1d Indicators: ATR(14) for trailing stop ===
+    # === 6h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -72,7 +85,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21)  # Donchian, volume avg, ATR, HMA warmup
+    warmup = max(20, 20, 14, 2)  # Donchian, volume avg, ATR, HTF warmup
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -84,7 +97,8 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(hma_aligned[i])):
+            np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -117,25 +131,23 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 2.0
+        volume_confirmed = volume_ratio[i] > 1.8
         
-        # Determine bias from weekly HMA21
-        bullish_bias = price > hma_aligned[i]
-        bearish_bias = price < hma_aligned[i]
+        # Determine bias from daily Camarilla levels
+        # Long: breakout above Donchian high with volume AND price > R4 (continuation)
+        # Short: breakout below Donchian low with volume AND price < S4 (continuation)
+        # Mean reversion: fade at R3/S3 (not used in this version - continuation only)
+        long_breakout = breakout_up and volume_confirmed and (price > r4_aligned[i])
+        short_breakout = breakout_down and volume_confirmed and (price < s4_aligned[i])
         
-        # Long: breakout above Donchian high with volume AND bullish bias from weekly HMA
-        long_entry = breakout_up and volume_confirmed and bullish_bias
-        # Short: breakout below Donchian low with volume AND bearish bias from weekly HMA
-        short_entry = breakout_down and volume_confirmed and bearish_bias
-        
-        if long_entry:
+        if long_breakout:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif short_entry:
+        elif short_breakout:
             in_position = True
             position_side = -1
             entry_price = close[i]
