@@ -2,10 +2,10 @@
 """
 exp_6584_1d_donchian20_1w_hma_vol_v1
 Hypothesis: 1d Donchian(20) breakout with 1w HMA21 trend filter and volume confirmation.
-Primary timeframe = 1d (target: 30-100 total trades over 4 years). 1w HMA21 provides
-smooth trend direction that works in both bull and bear markets. Volume confirmation
-ensures breakouts have conviction. Discrete sizing (0.25) minimizes fee churn.
-Includes ATR-based stoploss and max hold of 20 bars (~20 days).
+Uses 1d primary timeframe (target: 30-100 total trades over 4 years). 1w HMA21 provides
+smooth trend direction that works in both bull and bear markets. Volume confirmation ensures
+breakouts have conviction. Discrete sizing (0.25) minimizes fee churn. Includes ATR-based
+stoploss and time-based exit (max 30 bars = ~30 days).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -24,7 +24,19 @@ VOL_BASE_THRESHOLD = 2.0  # Volume threshold for confirmation
 SIGNAL_SIZE = 0.25      # 25% position size
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5  # Stoploss at 2.5 * ATR
-MAX_HOLD_BARS = 20      # Max hold: ~20 days
+MAX_HOLD_BARS = 30      # Max hold: ~30 * 1d = 30 days
+
+def calculate_hma(series, period):
+    """Calculate Hull Moving Average"""
+    if len(series) < period:
+        return np.full_like(series, np.nan)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    wma_half = pd.Series(series).ewm(span=half_period, adjust=False).mean()
+    wma_full = pd.Series(series).ewm(span=period, adjust=False).mean()
+    hma_raw = 2 * wma_half - wma_full
+    hma = pd.Series(hma_raw).ewm(span=sqrt_period, adjust=False).mean()
+    return hma.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -137,20 +149,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-def calculate_hma(values, period):
-    """Calculate Hull Moving Average"""
-    if len(values) < period:
-        return np.full_like(values, np.nan)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA of half period
-    wma_half = pd.Series(values).ewm(span=half_period, adjust=False).mean().values
-    # WMA of full period
-    wma_full = pd.Series(values).ewm(span=period, adjust=False).mean().values
-    # Raw HMA
-    raw_hma = 2 * wma_half - wma_full
-    # Final HMA (WMA of raw with sqrt period)
-    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
-    return hma
