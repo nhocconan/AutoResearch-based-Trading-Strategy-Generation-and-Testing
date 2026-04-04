@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 exp_6532_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA200 as trend filter and volume confirmation.
-Uses volume spike (2.0x) to confirm breakout strength. Designed for low-frequency, high-conviction trades
-targeting 50-150 total trades over 4 years on 12h timeframe. Works in bull/bear via EMA200 bias.
+Hypothesis: 12h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
+Uses volume spike (2.0x) to confirm breakout strength and avoid false signals.
+Designed for low-frequency, high-conviction trades targeting 50-150 total trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -108,5 +108,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
