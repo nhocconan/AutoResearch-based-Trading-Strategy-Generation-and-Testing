@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #5125: 12h Donchian(20) Breakout + 1d HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with 1d HMA(21) trend capture strong momentum with lower trade frequency. 
+Experiment #5126: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 1d HMA(21) trend capture strong momentum. 
 Volume > 1.8x average confirms participation. ATR(14) trailing stop (2.5x) manages risk. 
-Designed for 12-37 trades/year on 12h timeframe to minimize fee drag. Works in bull markets (breakouts with trend) 
-and bear markets (breakdowns with trend). Uses discrete position sizing (0.30) to minimize fee churn.
+Designed for 19-50 trades/year on 4h timeframe to minimize fee drag. Works in bull markets (breakouts with trend) 
+and bear markets (breakdowns with trend). Uses discrete position sizing (0.28) to minimize fee churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5125_12h_donchian20_1d_hma_vol_v1"
-timeframe = "12h"
+name = "exp_5126_4h_donchian20_1d_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -49,16 +49,16 @@ def generate_signals(prices):
     else:
         hma_1d_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian(20) channels ===
+    # === 4h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation (1.8x spike) ===
+    # === 4h Indicators: Volume confirmation (1.8x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -67,7 +67,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.28  # 28% position size
     
     # Position tracking state variables
     in_position = False
