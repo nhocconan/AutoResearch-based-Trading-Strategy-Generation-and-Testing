@@ -132,6 +132,7 @@ def generate_signals(prices):
     
     return signals
 
+</think>
 #!/usr/bin/env python3
 """
 Experiment #2361: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
