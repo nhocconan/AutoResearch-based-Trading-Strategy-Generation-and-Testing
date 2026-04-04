@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #3869: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend capture strong momentum moves.
-Volume > 1.5x MA(20) confirms institutional participation. Works in bull/bear:
-In uptrend (price > 1d EMA50), buy breakouts; in downtrend (price < 1d EMA50), short breakdowns.
-Discrete sizing (0.25) limits fee drag. ATR(14) trailing stop (2.0x) manages risk.
-Target: 75-150 trades over 4 years (19-37/year).
+Experiment #3869: 4h Donchian(20) breakout + 1d EMA(200) trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(200) trend capture institutional order flow.
+Volume > 1.5x MA(20) confirms participation. Works in bull/bear: In uptrend (price > EMA200),
+buy breakouts; in downtrend (price < EMA200), short breakdowns. Discrete sizing (0.25) limits
+fee drag. ATR(14) trailing stop (2.0x) manages risk. Target: 75-150 trades over 4 years (19-37/year).
 """
 
 import numpy as np
@@ -23,11 +22,11 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA(50) trend ===
+    # === HTF: 1d data for EMA(200) trend filter ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema_1d_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    ema_200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
     # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -57,12 +56,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20, 50)  # sufficient for all indicators
+    warmup = max(lookback_dc + 1, 20, 200)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_1d_50_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -107,23 +106,23 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Determine trend from 1d EMA(50)
-            uptrend = price > ema_1d_50_aligned[i]
-            downtrend = price < ema_1d_50_aligned[i]
+            # Determine trend from 1d EMA(200)
+            uptrend = price > ema_200_1d_aligned[i]
+            downtrend = price < ema_200_1d_aligned[i]
             
             # Long entry: breakout above Donchian upper band in uptrend
-            long_breakout = price > highest_high[i-1] and uptrend
+            long_entry = uptrend and price > highest_high[i-1]
             # Short entry: breakdown below Donchian lower band in downtrend
-            short_breakout = price < lowest_low[i-1] and downtrend
+            short_entry = downtrend and price < lowest_low[i-1]
             
-            if long_breakout and not short_breakout:
+            if long_entry and not short_entry:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            elif short_breakout and not long_breakout:
+            elif short_entry and not long_entry:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -136,3 +135,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
