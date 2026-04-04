@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #6166: 4h Donchian(20) breakout + 1d trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 trend capture structural moves with noise filtering.
+Experiment #6169: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA trend capture structural moves with lower noise than shorter EMAs.
 Price above 1d EMA50 = bullish bias (favor longs), below = bearish bias (favor shorts).
-Volume >2.0x average confirms strong participation. ATR trailing stop manages risk.
+Volume >1.8x average confirms strong participation. ATR trailing stop manages risk.
 Discrete sizing (0.25) minimizes fee churn. Target: 75-200 trades over 4 years.
 Timeframe: 4h. HTF: 1d for EMA50 trend filter.
 """
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6166_4h_donchian20_1d_ema_vol_v1"
+name = "exp_6169_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -106,7 +106,7 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 2.0  # Volume filter for stronger signals
+        volume_confirmed = volume_ratio[i] > 1.8  # Volume filter for stronger signals
         
         # Multi-timeframe trend filter: price relative to 1d EMA50
         bullish_bias = price > ema_1d_aligned[i]  # Above EMA50 = bullish
@@ -136,5 +136,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
