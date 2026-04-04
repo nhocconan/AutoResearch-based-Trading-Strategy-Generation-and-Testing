@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #2556: 12h Donchian(20) breakout + 1d pivot direction + volume confirmation
-HYPOTHESIS: Daily pivot points provide institutional reference levels that act as support/resistance.
-Donchian breakouts from these levels with volume confirmation capture institutional participation.
-Works in bull markets (breakouts above daily R1 with volume) and bear markets (breakdowns below daily S1 with volume).
-Uses discrete position sizing (0.25) to limit fee drag and ensure 50-150 total trades over 4 years.
+Experiment #2556: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: Donchian channel breakouts on 12h timeframe aligned with daily EMA trend and volume spikes 
+capture institutional participation with lower frequency to reduce fee drag. Works in bull markets 
+(breakouts with volume) and bear markets (breakdowns with volume). Uses discrete position sizing (0.25) 
+to limit fee drag and ensure 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2556_12h_donchian20_1d_pivot_vol_v1"
+name = "exp_2556_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -22,21 +22,14 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for pivot points (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2.0 * pivot_1d - low_1d
-    s1_1d = 2.0 * pivot_1d - high_1d
-    
-    # Align to 12h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # Calculate 1d EMA(50)
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     # === 12h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
@@ -59,11 +52,11 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 20  # sufficient for Donchian and volume MA
+    warmup = 50  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(pivot_1d_aligned[i]) or np.isnan(r1_1d_aligned[i]) or np.isnan(s1_1d_aligned[i]) or
+        if (np.isnan(trend_1d_aligned[i]) or
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
@@ -109,20 +102,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
+        # Require 1d trend alignment for bias filter
+        trend_bias = trend_1d_aligned[i]
+        
         # Volume confirmation: require volume spike (> 2.0x average)
         volume_spike = vol_ratio[i] > 2.0
         
-        if volume_spike:
-            # Long entry: price breaks above Donchian high AND above daily S1 (bullish bias)
-            if price > highest_20[i] and price > s1_1d_aligned[i]:
+        if volume_spike and trend_bias != 0:
+            # Long entry: price breaks above Donchian high with uptrend
+            if trend_bias > 0 and price > highest_20[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low AND below daily R1 (bearish bias)
-            elif price < lowest_20[i] and price < r1_1d_aligned[i]:
+            # Short entry: price breaks below Donchian low with downtrend
+            elif trend_bias < 0 and price < lowest_20[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
