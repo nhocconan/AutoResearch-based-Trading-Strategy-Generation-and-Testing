@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-exp_6838_1d_donchian20_1w_ema_vol_v2
-Hypothesis: 1d Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation.
-Modified: Reduced volume threshold from 2.0x to 1.5x and increased signal size to 0.30 to generate more trades while maintaining quality.
-Weekly EMA50 provides structural trend to avoid counter-trend trades. Volume confirms breakout legitimacy.
-Designed for 1d timeframe to capture major swings with ~15-40 trades/year (60-160 total over 4 years).
+exp_6838_1d_donchian20_1w_ema_vol_v1
+Hypothesis: 1d Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
+In bull markets (price > weekly EMA50): long breakouts only. In bear markets (price < weekly EMA50): short breakouts only.
+Weekly EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
+Designed for 1d timeframe to capture major swings with ~7-25 trades/year (30-100 total over 4 years).
 Works in both bull and bear markets by aligning with weekly trend direction.
 """
 
@@ -12,18 +12,18 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6838_1d_donchian20_1w_ema_vol_v2"
+name = "exp_6838_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5  # Reduced from 2.0 to increase trade frequency
-SIGNAL_SIZE = 0.30        # Increased from 0.25 to improve capital efficiency
+VOL_BASE_THRESHOLD = 2.0
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 40        # Increased from 30 to allow trends to develop
+MAX_HOLD_BARS = 30  # ~1.5 months (1d bars)
 EMA_PERIOD = 50
 
 def generate_signals(prices):
