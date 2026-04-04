@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #5013: 4h Donchian(20) Breakout + 12h HMA21 Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts in direction of 12h HMA21 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) trailing stop (2.5x) to limit downside. The 12h HTF trend filter reduces whipsaw vs 1d while maintaining sufficient signal frequency for 19-50 trades/year. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
+Experiment #5013: 4h Donchian(20) Breakout + 12h HMA Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts in direction of 12h HMA(21) trend with volume confirmation (>2x average) capture strong momentum moves while minimizing overtrading. Uses ATR(14) trailing stop (2.5x) to limit downside. Targets 25-40 trades/year on 4h timeframe to reduce fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 """
 
 import numpy as np
@@ -28,8 +28,10 @@ def generate_signals(prices):
         half_len = len(df_12h) // 2
         sqrt_len = int(np.sqrt(len(df_12h)))
         
-        # WMA function
+        # WMA function using convolution for efficiency
         def wma(values, window):
+            if len(values) < window:
+                return np.full(len(values), np.nan)
             weights = np.arange(1, window + 1)
             return np.convolve(values, weights, 'valid') / weights.sum()
         
