@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #6082: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA50 trend capture swing moves with proper structure. 
-Volume >1.5x average confirms participation. Uses discrete sizing (0.25) to minimize fee drag. 
-Designed to work in both bull and bear markets by requiring alignment with higher timeframe trend.
-Target: 50-150 total trades over 4 years (12-37/year).
+Experiment #6082: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR stop
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA50 trend capture multi-day swings with proper structure. 
+Volume >1.5x average confirms participation. Works in bull markets (breakouts above rising EMA50) 
+and bear markets (breakdowns below falling EMA50). Target: 50-150 total trades over 4 years (12-37/year). 
+Discrete sizing (0.25) minimizes fee drag. Uses 12h primary timeframe as instructed.
 """
 
 import numpy as np
@@ -28,10 +28,11 @@ def generate_signals(prices):
     # === HTF: 1d data for EMA50 trend ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 50:
-        ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+        # Calculate EMA50 on 1d close
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        ema_50_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
     # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -60,7 +61,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 50, 14) + 1  # Donchian, volume avg, EMA50, ATR + 1
+    warmup = max(20, 20, 50, 14) + 1  # Donchian, volume avg, EMA50 calc, ATR + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -72,7 +73,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_50_aligned[i])):
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -108,8 +109,8 @@ def generate_signals(prices):
         volume_confirmed = volume_ratio[i] > 1.5  # Volume filter for stronger signals
         
         # Multi-timeframe trend filter: price must be aligned with 1d EMA50
-        bullish_trend = price > ema_50_aligned[i]
-        bearish_trend = price < ema_50_aligned[i]
+        bullish_trend = price > ema_1d_aligned[i]
+        bearish_trend = price < ema_1d_aligned[i]
         
         # Entry conditions:
         # Long: breakout up with volume AND bullish trend on 1d EMA50
