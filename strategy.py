@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #5763: 4h Donchian(20) breakout + 12h EMA(34) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA(34) trend capture medium-term momentum with lower noise than daily EMA. Volume > 1.5x average confirms breakout strength. Designed for 75-150 total trades over 4 years to minimize fee drag while maintaining statistical validity. Works in both bull and bear markets by requiring trend alignment rather than directional bias.
+Experiment #5763: 4h Donchian(20) breakout + 12h EMA(21) trend + volume confirmation + ATR trailing stop
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA(21) trend capture intermediate-term moves with fewer whipsaws than daily EMA. Volume > 1.8x average confirms breakout strength. Designed to work in both bull and bear markets by requiring trend alignment and using ATR-based trailing stops. Target 75-200 total trades over 4 years.
 """
 
 import numpy as np
@@ -24,8 +24,8 @@ def generate_signals(prices):
     
     # === HTF: 12h data for EMA trend filter ===
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 34:
-        ema_12h = pd.Series(df_12h['close'].values).ewm(span=34, min_periods=34, adjust=False).mean().values
+    if len(df_12h) >= 21:
+        ema_12h = pd.Series(df_12h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
     else:
         ema_12h = np.full(len(df_12h), np.nan)
     
@@ -59,7 +59,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 34)  # Donchian, volume avg, ATR, EMA period
+    warmup = max(20, 20, 14, 21)  # Donchian, volume avg, ATR, EMA period
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -104,7 +104,7 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.5
+        volume_confirmed = volume_ratio[i] > 1.8
         trend_up = price > ema_12h_aligned[i]
         trend_down = price < ema_12h_aligned[i]
         
@@ -130,3 +130,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
