@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-exp_6572_12h_donchian20_1d_pivot_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d Camarilla pivot direction filter and volume confirmation.
-Uses 12h primary timeframe to reduce trade frequency (target: 50-150 total trades over 4 years).
-1d Camarilla pivots provide institutional support/resistance levels that work in both bull and bear markets:
+exp_6573_4h_donchian20_12h_pivot_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 12h Camarilla pivot direction filter and volume confirmation.
+Uses 4h primary timeframe for better trade frequency (target: 75-200 total trades over 4 years).
+12h Camarilla pivots provide institutional support/resistance levels that work in both bull and bear markets:
 - Fade at R3/S3 (mean reversion in ranges)
 - Breakout continuation at R4/S4 (trend acceleration)
 Volume confirmation ensures breakouts have conviction. Discrete sizing (0.25) minimizes fee churn.
@@ -13,44 +13,44 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6572_12h_donchian20_1d_pivot_vol_v1"
-timeframe = "12h"
+name = "exp_6573_4h_donchian20_12h_pivot_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-PIVOT_LOOKBACK = 1  # Use previous day's pivots
+PIVOT_LOOKBACK = 1  # Use previous 12h bar's pivots
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0  # Volume threshold for confirmation
 SIGNAL_SIZE = 0.25      # 25% position size
-MAX_HOLD_BARS = 15      # Max hold: ~7.5 days (12h bars)
+MAX_HOLD_BARS = 30      # Max hold: ~10 days (4h bars)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - using 12h for Camarilla pivots
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d Camarilla pivot levels (based on previous day)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h Camarilla pivot levels (based on previous bar)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
     # Pivot point
-    pivot = (high_1d + low_1d + close_1d) / 3
+    pivot = (high_12h + low_12h + close_12h) / 3
     # Camarilla levels
-    camarilla_h4 = pivot + (high_1d - low_1d) * 1.1 / 2  # R4
-    camarilla_h3 = pivot + (high_1d - low_1d) * 1.1 / 4  # R3
-    camarilla_l3 = pivot - (high_1d - low_1d) * 1.1 / 4  # S3
-    camarilla_l4 = pivot - (high_1d - low_1d) * 1.1 / 2  # S4
+    camarilla_h4 = pivot + (high_12h - low_12h) * 1.1 / 2  # R4
+    camarilla_h3 = pivot + (high_12h - low_12h) * 1.1 / 4  # R3
+    camarilla_l3 = pivot - (high_12h - low_12h) * 1.1 / 4  # S3
+    camarilla_l4 = pivot - (high_12h - low_12h) * 1.1 / 2  # S4
     
-    # Align to LTF (12h) with shift(1) for completed bars only
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    # Align to LTF (4h) with shift(1) for completed bars only
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l4)
     
     # Calculate LTF indicators
     close = prices['close'].values
