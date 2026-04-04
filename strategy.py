@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5214: 1h Donchian(20) Breakout + 4h EMA(50) Trend + 1d Volume Spike + Session Filter
-HYPOTHESIS: On 1h timeframe, Donchian(20) breakouts aligned with 4h EMA(50) trend capture momentum bursts while avoiding overtrading. 
-Volume > 2.0x daily average confirms institutional participation. Session filter (08-20 UTC) reduces noise trades. 
-Designed for 15-37 trades/year on 1h timeframe (60-150 total over 4 years) to minimize fee drag. 
-Uses discrete position sizing (0.20) to minimize fee churn. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend).
+Experiment #5215: 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
+HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts aligned with weekly pivot direction (above/below weekly pivot) capture institutional momentum with reduced false signals. Volume > 1.8x average confirms participation. Designed for 12-37 trades/year on 6h timeframe (50-150 total over 4 years) to minimize fee drag. Works in bull markets (breakouts above weekly pivot) and bear markets (breakdowns below weekly pivot). Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5214_1h_donchian20_4h_ema_1d_vol_session_v1"
-timeframe = "1h"
+name = "exp_5215_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,52 +17,38 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # Precompute HTF: 4h data for EMA trend
-    df_4h = get_htf_data(prices, '4h')
+    # Precompute HTF: 1w data for weekly pivot
+    df_1w = get_htf_data(prices, '1w')
     
-    # Precompute HTF: 1d data for volume average
-    df_1d = get_htf_data(prices, '1d')
-    
-    # === 4h Indicators: EMA(50) for trend ===
-    if len(df_4h) >= 50:
-        close_4h = df_4h['close'].values
-        ema_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # === 1w Indicators: Weekly Pivot (HLC/3) ===
+    if len(df_1w) >= 1:
+        typical_1w = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3.0
+        weekly_pivot = typical_1w.values
+        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     else:
-        ema_4h_aligned = np.full(n, np.nan)
+        weekly_pivot_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: Volume average (20-period) ===
-    if len(df_1d) >= 20:
-        volume_1d = df_1d['volume'].values
-        vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-        vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    else:
-        vol_ma_1d_aligned = np.full(n, np.nan)
-    
-    # === 1h Indicators: Donchian(20) channels ===
+    # === 6h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1h Indicators: Volume ratio (current / 1d average) ===
+    # === 6h Indicators: Volume confirmation (1.8x spike) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma_1d_aligned[20:]
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
-    # === Session filter: 08-20 UTC (pre-compute hours) ===
-    hours = pd.DatetimeIndex(open_time).hour
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -79,15 +62,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
-            signals[i] = 0.0
-            continue
-        
-        # --- Session Filter ---
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)  # UTC 8-20
-        
-        if not in_session:
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -117,14 +92,14 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>2.0x)
-        vol_confirm = vol_ratio[i] > 2.0
+        # Volume filter: confirmation (>1.8x)
+        vol_confirm = vol_ratio[i] > 1.8
         
-        # Donchian breakout conditions with 4h EMA trend filter
-        # Long: Donchian breakout above + price > 4h EMA (uptrend)
-        # Short: Donchian breakdown below + price < 4h EMA (downtrend)
-        breakout_long = (price >= high_roll[i]) and (price > ema_4h_aligned[i]) and vol_confirm
-        breakout_short = (price <= low_roll[i]) and (price < ema_4h_aligned[i]) and vol_confirm
+        # Donchian breakout conditions with weekly pivot filter
+        # Long: Donchian breakout above + price > weekly pivot (bullish bias)
+        # Short: Donchian breakdown below + price < weekly pivot (bearish bias)
+        breakout_long = (price >= high_roll[i]) and (price > weekly_pivot_aligned[i]) and vol_confirm
+        breakout_short = (price <= low_roll[i]) and (price < weekly_pivot_aligned[i]) and vol_confirm
         
         # Final entry conditions
         if breakout_long:
