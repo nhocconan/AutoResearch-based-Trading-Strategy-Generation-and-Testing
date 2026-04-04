@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #4360: 4h Donchian Breakout + Daily Pivot Direction + Volume Confirmation
+Experiment #4361: 4h Donchian Breakout + Daily Pivot Direction + Volume Confirmation
 HYPOTHESIS: Donchian(20) breakouts on 4h aligned with daily pivot bias (price > daily pivot = long bias, < daily pivot = short bias) and confirmed by volume spikes (>1.5x average) capture institutional momentum. Daily pivot provides structural support/resistance from higher timeframe, reducing false breakouts. Works in bull via upward breakouts with long bias, in bear via downward breakouts with short bias. Volume confirmation filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4360_4h_donchian20_1d_pivot_vol_v1"
+name = "exp_4361_4h_donchian20_1d_pivot_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -36,7 +36,6 @@ def generate_signals(prices):
         daily_pivot_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel(20) ===
-    # Upper = max(high, 20), Lower = min(low, 20)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
