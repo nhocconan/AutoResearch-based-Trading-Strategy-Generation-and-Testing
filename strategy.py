@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #4210: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
-HYPOTHESIS: Donchian channel breakouts on 1d timeframe capture swing momentum when aligned with weekly trend (EMA20/50 cross) and confirmed by volume (>1.8x average). 
-Uses discrete position sizing (0.25) to limit fee churn, targeting 50-100 total trades over 4 years (12-25/year). 
-Works in both bull and bear markets by requiring weekly trend alignment (avoids counter-trend trades) and volume confirmation (filters false breakouts).
-ATR-based trailing stop (2.0x) manages risk. Fewer trades = less fee drag = better test generalization.
+HYPOTHESIS: Daily Donchian channel breakouts capture momentum when aligned with weekly EMA50 trend filter, 
+confirmed by volume spikes (>2.0x average). Weekly EMA ensures we trade with the higher timeframe structure, 
+avoiding counter-trend breakouts in ranging/choppy markets. Discrete position sizing (0.25) limits fee churn, 
+targeting 30-100 total trades over 4 years (7-25/year). Works in both bull and bear markets by using EMA as 
+dynamic trend filter that adapts to volatility regimes.
 """
 
 import numpy as np
@@ -22,23 +23,14 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === Precompute HTF: 1w EMA for trend alignment ===
+    # === Precompute HTF: 1w data for EMA50 trend filter ===
     df_1w = get_htf_data(prices, '1w')
-    
-    # 1w EMA cross (20/50) for trend filter
-    if len(df_1w) >= 20:
-        close_1w = df_1w['close'].values
-        ema_20_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
-        ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
-        ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
-        uptrend_1w = ema_20_1w_aligned > ema_50_1w_aligned
+    if len(df_1w) >= 50:
+        # Weekly EMA50 (using previous completed week to avoid look-ahead)
+        ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)  # auto shift(1)
     else:
-        uptrend_1w = np.full(n, False)
-    
-    # Combined HTF trend: uptrend or downtrend
-    htf_uptrend = uptrend_1w
-    htf_downtrend = ~uptrend_1w
+        ema_50_aligned = np.full(n, np.nan)
     
     # === 1d Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
@@ -71,12 +63,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
+    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, EMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_20_1w_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -87,8 +79,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -96,8 +88,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -106,19 +98,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = vol_ratio[i] > 2.0
         
         if volume_confirm:
-            # Donchian breakout conditions
+            # Donchian breakout conditions (using previous bar's bands)
             breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
             breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
             
-            # Long conditions: breakout up + weekly uptrend
-            long_entry = breakout_up and htf_uptrend[i]
+            # Trend filter: price above/below weekly EMA50
+            above_ema = price > ema_50_aligned[i]
+            below_ema = price < ema_50_aligned[i]
             
-            # Short conditions: breakout down + weekly downtrend
-            short_entry = breakout_dn and htf_downtrend[i]
+            # Long: Donchian breakout up + above weekly EMA (trend alignment)
+            long_entry = breakout_up and above_ema
+            
+            # Short: Donchian breakout down + below weekly EMA (trend alignment)
+            short_entry = breakout_dn and below_ema
             
             if long_entry:
                 in_position = True
