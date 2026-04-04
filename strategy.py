@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #5308: 12h Donchian(20) breakout + 1w EMA trend + volume confirmation
-HYPOTHESIS: On 12h timeframe, price breaking above/below the 20-period Donchian channel 
-with volume > 1.5x average and aligned with 1w EMA50 trend captures strong momentum moves. 
-Donchian channels adapt to volatility and work in both bull and bear markets by catching 
-breakouts from consolidation. Volume confirmation ensures breakouts have participation. 
-1w EMA50 filter ensures we only trade in the direction of the higher timeframe trend, 
-avoiding counter-trend breakouts that fail. Uses discrete position sizing (0.25) and 
-ATR-based stoploss to control drawdown. Target: 12-37 trades/year on 12h timeframe 
-(50-150 total over 4 years) to minimize fee drag while maintaining statistical significance.
+Experiment #5311: 6h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: On 6h timeframe, price breaking above/below the 20-period Donchian channel 
+with volume > 1.5x average and aligned with 1d Camarilla pivot levels captures strong 
+momentum moves. Long when breaking above R4 with volume confirmation, short when 
+breaking below S4. Uses discrete position sizing (0.25) and ATR-based stoploss to 
+control drawdown. Target: 12-37 trades/year on 6h timeframe (50-150 total over 4 years) 
+to minimize fee drag while maintaining statistical significance.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5308_12h_donchian20_1w_ema_vol_v1"
-timeframe = "12h"
+name = "exp_5311_6h_donchian20_1d_camarilla_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,26 +27,48 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for EMA50 trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 50:
-        ema_50 = pd.Series(df_1w['close']).ewm(span=50, min_periods=50, adjust=False).mean().shift(1).values
-        ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # === HTF: 1d data for Camarilla pivot levels ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 2:
+        # Calculate Camarilla pivots from previous day's OHLC
+        # Camarilla levels: based on previous day's range
+        prev_close = df_1d['close'].shift(1).values
+        prev_high = df_1d['high'].shift(1).values
+        prev_low = df_1d['low'].shift(1).values
+        
+        # Typical price for pivot calculation
+        pivot = (prev_high + prev_low + prev_close) / 3.0
+        range_hl = prev_high - prev_low
+        
+        # Camarilla levels
+        r4 = pivot + (range_hl * 1.1 / 2)  # R4 = pivot + 1.1*(H-L)/2
+        r3 = pivot + (range_hl * 1.1/4)    # R3 = pivot + 1.1*(H-L)/4
+        s3 = pivot - (range_hl * 1.1/4)    # S3 = pivot - 1.1*(H-L)/4
+        s4 = pivot - (range_hl * 1.1/2)    # S4 = pivot - 1.1*(H-L)/2
+        
+        # Align to LTF (6h) with shift(1) for completed bars only
+        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     else:
-        ema_50_aligned = np.full(n, np.nan)
+        r4_aligned = np.full(n, np.nan)
+        r3_aligned = np.full(n, np.nan)
+        s3_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel (20-period) ===
+    # === 6h Indicators: Donchian Channel (20-period) ===
     # Upper band: 20-period high
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     # Lower band: 20-period low
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation ===
+    # === 6h Indicators: Volume confirmation ===
     # Average volume over 20 periods
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)  # Avoid division by zero
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -68,11 +88,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50)  # Donchian, volume avg, ATR, EMA50 warmup
+    warmup = max(20, 20, 14, 2)  # Donchian, volume avg, ATR, Camarilla warmup
     
     for i in range(warmup, n):
-        # --- Session Filter: Trade during major sessions (00-20 UTC) ---
+        # --- Session Filter: Avoid low liquidity periods (optional) ---
         hour = hours[i]
+        # Trade during major sessions: 00-06 UTC (Asia), 07-12 UTC (Europe), 13-20 UTC (US)
         # Avoid 21-23 UTC (low liquidity between sessions)
         if 21 <= hour <= 23:
             signals[i] = 0.0
@@ -80,7 +101,8 @@ def generate_signals(prices):
         
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or np.isnan(ema_50_aligned[i])):
+            np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or 
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -96,8 +118,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks below Donchian lower band (failed breakout)
-                # 3. Price crosses below 1w EMA50 (trend change)
-                if price <= stop_price or price <= donchian_low[i] or price < ema_50_aligned[i]:
+                # 3. Price crosses below S3 (reversion to mean)
+                if price <= stop_price or price <= donchian_low[i] or price < s3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -110,8 +132,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks above Donchian upper band (failed breakout)
-                # 3. Price crosses above 1w EMA50 (trend change)
-                if price >= stop_price or price >= donchian_high[i] or price > ema_50_aligned[i]:
+                # 3. Price crosses above R3 (reversion to mean)
+                if price >= stop_price or price >= donchian_high[i] or price > r3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -127,19 +149,21 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # Trend filter from 1w EMA50
-        trend_bullish = price > ema_50_aligned[i]
-        trend_bearish = price < ema_50_aligned[i]
+        # Camarilla pivot conditions
+        # Long: break above R4 with volume confirmation
+        # Short: break below S4 with volume confirmation
+        camarilla_long = breakout_up and volume_confirmed and (price > r4_aligned[i-1])
+        camarilla_short = breakout_down and volume_confirmed and (price < s4_aligned[i-1])
         
-        # Entry conditions: Donchian breakout + volume confirmation + trend alignment
-        if breakout_up and volume_confirmed and trend_bullish:
+        # Entry conditions
+        if camarilla_long:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif breakout_down and volume_confirmed and trend_bearish:
+        elif camarilla_short:
             in_position = True
             position_side = -1
             entry_price = close[i]
