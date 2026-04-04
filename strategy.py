@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #6351: 6h Donchian(20) breakout + 1d Camarilla pivot levels + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts with volume confirmation (>1.8x avg) and Camarilla pivot bias from 1d timeframe capture institutional momentum. 
+Experiment #6352: 12h Donchian(20) breakout + 1d Camarilla pivot levels + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts with volume confirmation (>1.8x avg) and Camarilla pivot bias from 1d timeframe capture institutional momentum. 
 Camarilla levels (R3/S3 for fade, R4/S4 for breakout) provide mathematically derived support/resistance that adapts to volatility. 
 In ranging markets (price between R3-S3), fade extremes; in breakout markets (price >R4 or <S4), continue the breakout direction. 
 Uses discrete sizing (0.25) to minimize fee churn. Target: 75-150 trades over 4 years.
@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6351_6h_donchian20_1d_camarilla_vol_v1"
-timeframe = "6h"
+name = "exp_6352_12h_donchian20_1d_camarilla_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -44,7 +44,7 @@ def generate_signals(prices):
         s3 = daily_close - ((daily_high - daily_low) * 1.1 / 4.0)
         s4 = daily_close - ((daily_high - daily_low) * 1.1 / 2.0)
         
-        # Align to 6h timeframe (shift by 1 day for prior day's levels)
+        # Align to 12h timeframe (shift by 1 day for prior day's levels)
         pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
         r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
         r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
@@ -57,15 +57,15 @@ def generate_signals(prices):
         s3_aligned = np.full(n, np.nan)
         s4_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20-period) ===
+    # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation ===
+    # === 12h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 6h Indicators: ATR(14) for trailing stop ===
+    # === 12h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
