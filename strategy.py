@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #6261: 4h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1-day Camarilla pivot levels (R4/S4 for continuation) capture institutional order flow. Volume >2.0x average confirms participation. Uses 1d HTF for pivot calculation. Discrete sizing (0.25) manages fee drag. Target: 75-200 trades over 4 years (19-50/year) for 4h timeframe. Works in both bull (breakout continuation) and bear (mean reversion at extremes) markets.
+Experiment #6262: 12h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1-day Camarilla pivot levels (R4/S4 for continuation, R3/S3 for mean reversion) capture institutional order flow. Volume >2.0x average confirms participation. Uses 1d HTF for pivot calculation (proven effective for identifying key supply/demand zones). Discrete sizing (0.25) manages fee drag. Target: 75-150 trades over 4 years (19-37/year) for 12h timeframe. Works in both bull (breakout continuation) and bear (mean reversion at extremes) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6261_4h_donchian20_1d_camarilla_vol_v1"
-timeframe = "4h"
+name = "exp_6262_12h_donchian20_1d_camarilla_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,26 +40,26 @@ def generate_signals(prices):
         s3 = pivot - (range_1d * 1.1 / 4)
         s4 = pivot - (range_1d * 1.1 / 2)
         
-        # Align to 4h timeframe (shift(1) inside align_htf_to_ltf for completed bars only)
-        r4_4h = align_htf_to_ltf(prices, df_1d, r4)
-        r3_4h = align_htf_to_ltf(prices, df_1d, r3)
-        s3_4h = align_htf_to_ltf(prices, df_1d, s3)
-        s4_4h = align_htf_to_ltf(prices, df_1d, s4)
+        # Align to 12h timeframe (shift(1) inside align_htf_to_ltf for completed bars only)
+        r4_12h = align_htf_to_ltf(prices, df_1d, r4)
+        r3_12h = align_htf_to_ltf(prices, df_1d, r3)
+        s3_12h = align_htf_to_ltf(prices, df_1d, s3)
+        s4_12h = align_htf_to_ltf(prices, df_1d, s4)
     else:
-        r4_4h = np.full(n, np.nan)
-        r3_4h = np.full(n, np.nan)
-        s3_4h = np.full(n, np.nan)
-        s4_4h = np.full(n, np.nan)
+        r4_12h = np.full(n, np.nan)
+        r3_12h = np.full(n, np.nan)
+        s3_12h = np.full(n, np.nan)
+        s4_12h = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation ===
+    # === 12h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 4h Indicators: ATR(14) for trailing stop ===
+    # === 12h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -90,8 +90,8 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(r4_4h[i]) or np.isnan(r3_4h[i]) or
-            np.isnan(s3_4h[i]) or np.isnan(s4_4h[i])):
+            np.isnan(r4_12h[i]) or np.isnan(r3_12h[i]) or
+            np.isnan(s3_12h[i]) or np.isnan(s4_12h[i])):
             signals[i] = 0.0
             continue
         
@@ -106,7 +106,7 @@ def generate_signals(prices):
                 # 1. Stoploss
                 # 2. Price breaks below Donchian low (failed breakout)
                 # 3. Mean reversion: price reaches S3 (strong support) in bullish context
-                if price <= stop_price or price <= donchian_low[i] or price <= s3_4h[i]:
+                if price <= stop_price or price <= donchian_low[i] or price <= s3_12h[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -119,7 +119,7 @@ def generate_signals(prices):
                 # 1. Stoploss
                 # 2. Price breaks above Donchian high (failed breakout)
                 # 3. Mean reversion: price reaches R3 (strong resistance) in bearish context
-                if price >= stop_price or price >= donchian_high[i] or price >= r3_4h[i]:
+                if price >= stop_price or price >= donchian_high[i] or price >= r3_12h[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -140,11 +140,11 @@ def generate_signals(prices):
         #   - Breakout below Donchian low with volume AND price < S4 (continuation)
         #   - OR mean reversion from extreme high: price > R4 AND breaking below Donchian high with volume
         
-        long_breakout = breakout_up and volume_confirmed and price > r4_4h[i]
-        long_mean_reversion = (price < s4_4h[i]) and breakout_up and volume_confirmed and price > donchian_low[i-1]
+        long_breakout = breakout_up and volume_confirmed and price > r4_12h[i]
+        long_mean_reversion = (price < s4_12h[i]) and breakout_up and volume_confirmed and price > donchian_low[i-1]
         
-        short_breakout = breakout_down and volume_confirmed and price < s4_4h[i]
-        short_mean_reversion = (price > r4_4h[i]) and breakout_down and volume_confirmed and price < donchian_high[i-1]
+        short_breakout = breakout_down and volume_confirmed and price < s4_12h[i]
+        short_mean_reversion = (price > r4_12h[i]) and breakout_down and volume_confirmed and price < donchian_high[i-1]
         
         long_entry = long_breakout or long_mean_reversion
         short_entry = short_breakout or short_mean_reversion
@@ -167,5 +167,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
