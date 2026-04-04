@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #4635: 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: 6h price breaking Donchian(20) channels from prior 1w with volume confirmation (>1.5x avg) and aligned with weekly pivot bias (above/below pivot) captures strong momentum breakouts. Weekly pivot provides higher-timeframe directional filter to avoid counter-trend trades. Target: 12-37 trades/year on 6h timeframe.
+HYPOTHESIS: 6h price breaking Donchian(20) channels with volume confirmation (>1.5x avg) 
+and aligned with weekly pivot direction (price above/below weekly pivot) captures strong 
+momentum breakouts in both bull and bear markets. Weekly pivot provides HTF bias, 
+Donchian structure defines breakout levels, volume confirms conviction. 
+Discrete sizing (0.25) and ATR trailing stop (2.0x) manage risk. 
+Target: 12-37 trades/year on 6h timeframe.
 """
 
 import numpy as np
@@ -19,52 +24,47 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1w data for weekly pivot and Donchian channels
-    df_1w = get_htf_data(prices, '1w')
+    # Precompute HTF: 1d data for Donchian channels (prior 20 periods)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    if len(df_1w) >= 1:
-        # Use prior week's OHLC (shifted by 1 to avoid look-ahead)
-        ph = np.concatenate([[np.nan], df_1w['high'].values[:-1]])  # prior week high
-        pl = np.concatenate([[np.nan], df_1w['low'].values[:-1]])   # prior week low
-        pc = np.concatenate([[np.nan], df_1w['close'].values[:-1]]) # prior week close
+    # Calculate Donchian(20) from prior 1d OHLC (shifted by 1 to avoid look-ahead)
+    if len(df_1d) >= 20:
+        # Use prior 20 days' high/low (shifted by 1)
+        ph = np.concatenate([[np.nan] * 20, df_1d['high'].values[:-20]])  # prior 20 days high
+        pl = np.concatenate([[np.nan] * 20, df_1d['low'].values[:-20]])   # prior 20 days low
         
-        # Weekly pivot = (H + L + C) / 3
-        weekly_pivot = (ph + pl + pc) / 3.0
-        # Weekly R1 = 2*P - L, S1 = 2*P - H
-        weekly_r1 = 2 * weekly_pivot - pl
-        weekly_s1 = 2 * weekly_pivot - ph
-    else:
-        weekly_pivot = np.full(n, np.nan)
-        weekly_r1 = np.full(n, np.nan)
-        weekly_s1 = np.full(n, np.nan)
-    
-    # Calculate Donchian(20) from prior 1w OHLC (shifted by 1 to avoid look-ahead)
-    if len(df_1w) >= 20:
-        # Use prior 20 weeks' high/low (shifted by 1)
-        ph_20 = np.concatenate([[np.nan] * 20, df_1w['high'].values[:-20]])  # prior 20 weeks high
-        pl_20 = np.concatenate([[np.nan] * 20, df_1w['low'].values[:-20]])   # prior 20 weeks low
-        
-        # Rolling max/min of prior 20 weeks
-        donchian_high = pd.Series(ph_20).rolling(window=20, min_periods=20).max().values
-        donchian_low = pd.Series(pl_20).rolling(window=20, min_periods=20).min().values
+        # Rolling max/min of prior 20 days
+        donchian_high = pd.Series(ph).rolling(window=20, min_periods=20).max().values
+        donchian_low = pd.Series(pl).rolling(window=20, min_periods=20).min().values
     else:
         donchian_high = np.full(n, np.nan)
         donchian_low = np.full(n, np.nan)
     
-    # Align HTF levels to 6h timeframe
-    if len(df_1w) > 0:
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-        weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
-        weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
-        dh_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
-        dl_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
+    # Align Donchian levels to 6h timeframe
+    if len(donchian_high) > 0:
+        dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+        dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     else:
-        weekly_pivot_aligned = np.full(n, np.nan)
-        weekly_r1_aligned = np.full(n, np.nan)
-        weekly_s1_aligned = np.full(n, np.nan)
         dh_aligned = np.full(n, np.nan)
         dl_aligned = np.full(n, np.nan)
+    
+    # Precompute HTF: 1w data for weekly pivot points
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate weekly pivot points (standard formula: (H+L+C)/3)
+    if len(df_1w) >= 1:
+        weekly_high = df_1w['high'].values
+        weekly_low = df_1w['low'].values
+        weekly_close = df_1w['close'].values
+        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    else:
+        weekly_pivot = np.array([])
+    
+    # Align weekly pivot to 6h timeframe
+    if len(weekly_pivot) > 0:
+        pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    else:
+        pivot_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -94,7 +94,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(dh_aligned[i]) or np.isnan(dl_aligned[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(pivot_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -127,13 +127,13 @@ def generate_signals(prices):
         # Volume filter: confirmation for breakouts (>1.5x)
         vol_breakout = vol_ratio[i] > 1.5
         
-        # Weekly pivot bias: long if price above pivot, short if below pivot
-        pivot_bias_long = price > weekly_pivot_aligned[i]
-        pivot_bias_short = price < weekly_pivot_aligned[i]
+        # Weekly pivot direction filter
+        above_pivot = price > pivot_aligned[i]
+        below_pivot = price < pivot_aligned[i]
         
-        # Breakout conditions: price breaks Donchian high/low with volume confirmation AND pivot bias
-        breakout_long = price > dh_aligned[i] and vol_breakout and pivot_bias_long
-        breakout_short = price < dl_aligned[i] and vol_breakout and pivot_bias_short
+        # Breakout conditions: price breaks Donchian high/low with volume confirmation and pivot alignment
+        breakout_long = price > dh_aligned[i] and vol_breakout and above_pivot
+        breakout_short = price < dl_aligned[i] and vol_breakout and below_pivot
         
         if breakout_long:
             in_position = True
