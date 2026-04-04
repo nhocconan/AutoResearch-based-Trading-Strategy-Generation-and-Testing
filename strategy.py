@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-exp_6576_12h_donchian20_1d_pivot_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d Camarilla pivot direction filter and volume confirmation.
-Uses 12h primary timeframe to target 50-150 total trades over 4 years (12-37/year).
+exp_6577_4h_donchian20_1d_pivot_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 1d Camarilla pivot direction filter and volume confirmation.
+Uses 4h primary timeframe for optimal balance of signal quality and trade frequency (target: 75-200 total trades over 4 years).
 1d Camarilla pivots provide institutional support/resistance levels that work in both bull and bear markets:
 - Fade at R3/S3 (mean reversion in ranges)
 - Breakout continuation at R4/S4 (trend acceleration)
@@ -13,8 +13,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6576_12h_donchian20_1d_pivot_vol_v1"
-timeframe = "12h"
+name = "exp_6577_4h_donchian20_1d_pivot_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -23,7 +23,7 @@ PIVOT_LOOKBACK = 1  # Use previous day's pivots
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0  # Volume threshold for confirmation
 SIGNAL_SIZE = 0.25      # 25% position size
-MAX_HOLD_BARS = 15      # Max hold: ~7.5 days (12h bars)
+MAX_HOLD_BARS = 20      # Max hold: ~10 days (4h bars)
 
 def generate_signals(prices):
     n = len(prices)
@@ -46,7 +46,7 @@ def generate_signals(prices):
     camarilla_l3 = pivot - (high_1d - low_1d) * 1.1 / 4  # S3
     camarilla_l4 = pivot - (high_1d - low_1d) * 1.1 / 2  # S4
     
-    # Align to LTF (12h) with shift(1) for completed bars only
+    # Align to LTF (4h) with shift(1) for completed bars only
     camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
     camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
     camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
