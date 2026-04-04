@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4466: 4h Donchian(20) Breakout + 1d EMA50 Trend + Volume Confirmation (Reduced Frequency)
-HYPOTHESIS: Reducing trade frequency from ~478 to target 75-200 total trades by tightening volume confirmation (2.5x avg volume) and requiring Donchian breakout with 2-bar confirmation. This maintains the edge of 4h Donchian breakouts with 1d EMA50 trend alignment while minimizing fee drift. Position size 0.25.
+Experiment #4466: 4h Donchian(20) Breakout + 1d EMA50 Trend + Volume Confirmation
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 1d EMA50 trend direction and confirmed by volume (>1.8x average) capture institutional momentum with minimal false signals. The 1d EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
 """
 
 import numpy as np
@@ -102,18 +102,16 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 2.5x average) to reduce trade frequency
-        volume_confirm = vol_ratio[i] > 2.5
+        # Require volume confirmation (> 1.8x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.8
         
         # 1d EMA bias: price > EMA = long bias, price < EMA = short bias
         long_bias = price > ema_1d_aligned[i]
         short_bias = price < ema_1d_aligned[i]
         
-        # Donchian breakout conditions with 2-bar confirmation
-        # Require close > upper band for current and previous bar (strong breakout)
-        breakout_up = close[i] > donch_upper[i-1] and close[i-1] > donch_upper[i-2]
-        # Require close < lower band for current and previous bar (strong breakout)
-        breakout_down = close[i] < donch_lower[i-1] and close[i-1] < donch_lower[i-2]
+        # Donchian breakout conditions
+        breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
+        breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
         
         # Long conditions: upward breakout + long bias + volume
         long_entry = breakout_up and long_bias and volume_confirm
