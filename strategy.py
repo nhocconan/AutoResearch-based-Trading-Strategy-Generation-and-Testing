@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4345: 12h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: Price breaking Donchian(20) channels on 12h captures significant momentum when aligned with 1d EMA(50) trend and confirmed by volume spikes (>1.5x average). Works in bull via upside breakouts, in bear via downside breakouts. Volume confirmation filters false breakouts. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+Experiment #4345: 12h Donchian(20) Breakout + 1d EMA50 + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 12h capture intermediate-term momentum when aligned with 1d EMA50 trend and confirmed by volume spikes (>2.0x average). Works in bull via upside breakouts above EMA50, in bear via downside breakouts below EMA50. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4345_12h_donchian20_1d_ema_vol_v1"
+name = "exp_4345_12h_donchian20_1d_ema50_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -23,7 +23,7 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1d EMA(50) for trend filter ===
+    # === Precompute HTF: 1d EMA50 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 50:
         ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
@@ -31,13 +31,11 @@ def generate_signals(prices):
     else:
         ema_50_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian(20) channels ===
-    # Upper channel = max(high, 20)
-    # Lower channel = min(low, 20)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # === 12h Indicators: Donchian Channel(20) ===
+    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -62,11 +60,11 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
+    warmup = max(lookback, 20, 14, 50)  # Donchian, vol MA, ATR, EMA50
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(vol_ratio[i]) or
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(atr[i]) or np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0
             continue
@@ -103,22 +101,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = vol_ratio[i] > 2.0
         
-        # Trend filter: price above/below 1d EMA(50)
+        # Trend filter: price above/below 1d EMA50
         price_above_ema = price > ema_50_aligned[i]
         price_below_ema = price < ema_50_aligned[i]
         
         # Donchian breakout conditions
-        upper_breakout = high[i] > donchian_upper[i]  # Price breaks above upper channel
-        lower_breakout = low[i] < donchian_lower[i]  # Price breaks below lower channel
+        breakout_up = price > highest_high[i-1]  # Break above previous period's high
+        breakout_down = price < lowest_low[i-1]  # Break below previous period's low
         
-        # Long conditions: Upside breakout + volume + price above EMA
-        long_entry = upper_breakout and volume_confirm and price_above_ema
+        # Long conditions: Upside breakout + above EMA50 + volume
+        long_entry = breakout_up and price_above_ema and volume_confirm
         
-        # Short conditions: Downside breakout + volume + price below EMA
-        short_entry = lower_breakout and volume_confirm and price_below_ema
+        # Short conditions: Downside breakout + below EMA50 + volume
+        short_entry = breakout_down and price_below_ema and volume_confirm
         
         if long_entry:
             in_position = True
