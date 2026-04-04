@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #6442: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts with volume confirmation (>2.0x avg) and 1d trend filter (price vs EMA50) capture institutional order flow while keeping trade frequency low (target: 50-150 total trades over 4 years). Long when price breaks above Donchian high with volume and price > 1d EMA50 (uptrend). Short when price breaks below Donchian low with volume and price < 1d EMA50 (downtrend). Uses trailing stop at 2.5*ATR from extreme. Discrete sizing at 0.30 to balance profit potential and drawdown control. Works in bull via upward breakouts with volume and uptrend, in bear via downward breakdowns with volume and downtrend.
+Experiment #6445: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts with volume confirmation (>2.0x avg) and 1d trend filter (price vs EMA50) capture institutional order flow while maintaining optimal trade frequency for 12h timeframe. Long when price breaks above Donchian high with volume AND price > 1d EMA50 (uptrend). Short when price breaks below Donchian low with volume AND price < 1d EMA50 (downtrend). Uses ATR-based trailing stop (2.5x) from extreme. Discrete sizing at 0.30. Target: 50-150 trades over 4 years. Works in bull via upward breakouts with volume and uptrend, in bear via downward breakdowns with volume and downtrend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6442_12h_donchian20_1d_ema_vol_v1"
+name = "exp_6445_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
