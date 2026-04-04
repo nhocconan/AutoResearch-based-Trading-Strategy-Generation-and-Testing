@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4008: 12h Donchian(20) breakout + weekly pivot direction + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with weekly pivot bias capture high-probability trends in both bull and bear markets. Weekly pivot (from prior week OHLC) provides structural bias: price above weekly pivot = bullish context (favor longs), below = bearish context (favor shorts). Volume > 1.5x MA(20) confirms participation. Discrete sizing (0.25) and ATR(20) trailing stop (2.5x) control risk. Target: 50-150 trades over 4 years (12-37/year).
+Experiment #4009: 4h Donchian(20) breakout + daily trend filter + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA(50) trend capture high-probability moves in both bull and bear markets. Volume > 1.5x MA(20) confirms institutional participation. Discrete sizing (0.25) and ATR(20) trailing stop (2.0x) control risk. Target: 100-200 trades over 4 years (25-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4008_12h_donchian20_1w_pivot_vol_v1"
-timeframe = "12h"
+name = "exp_4009_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,34 +19,26 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for weekly pivot calculation (prior week OHLC) ===
+    # === HTF: 1d data for daily EMA(50) trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 5:
-        # Calculate weekly pivot from prior week's OHLC
-        # Need at least 5 days for prior week (Mon-Fri)
-        weekly_high = df_1d['high'].rolling(window=5, min_periods=5).max().values
-        weekly_low = df_1d['low'].rolling(window=5, min_periods=5).min().values
-        weekly_close = df_1d['close'].rolling(window=5, min_periods=5).last().values
-        # Weekly pivot = (H + L + C) / 3
-        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-        # Align to 12h timeframe (1d -> 12h: 2x) and shift by 1 week (10 periods) for prior week
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-        weekly_pivot_aligned = np.roll(weekly_pivot_aligned, 10)
-        weekly_pivot_aligned[:10] = np.nan
+    if len(df_1d) >= 50:
+        daily_close = df_1d['close'].values
+        daily_ema = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
+        daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
     else:
-        weekly_pivot_aligned = np.full(n, np.nan)
+        daily_ema_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel(20) for breakout ===
+    # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 12h Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(20) for volatility and trailing stop ===
+    # === 4h Indicators: ATR(20) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -64,13 +56,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 10, 20 + 10, 20 + 5)  # DC lookback, vol MA, ATR buffer, weekly shift
+    warmup = max(lookback_dc + 1, 20 + 10, 20 + 10, 50 + 5)  # DC lookback, vol MA, ATR buffer, EMA warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(weekly_pivot_aligned[i])):
+            np.isnan(daily_ema_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -81,8 +73,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -90,8 +82,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -104,9 +96,9 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Determine trend alignment from weekly pivot (prior week)
-            bullish_alignment = price > weekly_pivot_aligned[i]
-            bearish_alignment = price < weekly_pivot_aligned[i]
+            # Determine trend alignment from daily EMA(50)
+            bullish_alignment = price > daily_ema_aligned[i]
+            bearish_alignment = price < daily_ema_aligned[i]
             
             # Breakout conditions using Donchian
             breakout_up = price > highest_high[i-1]
