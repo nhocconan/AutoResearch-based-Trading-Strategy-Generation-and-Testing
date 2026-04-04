@@ -2,10 +2,10 @@
 """
 exp_6833_4h_donchian20_12h_ema_vol_v1
 Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation.
-In bull markets (price > 12h EMA50): long breakouts only. In bear markets (price < 12h EMA50): short breakouts only.
-12h EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
-Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
-Works in both bull and bear markets by aligning with 12h trend direction.
+In 12h uptrend (price > 12h EMA50): long Donchian breakouts only. In 12h downtrend (price < 12h EMA50): short breakouts only.
+Volume > 2.0x 20-period MA confirms breakout legitimacy. ATR-based stoploss at 2.5x ATR.
+Designed for 4h timeframe targeting 75-200 trades over 4 years (19-50/year) with low fee drag.
+Uses proven price channel structure with HTF trend alignment to work in both bull and bear markets.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -23,7 +23,6 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 30  # ~5 months (4h bars)
 EMA_PERIOD = 50
 
 def generate_signals(prices):
@@ -31,14 +30,14 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 12h for trend filter
+    # Load HTF data ONCE before loop - using 12h for EMA
     df_12h = get_htf_data(prices, '12h')
     
     # Calculate 12h EMA50
     close_12h = df_12h['close'].values
     ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align to LTF (4h)
+    # Align to LTF (4h) - align_htf_to_ltf handles shift(1) for completed bars only
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Calculate LTF indicators
@@ -91,13 +90,6 @@ def generate_signals(prices):
                 bars_since_entry = 0
                 continue
                 
-        # Time-based exit
-        if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
-            signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
-            continue
-            
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
