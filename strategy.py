@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #3152: 12h Donchian Breakout + 1d EMA Trend + Volume Spike
-HYPOTHESIS: 12h Donchian(20) breakouts capture medium-term trends with low trade frequency.
-1d EMA(50) trend filter ensures alignment with higher timeframe momentum.
-Volume spike (>2.0x 20-period average) confirms breakout strength.
-ATR-based trailing stop (2.5x) manages risk.
-Position size 0.25. Target: 50-150 total trades over 4 years (12-37/year).
-Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets
-by using price channels and volatility filters.
+Experiment #3152: 12h Camarilla Pivot + 1w Volume Spike + Chop Regime Filter
+HYPOTHESIS: 12h strategies using Camarilla pivot levels from 1d timeframe capture institutional reaction points with low trade frequency.
+Weekly volume spike (>2.5x average) confirms breakout significance.
+Choppiness Index regime filter (CHOP > 61.8 = range) enables mean reversion at pivot levels.
+Position size 0.25. Target: 75-150 total trades over 4 years (19-37/year).
+Designed to work in bull markets (breakout continuation) and bear markets (mean reversion at extremes).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3152_12h_donchian20_1d_ema_vol_v1"
+name = "exp_3152_12h_camarilla1w_vol_chop_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,30 +23,48 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1d close
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate Camarilla pivot levels for 1d
+    # Camarilla: R4 = close + 1.5*(high-low)*1.1/2, R3 = close + 1.25*(high-low)*1.1/2, etc.
+    # We use R3, S3 as primary levels
+    rng_1d = high_1d - low_1d
+    camarilla_r3_1d = close_1d + 1.25 * rng_1d * 1.1 / 2
+    camarilla_s3_1d = close_1d - 1.25 * rng_1d * 1.1 / 2
     
-    # === 12h Indicators: Donchian channels (20-period) ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === HTF: 1w data for volume average (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    volume_1w = df_1w['volume'].values
+    vol_ma_1w = pd.Series(volume_1w).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    
+    # === 12h Indicators: Choppiness Index (14) for regime detection ===
+    def calculate_chop(high_arr, low_arr, close_arr, window=14):
+        """Calculate Choppiness Index: higher = more choppy/ranging"""
+        tr1 = high_arr[1:] - low_arr[1:]
+        tr2 = np.abs(high_arr[1:] - close_arr[:-1])
+        tr3 = np.abs(low_arr[1:] - close_arr[:-1])
+        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        
+        atr_sum = pd.Series(tr).rolling(window=window, min_periods=window).sum()
+        highest_high = pd.Series(high_arr).rolling(window=window, min_periods=window).max()
+        lowest_low = pd.Series(low_arr).rolling(window=window, min_periods=window).min()
+        
+        chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(window)
+        return chop.values
+    
+    chop = calculate_chop(high, low, close, 14)
+    
+    # === 12h Indicators: Volume ratio vs weekly average ===
     vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
-    
-    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    vol_ratio[20:] = volume[20:] / vol_ma_1w_aligned[20:]
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -58,15 +74,13 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 20, 14)  # sufficient for all indicators
+    warmup = max(50, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -74,30 +88,28 @@ def generate_signals(prices):
         
         # --- Exit Logic ---
         if in_position:
-            # Update highest/lowest since entry for trailing stop
+            # Exit conditions: price reaches opposite pivot level or chop regime changes
             if position_side > 0:  # Long
-                highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price reaches S3 (mean reversion target)
+                if price <= camarilla_s3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price re-enters Donchian channel (mean reversion)
-                elif price <= highest_high[i]:
+                # Exit if chop drops below 38.2 (trending regime) - trail with price action
+                elif chop[i] < 38.2 and price < close[i-1]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
-                lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price reaches R3 (mean reversion target)
+                if price >= camarilla_r3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price re-enters Donchian channel (mean reversion)
-                elif price >= lowest_low[i]:
+                # Exit if chop drops below 38.2 (trending regime) - trail with price action
+                elif chop[i] < 38.2 and price > close[i-1]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -106,28 +118,24 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
+        # Require volume spike (> 2.5x weekly average) for confirmation
+        volume_spike = vol_ratio[i] > 2.5
         
-        if volume_spike:
-            # 1d EMA trend filter: only long above EMA, short below EMA
-            price_vs_ema = price - ema_1d_aligned[i]
-            
-            # Long entry: price breaks above Donchian high with bullish 1d trend
-            if price > highest_high[i] and price_vs_ema > 0:
+        # Require choppy/ranging regime (CHOP > 61.8) for mean reversion setup
+        choppy_regime = chop[i] > 61.8
+        
+        if volume_spike and choppy_regime:
+            # Long entry: price touches S3 level with bullish rejection (close > open)
+            if low[i] <= camarilla_s3_aligned[i] and close[i] > open[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with bearish 1d trend
-            elif price < lowest_low[i] and price_vs_ema < 0:
+            # Short entry: price touches R3 level with bearish rejection (close < open)
+            elif high[i] >= camarilla_r3_aligned[i] and close[i] < open[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
