@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4888: 12h Donchian(20) Breakout + 1w/1d HTF Trend + Volume Spike
-HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with 1w HMA50 and 1d HMA21 trend filters capture strong momentum moves. Volume confirmation (>1.5x average) filters false breakouts. ATR(14) trailing stop (2.0x) manages risk. Designed for 12-37 trades/year on 12h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
+Experiment #4888: 12h Donchian(20) Breakout + 1w/1d HTF Trend + Volume Confirmation
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with 1w/1d HMA trend filters capture strong momentum moves while minimizing overtrading. Volume confirmation (>1.5x average) ensures breakout validity. ATR-based trailing stop (2.0x) manages risk. Designed for 12-37 trades/year on 12h timeframe to avoid fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 """
 
 import numpy as np
@@ -23,13 +23,11 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1w Indicators: HMA50 for trend filter ===
-    if len(df_1w) >= 50:
-        # Hull Moving Average calculation
+    # === 1w Indicators: HMA21 for trend filter ===
+    if len(df_1w) >= 21:
         half_len = len(df_1w) // 2
         sqrt_len = int(np.sqrt(len(df_1w)))
         
-        # WMA function
         def wma(values, window):
             weights = np.arange(1, window + 1)
             return np.convolve(values, weights, 'valid') / weights.sum()
@@ -45,7 +43,6 @@ def generate_signals(prices):
                             if i+sqrt_len <= len(close_1w) else np.nan 
                             for i in range(len(close_1w))])
         
-        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
         hma_raw = 2 * wma_half - wma_full
         hma_1w = np.array([wma(hma_raw[i:i+sqrt_len], sqrt_len)[-1] 
                           if i+sqrt_len <= len(hma_raw) else np.nan 
@@ -53,19 +50,11 @@ def generate_signals(prices):
     else:
         hma_1w = np.full(len(df_1w), np.nan)
     
-    # Align HTF HMA50 to 12h timeframe
-    if len(hma_1w) > 0:
-        hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
-    else:
-        hma_1w_aligned = np.full(n, np.nan)
-    
     # === 1d Indicators: HMA21 for trend filter ===
     if len(df_1d) >= 21:
-        # Hull Moving Average calculation
         half_len = len(df_1d) // 2
         sqrt_len = int(np.sqrt(len(df_1d)))
         
-        # WMA function
         def wma(values, window):
             weights = np.arange(1, window + 1)
             return np.convolve(values, weights, 'valid') / weights.sum()
@@ -81,7 +70,6 @@ def generate_signals(prices):
                             if i+sqrt_len <= len(close_1d) else np.nan 
                             for i in range(len(close_1d))])
         
-        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
         hma_raw = 2 * wma_half - wma_full
         hma_1d = np.array([wma(hma_raw[i:i+sqrt_len], sqrt_len)[-1] 
                           if i+sqrt_len <= len(hma_raw) else np.nan 
@@ -90,6 +78,11 @@ def generate_signals(prices):
         hma_1d = np.full(len(df_1d), np.nan)
     
     # Align HTF HMA21 to 12h timeframe
+    if len(hma_1w) > 0:
+        hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    else:
+        hma_1w_aligned = np.full(n, np.nan)
+        
     if len(hma_1d) > 0:
         hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     else:
@@ -161,9 +154,13 @@ def generate_signals(prices):
         # Volume filter: confirmation (>1.5x)
         vol_confirm = vol_ratio[i] > 1.5
         
-        # Donchian breakout conditions with trend alignment (both HTFs must agree)
-        breakout_long = (price >= high_roll[i]) and (price > hma_1w_aligned[i]) and (price > hma_1d_aligned[i]) and vol_confirm
-        breakout_short = (price <= low_roll[i]) and (price < hma_1w_aligned[i]) and (price < hma_1d_aligned[i]) and vol_confirm
+        # Require BOTH HTF trends to agree (stronger filter)
+        hma_trend_long = (hma_1w_aligned[i] > hma_1d_aligned[i])  # 1w above 1d = bullish
+        hma_trend_short = (hma_1w_aligned[i] < hma_1d_aligned[i])  # 1w below 1d = bearish
+        
+        # Donchian breakout conditions with HTF trend alignment
+        breakout_long = (price >= high_roll[i]) and hma_trend_long and vol_confirm
+        breakout_short = (price <= low_roll[i]) and hma_trend_short and vol_confirm
         
         # Final entry conditions
         if breakout_long:
