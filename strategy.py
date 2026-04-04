@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4918: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Spike
-HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts in direction of 1w HMA21 trend with volume confirmation (>2x average) capture strong momentum moves in both bull and bear markets. Uses ATR(14) trailing stop (2.5x) to limit downside. Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag while maintaining statistical significance.
+HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts in direction of 1w HMA21 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) trailing stop (2.5x) to limit downside. Designed for 7-25 trades/year on 1d timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 """
 
 import numpy as np
