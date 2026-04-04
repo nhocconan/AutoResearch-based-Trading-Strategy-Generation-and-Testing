@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #5959: 6h Donchian(20) breakout + 12h pivot direction + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h aligned with 12h pivot (price vs 12h pivot) capture sustained moves.
-12h pivot provides structural support/resistance from higher timeframe. Volume >1.5x average confirms breakout strength.
-ATR trailing stop manages risk. Target: 75-200 trades over 4 years (19-50/year) to minimize fee drift.
-Uses 12h as HTF for better alignment with 6h primary timeframe vs 1d.
+HYPOTHESIS: Donchian breakouts on 6h aligned with 12h pivot (price vs 12h pivot) capture sustained moves with lower noise than daily.
+12h pivot provides structural support/resistance from higher timeframe (more stable than 1d on 6h chart). Volume >1.5x average confirms breakout strength.
+ATR trailing stop manages risk. Target: 75-150 trades over 4 years (19-37/year) to minimize fee drift.
 """
 
 import numpy as np
@@ -25,20 +24,20 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 12h data for 12h pivot ===
+    # === HTF: 12h data for pivot ===
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) >= 1:
-        # Calculate 12h pivot from prior 12h bar's OHLC
+        # Calculate pivot from prior 12h bar's OHLC
         high_12h = pd.Series(df_12h['high'].values)
         low_12h = pd.Series(df_12h['low'].values)
         close_12h = pd.Series(df_12h['close'].values)
         
-        # Prior 12h bar's OHLC
+        # Prior 12h OHLC
         prior_high = high_12h.shift(1)
         prior_low = low_12h.shift(1)
         prior_close = close_12h.shift(1)
         
-        # 12h pivot point: (H + L + C) / 3
+        # Pivot point: (H + L + C) / 3
         pivot_12h = (prior_high + prior_low + prior_close) / 3.0
         pivot_12h_values = pivot_12h.values
         pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h_values)
