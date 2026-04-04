@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-exp_6487_6h_donchian20_1d_ema_vol_v1
-Hypothesis: 6h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Uses daily EMA(50) as trend filter: long only when price > EMA50, short only when price < EMA50.
+exp_6488_12h_donchian20_1w_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1w EMA trend filter and volume confirmation.
+Uses weekly EMA(50) as trend filter: long only when price > EMA50, short only when price < EMA50.
 Donchian(20) breakout provides entry timing, volume confirmation filters weak breakouts.
-Designed to work in both bull and bear markets by using 1d EMA as trend filter and Donchian breakouts for momentum.
-Target: 75-200 trades over 4 years (19-50/year). Uses 6h primary timeframe per experiment instructions.
+Designed to work in both bull and bear markets by using 1w EMA as trend filter and Donchian breakouts for momentum.
+Target: 50-150 trades over 4 years (12-37/year) on 12h timeframe.
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6487_6h_donchian20_1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_6488_12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -27,15 +27,15 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA trend
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - using 1w for EMA trend
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA(50)
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, min_periods=EMA_PERIOD, adjust=False).mean().values
+    # Calculate 1w EMA(50)
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, min_periods=EMA_PERIOD, adjust=False).mean().values
     
-    # Align to LTF (6h) with shift(1) for completed bars only
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align to LTF (12h) with shift(1) for completed bars only
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -59,17 +59,17 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if EMA data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(ema_1w_aligned[i]):
             continue
             
-        # Long conditions: price breaks above Donchian HIGH + above 1d EMA + volume spike
+        # Long conditions: price breaks above Donchian HIGH + above 1w EMA + volume spike
         long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
-        long_trend = close[i] > ema_1d_aligned[i]  # price above 1d EMA (bullish trend)
+        long_trend = close[i] > ema_1w_aligned[i]  # price above 1w EMA (bullish trend)
         long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Short conditions: price breaks below Donchian LOW + below 1d EMA + volume spike
+        # Short conditions: price breaks below Donchian LOW + below 1w EMA + volume spike
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
-        short_trend = close[i] < ema_1d_aligned[i]  # price below 1d EMA (bearish trend)
+        short_trend = close[i] < ema_1w_aligned[i]  # price below 1w EMA (bearish trend)
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Exit conditions: simple midpoint reversal
