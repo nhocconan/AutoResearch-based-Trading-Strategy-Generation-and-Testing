@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #6267: 6h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 1-day Camarilla pivot levels (R4/S4 for continuation) capture institutional order flow with lower frequency than 4h, reducing fee drag. Volume >2.0x average confirms participation. Uses 1d HTF for pivot calculation. Discrete sizing (0.25) manages fee drag. Target: 50-150 trades over 4 years (12-37/year) for 6h timeframe. Works in both bull (breakout continuation) and bear (mean reversion at extremes) markets by using Camarilla extremes as reversal zones.
+HYPOTHESIS: 6h Donchian breakouts aligned with 1-day Camarilla pivot levels (R4/S4 for continuation, R3/S3 for mean reversion) capture institutional order flow. Volume >2.0x average confirms participation. Uses 1d HTF for pivot calculation. Discrete sizing (0.25) manages fee drag. Target: 75-200 trades over 4 years (19-50/year) for 6h timeframe. Works in both bull (breakout continuation) and bear (mean reversion at extremes) markets.
 """
 
 import numpy as np
@@ -167,3 +167,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
