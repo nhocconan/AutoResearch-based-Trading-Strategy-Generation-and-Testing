@@ -1,58 +1,64 @@
 #!/usr/bin/env python3
 """
-exp_6771_6h_donchian20_1d_pivot_vol_v1
-Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot levels and volume confirmation.
-Long when price breaks above Donchian high AND above daily R3 pivot with volume spike.
-Short when price breaks below Donchian low AND below daily S3 pivot with volume spike.
-Uses 1d HTF for pivot structure to avoid noise, 6h for precise timing.
-Designed for ranging and trending markets - pivots act as dynamic support/resistance.
-Volume confirmation ensures breakout legitimacy. Target: 12-37 trades/year.
+exp_6771_6h_camarilla_pivot_1d_v1
+Hypothesis: 6h Camarilla pivot levels from 1d HTF: fade at R3/S3, breakout continuation at R4/S4.
+In ranging markets (ADX < 25): fade extreme Camarilla levels (R3/S3) with volume confirmation.
+In trending markets (ADX >= 25): breakout continuation when price closes beyond R4/S4 with volume.
+This structure-based approach works in both bull and bear markets by adapting to regime.
+Target: 50-150 total trades over 4 years (12-37/year) with discrete sizing to minimize fee drag.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6771_6h_donchian20_1d_pivot_vol_v1"
+name = "exp_6771_6h_camarilla_pivot_1d_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+CAMARILLA_LOOKBACK = 1  # Use previous 1d bar for pivot calculation
+ADX_PERIOD = 14
+ADX_TREND_THRESHOLD = 25
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0
+VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 20  # ~5 days (6h bars)
-PIVOT_LOOKBACK = 1  # use previous day's pivot
+ATR_STOP_MULTIPLIER = 2.0
+MAX_HOLD_BARS = 8  # ~2 days (6h bars)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for daily pivots
+    # Load HTF data ONCE before loop - using 1d for Camarilla pivot calculation
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla pivot levels (using previous day's OHLC)
-    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
+    # Calculate Camarilla pivot levels from previous 1d bar
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate pivot levels for each day
-    rng = high_1d - low_1d
-    r3_1d = close_1d + (rng * 1.1 / 4)
-    s3_1d = close_1d - (rng * 1.1 / 4)
-    r4_1d = close_1d + (rng * 1.1 / 2)
-    s4_1d = close_1d - (rng * 1.1 / 2)
+    # True range for ATR calculation later
+    tr_1d = np.maximum(high_1d - low_1d, 
+                       np.maximum(np.abs(high_1d - np.roll(close_1d, 1)),
+                                  np.abs(low_1d - np.roll(close_1d, 1))))
+    atr_1d = pd.Series(tr_1d).ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Align to LTF (6h) - note: pivots are based on previous day's data
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Pivot point (PP)
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla levels
+    r4 = pp + ((high_1d - low_1d) * 1.1 / 2.0)
+    r3 = pp + ((high_1d - low_1d) * 1.1 / 4.0)
+    s3 = pp - ((high_1d - low_1d) * 1.1 / 4.0)
+    s4 = pp - ((high_1d - low_1d) * 1.1 / 2.0)
+    
+    # Align Camarilla levels to LTF (6h)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -60,19 +66,26 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # ADX for regime detection
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    tr = np.maximum(high - low, 
+                    np.maximum(np.abs(high - np.roll(close, 1)),
+                               np.abs(low - np.roll(close, 1))))
+    atr = pd.Series(tr).ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values
+    
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values
     
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
-    
-    # ATR for stoploss
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -80,13 +93,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(CAMARILLA_LOOKBACK, ADX_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if HTF data not available (first day)
-        if np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]):
+        # Skip if HTF data not available
+        if np.isnan(r4_aligned[i]) or np.isnan(adx[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -114,20 +127,27 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Breakout signals with pivot confirmation
-        # Long: price above Donchian high AND above R3 pivot
-        long_breakout = (close[i] > highest_high[i]) and (close[i] > r3_1d_aligned[i]) and vol_confirmed
-        # Short: price below Donchian low AND below S3 pivot
-        short_breakout = (close[i] < lowest_low[i]) and (close[i] < s3_1d_aligned[i]) and vol_confirmed
+        # Regime detection: ADX >= 25 = trending, ADX < 25 = ranging
+        is_trending = adx[i] >= ADX_TREND_THRESHOLD
+        
+        # Camarilla-based signals
+        if is_trending:
+            # Trending market: breakout continuation at R4/S4
+            long_signal = (close[i] > r4_aligned[i]) and vol_confirmed
+            short_signal = (close[i] < s4_aligned[i]) and vol_confirmed
+        else:
+            # Ranging market: fade at R3/S3 (mean reversion)
+            long_signal = (close[i] < s3_aligned[i]) and vol_confirmed
+            short_signal = (close[i] > r3_aligned[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if long_breakout:
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif short_breakout:
+            elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
