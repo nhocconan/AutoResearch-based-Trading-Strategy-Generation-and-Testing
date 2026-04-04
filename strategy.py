@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #2927: 6h Elder Ray + ADX Regime Filter
-HYPOTHESIS: Elder Ray (Bull Power/Bear Power) identifies trend strength, while ADX regime filter (ADX>25 = trending, ADX<20 = ranging) prevents whipsaws. In trending regimes (ADX>25), take Elder Ray signals: long when Bull Power>0 and Bear Power<0, short when Bear Power>0 and Bull Power<0. In ranging regimes (ADX<20), fade extremes: long when Bear Power<-0.5*ATR and price>SMA(50), short when Bull Power>0.5*ATR and price<SMA(50). 6h timeframe balances signal quality and trade frequency. Uses discrete position sizing (0.25) to minimize fee churn. Target: 75-150 total trades over 4 years.
+Experiment #2928: 12h Donchian Breakout + Weekly Pivot Direction + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture medium-term trends with lower trade frequency.
+Weekly pivot (from 1d data) provides directional bias: only take long breakouts when price > weekly pivot,
+and short breakouts when price < weekly pivot. Volume spike (>2.0x 20-period average) confirms breakout strength.
+This combination filters false breakouts in choppy markets while capturing strong trends in both bull and bear regimes.
+12h timeframe targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2927_6h_elder_ray_adx_regime_v2"
-timeframe = "6h"
+name = "exp_2928_12h_donchian20_1w_pivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,44 +23,31 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === 6h Indicators: EMA(13) for Elder Ray ===
-    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    # === HTF: 1d data for weekly pivot calculation (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # === 6h Indicators: ATR(14) for volatility ===
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0]-low[0], np.abs(high[0]-close[0]), np.abs(low[0]-close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # Calculate weekly pivot from daily OHLC (simplified: use last 5 days)
+    # Pivot = (High + Low + Close) / 3 for each day, then average last 5 days
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Rolling mean of last 5 daily pivots for weekly bias
+    weekly_pivot = pd.Series(pivot_1d).rolling(window=5, min_periods=5).mean().values
     
-    # === 6h Indicators: Bull Power and Bear Power ===
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Align to 12h timeframe (shifted by 1 for completed bars only)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
-    # === 6h Indicators: ADX(14) for regime detection ===
-    # +DM and -DM
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = np.concatenate([[0.0], plus_dm])
-    minus_dm = np.concatenate([[0.0], minus_dm])
+    # === 12h Indicators: Donchian channels (20-period) ===
+    lookback = 20
+    # Rolling max/min for Donchian channels
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Smoothed +DM, -DM, TR
-    tr_smooth = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # +DI and -DI
-    plus_di = 100 * plus_dm_smooth / (tr_smooth + 1e-10)
-    minus_di = 100 * minus_dm_smooth / (tr_smooth + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # === 6h Indicators: SMA(50) for mean reversion anchor ===
-    sma50 = pd.Series(close).rolling(window=50, min_periods=50).mean().values
+    # === 12h Indicators: Volume MA(20) for spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.ones(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -66,31 +57,49 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    warmup = 60  # sufficient for all indicators (max 50, 14)
+    warmup = max(50, lookback, 20)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(ema13[i]) or np.isnan(atr[i]) or np.isnan(bull_power[i]) or 
-            np.isnan(bear_power[i]) or np.isnan(adx[i]) or np.isnan(sma50[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic: ATR-based trailing stop ---
+        # --- Exit Logic ---
         if in_position:
+            # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
-                # Exit if price drops 2.5*ATR below entry or reverses strongly
-                if price < entry_price - 2.5 * atr[i] or bear_power[i] > 0:
+                highest_since_entry = max(highest_since_entry, high[i])
+                # Exit if price drops 2.5*ATR below highest since entry
+                # Use 12h ATR(14) approximation from price range
+                atr_estimate = (high[i] - low[i]) * 0.5
+                if price < highest_since_entry - 2.5 * atr_estimate:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price re-enters Donchian channel (mean reversion)
+                elif price <= highest_high[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
-                # Exit if price rises 2.5*ATR above entry or reverses strongly
-                if price > entry_price + 2.5 * atr[i] or bull_power[i] < 0:
+                lowest_since_entry = min(lowest_since_entry, low[i])
+                # Exit if price rises 2.5*ATR above lowest since entry
+                atr_estimate = (high[i] - low[i]) * 0.5
+                if price > lowest_since_entry + 2.5 * atr_estimate:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price re-enters Donchian channel (mean reversion)
+                elif price >= lowest_low[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -99,36 +108,34 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Regime detection: ADX > 25 = trending, ADX < 20 = ranging
-        if adx[i] > 25.0:  # Trending regime
-            # Trend following: Elder Ray signals
-            if bull_power[i] > 0 and bear_power[i] < 0:  # Strong bullish
+        # Require volume spike (> 2.0x average) for confirmation
+        volume_spike = vol_ratio[i] > 2.0
+        
+        if volume_spike:
+            # Get weekly pivot bias
+            price_vs_pivot = price - weekly_pivot_aligned[i]
+            
+            # Long entry: price breaks above Donchian high with bullish weekly bias
+            if price > highest_high[i] and price_vs_pivot > 0:
                 in_position = True
                 position_side = 1
-                entry_price = price
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = SIZE
-            elif bear_power[i] > 0 and bull_power[i] < 0:  # Strong bearish
+            # Short entry: price breaks below Donchian low with bearish weekly bias
+            elif price < lowest_low[i] and price_vs_pivot < 0:
                 in_position = True
                 position_side = -1
-                entry_price = price
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
-        elif adx[i] < 20.0:  # Ranging regime
-            # Mean reversion: fade extremes near SMA50
-            if bear_power[i] < -0.5 * atr[i] and price > sma50[i]:  # Oversold bounce long
-                in_position = True
-                position_side = 1
-                entry_price = price
-                signals[i] = SIZE
-            elif bull_power[i] > 0.5 * atr[i] and price < sma50[i]:  # Overbought fade short
-                in_position = True
-                position_side = -1
-                entry_price = price
-                signals[i] = -SIZE
-            else:
-                signals[i] = 0.0
-        else:  # Transition regime (ADX 20-25) - stay flat
+        else:
             signals[i] = 0.0
     
     return signals
+
+</think>
