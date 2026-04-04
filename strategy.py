@@ -4,8 +4,8 @@ Experiment #3010: 1d Donchian Breakout + 1w HMA Trend + Volume Spike
 HYPOTHESIS: Donchian(20) breakouts on 1d capture medium-term trends. 1w HMA(21) provides
 trend filter: only take longs when price > HMA, shorts when price < HMA. Volume spike
 (>2.0x 20-period average) confirms breakout strength. This combination filters false
-breakouts in choppy markets while capturing strong trends. 1d timeframe minimizes
-fee drag while allowing sufficient trade frequency. Target: 30-100 total trades over 4 years.
+breakouts in choppy markets while capturing strong trends. 1d timeframe balances
+trade frequency and fee drag. Target: 75-250 total trades over 4 years.
 """
 
 import numpy as np
