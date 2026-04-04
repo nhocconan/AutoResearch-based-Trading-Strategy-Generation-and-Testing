@@ -2,9 +2,9 @@
 """
 Experiment #2805: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
 HYPOTHESIS: 12h Donchian breakouts aligned with daily EMA trend and volume spikes capture
-strong momentum moves while minimizing fee drag. Daily trend filter provides robust bias
-for both bull and bear markets, reducing counter-trend entries. 12h timeframe targets
-50-150 total trades over 4 years (12-37/year) to balance opportunity with cost efficiency.
+strong momentum moves while avoiding whipsaws. Daily trend filter provides robust bias
+for both bull and bear markets, reducing counter-trend entries. 12h timeframe minimizes
+fee drag while capturing multi-day trends. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
