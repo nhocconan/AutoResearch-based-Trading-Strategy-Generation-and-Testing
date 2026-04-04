@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #2836: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with daily EMA trend and volume spikes capture
+Experiment #2837: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA trend and volume spikes capture
 strong momentum moves while avoiding whipsaws. Daily trend filter provides robust bias
-for both bull and bear markets, reducing counter-trend entries. 12h timeframe minimizes
-fee drag while capturing multi-day to multi-week trends. Target: 75-150 total trades over 4 years.
+for both bull and bear markets, reducing counter-trend entries. 4h timeframe balances
+trade frequency and trend capture. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2836_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_2837_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,7 +31,7 @@ def generate_signals(prices):
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 12h Indicators: Donchian(20) channels, Volume MA(20) ===
+    # === 4h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
