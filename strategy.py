@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #2864: 1d Donchian Breakout + 1w Trend Filter + Volume Spike
-HYPOTHESIS: Daily Donchian(20) breakouts capture medium-term trends, filtered by 
-weekly EMA(50) trend to avoid counter-trend trades, with volume confirmation to 
-ensure breakout validity. Daily timeframe targets 30-100 trades over 4 years 
-(7-25/year) to minimize fee drag while capturing significant moves. Weekly trend 
-filter ensures alignment with higher-timeframe momentum, reducing whipsaws in 
-ranging markets. Works in both bull (trend continuation) and bear (trend 
-reversal) markets by following the weekly trend direction.
+Experiment #2864: 1d Donchian(20) Breakout + 1w Trend Filter + Volume Confirmation
+HYPOTHESIS: Daily Donchian(20) breakouts capture medium-term trends. Weekly trend filter ensures
+we only trade in the direction of the higher timeframe trend (buy breakouts in weekly uptrend,
+sell breakdowns in weekly downtrend), reducing false signals during counter-trend moves.
+Volume confirmation adds conviction. Daily timeframe targets 30-100 trades over 4 years (7-25/year)
+to minimize fee drag. ATR-based stoploss manages risk.
 """
 
 import numpy as np
@@ -25,6 +23,23 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
+    # === HTF: 1d data for Donchian channels (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Calculate 20-period Donchian channels on daily data
+    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
+    high_roll_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_roll_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
+    donch_upper = high_roll_max
+    donch_lower = low_roll_min
+    
+    # Align to 1d timeframe (prices is already 1d, so no shift needed for alignment)
+    # But we still use align_htf_to_ltf for consistency and proper handling of gaps
+    donch_upper_aligned = align_htf_to_ltf(prices, df_1d, donch_upper)
+    donch_lower_aligned = align_htf_to_ltf(prices, df_1d, donch_lower)
+    
     # === HTF: 1w data for trend filter (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
@@ -34,15 +49,19 @@ def generate_signals(prices):
     trend_1w = np.where(close_1w > ema_1w, 1, -1)  # 1 = uptrend, -1 = downtrend
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # === 1d Indicators: Donchian(20) channels ===
-    # Calculate rolling high/low for Donchian channels
-    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === Volume MA(20) for spike detection ===
+    # === 1d Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    
+    # === ATR(14) for stoploss ===
+    # True Range = max(high-low, abs(high-close_prev), abs(low-close_prev))
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar has no previous close
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -52,15 +71,13 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    warmup = 50  # sufficient for all indicators
+    warmup = 50  # sufficient for all indicators (max of 20, 50, 14)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(donch_upper_aligned[i]) or np.isnan(donch_lower_aligned[i]) or
+            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -68,33 +85,29 @@ def generate_signals(prices):
         
         # --- Exit Logic ---
         if in_position:
-            # Update highest/lowest since entry for trailing stop
-            if position_side > 0:  # Long
-                highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2*ATR below highest since entry
-                # Use 1d ATR(14) approximation from price range
-                atr_estimate = (high[i] - low[i]) * 0.5  # rough ATR estimate
-                if price < highest_since_entry - 2.0 * atr_estimate:
+            # Long exit: stoploss or reversal signal
+            if position_side > 0:
+                # Stoploss: 2 * ATR below entry
+                if price <= entry_price - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price re-enters Donchian channel (mean reversion)
-                elif price <= highest_20[i] and price >= lowest_20[i]:
+                # Exit on weekly trend reversal
+                elif trend_1w_aligned[i] < 0:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
-            else:  # Short
-                lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2*ATR above lowest since entry
-                atr_estimate = (high[i] - low[i]) * 0.5
-                if price > lowest_since_entry + 2.0 * atr_estimate:
+            # Short exit: stoploss or reversal signal
+            else:
+                # Stoploss: 2 * ATR above entry
+                if price >= entry_price + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price re-enters Donchian channel (mean reversion)
-                elif price <= highest_20[i] and price >= lowest_20[i]:
+                # Exit on weekly trend reversal
+                elif trend_1w_aligned[i] > 0:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -103,28 +116,24 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) for confirmation
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
             # Get weekly trend bias
             trend_bias = trend_1w_aligned[i]
             
-            # Long entry: price breaks above Donchian(20) upper band in weekly uptrend
-            if trend_bias > 0 and price > highest_20[i]:
+            # Long entry: price breaks above Donchian upper in weekly uptrend
+            if trend_bias > 0 and price > donch_upper_aligned[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian(20) lower band in weekly downtrend
-            elif trend_bias < 0 and price < lowest_20[i]:
+            # Short entry: price breaks below Donchian lower in weekly downtrend
+            elif trend_bias < 0 and price < donch_lower_aligned[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
