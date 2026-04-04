@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3687: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts capture intermediate-term momentum while 1d weekly pivot levels (from prior week) provide institutional support/resistance structure. Volume spike confirms breakout authenticity. Weekly pivot direction (price above/below weekly pivot) filters for trend alignment. This avoids counter-trend trades and works in both bull (breakouts with volume above pivot) and bear (failed breakouts below pivot reverse quickly) markets. Using 6h timeframe reduces trade frequency vs 4h to minimize fee drag while maintaining sufficient signals. Position size 0.25 balances return and drawdown. Target: 75-150 total trades over 4 years (19-37/year) by using strict entry conditions requiring Donchian breakout, weekly pivot alignment, and volume confirmation.
+Experiment #3689: 4h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts capture intermediate-term momentum while 1d weekly pivot levels (from prior week) provide institutional support/resistance structure. Volume spike confirms breakout authenticity. Weekly pivot direction (price above/below weekly pivot) filters for trend alignment. This avoids counter-trend trades and works in both bull (breakouts with volume above pivot) and bear (failed breakouts below pivot reverse quickly) markets. Using 4h timeframe targets 75-200 total trades over 4 years (19-50/year) with strict entry conditions. Position size 0.25 balances return and drawdown.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3687_6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_3689_4h_donchian20_1d_pivot_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,22 +39,22 @@ def generate_signals(prices):
     # Weekly S1 = 2 * pivot - weekly_high
     weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Align weekly pivot levels to 6h timeframe (shifted by 1 for completed weekly bar)
+    # Align weekly pivot levels to 4h timeframe (shifted by 1 for completed weekly bar)
     weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
     weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
     
-    # === 6h Indicators: Donchian Channel(20) for breakout ===
+    # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for volatility and stoploss ===
+    # === 4h Indicators: ATR(14) for volatility and stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
