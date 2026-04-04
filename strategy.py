@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #2876: 12h Donchian Breakout + Daily Pivot Direction + Volume Spike
-HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture swing moves with lower frequency.
-Daily pivot (from 1d data) provides directional bias: only take long breakouts
-when daily pivot shows bullish bias (price > daily pivot), and short breakouts
-when bearish (price < daily pivot). Volume spike (>1.8x 20-period average)
-confirms breakout strength. 12h timeframe reduces trade frequency to minimize
-fee drag while capturing meaningful swings in both bull and bear markets.
-Target: 50-150 total trades over 4 years (12-37/year).
+Experiment #2876: 12h Donchian(20) Breakout + 1d Trend Filter + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture medium-term trends.
+Daily EMA(50) provides trend bias: only take long breakouts when price > EMA50,
+and short breakouts when price < EMA50. Volume spike (>2.0x 20-period average)
+confirms breakout strength. This combination filters false breakouts in choppy
+markets while capturing strong trends. 12h timeframe targets 50-150 total trades
+over 4 years (12-37/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2876_12h_donchian20_1d_pivot_vol_v1"
+name = "exp_2876_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,20 +24,19 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for daily pivot calculation (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA50 trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot: (High + Low + Close) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate daily EMA(50)
+    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
     # Align to 12h timeframe (shifted by 1 for completed bars only)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # === 12h Indicators: Donchian channels (20-period) ===
     lookback = 20
+    # Rolling max/min for Donchian channels
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
@@ -58,12 +56,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback, 20)  # sufficient for all indicators
+    warmup = max(50, lookback, 20)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -74,10 +72,10 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry
+                # Exit if price drops 2.5*ATR below highest since entry
                 # Use 12h ATR(14) approximation from price range
                 atr_estimate = (high[i] - low[i]) * 0.5
-                if price < highest_since_entry - 2.0 * atr_estimate:
+                if price < highest_since_entry - 2.5 * atr_estimate:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -90,9 +88,9 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry
+                # Exit if price rises 2.5*ATR above lowest since entry
                 atr_estimate = (high[i] - low[i]) * 0.5
-                if price > lowest_since_entry + 2.0 * atr_estimate:
+                if price > lowest_since_entry + 2.5 * atr_estimate:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -106,23 +104,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) for confirmation
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume spike (> 2.0x average) for confirmation
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Get daily pivot bias
-            price_vs_pivot = price - pivot_aligned[i]
+            # Get daily EMA50 trend bias
+            price_vs_ema = price - ema_50_aligned[i]
             
-            # Long entry: price breaks above Donchian high with bullish daily bias
-            if price > highest_high[i] and price_vs_pivot > 0:
+            # Long entry: price breaks above Donchian high with bullish trend bias
+            if price > highest_high[i] and price_vs_ema > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with bearish daily bias
-            elif price < lowest_low[i] and price_vs_pivot < 0:
+            # Short entry: price breaks below Donchian low with bearish trend bias
+            elif price < lowest_low[i] and price_vs_ema < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
