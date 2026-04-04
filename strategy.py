@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5233: 4h Donchian(20) Breakout + 12h EMA Trend + Volume Spike
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 12h EMA(50) trend capture momentum bursts with lower overtrading risk than 1h. Volume > 2.0x average confirms institutional participation. Designed for 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
+Experiment #5234: 1h Donchian(20) Breakout + 4h EMA(50) Trend + 1d Volume Spike + Session Filter
+HYPOTHESIS: On 1h timeframe, Donchian(20) breakouts aligned with 4h EMA(50) trend capture momentum bursts. Volume > 2.0x daily average confirms institutional participation. Session filter (08-20 UTC) reduces noise trades. Designed for 15-37 trades/year on 1h timeframe (60-150 total over 4 years) to minimize fee drag. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend). Uses discrete position sizing (0.20) to minimize fee churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5233_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_5234_1h_donchian20_4h_ema_1d_vol_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,38 +17,49 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
+    open_time = prices["open_time"].values  # already datetime64[ms]
     n = len(close)
     
-    # Precompute HTF: 12h data for EMA trend
-    df_12h = get_htf_data(prices, '12h')
+    # Precompute HTF: 4h data for EMA trend
+    df_4h = get_htf_data(prices, '4h')
     
-    # === 12h Indicators: EMA(50) for trend ===
-    if len(df_12h) >= 50:
-        close_12h = df_12h['close'].values
-        ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Precompute HTF: 1d data for volume average
+    df_1d = get_htf_data(prices, '1d')
+    
+    # === 4h Indicators: EMA(50) for trend ===
+    if len(df_4h) >= 50:
+        close_4h = df_4h['close'].values
+        ema_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     else:
-        ema_12h_aligned = np.full(n, np.nan)
+        ema_4h_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian(20) channels ===
+    # === 1d Indicators: Volume average (20-period) ===
+    if len(df_1d) >= 20:
+        volume_1d = df_1d['volume'].values
+        vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+        vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    else:
+        vol_ma_1d_aligned = np.full(n, np.nan)
+    
+    # === 1h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation (2.0x spike) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
-    
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 1h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
+    # === Precompute session hours (08-20 UTC) ===
+    # open_time is already datetime64[ms], convert to get hour
+    hours = pd.DatetimeIndex(open_time).hour
+    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.20  # 20% position size
     
     # Position tracking state variables
     in_position = False
@@ -62,11 +73,15 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        hour = hours[i]
+        
+        # Session filter: only trade 08-20 UTC
+        in_session = (8 <= hour <= 20)
         
         # --- Exit Logic ---
         if in_position:
@@ -92,14 +107,14 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>2.0x)
-        vol_confirm = vol_ratio[i] > 2.0
+        # Volume filter: confirmation (>2.0x daily average)
+        vol_confirm = volume[i] > 2.0 * vol_ma_1d_aligned[i]
         
-        # Donchian breakout conditions with 12h EMA trend filter
-        # Long: Donchian breakout above + price > 12h EMA (uptrend)
-        # Short: Donchian breakdown below + price < 12h EMA (downtrend)
-        breakout_long = (price >= high_roll[i]) and (price > ema_12h_aligned[i]) and vol_confirm
-        breakout_short = (price <= low_roll[i]) and (price < ema_12h_aligned[i]) and vol_confirm
+        # Donchian breakout conditions with 4h EMA trend filter
+        # Long: Donchian breakout above + price > 4h EMA (uptrend)
+        # Short: Donchian breakdown below + price < 4h EMA (downtrend)
+        breakout_long = (price >= high_roll[i]) and (price > ema_4h_aligned[i]) and vol_confirm and in_session
+        breakout_short = (price <= low_roll[i]) and (price < ema_4h_aligned[i]) and vol_confirm and in_session
         
         # Final entry conditions
         if breakout_long:
