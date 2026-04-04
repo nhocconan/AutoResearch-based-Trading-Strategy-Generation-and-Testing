@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #2348: 12h Donchian(20) breakout + 1w EMA trend + volume confirmation
-HYPOTHESIS: Donchian channel breakouts on 12h timeframe with weekly trend alignment and volume spikes 
-capture institutional participation during trend acceleration. Uses 12h primary timeframe to reduce 
-trade frequency and fee drag, targeting 50-150 total trades over 4 years. Weekly EMA filter ensures 
-we only trade with the higher timeframe trend, improving win rate in both bull and bear markets. 
-Discrete position sizing (0.25) limits risk per trade and minimizes fee impact from signal changes.
+HYPOTHESIS: 12h Donchian breakouts with weekly trend alignment and volume spikes capture 
+institutional participation during trend acceleration. Works in bull markets (breakouts with volume) 
+and bear markets (breakdowns with volume). Uses discrete position sizing (0.25) to limit fee drag 
+and ensure 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -132,5 +131,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
