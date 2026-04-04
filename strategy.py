@@ -1,26 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #2318: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts with weekly trend alignment and volume confirmation
-capture strong momentum moves while avoiding false breakouts. Works in bull markets
-via breakouts and bear markets via short breakdowns. Weekly trend filter ensures
-we only trade with the dominant higher timeframe momentum.
-- Primary: 1d Donchian(20) breakout (long at 20-day high, short at 20-day low)
-- HTF: 1w HMA(21) for trend alignment (only trade long when weekly HMA rising,
-  short when falling)
-- Entry: Long when price breaks above 20-day high + volume spike + weekly HMA up;
-  Short when price breaks below 20-day low + volume spike + weekly HMA down
-- Exit: ATR(14) stoploss (2*ATR) or opposite Donchian band touch
-- Volume: Require > 1.5x 20-bar average spike to confirm participation
-- Target: 30-100 total trades over 4 years (7-25/year) - suitable for 1d timeframe
+Experiment #2319: 6h ATR Breakout + 12h/1d Trend Alignment + Volume Spike
+HYPOTHESIS: 6h ATR breakouts with 12h/1d trend alignment and volume confirmation capture 
+institutional participation during trend acceleration phases. Works in bull markets 
+(breakouts with volume) and bear markets (breakdowns with volume). 
+- Entry: Long when price breaks above ATR(14) upper band with 12h/1d uptrend + volume spike
+         Short when price breaks below ATR(14) lower band with 12h/1d downtrend + volume spike
+- Exit: Opposite ATR band or trailing stop (2*ATR from extreme)
+- Volume: > 2.0x 20-bar average spike to confirm participation
+- Target: 75-150 total trades over 4 years (19-37/year) - suitable for 6h timeframe
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2318_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_2319_6h_atr_breakout_12h1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,36 +26,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === HTF: 12h data for EMA trend (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate 1w HMA(21)
-    def calculate_hma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
-        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
-        hma = 2 * wma_half - wma_full
-        hma = pd.Series(hma).ewm(span=sqrt_period, adjust=False).mean().values
-        return hma
+    # Calculate 12h EMA(50)
+    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_12h = np.where(close_12h > ema_12h, 1, -1)
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
-    hma_1w = calculate_hma(close_1w, 21)
-    # Trend: 1 when HMA rising, -1 when falling
-    hma_diff = np.diff(hma_1w, prepend=hma_1w[0])
-    trend_1w = np.where(hma_diff > 0, 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # === HTF: 1d data for EMA trend ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 1d Indicators: Donchian(20), ATR(14), Volume MA(20) ===
-    # Donchian channels: 20-period high/low
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_high = high_roll
-    donchian_low = low_roll
-    
-    # ATR(14) for stoploss
+    # === 6h Indicators: ATR(14) bands, Volume MA(20) ===
+    # ATR calculation
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -67,6 +51,12 @@ def generate_signals(prices):
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # ATR bands using 20-period SMA as base
+    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
+    atr_multiplier = 1.5
+    upper_band = sma_20 + (atr * atr_multiplier)
+    lower_band = sma_20 - (atr * atr_multiplier)
     
     # Volume MA for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -81,13 +71,16 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    warmup = 20  # sufficient for Donchian and ATR
+    warmup = 50  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(trend_1w_aligned[i]) or np.isnan(donchian_high[i]) or
-            np.isnan(donchian_low[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(trend_12h_aligned[i]) or np.isnan(trend_1d_aligned[i]) or
+            np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -95,26 +88,30 @@ def generate_signals(prices):
         
         # --- Exit Logic ---
         if in_position:
-            # Exit if price moves 2*ATR against position
+            # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
-                if price < entry_price - 2.0 * atr[i]:
+                highest_since_entry = max(highest_since_entry, high[i])
+                # Exit if price drops 2*ATR below highest since entry
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price touches or crosses below Donchian low (contrarian exit)
-                elif price <= donchian_low[i]:
+                # Exit if price crosses below lower band (mean reversion)
+                elif price < lower_band[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
-                if price > entry_price + 2.0 * atr[i]:
+                lowest_since_entry = min(lowest_since_entry, low[i])
+                # Exit if price rises 2*ATR above lowest since entry
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price touches or crosses above Donchian high (contrarian exit)
-                elif price >= donchian_high[i]:
+                # Exit if price crosses above upper band (mean reversion)
+                elif price > upper_band[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -123,21 +120,35 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        trend_bias = trend_1w_aligned[i]  # 1 for uptrend, -1 for downtrend
-        volume_spike = vol_ratio[i] > 1.5
+        # Require both 12h and 1d trend alignment for bias filter
+        trend_bias_12h = trend_12h_aligned[i]
+        trend_bias_1d = trend_1d_aligned[i]
         
-        if volume_spike:
-            # Long entry: price breaks above 20-day high + weekly uptrend
-            if trend_bias > 0 and price > donchian_high[i]:
+        # Only trade when both timeframes agree
+        if trend_bias_12h == trend_bias_1d:
+            trend_bias = trend_bias_12h  # Either 1 or -1
+        else:
+            trend_bias = 0  # No clear trend, skip
+        
+        # Volume confirmation: require volume spike (> 2.0x average - strict to limit trades)
+        volume_spike = vol_ratio[i] > 2.0
+        
+        if volume_spike and trend_bias != 0:
+            # Long entry: price breaks above upper band with uptrend on both timeframes
+            if trend_bias > 0 and price > upper_band[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below 20-day low + weekly downtrend
-            elif trend_bias < 0 and price < donchian_low[i]:
+            # Short entry: price breaks below lower band with downtrend on both timeframes
+            elif trend_bias < 0 and price < lower_band[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
