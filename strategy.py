@@ -3,8 +3,9 @@
 Experiment #2738: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
 HYPOTHESIS: Daily Donchian breakouts with weekly EMA trend alignment and volume spikes
 capture institutional participation with low frequency suitable for 1d timeframe.
-Uses 1w for signal direction, 1d only for entry timing. Target: 30-100 total trades over 4 years.
-Works in both bull and bear markets by following the higher timeframe trend.
+Uses 1w for signal direction, 1d only for entry timing and risk management.
+Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
+Works in both bull and bear markets via trend filter and volatility-based stops.
 """
 
 import numpy as np
