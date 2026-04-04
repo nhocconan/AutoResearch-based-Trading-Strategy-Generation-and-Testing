@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4342: 12h Donchian(20) Breakout + 1d EMA50 Trend + Volume Spike
-HYPOTHESIS: Donchian channel breakouts on 12h capture significant price moves when aligned with 1d EMA50 trend filter and confirmed by volume spikes (>1.5x average). Works in bull via upside breaks above EMA50, in bear via downside breaks below EMA50. Volume confirmation filters false breakouts. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+Experiment #4342: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts capture intermediate-term momentum when aligned with 1d EMA50 trend and confirmed by volume spikes (>1.5x average). Works in bull via upside breakouts, in bear via downside breakdowns. Uses discrete position sizing (0.25) to limit drawdown. Targets 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -26,17 +26,26 @@ def generate_signals(prices):
     # === Precompute HTF: 1d EMA50 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 50:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+        ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        ema_50_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel (20) ===
-    # Upper = max(high, 20), Lower = min(low, 20)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # === 12h Indicators: Donchian(20) channels ===
+    def rolling_max(arr, window):
+        res = np.full(len(arr), np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.max(arr[i-window+1:i+1])
+        return res
+    
+    def rolling_min(arr, window):
+        res = np.full(len(arr), np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.min(arr[i-window+1:i+1])
+        return res
+    
+    donchian_high = rolling_max(high, 20)
+    donchian_low = rolling_min(low, 20)
     
     # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,8 +74,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(atr[i]) or np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -105,16 +114,20 @@ def generate_signals(prices):
         # Require volume confirmation (> 1.5x average) to filter noise
         volume_confirm = vol_ratio[i] > 1.5
         
-        # Trend filter: price must be on correct side of 1d EMA50
-        price_above_ema = close[i] > ema_1d_aligned[i]
-        price_below_ema = close[i] < ema_1d_aligned[i]
+        # Trend filter: price must be above/below 1d EMA50
+        price_above_ema = price > ema_50_aligned[i]
+        price_below_ema = price < ema_50_aligned[i]
+        
+        # Donchian breakout conditions
+        breakout_up = price > donchian_high[i-1]  # Break above previous period's high
+        breakout_down = price < donchian_low[i-1]  # Break below previous period's low
         
         if volume_confirm:
-            # Long conditions: break above Donchian upper + price above EMA50
-            long_entry = (high[i] > donchian_upper[i]) and price_above_ema
+            # Long conditions: Upside breakout + price above EMA50
+            long_entry = breakout_up and price_above_ema
             
-            # Short conditions: break below Donchian lower + price below EMA50
-            short_entry = (low[i] < donchian_lower[i]) and price_below_ema
+            # Short conditions: Downside breakout + price below EMA50
+            short_entry = breakout_down and price_below_ema
             
             if long_entry:
                 in_position = True
