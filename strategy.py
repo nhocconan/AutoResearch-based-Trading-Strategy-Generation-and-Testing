@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #2746: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts with 1d EMA trend alignment and volume spikes capture
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA trend and volume spikes capture
 institutional participation while minimizing overtrading. Target: 75-200 total trades over 4 years.
-Uses 1d for signal direction (HTF), 4h only for entry timing and stoploss.
+Uses 1d for trend filter, 4h for entry timing with strict volume confirmation (>2.0x avg).
 """
 
 import numpy as np
@@ -104,8 +104,8 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 2.0x average) - STRICT
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # Long entry: price breaks above Donchian high with uptrend on 1d
