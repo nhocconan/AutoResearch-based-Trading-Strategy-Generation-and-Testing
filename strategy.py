@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3697: 4h Donchian(20) breakout + 1d/1w pivot direction + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts capture swing momentum with daily/weekly pivot providing structural bias (above/below pivot = bullish/bearish regime). Volume spike confirms breakout authenticity. Uses discrete position sizing (0.25) to manage drawdown from 2022 crash while allowing profit accumulation. Targets 75-200 trades over 4 years (19-50/year) with strict 3-condition confluence. Weekly pivot avoids whipsaw in ranging markets.
+Experiment #3700: 4h Donchian(20) breakout + 1d pivot direction + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts capture intermediate-term momentum with daily pivot providing structural bias (above/below daily pivot = bullish/bearish regime). Volume spike confirms breakout authenticity. Daily pivot avoids whipsaw in ranging markets. Targets 75-200 trades over 4 years (19-50/year) with strict 3-condition confluence. Position size 0.25 manages drawdown from 2022 crash while allowing profit accumulation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3697_4h_donchian20_1d_1w_pivot_vol_v1"
+name = "exp_3700_4h_donchian20_1d_pivot_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,18 +30,6 @@ def generate_signals(prices):
     
     # Align daily pivot to 4h timeframe (shifted by 1 for completed daily bar)
     daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
-    
-    # === HTF: 1w data for weekly pivot (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot points: P = (H + L + C)/3
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
-    
-    # Align weekly pivot to 4h timeframe (shifted by 1 for completed weekly bar)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
     # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -76,8 +64,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(daily_pivot_aligned[i]) or np.isnan(weekly_pivot_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(daily_pivot_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -93,8 +80,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below daily OR weekly pivot (regime change)
-                elif price < daily_pivot_aligned[i] or price < weekly_pivot_aligned[i]:
+                # Exit if price breaks below daily pivot (regime change)
+                elif price < daily_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -107,8 +94,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above daily OR weekly pivot (regime change)
-                elif price > daily_pivot_aligned[i] or price > weekly_pivot_aligned[i]:
+                # Exit if price breaks above daily pivot (regime change)
+                elif price > daily_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -121,20 +108,18 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Long entry: Price breaks above Donchian upper band AND above BOTH pivots (bullish regime)
+            # Long entry: Price breaks above Donchian upper band AND above daily pivot (bullish regime)
             if (price > highest_high[i-1] and  # Breakout above previous period's high
-                price > daily_pivot_aligned[i] and   # Above daily pivot (bullish bias)
-                price > weekly_pivot_aligned[i]):    # Above weekly pivot (strong bullish bias)
+                price > daily_pivot_aligned[i]):   # Above daily pivot (bullish bias)
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Price breaks below Donchian lower band AND below BOTH pivots (bearish regime)
+            # Short entry: Price breaks below Donchian lower band AND below daily pivot (bearish regime)
             elif (price < lowest_low[i-1] and   # Breakout below previous period's low
-                  price < daily_pivot_aligned[i] and   # Below daily pivot (bearish bias)
-                  price < weekly_pivot_aligned[i]):    # Below weekly pivot (strong bearish bias)
+                  price < daily_pivot_aligned[i]):   # Below daily pivot (bearish bias)
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -151,15 +136,15 @@ def generate_signals(prices):
 </think>
 #!/usr/bin/env python3
 """
-Experiment #3697: 4h Donchian(20) breakout + 1d/1w pivot direction + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts capture swing momentum with daily/weekly pivot providing structural bias (above/below pivot = bullish/bearish regime). Volume spike confirms breakout authenticity. Uses discrete position sizing (0.25) to manage drawdown from 2022 crash while allowing profit accumulation. Targets 75-200 trades over 4 years (19-50/year) with strict 3-condition confluence. Weekly pivot avoids whipsaw in ranging markets.
+Experiment #3700: 4h Donchian(20) breakout + 1d pivot direction + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts capture intermediate-term momentum with daily pivot providing structural bias (above/below daily pivot = bullish/bearish regime). Volume spike confirms breakout authenticity. Daily pivot avoids whipsaw in ranging markets. Targets 75-200 trades over 4 years (19-50/year) with strict 3-condition confluence. Position size 0.25 manages drawdown from 2022 crash while allowing profit accumulation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3697_4h_donchian20_1d_1w_pivot_vol_v1"
+name = "exp_3700_4h_donchian20_1d_pivot_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -181,18 +166,6 @@ def generate_signals(prices):
     
     # Align daily pivot to 4h timeframe (shifted by 1 for completed daily bar)
     daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
-    
-    # === HTF: 1w data for weekly pivot (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot points: P = (H + L + C)/3
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
-    
-    # Align weekly pivot to 4h timeframe (shifted by 1 for completed weekly bar)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
     # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -227,8 +200,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(daily_pivot_aligned[i]) or np.isnan(weekly_pivot_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(daily_pivot_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -244,8 +216,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below daily OR weekly pivot (regime change)
-                elif price < daily_pivot_aligned[i] or price < weekly_pivot_aligned[i]:
+                # Exit if price breaks below daily pivot (regime change)
+                elif price < daily_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -258,8 +230,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above daily OR weekly pivot (regime change)
-                elif price > daily_pivot_aligned[i] or price > weekly_pivot_aligned[i]:
+                # Exit if price breaks above daily pivot (regime change)
+                elif price > daily_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -272,20 +244,18 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Long entry: Price breaks above Donchian upper band AND above BOTH pivots (bullish regime)
+            # Long entry: Price breaks above Donchian upper band AND above daily pivot (bullish regime)
             if (price > highest_high[i-1] and  # Breakout above previous period's high
-                price > daily_pivot_aligned[i] and   # Above daily pivot (bullish bias)
-                price > weekly_pivot_aligned[i]):    # Above weekly pivot (strong bullish bias)
+                price > daily_pivot_aligned[i]):   # Above daily pivot (bullish bias)
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Price breaks below Donchian lower band AND below BOTH pivots (bearish regime)
+            # Short entry: Price breaks below Donchian lower band AND below daily pivot (bearish regime)
             elif (price < lowest_low[i-1] and   # Breakout below previous period's low
-                  price < daily_pivot_aligned[i] and   # Below daily pivot (bearish bias)
-                  price < weekly_pivot_aligned[i]):    # Below weekly pivot (strong bearish bias)
+                  price < daily_pivot_aligned[i]):   # Below daily pivot (bearish bias)
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -298,3 +268,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
