@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4268: 12h Donchian(20) breakout + 1w EMA50 trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 12h timeframe capture swing momentum when aligned with 1w EMA50 trend (price > EMA50 for longs, < EMA50 for shorts) and confirmed by volume (>2.0x average). Uses 1w EMA for smoother trend filter (less whipsaw than HMA) while maintaining optimal trade frequency. ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 50-150 total trades over 4 years (12-37/year). Works in bull via breakout continuation, in bear via shorting breakdowns. Novelty: Uses 1w HTF (as specified in experiment) to reduce noise while keeping trade count optimal.
+HYPOTHESIS: Donchian breakouts on 12h timeframe capture swing momentum when aligned with 1w EMA50 trend (price > EMA50 for longs, < EMA50 for shorts) and confirmed by volume (>2.0x average). Uses weekly EMA for smoother trend filter (less whipsaw than shorter EMAs) while maintaining optimal trade frequency. ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 75-150 total trades over 4 years (19-37/year). Works in bull via breakout continuation, in bear via shorting breakdowns. Novelty: Uses 1w HTF (as specified in experiment) to reduce noise while keeping trade count optimal.
 """
 
 import numpy as np
