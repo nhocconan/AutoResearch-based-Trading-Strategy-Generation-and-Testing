@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #5660: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+Experiment #5661: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
 HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts with volume > 1.5x average and aligned 
-with 1d EMA(50) trend (price above EMA = long bias, below = short bias) capture 
-high-probability trend continuation moves. The 1d EMA provides institutional trend bias 
-that adapts to both bull and bear markets. Volume confirms breakout strength. ATR trailing 
-stop (2.0x) manages risk. Discrete sizing (0.25) minimizes fee churn. Target: 19-50 trades/year.
+with 1d EMA(50) trend (price above EMA = long bias, below = short bias) capture high-probability 
+trend continuation moves. The 1d EMA provides a robust trend filter that works in both bull and 
+bear markets by adapting to price action. Volume confirms breakout strength. ATR trailing stop 
+(2.0x) manages risk. Discrete sizing (0.25) minimizes fee churn. Target: 19-50 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5660_4h_donchian20_1d_ema_vol_v1"
+name = "exp_5661_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,7 +29,8 @@ def generate_signals(prices):
     # === HTF: 1d data for EMA(50) trend ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 50:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        close_1d = df_1d['close'].values
+        ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     else:
         ema_1d = np.array([])
     
@@ -110,11 +111,11 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # EMA trend bias: long above EMA, short below EMA
+        # EMA bias: long above EMA, short below EMA
         long_bias = price > ema_1d_aligned[i]
         short_bias = price < ema_1d_aligned[i]
         
-        # Entry conditions: breakout in direction of EMA trend with volume
+        # Entry conditions: breakout in direction of EMA bias with volume
         long_setup = breakout_up and volume_confirmed and long_bias
         short_setup = breakout_down and volume_confirmed and short_bias
         
@@ -136,3 +137,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
