@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3776: 12h Donchian(20) breakout + 1d volume profile high-volume node (VHN) + ATR filter
-HYPOTHESIS: 12h Donchian breakouts capture swing moves, with 1d volume profile identifying high-volume nodes (HVN) as key support/resistance. Breakouts above/below VHN with volume confirmation (>1.5x) and volatility expansion (ATR > 1.2x MA) indicate institutional participation. Works in bull markets (breakouts above VHN) and bear markets (breakdowns below VHN). Position size 0.25 manages drawdown. Target: 50-150 trades over 4 years.
+Experiment #3778: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation + ATR filter
+HYPOTHESIS: Daily Donchian breakouts capture swing moves in BTC/ETH/SOL. 1-week HMA-21 filters trend direction (long when price>HMA, short when price<HMA). Volume spike (>1.5x 20-day MA) confirms institutional participation. ATR-based trailing stop (2.0x) manages risk. Works in bull markets (breakouts above HMA) and bear markets (breakdowns below HMA). Position size 0.25 manages drawdown. Target: 30-100 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3776_12h_donchian20_1d_vhn_vol_v1"
-timeframe = "12h"
+name = "exp_3778_1d_donchian20_1w_hma_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,55 +19,41 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for volume profile VHN (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
+    # === HTF: 1w data for HMA-21 trend (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d volume profile high-volume node (VHN) - price level with max volume
-    # Use 50 bins between 1d low and high
-    nbins = 50
-    vhn_1d = np.full(len(close_1d), np.nan)
+    # Calculate HMA(21) on 1w close
+    def hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean()
+        wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean()
+        raw = 2 * wma2 - wma1
+        hma_val = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
+        return hma_val.values
     
-    for i in range(len(close_1d)):
-        if i < 1:  # Need at least 1 day of data
-            continue
-        # Create volume histogram for this 1d bar
-        hist, bin_edges = np.histogram(
-            [high_1d[i], low_1d[i], close_1d[i]],  # Simplified: use OHLC as proxy for price distribution
-            bins=nbins,
-            range=(low_1d[i], high_1d[i]),
-            weights=[volume_1d[i], volume_1d[i], volume_1d[i]]  # Distribute volume across price range
-        )
-        # Find bin with maximum volume (VHN)
-        if np.sum(hist) > 0:
-            max_bin_idx = np.argmax(hist)
-            vhn_1d[i] = (bin_edges[max_bin_idx] + bin_edges[max_bin_idx + 1]) / 2
+    hma_1w = hma(close_1w, 21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # Align 1d VHN to 12h timeframe (shifted by 1 for completed 1d bar)
-    vhn_1d_aligned = align_htf_to_ltf(prices, df_1d, vhn_1d)
-    
-    # === 12h Indicators: Donchian Channel(20) for breakout ===
+    # === 1d Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 1d Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for volatility filter ===
+    # === 1d Indicators: ATR(14) for volatility and stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    atr_ma = pd.Series(atr).rolling(window=10, min_periods=10).mean().values
-    atr_ratio = np.ones(n)
-    atr_ratio[10:] = atr[10:] / atr_ma[10:]
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -80,13 +66,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20, 14, 10)  # sufficient for all indicators
+    warmup = max(lookback_dc + 1, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vhn_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr_ratio[i])):
+            np.isnan(hma_1w_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -126,23 +112,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.5x average) AND volatility expansion (ATR > 1.2x MA)
+        # Require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
-        vol_expansion = atr_ratio[i] > 1.2
         
-        if volume_spike and vol_expansion:
-            # Long entry: Price breaks above Donchian upper band AND above 1d VHN (bullish breakout from value area)
+        if volume_spike:
+            # Long entry: Price breaks above Donchian upper band AND above 1w HMA (bullish breakout with trend)
             if (price > highest_high[i-1] and  # Breakout above previous period's high
-                price > vhn_1d_aligned[i]):    # Above 1d volume high-volume node
+                price > hma_1w_aligned[i]):    # Above 1w HMA-21 (uptrend filter)
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Price breaks below Donchian lower band AND below 1d VHN (bearish breakdown from value area)
+            # Short entry: Price breaks below Donchian lower band AND below 1w HMA (bearish breakdown with trend)
             elif (price < lowest_low[i-1] and    # Breakout below previous period's low
-                  price < vhn_1d_aligned[i]):    # Below 1d volume high-volume node
+                  price < hma_1w_aligned[i]):    # Below 1w HMA-21 (downtrend filter)
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
