@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4493: 4h Donchian(20) Breakout + 12h EMA Trend + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h EMA50 trend direction and confirmed by volume (>1.5x average) capture medium-term momentum with reduced noise. The 12h EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25. This strategy avoids overtrading by using strict entry conditions (3-condition confluence) and focuses on 4h timeframe which has proven success in DB top performers.
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h EMA50 trend direction and confirmed by volume (>1.8x average) capture medium-term momentum with reduced noise. The 12h EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25. This timeframe (4h) has higher win rate than lower timeframes due to reduced noise and better alignment with institutional trading rhythms.
 """
 
 import numpy as np
@@ -102,8 +102,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume confirmation (> 1.8x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.8
         
         # 12h EMA bias: price > EMA = long bias, price < EMA = short bias
         long_bias = price > ema_12h_aligned[i]
