@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4565: 12h Donchian(20) Breakout + 1d HTF Trend + Volume Confirmation
-HYPOTHESIS: 12h Donchian(20) breakouts aligned with 1-day EMA(50) trend (bullish when price > EMA, bearish when price < EMA) and volume confirmation (>1.8x average) capture medium-term momentum with higher timeframe trend filter. Uses 12h primary timeframe to balance trade frequency and statistical validity (target: 50-150 total trades over 4 years). Works in both bull and bear markets by only trading breakouts in direction of higher timeframe EMA trend.
+Experiment #4569: 4h Donchian(20) Breakout + 1d HTF Trend + Volume Confirmation
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 1-day EMA(50) trend (bullish when price > EMA, bearish when price < EMA) and volume confirmation (>1.8x average) capture medium-term momentum with higher timeframe trend filter. Uses 4h primary timeframe to balance trade frequency and statistical validity (target: 75-200 total trades over 4 years). Works in both bull and bear markets by only trading breakouts in direction of higher timeframe EMA trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4565_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_4569_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,24 +28,24 @@ def generate_signals(prices):
     else:
         ema_1d = np.array([])
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     if len(ema_1d) > 0:
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
         ema_1d_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel(20) ===
+    # === 4h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -133,5 +133,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
