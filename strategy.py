@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #3558: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts with weekly EMA trend filter and volume confirmation capture medium-term momentum. 
-Weekly EMA (from 1w data) provides robust trend direction. Volume confirms breakout strength. 
-Position size 0.25. Target: 50-100 total trades over 4 years (12-25/year).
-Uses 1d for price action and breakout detection, 1w only for trend filter.
-Works in bull (continuation from weekly uptrend) and bear (continuation from weekly downtrend) via price channels.
+Experiment #3558: 1d Donchian Breakout + 1w EMA Trend + Volume Confirmation
+HYPOTHESIS: Daily Donchian(20) breakouts with 1-week EMA trend filter and volume confirmation capture medium-term momentum across bull and bear markets. The weekly EMA provides the primary trend direction (bullish when price > EMA50, bearish when price < EMA50), while the daily Donchian breakout provides precise entry timing. Volume confirmation ensures breakout strength. Works in bull markets (breakouts above EMA50) and bear markets (breakdowns below EMA50) by aligning with the higher timeframe trend.
 """
 
 import numpy as np
@@ -27,11 +23,13 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate EMA(21) on weekly data
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_21_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate EMA(50) on weekly data
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # === 1d Indicators: Donchian channels (20-period) for entry timing ===
+    # Align weekly EMA to daily timeframe
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # === Primary TF: 1d Indicators: Donchian channels (20-period) for entry timing ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
@@ -59,12 +57,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 21, 20, 14)  # sufficient for all indicators
+    warmup = max(lookback, 50, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_21_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -80,22 +78,12 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below Donchian low (mean reversion)
-                elif price < lowest_low[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 # Exit if price rises 2.5*ATR above lowest since entry
                 if price > lowest_since_entry + 2.5 * atr[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                # Exit if price breaks above Donchian high (mean reversion)
-                elif price > highest_high[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -109,20 +97,20 @@ def generate_signals(prices):
         
         if volume_spike:
             # Determine trend bias from weekly EMA
-            price_vs_ema = price - ema_21_1w_aligned[i]
+            price_vs_ema = price - ema_50_1w_aligned[i]
             
-            # Long entry: price breaks above 1d Donchian high with bullish bias (above weekly EMA)
+            # Long entry: price breaks above 1d Donchian high with bullish bias (above weekly EMA50)
             if (price > highest_high[i] and 
-                price_vs_ema > 0):  # Above weekly EMA = bullish bias
+                price_vs_ema > 0):  # Above weekly EMA50 = bullish bias
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below 1d Donchian low with bearish bias (below weekly EMA)
+            # Short entry: price breaks below 1d Donchian low with bearish bias (below weekly EMA50)
             elif (price < lowest_low[i] and 
-                  price_vs_ema < 0):  # Below weekly EMA = bearish bias
+                  price_vs_ema < 0):  # Below weekly EMA50 = bearish bias
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
