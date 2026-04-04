@@ -1,45 +1,62 @@
 #!/usr/bin/env python3
 """
-exp_6747_6h_donchian20_1d_ema_vol_v1
-Hypothesis: 6h Donchian(20) breakout with daily EMA50 trend filter and volume confirmation.
-In bull markets (price > daily EMA50): long breakouts only. In bear markets (price < daily EMA50): short breakouts only.
-Daily EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
-Designed for 6h timeframe to capture intermediate swings with ~12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by aligning with daily trend direction.
+exp_6747_6h_donchian20_1d_pivot_vol_v1
+Hypothesis: 6h Donchian(20) breakout with daily Camarilla pivot levels and volume confirmation.
+- In ranging markets: fade at R3/S3 (mean reversion)
+- In trending markets: breakout continuation at R4/S4 (trend follow)
+- Uses 1d HTF for pivot calculation to avoid look-ahead
+- Volume confirms breakout legitimacy
+- Designed for 6h timeframe to capture medium swings with ~12-37 trades/year (50-150 total over 4 years)
+- Works in both bull and bear markets by adapting to price action relative to daily pivots
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6747_6h_donchian20_1d_ema_vol_v1"
+name = "exp_6747_6h_donchian20_1d_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0
+VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 MAX_HOLD_BARS = 20  # ~5 days (6h bars)
-EMA_PERIOD = 50
+PIVOT_LOOKBACK = 1  # use previous day's pivot
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for daily EMA
+    # Load HTF data ONCE before loop - using 1d for daily pivots
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA50
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    
+    # Pivot point
+    pp = (high_1d + low_1d + close_1d) / 3.0
+    # Ranges
+    range_1d = high_1d - low_1d
+    # Camarilla levels
+    r4 = pp + range_1d * 1.1 / 2
+    r3 = pp + range_1d * 1.1 / 4
+    s3 = pp - range_1d * 1.1 / 4
+    s4 = pp - range_1d * 1.1 / 2
     
     # Align to LTF (6h)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -67,13 +84,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(pp_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -101,17 +118,39 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend direction from daily EMA50
-        daily_uptrend = close[i] > ema_1d_aligned[i]
-        daily_downtrend = close[i] < ema_1d_aligned[i]
+        # Price action relative to daily Camarilla levels
+        at_r3 = abs(close[i] - r3_aligned[i]) < (r4_aligned[i] - r3_aligned[i]) * 0.1
+        at_s3 = abs(close[i] - s3_aligned[i]) < (s3_aligned[i] - s4_aligned[i]) * 0.1
+        breakout_r4 = close[i] > r4_aligned[i]
+        breakout_s4 = close[i] < s4_aligned[i]
         
-        # Breakout signals aligned with daily trend
-        long_breakout = daily_uptrend and (close[i] > highest_high[i]) and vol_confirmed
-        short_breakout = daily_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
+        # Determine market regime based on price relative to R3/S3
+        ranging_market = (close[i] > r3_aligned[i] and close[i] < s3_aligned[i]) or \
+                         (at_r3 and close[i] <= r3_aligned[i]) or \
+                         (at_s3 and close[i] >= s3_aligned[i])
+        trending_market = not ranging_market
+        
+        # Mean reversion in ranging market: fade at R3/S3
+        long_fade = ranging_market and at_s3 and vol_confirmed
+        short_fade = ranging_market and at_r3 and vol_confirmed
+        
+        # Trend continuation in trending market: breakout at R4/S4
+        long_breakout = trending_market and breakout_r4 and vol_confirmed
+        short_breakout = trending_market and breakout_s4 and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if long_breakout:
+            if long_fade:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+            elif short_fade:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+            elif long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
