@@ -2,11 +2,11 @@
 """
 Experiment #3085: 12h Donchian Breakout + 1d HMA Trend + Volume Spike
 HYPOTHESIS: 12h Donchian(20) breakouts capture swing moves with low trade frequency. 
-1d HMA(50) trend filter ensures alignment with daily momentum. Volume spike (>1.8x 20-period 
-average) confirms breakout strength. ATR-based trailing stop (2.0x) manages risk. 
-Position size 0.25. Target: 50-150 total trades over 4 years (12-37/year). 
-Designed to work in bull markets (trend continuation) and bear markets (mean reversion 
-from extremes) by using price channels and volatility filters.
+1d HMA(50) trend filter ensures alignment with daily momentum. Volume spike (>1.8x 20-period average) 
+confirms breakout strength. ATR-based trailing stop (2.0x) manages risk. Position size 0.25. 
+Target: 75-150 total trades over 4 years (19-37/year). Designed to work in bull markets via 
+trend continuation and bear markets via mean reversion from extremes (exit when price re-enters 
+channel). Uses 12h primary timeframe with 1d HTF as specified.
 """
 
 import numpy as np
@@ -145,5 +145,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
