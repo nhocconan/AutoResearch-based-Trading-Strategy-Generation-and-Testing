@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4150: 1d Donchian(20) breakout + 1w HMA(21) trend filter + volume confirmation + ATR trailing stop
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA(21) trend capture strong momentum moves. Weekly trend filter avoids counter-trend trades during 2022 bear and 2025 range. Volume confirmation filters false breakouts. ATR(14) trailing stop manages risk. Target: 50-100 total trades over 4 years (12-25/year) to minimize fee drag while maintaining statistical significance.
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA(21) trend capture strong momentum with minimal whipsaw. Volume filters false breakouts. ATR trailing stop manages risk. Works in bull/bear as HMA adapts to weekly trend. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -22,13 +22,13 @@ def generate_signals(prices):
     # === HTF: 1w HMA(21) for trend filter ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 21:
-        # Hull Moving Average: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        wma_half = pd.Series(df_1w['close'].values).ewm(span=half_len, adjust=False).mean().values
+        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        half = 21 // 2
+        sqrt_n = int(np.sqrt(21))
+        wma_half = pd.Series(df_1w['close'].values).ewm(span=half, adjust=False).mean().values
         wma_full = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False).mean().values
         raw_hma = 2 * wma_half - wma_full
-        hma_1w = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False).mean().values
+        hma_1w = pd.Series(raw_hma).ewm(span=sqrt_n, adjust=False).mean().values
         hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     else:
         hma_1w_aligned = np.full(n, np.nan)
@@ -61,7 +61,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 5, 20 + 5, 14 + 5)  # DC lookback, vol MA buffer, ATR buffer
+    warmup = max(lookback_dc + 1, 20 + 5, 20 + 5, 14 + 5)  # DC lookback, vol MA buffer, HMA buffer, ATR buffer
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
