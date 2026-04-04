@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #3173: 4h Donchian Breakout + 12h HMA Trend + Volume Spike
-HYPOTHESIS: 4h Donchian(20) breakouts capture swing moves with optimal trade frequency for 4h timeframe.
-12h HMA(21) trend filter ensures alignment with medium-term momentum. Volume spike (>1.8x 20-period average) confirms breakout strength.
-ATR-based trailing stop (2.0x) manages risk. Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets by using price channels and volatility filters.
+Experiment #3173: 4h Donchian(20) Breakout + 12h HMA(20) Trend + Volume Spike
+HYPOTHESIS: 4h Donchian breakouts with 12h HMA trend filter and volume confirmation capture medium-term trends.
+Works in bull markets via trend continuation and bear markets via mean reversion from extremes.
+Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+Uses ATR-based trailing stop (2.5x) for risk management. Position size 0.25.
 """
 
 import numpy as np
@@ -26,7 +26,7 @@ def generate_signals(prices):
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
-    # Calculate HMA(21) on 12h close
+    # Calculate HMA(20) on 12h close
     def hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -38,7 +38,7 @@ def generate_signals(prices):
         hma_vals = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
         return hma_vals
     
-    hma_12h = hma(close_12h, 21)
+    hma_12h = hma(close_12h, 20)
     hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
     # === 4h Indicators: Donchian channels (20-period) ===
@@ -69,7 +69,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 20, 14, 21)  # sufficient for all indicators
+    warmup = max(50, lookback, 20, 14, 20)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -85,8 +85,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -99,8 +99,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -114,8 +114,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) for confirmation
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume spike (> 2.0x average) for confirmation
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # 12h HMA trend filter: only long above HMA, short below HMA
@@ -143,5 +143,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
