@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #6156: 12h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d Camarilla pivot levels (R3/S3 for bias) capture institutional order flow. Daily Camarilla from 1d provides key support/resistance: price above R3 = bullish bias, below S3 = bearish bias. Volume >1.5x average confirms participation. ATR trailing stop manages risk. Discrete sizing (0.25) minimizes fee churn. Target: 75-150 trades over 4 years.
-Timeframe: 12h. HTF: 1d for Camarilla pivot calculation.
+Experiment #6157: 4h Donchian(20) breakout + 1d volume confirmation + ATR trailing stop
+HYPOTHESIS: 4h Donchian breakouts with volume confirmation capture institutional participation in both bull and bear markets. Using 1d HTF for volume filter ensures alignment with higher timeframe participation. ATR-based trailing stop manages risk during volatile periods. Discrete sizing (0.25) minimizes fee churn. Target: 100-180 trades over 4 years.
+Timeframe: 4h. HTF: 1d for volume confirmation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6156_12h_donchian20_1d_camarilla_vol_v1"
-timeframe = "12h"
+name = "exp_6157_4h_donchian20_1d_vol_confirm_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,41 +23,24 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for Camarilla pivot levels (using prior day's high/low/close) ===
+    # === HTF: 1d volume for confirmation (use prior day's average volume) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 2:
-        # Calculate Camarilla levels from prior day's OHLC
-        # Daily high, low, close from previous completed day
-        daily_high = pd.Series(df_1d['high'].values).shift(1).values
-        daily_low = pd.Series(df_1d['low'].values).shift(1).values
-        daily_close = pd.Series(df_1d['close'].values).shift(1).values
-        daily_range = daily_high - daily_low
-        
-        # Camarilla levels: R4, R3, S3, S4
-        camarilla_r4 = daily_close + daily_range * 1.1 / 2
-        camarilla_r3 = daily_close + daily_range * 1.1 / 4
-        camarilla_s3 = daily_close - daily_range * 1.1 / 4
-        camarilla_s4 = daily_close - daily_range * 1.1 / 2
-        
-        camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-        camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-        camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-        camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    if len(df_1d) >= 1:
+        # Daily volume average (use same day's volume for 4h alignment)
+        daily_volume = df_1d['volume'].values
+        # Shift by 1 to avoid look-ahead: use previous day's volume for current 4h bars
+        daily_volume_shifted = np.roll(daily_volume, 1)
+        daily_volume_shifted[0] = np.nan  # First value undefined
+        # Align to 4h timeframe
+        volume_1d_avg_aligned = align_htf_to_ltf(prices, df_1d, daily_volume_shifted)
     else:
-        camarilla_r3_aligned = np.full(n, np.nan)
-        camarilla_s3_aligned = np.full(n, np.nan)
-        camarilla_r4_aligned = np.full(n, np.nan)
-        camarilla_s4_aligned = np.full(n, np.nan)
+        volume_1d_avg_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation ===
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
-    
-    # === 12h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -76,10 +59,10 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 2) + 1  # Donchian, volume avg, ATR, daily pivot + 1
+    warmup = max(20, 14) + 1  # Donchian, ATR + 1
     
     for i in range(warmup, n):
-        # --- Session Filter: Avoid low liquidity periods ---
+        # --- Session Filter: Avoid low liquidity periods (21:00-23:59 UTC) ---
         hour = hours[i]
         if 21 <= hour <= 23:
             signals[i] = 0.0
@@ -87,9 +70,8 @@ def generate_signals(prices):
         
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(camarilla_r3_aligned[i]) or np.isnan(camarilla_s3_aligned[i]) or
-            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i])):
+            np.isnan(volume[i]) or np.isnan(atr[i]) or
+            np.isnan(volume_1d_avg_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -122,19 +104,14 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.5  # Volume filter for stronger signals
-        
-        # Multi-timeframe trend filter: price relative to 1d Camarilla levels
-        # Bullish: above R3 (strong bias) or between R3-R4 (continuation bias)
-        bullish_bias = price > camarilla_r3_aligned[i]
-        # Bearish: below S3 (strong bias) or between S3-S4 (continuation bias)
-        bearish_bias = price < camarilla_s3_aligned[i]
+        # Volume confirmation: current 4h volume > 1.5x previous day's average volume
+        volume_confirmed = volume[i] > 1.5 * volume_1d_avg_aligned[i]
         
         # Entry conditions:
-        # Long: breakout up with volume AND bullish bias above Camarilla R3
-        # Short: breakout down with volume AND bearish bias below Camarilla S3
-        long_entry = breakout_up and volume_confirmed and bullish_bias
-        short_entry = breakout_down and volume_confirmed and bearish_bias
+        # Long: breakout up with volume confirmation
+        # Short: breakout down with volume confirmation
+        long_entry = breakout_up and volume_confirmed
+        short_entry = breakout_down and volume_confirmed
         
         if long_entry:
             in_position = True
