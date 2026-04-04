@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #3999: 6h Donchian(20) breakout + 12h/1d Camarilla pivot confluence + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 12h/1d Camarilla pivot levels (R3/S3 for fade, R4/S4 for breakout) 
-capture high-probability moves. Volume > 2.0x MA(50) confirms institutional participation. 
-Uses discrete sizing (0.25) and ATR(20) trailing stop (2.0x) for risk control. 
-Camarilla pivots derived from 1d timeframe provide institutional reference levels effective in both bull/bear regimes.
-Target: 75-175 trades over 4 years (19-44/year). Works via confluence filtering reducing false breakouts.
+Experiment #4000: 4h Donchian(20) breakout + 1d Camarilla pivot confluence + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d Camarilla pivot levels (R3/S3 for fade, R4/S4 for breakout)
+capture high-probability moves in both bull and bear regimes. Volume > 2.0x MA(50) confirms institutional participation.
+Uses discrete sizing (0.25) and ATR(20) trailing stop (2.0x) for risk control.
+Target: 75-200 trades over 4 years (19-50/year). Works via confluence filtering reducing false breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3999_6h_donchian20_12h1d_camarilla_vol_v1"
-timeframe = "6h"
+name = "exp_4000_4h_donchian20_1d_camarilla_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,46 +22,22 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for Camarilla pivots ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 2:
-        # Calculate Camarilla levels from previous 12h bar
-        h_12h = df_12h['high'].values
-        l_12h = df_12h['low'].values
-        c_12h = df_12h['close'].values
-        rng = h_12h - l_12h
-        
-        # Camarilla levels: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4)
-        # S3 = C - ((H-L) * 1.1/4), S4 = C - ((H-L) * 1.1/2)
-        r4_12h = c_12h + (rng * 1.1 / 2)
-        r3_12h = c_12h + (rng * 1.1 / 4)
-        s3_12h = c_12h - (rng * 1.1 / 4)
-        s4_12h = c_12h - (rng * 1.1 / 2)
-        
-        # Align to 6h timeframe (shift by 1 for completed bar)
-        r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
-        r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
-        s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
-        s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
-    else:
-        r4_12h_aligned = np.full(n, np.nan)
-        r3_12h_aligned = np.full(n, np.nan)
-        s3_12h_aligned = np.full(n, np.nan)
-        s4_12h_aligned = np.full(n, np.nan)
-    
-    # === HTF: 1d data for additional Camarilla confirmation ===
+    # === HTF: 1d data for Camarilla pivots ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 2:
         h_1d = df_1d['high'].values
         l_1d = df_1d['low'].values
         c_1d = df_1d['close'].values
-        rng_1d = h_1d - l_1d
+        rng = h_1d - l_1d
         
-        r4_1d = c_1d + (rng_1d * 1.1 / 2)
-        r3_1d = c_1d + (rng_1d * 1.1 / 4)
-        s3_1d = c_1d - (rng_1d * 1.1 / 4)
-        s4_1d = c_1d - (rng_1d * 1.1 / 2)
+        # Camarilla levels: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4)
+        # S3 = C - ((H-L) * 1.1/4), S4 = C - ((H-L) * 1.1/2)
+        r4_1d = c_1d + (rng * 1.1 / 2)
+        r3_1d = c_1d + (rng * 1.1 / 4)
+        s3_1d = c_1d - (rng * 1.1 / 4)
+        s4_1d = c_1d - (rng * 1.1 / 2)
         
+        # Align to 4h timeframe (shift by 1 for completed bar)
         r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
         r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
         s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
@@ -73,17 +48,17 @@ def generate_signals(prices):
         s3_1d_aligned = np.full(n, np.nan)
         s4_1d_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel(20) for breakout ===
+    # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 6h Indicators: Volume MA(50) for confirmation ===
+    # === 4h Indicators: Volume MA(50) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=50, min_periods=50).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[50:] = volume[50:] / vol_ma[50:]
     
-    # === 6h Indicators: ATR(20) for volatility and trailing stop ===
+    # === 4h Indicators: ATR(20) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -107,8 +82,6 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(r4_12h_aligned[i]) or np.isnan(r3_12h_aligned[i]) or
-            np.isnan(s3_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or
             np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
             np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i])):
             signals[i] = 0.0
@@ -144,20 +117,18 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Determine confluence from 12h and 1d Camarilla levels
-            # Bullish confluence: price above R3 (both timeframes) AND breaking above R4
-            # Bearish confluence: price below S3 (both timeframes) AND breaking below S4
-            bullish_confluence_12h = price > r3_12h_aligned[i]
-            bullish_confluence_1d = price > r3_1d_aligned[i]
-            bearish_confluence_12h = price < s3_12h_aligned[i]
-            bearish_confluence_1d = price < s3_1d_aligned[i]
+            # Determine confluence from 1d Camarilla levels
+            # Bullish confluence: price above R3 AND breaking above R4
+            # Bearish confluence: price below S3 AND breaking below S4
+            bullish_confluence = price > r3_1d_aligned[i]
+            bearish_confluence = price < s3_1d_aligned[i]
             
             # Breakout conditions using Donchian
             breakout_up = price > highest_high[i-1]
             breakout_down = price < lowest_low[i-1]
             
             # Long: bullish confluence + breakout above Donchian high
-            if bullish_confluence_12h and bullish_confluence_1d and breakout_up:
+            if bullish_confluence and breakout_up:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
@@ -165,7 +136,7 @@ def generate_signals(prices):
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
             # Short: bearish confluence + breakout below Donchian low
-            elif bearish_confluence_12h and bearish_confluence_1d and breakout_down:
+            elif bearish_confluence and breakout_down:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
