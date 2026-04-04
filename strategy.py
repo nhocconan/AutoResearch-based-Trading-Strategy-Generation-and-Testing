@@ -3,7 +3,7 @@
 exp_6583_4h_donchian20_12h_ema_vol_v1
 Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
 Uses 4h primary timeframe (target: 75-200 total trades over 4 years). 12h EMA50 provides
-smooth trend direction that adapts to both bull and bear markets (above EMA50 = bullish bias,
+clear trend direction that works in both bull and bear markets (above EMA50 = bullish bias,
 below = bearish bias). Volume confirmation ensures breakouts have conviction.
 Discrete sizing (0.25) minimizes fee churn. Includes ATR-based stoploss and time-based exit.
 """
@@ -137,5 +137,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
