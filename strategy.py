@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #6353: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts with volume confirmation (>1.8x avg) aligned with 12h HMA trend capture institutional momentum with lower frequency. 
-12h HMA provides smoother trend filter than shorter timeframes, reducing whipsaw in bear markets. 
-Discrete sizing (0.25) minimizes fee churn. Target: 75-200 trades over 4 years.
+HYPOTHESIS: 4h Donchian breakouts with volume confirmation (>1.5x avg) and 12h HMA trend filter capture institutional momentum while avoiding whipsaws. 
+In bull markets, HMA uptrend confirms breakout validity. In bear markets, HMA downtrend filters false breakouts. 
+Volume confirmation ensures breakouts have participation. Uses discrete sizing (0.25) to minimize fee churn. 
+Target: 75-200 trades over 4 years (19-50/year). Works in both bull and bear via trend filter.
 """
 
 import numpy as np
@@ -28,36 +29,37 @@ def generate_signals(prices):
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) >= 21:
         # Hull Moving Average (HMA) calculation
-        # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n))
-        def wma(values, window):
-            weights = np.arange(1, window + 1)
-            return np.convolve(values, weights, 'valid') / weights.sum()
+        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        def wma(values, period):
+            if len(values) < period:
+                return np.full_like(values, np.nan)
+            weights = np.arange(1, period + 1)
+            return np.convolve(values, weights / weights.sum(), mode='valid')
         
         close_12h = df_12h['close'].values
-        n_12h = len(close_12h)
-        half_n = 12  # 21//2
-        sqrt_n = int(np.sqrt(21))  # 4
+        n_period = 21
+        half_n = n_period // 2
+        sqrt_n = int(np.sqrt(n_period))
         
-        if n_12h >= 21:
-            wma_half = np.array([wma(close_12h[i:i+half_n], half_n) 
-                                if i+half_n <= n_12h else np.nan 
-                                for i in range(n_12h)])
-            wma_full = np.array([wma(close_12h[i:i+21], 21) 
-                               if i+21 <= n_12h else np.nan 
-                               for i in range(n_12h)])
-            wma_diff = 2 * wma_half - wma_full
-            hma_12h = np.array([wma(wma_diff[i:i+sqrt_n], sqrt_n) 
-                              if i+sqrt_n <= len(wma_diff) else np.nan 
-                              for i in range(len(wma_diff))])
-            # Pad to match length
-            hma_12h = np.concatenate([np.full(n_12h - len(hma_12h), np.nan), hma_12h])
-        else:
-            hma_12h = np.full(n_12h, np.nan)
+        wma_half = wma(close_12h, half_n)
+        wma_full = wma(close_12h, n_period)
         
-        # Align to 4h timeframe (shift by 1 for completed 12h bar)
-        hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+        # 2*WMA(half) - WMA(full)
+        wma_diff = 2 * wma_half - wma_full
+        
+        # WMA of the difference with sqrt(n) period
+        hma_values = wma(wma_diff, sqrt_n)
+        
+        # Pad to original length
+        hma_padded = np.full(len(close_12h), np.nan)
+        start_idx = len(close_12h) - len(hma_values)
+        if start_idx >= 0:
+            hma_padded[start_idx:] = hma_values
+        
+        # Align to 4h timeframe
+        hma_aligned = align_htf_to_ltf(prices, df_12h, hma_padded)
     else:
-        hma_12h_aligned = np.full(n, np.nan)
+        hma_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -98,7 +100,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(hma_12h_aligned[i])):
+            np.isnan(hma_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -112,8 +114,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks below Donchian low (failed breakout)
-                # 3. Price crosses below 12h HMA (trend change)
-                if price <= stop_price or price <= donchian_low[i] or price < hma_12h_aligned[i]:
+                # 3. HMA trend turns down (exit long when trend deteriorates)
+                if price <= stop_price or price <= donchian_low[i] or hma_aligned[i] < hma_aligned[i-1]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -125,8 +127,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks above Donchian high (failed breakout)
-                # 3. Price crosses above 12h HMA (trend change)
-                if price >= stop_price or price >= donchian_high[i] or price > hma_12h_aligned[i]:
+                # 3. HMA trend turns up (exit short when trend deteriorates)
+                if price >= stop_price or price >= donchian_high[i] or hma_aligned[i] > hma_aligned[i-1]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -137,12 +139,12 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.8  # Volume filter
-        uptrend = hma_12h_aligned[i] > hma_12h_aligned[i-1]  # 12h HMA rising
-        downtrend = hma_12h_aligned[i] < hma_12h_aligned[i-1]  # 12h HMA falling
+        volume_confirmed = volume_ratio[i] > 1.5  # Volume filter
+        hma_uptrend = hma_aligned[i] > hma_aligned[i-1]
+        hma_downtrend = hma_aligned[i] < hma_aligned[i-1]
         
-        long_entry = breakout_up and volume_confirmed and uptrend
-        short_entry = breakout_down and volume_confirmed and downtrend
+        long_entry = breakout_up and volume_confirmed and hma_uptrend
+        short_entry = breakout_down and volume_confirmed and hma_downtrend
         
         if long_entry:
             in_position = True
@@ -162,4 +164,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-</trend>
