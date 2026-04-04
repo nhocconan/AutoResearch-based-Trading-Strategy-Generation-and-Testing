@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4228: 12h Donchian(20) breakout + 1w EMA trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 12h timeframe capture swing momentum when aligned with 1w EMA50 trend (price > EMA50 for longs, < EMA50 for shorts) and confirmed by volume (>2.0x average). Uses 1w EMA for direction, 12h only for entry/exit timing. ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 50-150 total trades over 4 years (12-37/year). Works in bull via breakout continuation, in bear via shorting breakdowns. Target timeframe: 12h.
+Experiment #4230: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 1d timeframe capture swing momentum when aligned with 1w EMA50 trend (price > EMA50 for longs, < EMA50 for shorts) and confirmed by volume (>2.0x average). Uses 1w EMA for direction, 1d only for entry/exit timing. ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 30-100 total trades over 4 years (7-25/year). Works in bull via breakout continuation, in bear via shorting breakdowns. Target timeframe: 1d.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4228_12h_donchian20_1w_ema_vol_v1"
-timeframe = "12h"
+name = "exp_4230_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,7 +31,7 @@ def generate_signals(prices):
     else:
         ema_1w_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel (20) ===
+    # === 1d Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -39,12 +39,12 @@ def generate_signals(prices):
     
     donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
-    # === 12h Indicators: Volume MA(20) for confirmation ===
+    # === 1d Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
