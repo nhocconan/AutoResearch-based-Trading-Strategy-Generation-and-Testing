@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4165: 12h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation + ATR stoploss
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(50) trend capture medium-term momentum with reduced noise.
-Volume spike (>2.0x) filters false breakouts. ATR trailing stop (2.5x) manages risk. Using 12h primary timeframe
-targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag while maintaining statistical significance.
-1d EMA provides smoother trend than shorter EMAs, reducing whipsaw in choppy markets and working in both bull/bear regimes.
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(50) trend capture medium-term momentum with reduced lag. Volume spike (>2.0x) filters false breakouts. ATR trailing stop (2.5x) manages risk. 1d EMA provides smoother trend than shorter EMAs, reducing whipsaw in choppy markets. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
