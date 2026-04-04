@@ -1,63 +1,64 @@
 #!/usr/bin/env python3
 """
-exp_6796_12h_camarilla_pivot_1d_v1
-Hypothesis: 12h Camarilla pivot levels from 1d + volume confirmation + ATR stoploss.
-Uses 1d HTF to calculate Camarilla pivot levels (H3/L3, H4/L4) for 12h entries.
-Long when price > H4 with volume confirmation, short when price < L4 with volume confirmation.
-Weekly trend filter avoided to keep trades in target range (50-150 total over 4 years).
-Designed for 12h timeframe to capture swing moves with ~12-37 trades/year.
-Works in both bull and bear markets by fading extreme moves at pivot levels.
+exp_6795_6h_donchian20_1w_pivot_v1
+Hypothesis: 6h Donchian(20) breakout with weekly Camarilla pivot direction filter and volume confirmation.
+In weekly uptrend (price > weekly pivot): long breakouts only. In weekly downtrend (price < weekly pivot): short breakouts only.
+Weekly Camarilla pivot provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
+Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
+Works in both bull and bear markets by aligning with weekly trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6796_12h_camarilla_pivot_1d_v1"
-timeframe = "12h"
+name = "exp_6795_6h_donchian20_1w_pivot_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_MULT = 1.1  # H4/L4 multiplier
+DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5
+VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # ~5 days (12h bars)
+MAX_HOLD_BARS = 20  # ~5 days (6h bars)
+PIVOT_LOOKBACK = 5  # days for weekly pivot calculation
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - using 1w for weekly Camarilla pivot
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly Camarilla pivot (using prior week's OHLC)
+    # Camarilla levels: R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, etc.
+    # But for trend filter, we use the weekly pivot point: P = (H+L+C)/3
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Pivot point (PP) = (H + L + C) / 3
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    rng = high_1d - low_1d
-    # Camarilla levels
-    h3 = pp + rng * 1.1 / 2
-    l3 = pp - rng * 1.1 / 2
-    h4 = pp + rng * 1.1
-    l4 = pp - rng * 1.1
+    # Weekly pivot point (using prior completed week)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Shift by 1 to use only prior week's pivot (no look-ahead)
+    pivot_1w = np.roll(pivot_1w, 1)
+    pivot_1w[0] = np.nan  # First value has no prior week
     
-    # Align to LTF (12h)
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    # Align to LTF (6h)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
@@ -75,13 +76,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]):
+        if np.isnan(pivot_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -109,9 +110,13 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Camarilla breakout signals
-        long_breakout = close[i] > h4_aligned[i] and vol_confirmed
-        short_breakout = close[i] < l4_aligned[i] and vol_confirmed
+        # Determine trend direction from weekly pivot
+        weekly_uptrend = close[i] > pivot_1w_aligned[i]
+        weekly_downtrend = close[i] < pivot_1w_aligned[i]
+        
+        # Breakout signals aligned with weekly trend
+        long_breakout = weekly_uptrend and (close[i] > highest_high[i]) and vol_confirmed
+        short_breakout = weekly_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
