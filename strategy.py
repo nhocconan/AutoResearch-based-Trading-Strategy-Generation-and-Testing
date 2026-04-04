@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4140: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend direction capture strong momentum moves. Volume confirmation filters false breakouts. Works in both bull/bear as EMA adapts to volatility. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #4140: 4h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend direction capture strong momentum moves. Volume confirmation filters false breakouts. Works in both bull/bear as EMA adapts to trend. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -22,10 +22,10 @@ def generate_signals(prices):
     # === HTF: 1d EMA(50) for trend filter ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 50:
-        ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        ema_50_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -37,7 +37,7 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for volatility and stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -55,13 +55,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 5, 14 + 5)  # DC lookback, vol MA buffer, ATR buffer
+    warmup = max(lookback_dc + 1, 20 + 5, 50 + 5, 14 + 5)  # DC lookback, vol MA buffer, EMA buffer, ATR buffer
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_50_aligned[i])):
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -100,13 +100,13 @@ def generate_signals(prices):
             breakout_down = price < lowest_low[i-1]
             
             # EMA trend filter
-            above_ema = price > ema_50_aligned[i]
-            below_ema = price < ema_50_aligned[i]
+            above_ema = price > ema_1d_aligned[i]
+            below_ema = price < ema_1d_aligned[i]
             
-            # Long conditions: Donchian breakout up + above EMA (trend continuation)
+            # Long conditions: Donchian breakout up + above 1d EMA (trend alignment)
             long_entry = breakout_up and above_ema
             
-            # Short conditions: Donchian breakout down + below EMA (trend continuation)
+            # Short conditions: Donchian breakout down + below 1d EMA (trend alignment)
             short_entry = breakout_down and below_ema
             
             if long_entry:
