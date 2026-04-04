@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4644: 1d Donchian(20) Breakout + Volume Confirmation + ATR Stoploss
-HYPOTHESIS: Daily price breaking Donchian(20) channels from prior 1d with volume confirmation (>1.5x avg) captures strong momentum breakouts in both bull and bear markets. Uses 1w HTF for regime filter (price > 200-period EMA for long bias, < 200-period EMA for short bias) to avoid counter-trend trades. Discrete sizing (0.25) and ATR trailing stop (2.0x) manage risk. Target: 7-25 trades/year on 1d timeframe.
+Experiment #4645: 12h Donchian(20) Breakout from 1d HTF + Volume Confirmation + ATR Stoploss
+HYPOTHESIS: 12h price breaking Donchian(20) channels calculated from prior 1d data with volume confirmation (>1.5x avg) captures strong momentum breakouts. Uses 1d HTF for structure, discrete sizing (0.25), and ATR trailing stop (2.0x). Target: 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4644_1d_donchian20_vol_regime_v1"
-timeframe = "1d"
+name = "exp_4645_12h_donchian20_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,7 +35,7 @@ def generate_signals(prices):
         donchian_high = np.full(n, np.nan)
         donchian_low = np.full(n, np.nan)
     
-    # Align Donchian levels to 1d timeframe
+    # Align Donchian levels to 12h timeframe
     if len(donchian_high) > 0:
         dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
         dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
@@ -43,20 +43,12 @@ def generate_signals(prices):
         dh_aligned = np.full(n, np.nan)
         dl_aligned = np.full(n, np.nan)
     
-    # Precompute HTF: 1w data for regime filter (200-period EMA)
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 200:
-        ema_200 = pd.Series(df_1w['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-        ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
-    else:
-        ema_200_aligned = np.full(n, np.nan)
-    
-    # === 1d Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -79,7 +71,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(dh_aligned[i]) or np.isnan(dl_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or np.isnan(ema_200_aligned[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -112,13 +104,9 @@ def generate_signals(prices):
         # Volume filter: confirmation for breakouts (>1.5x)
         vol_breakout = vol_ratio[i] > 1.5
         
-        # Regime filter: price > 200-period EMA for long bias, < 200-period EMA for short bias
-        regime_long = price > ema_200_aligned[i]
-        regime_short = price < ema_200_aligned[i]
-        
-        # Breakout conditions: price breaks Donchian high/low with volume confirmation AND regime filter
-        breakout_long = price > dh_aligned[i] and vol_breakout and regime_long
-        breakout_short = price < dl_aligned[i] and vol_breakout and regime_short
+        # Breakout conditions: price breaks Donchian high/low with volume confirmation
+        breakout_long = price > dh_aligned[i] and vol_breakout
+        breakout_short = price < dl_aligned[i] and vol_breakout
         
         if breakout_long:
             in_position = True
