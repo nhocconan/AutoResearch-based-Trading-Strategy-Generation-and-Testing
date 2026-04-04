@@ -3,9 +3,9 @@
 Experiment #5393: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation
 HYPOTHESIS: On 4h timeframe, price breaking above/below the 20-period Donchian channel 
 with volume > 2.0x average and aligned with the 12h Hull Moving Average (HMA(21)) trend 
-captures strong momentum moves while minimizing false breakouts. The 12h HMA acts as 
-a higher timeframe trend filter to avoid counter-trend trades. Discrete position sizing 
-(0.25) and ATR-based stoploss (2.0x ATR) control risk. Target: 19-50 trades/year 
+captures strong momentum moves while minimizing false breakouts. The 12h HMA acts as a 
+higher timeframe trend filter to avoid counter-trend trades. Discrete position sizing 
+(0.25) and ATR-based trailing stoploss (2.5x ATR) control risk. Target: 19-50 trades/year 
 (75-200 total over 4 years) to minimize fee drag while maintaining statistical significance. 
 Works in bull markets via breakouts above rising 12h HMA and in bear markets via short 
 breakdowns below falling 12h HMA.
@@ -37,10 +37,17 @@ def generate_signals(prices):
         # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
         half_len = 21 // 2
         sqrt_len = int(np.sqrt(21))
-        wma_half = close_12h.rolling(window=half_len, min_periods=half_len).mean()
-        wma_full = close_12h.rolling(window=21, min_periods=21).mean()
+        
+        def wma(series, period):
+            if len(series) < period:
+                return pd.Series([np.nan] * len(series), index=series.index)
+            weights = np.arange(1, period + 1)
+            return series.rolling(period).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
+        
+        wma_half = wma(close_12h, half_len)
+        wma_full = wma(close_12h, 21)
         raw_hma = 2 * wma_half - wma_full
-        hma_12h = raw_hma.rolling(window=sqrt_len, min_periods=sqrt_len).mean().values
+        hma_12h = wma(raw_hma, sqrt_len).values
         
         # Align to LTF (4h) with shift(1) for completed bars only
         hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h) if len(hma_12h) > 0 else np.full(n, np.nan)
@@ -103,8 +110,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop logic
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Stoploss: 2.0 * ATR below highest since entry
-                stop_price = highest_since_entry - 2.0 * atr[i]
+                # Stoploss: 2.5 * ATR below highest since entry
+                stop_price = highest_since_entry - 2.5 * atr[i]
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks below Donchian lower band (failed breakout)
@@ -117,8 +124,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Stoploss: 2.0 * ATR above lowest since entry
-                stop_price = lowest_since_entry + 2.0 * atr[i]
+                # Stoploss: 2.5 * ATR above lowest since entry
+                stop_price = lowest_since_entry + 2.5 * atr[i]
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks above Donchian upper band (failed breakout)
@@ -140,8 +147,8 @@ def generate_signals(prices):
         volume_confirmed = volume_ratio[i] > 2.0
         
         # 12h HMA trend filter
-        # Long: price above 12h HMA (bullish bias)
-        # Short: price below 12h HMA (bearish bias)
+        # Long: price above 12h HMA (bullish trend)
+        # Short: price below 12h HMA (bearish trend)
         hma_bias_up = price > hma_12h_aligned[i-1]
         hma_bias_down = price < hma_12h_aligned[i-1]
         
