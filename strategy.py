@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4711: 6h Camarilla Pivot Reversal + 1d Trend Filter
-HYPOTHESIS: At 6h timeframe, price reactions to 1d Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) combined with 1d EMA50 trend filter captures institutional order flow. In bull/bear markets, price often reverses at R3/S3 (80% probability) or breaks through R4/S4 with continuation. This strategy targets 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Works in ranging markets (reversions at R3/S3) and trending markets (breakouts at R4/S4).
+Experiment #4713: 4h Donchian Breakout + 12h HMA Trend + Volume Confirmation
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 12h HMA(21) trend direction, confirmed by volume spikes (>1.5x 20-period average), capture institutional momentum with controlled trade frequency. Uses ATR(14) trailing stop (2.5x) for risk management. Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered by 12h HMA).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4711_6h_camarilla_pivot_1d_trend_v1"
-timeframe = "6h"
+name = "exp_4713_4h_donchian20_12h_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,56 +19,53 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for Camarilla pivots and EMA50 trend
-    df_1d = get_htf_data(prices, '1d')
+    # Precompute HTF: 12h data for HMA(21) trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # === 1d Indicators: Camarilla pivot levels from prior day ===
-    if len(df_1d) >= 2:
-        # Use prior day's OHLC (shifted by 1 to avoid look-ahead)
-        ph = np.concatenate([[np.nan], df_1d['high'].values[:-1]])   # prior day high
-        pl = np.concatenate([[np.nan], df_1d['low'].values[:-1]])    # prior day low
-        pc = np.concatenate([[np.nan], df_1d['close'].values[:-1]])  # prior day close
+    # === 12h Indicators: HMA(21) for trend ===
+    if len(df_12h) >= 21:
+        # Hull Moving Average: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        half_len = 12 // 2
+        sqrt_len = int(np.sqrt(12))
         
-        # Camarilla calculations
-        pivot = (ph + pl + pc) / 3
-        range_ = ph - pl
+        def wma(arr, window):
+            if len(arr) < window:
+                return np.full_like(arr, np.nan)
+            weights = np.arange(1, window + 1, dtype=np.float64)
+            return np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
         
-        # Resistance levels
-        r3 = pivot + range_ * 1.1 / 2
-        r4 = pivot + range_ * 1.1
-        # Support levels
-        s3 = pivot - range_ * 1.1 / 2
-        s4 = pivot - range_ * 1.1
+        close_12h = df_12h['close'].values
+        wma_half = wma(close_12h, half_len)
+        wma_full = wma(close_12h, 12)
+        wma_diff = 2 * wma_half - wma_full
+        hma_12h = wma(wma_diff, sqrt_len)
         
-        # Align to 6h timeframe
-        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+        # Pad beginning with NaN
+        hma_12h_padded = np.full(len(close_12h), np.nan)
+        if len(hma_12h) > 0:
+            start_idx = len(close_12h) - len(hma_12h)
+            hma_12h_padded[start_idx:] = hma_12h
+        hma_12h = hma_12h_padded
     else:
-        r3_aligned = np.full(n, np.nan)
-        r4_aligned = np.full(n, np.nan)
-        s3_aligned = np.full(n, np.nan)
-        s4_aligned = np.full(n, np.nan)
+        hma_12h = np.full(len(df_12h), np.nan)
     
-    # === 1d Indicators: EMA50 for trend filter ===
-    if len(df_1d) >= 50:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    # Align HTF HMA to 4h timeframe
+    if len(hma_12h) > 0:
+        hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     else:
-        ema_1d = np.full(len(df_1d), np.nan)
+        hma_12h_aligned = np.full(n, np.nan)
     
-    # Align HTF EMA50 to 6h timeframe
-    if len(ema_1d) > 0:
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    else:
-        ema_1d_aligned = np.full(n, np.nan)
+    # === 4h Indicators: Donchian Channel(20) ===
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 6h Indicators: Volume confirmation ===
+    # === 4h Indicators: Volume confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -86,13 +83,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(2, 20, 14, 50)  # Prior day, Volume MA, ATR, EMA50 warmup
+    warmup = max(lookback, 20, 14, 21)  # Donchian, Volume MA, ATR, HMA warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or 
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(hma_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -122,40 +118,32 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>1.3x)
-        vol_confirm = vol_ratio[i] > 1.3
+        # Volume filter: confirmation (>1.5x)
+        vol_confirm = vol_ratio[i] > 1.5
         
-        # Mean reversion at R3/S3 (80% probability zone)
-        mean_revert_long = (price <= s3_aligned[i] * 1.001) and vol_confirm  # slight buffer
-        mean_revert_short = (price >= r3_aligned[i] * 0.999) and vol_confirm  # slight buffer
+        # Donchian breakout conditions
+        breakout_long = (price >= highest_high[i]) and vol_confirm
+        breakout_short = (price <= lowest_low[i]) and vol_confirm
         
-        # Breakout continuation at R4/S4 with trend alignment
-        breakout_long = (price >= r4_aligned[i] * 0.999) and (price > ema_1d_aligned[i]) and vol_confirm
-        breakout_short = (price <= s4_aligned[i] * 1.001) and (price < ema_1d_aligned[i]) and vol_confirm
+        # Trend filter: 12h HMA direction
+        # For long: price above 12h HMA (bullish bias)
+        # For short: price below 12h HMA (bearish bias)
+        if len(hma_12h_aligned) > i and not np.isnan(hma_12h_aligned[i]):
+            hma_trend_long = price > hma_12h_aligned[i]
+            hma_trend_short = price < hma_12h_aligned[i]
+        else:
+            hma_trend_long = True
+            hma_trend_short = True
         
-        # Final entry conditions
-        if mean_revert_long:
+        # Final entry conditions: breakout + volume + trend alignment
+        if breakout_long and vol_confirm and hma_trend_long:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif mean_revert_short:
-            in_position = True
-            position_side = -1
-            entry_price = close[i]
-            highest_since_entry = high[i]
-            lowest_since_entry = low[i]
-            signals[i] = -SIZE
-        elif breakout_long:
-            in_position = True
-            position_side = 1
-            entry_price = close[i]
-            highest_since_entry = high[i]
-            lowest_since_entry = low[i]
-            signals[i] = SIZE
-        elif breakout_short:
+        elif breakout_short and vol_confirm and hma_trend_short:
             in_position = True
             position_side = -1
             entry_price = close[i]
