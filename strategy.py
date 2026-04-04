@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #2849: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+Experiment #2849: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA trend and volume spikes capture
-strong momentum moves while minimizing whipsaws. Daily trend filter provides robust bias
-for both bull and bear markets. 4h timeframe balances trade frequency and fee drag,
-targeting 75-200 total trades over 4 years (19-50/year).
+strong momentum moves while avoiding whipsaws. Daily trend filter provides robust bias
+for both bull and bear markets, reducing counter-trend entries. 4h timeframe balances
+trade frequency and fee drag. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -22,7 +22,7 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA(50) trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
