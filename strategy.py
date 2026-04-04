@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #3513: 4h Donchian Breakout + 12h HMA Trend + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h HMA(21) trend direction and volume spikes capture medium-term momentum with controlled trade frequency. 
-The 12h HMA acts as a robust trend filter to avoid counter-trend whipsaws, while volume confirms breakout strength. 
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h HMA(21) trend direction and volume confirmation capture medium-term momentum with controlled trade frequency. 
+12h HMA provides smoother trend filter than EMA, reducing whipsaws. Volume confirms breakout strength. 
 Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-Uses 12h for trend filter and 4h only for entry timing and risk management.
+Uses 12h for trend filter and 4h for entry timing and risk management.
 Works in bull (continuation from uptrend) and bear (continuation from downtrend) via price channels.
 """
 
@@ -26,22 +26,34 @@ def generate_signals(prices):
     
     # === HTF: 12h data for HMA trend filter (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Calculate HMA(21) on 12h close
-    def hma(arr, period):
+    # === 12h Indicators: HMA(21) for trend ===
+    def calculate_hma(arr, period):
+        """Hull Moving Average: WMA(2*WMA(n/2) - WMA(n), sqrt(n))"""
         if len(arr) < period:
             return np.full_like(arr, np.nan)
         half_period = period // 2
         sqrt_period = int(np.sqrt(period))
-        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean()
-        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean()
-        hma_val = 2 * wma_half - wma_full
-        hma_final = pd.Series(hma_val).ewm(span=sqrt_period, adjust=False).mean()
-        return hma_final.values
+        
+        def wma(values, window):
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, 'valid') / weights.sum()
+        
+        wma_half = np.array([wma(arr[max(0, i-half_period+1):i+1], half_period) 
+                            if i >= half_period-1 else np.nan for i in range(len(arr))])
+        wma_full = np.array([wma(arr[max(0, i-period+1):i+1], period) 
+                            if i >= period-1 else np.nan for i in range(len(arr))])
+        
+        raw_hma = 2 * wma_half - wma_full
+        hma = np.array([wma(raw_hma[max(0, i-sqrt_period+1):i+1], sqrt_period) 
+                       if i >= sqrt_period-1 else np.nan for i in range(len(raw_hma))])
+        return hma
     
-    hma_12h = hma(close_12h, 21)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    hma_12h = calculate_hma(close_12h, 21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)  # auto shift(1)
     
     # === 4h Indicators: Donchian channels (20-period) for entry timing ===
     lookback_4h = 20
@@ -92,7 +104,7 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below Donchian low (mean reversion)
+                # Exit if price breaks below 4h Donchian low - trend reversal
                 elif price < lowest_low_4h[i]:
                     in_position = False
                     position_side = 0
@@ -106,7 +118,7 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above Donchian high (mean reversion)
+                # Exit if price breaks above 4h Donchian high - trend reversal
                 elif price > highest_high_4h[i]:
                     in_position = False
                     position_side = 0
@@ -120,21 +132,21 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Determine trend bias from 12h HMA
-            hma_bias = hma_12h_aligned[i]
+            # Determine trend from 12h HMA
+            hma_trend = hma_12h_aligned[i]
             
-            # Long entry: price breaks above 4h Donchian high with bullish HMA bias
+            # Long entry: price breaks above 4h Donchian high with uptrend (price > HMA)
             if (price > highest_high_4h[i] and 
-                close[i] > hma_bias):  # Price above 12h HMA = bullish bias
+                price > hma_trend):  # Above 12h HMA = uptrend
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below 4h Donchian low with bearish HMA bias
+            # Short entry: price breaks below 4h Donchian low with downtrend (price < HMA)
             elif (price < lowest_low_4h[i] and 
-                  close[i] < hma_bias):  # Price below 12h HMA = bearish bias
+                  price < hma_trend):  # Below 12h HMA = downtrend
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
