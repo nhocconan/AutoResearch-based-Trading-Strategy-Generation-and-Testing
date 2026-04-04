@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #2556: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: Donchian channel breakouts on 12h timeframe aligned with daily EMA trend and volume spikes 
-capture institutional participation with lower frequency to reduce fee drag. Works in bull markets 
-(breakouts with volume) and bear markets (breakdowns with volume). Uses discrete position sizing (0.25) 
-to limit fee drag and ensure 50-150 total trades over 4 years.
+Experiment #2557: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: Donchian breakouts with daily EMA trend alignment and volume spikes capture
+institutional participation. Works in bull markets (breakouts with volume) and bear markets
+(breakdowns with volume). Uses discrete position sizing (0.25) to limit fee drag and ensure
+75-200 total trades over 4 years. Volume spike threshold increased to 3.0x to reduce trades.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2556_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_2557_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,7 +31,7 @@ def generate_signals(prices):
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 12h Indicators: Donchian(20) channels, Volume MA(20) ===
+    # === 4h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -105,8 +105,8 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 3.0x average) - increased from 2.0x
+        volume_spike = vol_ratio[i] > 3.0
         
         if volume_spike and trend_bias != 0:
             # Long entry: price breaks above Donchian high with uptrend
