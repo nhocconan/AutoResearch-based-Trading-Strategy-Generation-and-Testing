@@ -4,9 +4,9 @@ Experiment #5728: 12h Donchian(20) breakout + 1w EMA(50) trend + volume confirma
 HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts with volume > 2.0x average and aligned 
 with weekly EMA(50) direction (price above EMA = bullish, below = bearish) capture 
 high-probability trend continuation moves. The weekly EMA(50) provides a robust trend filter 
-that adapts to long-term trend, working in both bull and bear markets. Volume confirms 
+that works in both bull and bear markets by adapting to the long-term trend. Volume confirms 
 breakout strength. ATR trailing stop (2.5x) manages risk. Discrete sizing (0.25) minimizes 
-fee churn. Target: 12-37 trades/year (50-150 total over 4 years).
+fee churn. Target: 12-37 trades/year.
 """
 
 import numpy as np
