@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4110: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation + chop filter
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA(21) trend, volume confirmation, and chop regime filter capture strong trending moves while minimizing whipsaws in both bull and bear markets. Weekly timeframe adapts to regime changes, chop filter avoids range-bound false signals. Target: 30-100 total trades over 4 years (7-25/year).
+Experiment #4110: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA(21) trend direction and volume confirmation capture strong trending moves while minimizing whipsaws. Weekly timeframe filters noise and adapts to regime changes. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4110_1d_donchian20_1w_hma21_vol_chop_v1"
+name = "exp_4110_1d_donchian20_1w_hma21_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -32,25 +32,6 @@ def generate_signals(prices):
         hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
     else:
         hma_21_aligned = np.full(n, np.nan)
-    
-    # === HTF: 1w Chopiness Index(14) for regime filter ===
-    if len(df_1w) >= 1:
-        # True Range
-        tr1 = df_1w['high'].values - df_1w['low'].values
-        tr2 = np.abs(df_1w['high'].values - np.concatenate([[df_1w['close'].values[0]], df_1w['close'].values[:-1]]))
-        tr3 = np.abs(df_1w['low'].values - np.concatenate([[df_1w['close'].values[0]], df_1w['close'].values[:-1]]))
-        tr_w = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr_w = pd.Series(tr_w).ewm(span=14, min_periods=14, adjust=False).mean().values
-        
-        # Chopiness Index = 100 * log10(sum(ATR14) / (max(high)-min(low)) * sqrt(period))
-        sum_atr_w = pd.Series(atr_w).rolling(window=14, min_periods=14).sum().values
-        max_high_w = pd.Series(df_1w['high'].values).rolling(window=14, min_periods=14).max().values
-        min_low_w = pd.Series(df_1w['low'].values).rolling(window=14, min_periods=14).min().values
-        chop_w = 100 * np.log10(sum_atr_w / (max_high_w - min_low_w) * np.sqrt(14))
-        chop_w = np.where((max_high_w - min_low_w) == 0, 50, chop_w)  # avoid div by zero
-        chop_w_aligned = align_htf_to_ltf(prices, df_1w, chop_w)
-    else:
-        chop_w_aligned = np.full(n, 50.0)  # neutral chop
     
     # === 1d Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -80,13 +61,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 10, 14 + 10)  # DC lookback, vol MA buffer, chop buffer
+    warmup = max(lookback_dc + 1, 20 + 10)  # DC lookback, vol MA buffer
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(hma_21_aligned[i]) or np.isnan(chop_w_aligned[i])):
+            np.isnan(hma_21_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -119,13 +100,7 @@ def generate_signals(prices):
         # Require volume spike (> 1.5x average) to filter noise
         volume_spike = vol_ratio[i] > 1.5
         
-        # Chop regime filter: only trade when trending (CHOP < 38.2) or extreme range (CHOP > 61.8)
-        chop_value = chop_w_aligned[i]
-        trending_regime = chop_value < 38.2
-        extreme_range_regime = chop_value > 61.8
-        regime_filter = trending_regime  # Focus on trending regimes for breakouts
-        
-        if volume_spike and regime_filter:
+        if volume_spike:
             # HTF 1w HMA(21) trend bias: 
             price_above_hma = price > hma_21_aligned[i]
             price_below_hma = price < hma_21_aligned[i]
