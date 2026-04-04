@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #5045: 12h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with daily EMA trend capture strong momentum with lower frequency. Daily EMA acts as trend filter: price above EMA200 for longs, below for shorts. Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. Designed for 12-37 trades/year on 12h timeframe to minimize fee drag while maintaining statistical significance. Daily EMA200 provides structural trend filter that works in both bull (breakouts with trend) and bear (breakdowns with trend) markets.
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with 1d EMA(50) trend direction capture strong momentum with lower frequency. The 1d EMA acts as a regime filter: only take longs when price > EMA50 (bull regime) and shorts when price < EMA50 (bear regime). Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. Designed for 12-37 trades/year on 12h timeframe to minimize fee drag while maintaining statistical significance. Works in both bull (breakouts with trend) and bear (breakdowns with trend) markets by using the 1d EMA as dynamic trend filter.
 """
 
 import numpy as np
@@ -19,17 +19,17 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for EMA200 trend filter
+    # Precompute HTF: 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d Indicators: EMA200 for trend filter ===
-    if len(df_1d) >= 200:
-        ema_200 = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    # === 1d Indicators: EMA(50) for trend regime ===
+    if len(df_1d) >= 50:
+        close_1d = pd.Series(df_1d['close'].values)
+        ema_50_1d = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
+        # Align to 12h timeframe (shifted by 1 for completed daily bars only)
+        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     else:
-        ema_200 = np.full(len(df_1d), np.nan)
-    
-    # Align EMA200 to 12h timeframe
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+        ema_50_aligned = np.full(n, np.nan)
     
     # === 12h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -58,12 +58,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 200)  # Donchian, Volume MA, ATR, EMA200 warmup
+    warmup = max(20, 20, 14, 50)  # Donchian, Volume MA, ATR, EMA warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_200_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -96,11 +96,15 @@ def generate_signals(prices):
         # Volume filter: confirmation (>1.5x)
         vol_confirm = vol_ratio[i] > 1.5
         
-        # Donchian breakout conditions with daily EMA200 trend filter
-        # Long: Donchian breakout above high AND price above EMA200 (uptrend)
-        # Short: Donchian breakdown below low AND price below EMA200 (downtrend)
-        breakout_long = (price >= high_roll[i]) and (price > ema_200_aligned[i]) and vol_confirm
-        breakout_short = (price <= low_roll[i]) and (price < ema_200_aligned[i]) and vol_confirm
+        # Trend filter from 1d EMA50: only long in bull regime, short in bear regime
+        bull_regime = price > ema_50_aligned[i]
+        bear_regime = price < ema_50_aligned[i]
+        
+        # Donchian breakout conditions with trend alignment
+        # Long: Donchian breakout above resistance AND bull regime
+        # Short: Donchian breakdown below support AND bear regime
+        breakout_long = (price >= high_roll[i]) and bull_regime and vol_confirm
+        breakout_short = (price <= low_roll[i]) and bear_regime and vol_confirm
         
         # Final entry conditions
         if breakout_long:
@@ -121,5 +125,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
