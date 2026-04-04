@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #6442: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts with volume confirmation (>2.0x avg) and 1d trend filter (price vs EMA50) capture institutional order flow while keeping trade frequency low (target: 75-200 trades over 4 years). Long when price breaks above Donchian high with volume AND price > 1d EMA50 (uptrend). Short when price breaks below Donchian low with volume AND price < 1d EMA50 (downtrend). Uses ATR-based trailing stop. Works in bull via upward breakouts with volume and uptrend, in bear via downward breakdowns with volume and downtrend. Designed for 12h timeframe to minimize fee drag.
+HYPOTHESIS: 12h Donchian breakouts with volume confirmation (>2.0x avg) and 1d trend filter (price vs EMA50) capture institutional order flow while keeping trade frequency low (target: 50-150 total trades over 4 years). Long when price breaks above Donchian high with volume and price > 1d EMA50 (uptrend). Short when price breaks below Donchian low with volume and price < 1d EMA50 (downtrend). Uses trailing stop at 2.5*ATR from extreme. Discrete sizing at 0.30 to balance profit potential and drawdown control. Works in bull via upward breakouts with volume and uptrend, in bear via downward breakdowns with volume and downtrend.
 """
 
 import numpy as np
@@ -49,7 +49,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size (discrete level)
+    SIZE = 0.30  # 30% position size (discrete level)
     
     # Position tracking state variables
     in_position = False
