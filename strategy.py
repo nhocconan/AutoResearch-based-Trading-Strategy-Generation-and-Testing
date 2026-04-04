@@ -2,8 +2,8 @@
 """
 Experiment #6003: 4h Donchian(20) breakout + 12h EMA(21) trend filter + volume confirmation
 HYPOTHESIS: Donchian breakouts on 4h aligned with 12h EMA trend capture sustained moves in both bull and bear markets.
-12h EMA provides intermediate-term trend bias more resilient than shorter timeframes. Volume >1.5x average confirms breakout strength.
-ATR trailing stop manages risk. Target 75-200 trades over 4 years (19-50/year). Uses discrete position sizing (0.25) to minimize fee churn.
+12h EMA provides intermediate-term trend bias. Volume >1.5x average confirms breakout strength.
+ATR trailing stop manages risk. Target 75-200 trades over 4 years. Uses discrete position sizing to minimize fee drag.
 """
 
 import numpy as np
