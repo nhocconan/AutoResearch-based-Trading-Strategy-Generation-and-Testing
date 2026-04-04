@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4058: 1d Donchian(20) breakout + weekly pivot direction + volume confirmation
-HYPOTHESIS: Donchian breakouts on 1d aligned with weekly pivot bias (price above/below weekly pivot) with volume confirmation capture high-probability continuation moves. Weekly pivot provides structural support/resistance from longer timeframe, filtering breakouts against the major trend. This should work in both bull and bear markets by only taking breakouts in the direction of the weekly pivot bias. Target: 30-100 total trades over 4 years (7-25/year).
+Experiment #4059: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
+HYPOTHESIS: Donchian breakouts on 6h aligned with weekly pivot bias (price above/below weekly pivot) with volume confirmation capture high-probability continuation moves. Weekly pivot provides structural support/resistance from longer timeframe, filtering breakouts against the major trend. This should work in both bull and bear markets by only taking breakouts in the direction of the weekly pivot bias. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4058_1d_donchian20_1w_pivot_vol_v1"
-timeframe = "1d"
+name = "exp_4059_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,17 +31,17 @@ def generate_signals(prices):
     else:
         weekly_pivot_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: Donchian Channel(20) for breakout ===
+    # === 6h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 1d Indicators: Volume MA(20) for confirmation ===
+    # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(20) for volatility and trailing stop ===
+    # === 6h Indicators: ATR(20) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -133,3 +133,6 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+# Note: This strategy is identical to exp_4055. The previous version (exp_4057) was a different strategy (4h Donchian with daily pivot). 
+# This version targets 6h timeframe with weekly pivot as requested in experiment #4059.
