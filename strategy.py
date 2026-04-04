@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3963: 4h Donchian(20) breakout + 12h EMA-50 trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA-50 trend capture swings with controlled frequency. Volume > 2.0x MA(20) confirms strength. ATR(14) trailing stop (2.5x) manages risk. Discrete sizing (0.25) reduces fee drag. Target: 75-200 trades over 4 years (19-50/year). Works in bull/bear via 12h EMA-50 trend filter.
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA-50 trend capture major swings with controlled frequency. Volume > 2.0x MA(20) confirms strength. ATR(14) trailing stop (2.5x) manages risk. Discrete sizing (0.25) reduces fee drag. Target: 75-200 trades over 4 years (19-50/year). Works in bull/bear via 12h EMA-50 trend filter.
 """
 
 import numpy as np
