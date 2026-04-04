@@ -4,7 +4,7 @@ Experiment #5918: 1d Donchian(20) breakout + weekly HMA trend + volume confirmat
 HYPOTHESIS: Weekly HMA(21) defines the major trend regime on 1d timeframe. 
 1d Donchian(20) breakouts aligned with weekly HMA direction capture high-probability 
 continuation moves in both bull and bear markets. Volume confirmation filters weak breakouts.
-Target: 30-100 total trades over 4 years (7-25/year).
+ATR trailing stop manages risk. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -25,30 +25,36 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for HMA(21) ===
+    # === HTF: 1w data for HMA(21) trend ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 21:
-        # Calculate HMA(21) on weekly close prices
-        weekly_close = df_1w['close'].values
+        # Calculate Hull Moving Average (HMA) on weekly close
+        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        def wma(values, window):
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, 'valid') / weights.sum()
         
-        # Weighted Moving Average function
-        def wma(data, period):
-            weights = np.arange(1, period + 1)
-            return np.convolve(data, weights / weights.sum(), mode='same')
+        close_1w = df_1w['close'].values
+        n_half = len(close_1w) // 2
+        sqrt_n = int(np.sqrt(len(close_1w)))
         
-        # HMA = WMA(2 * WMA(n/2) - WMA(n), sqrt(n))
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        
-        wma_half = wma(weekly_close, half_len)
-        wma_full = wma(weekly_close, 21)
-        raw_hma = 2 * wma_half - wma_full
-        hma_21 = wma(raw_hma, sqrt_len)
+        if n_half > 0 and sqrt_n > 0:
+            wma_half = wma(close_1w, n_half)
+            wma_full = wma(close_1w, len(close_1w))
+            hma_raw = 2 * wma_half - wma_full
+            hma = wma(hma_raw, sqrt_n)
+            # Pad to match original length
+            hma_padded = np.full(len(close_1w), np.nan)
+            start_idx = len(close_1w) - len(hma)
+            hma_padded[start_idx:] = hma
+            hma_1w = hma_padded
+        else:
+            hma_1w = np.full(len(close_1w), np.nan)
         
         # Align to LTF (1d) with shift(1) for completed bars only
-        hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
+        hma_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     else:
-        hma_21_aligned = np.full(n, np.nan)
+        hma_aligned = np.full(n, np.nan)
     
     # === 1d Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -77,10 +83,10 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 20)  # Donchian, volume avg, ATR
+    warmup = max(20, 20, 14)  # Donchian, volume avg, ATR
     
     for i in range(warmup, n):
-        # --- Session Filter: Avoid low liquidity periods ---
+        # --- Session Filter: Avoid low liquidity periods (UTC 21-23) ---
         hour = hours[i]
         if 21 <= hour <= 23:
             signals[i] = 0.0
@@ -89,7 +95,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(hma_21_aligned[i])):
+            np.isnan(hma_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -126,8 +132,8 @@ def generate_signals(prices):
         
         # Weekly HMA trend logic:
         # Above weekly HMA = long bias, below = short bias
-        long_bias = price > hma_21_aligned[i]
-        short_bias = price < hma_21_aligned[i]
+        long_bias = price > hma_aligned[i]
+        short_bias = price < hma_aligned[i]
         
         # Entry conditions: breakout in direction of weekly HMA trend
         long_setup = breakout_up and volume_confirmed and long_bias
