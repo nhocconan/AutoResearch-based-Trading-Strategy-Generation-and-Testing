@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #5078: 1d Donchian(20) Breakout + 1w Weekly Pivot Direction + Volume Spike + ATR Stoploss
-HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts aligned with weekly pivot levels (from 1w HTF) capture strong momentum with lower frequency. Weekly pivot acts as regime filter: R3/S3 for mean reversion, R4/S4 for breakout confirmation. Volume > 2x average confirms institutional participation. ATR(14) trailing stop (2.5x) manages risk. Designed for 7-25 trades/year on 1d timeframe to minimize fee drag while maintaining statistical significance. Weekly pivot provides structural support/resistance that works in both bull (breakouts through R4) and bear (breakdowns through S4) markets.
+HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts aligned with weekly pivot levels (from 1w HTF) capture strong momentum with lower frequency. Weekly pivot acts as regime filter: R3/S3 for mean reversion, R4/S4 for breakout confirmation. Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. Designed for 7-25 trades/year on 1d timeframe to minimize fee drag while maintaining statistical significance. Weekly pivot provides structural support/resistance that works in both bull (breakouts through R4) and bear (breakdowns through S4) markets.
 """
 
 import numpy as np
@@ -24,24 +24,23 @@ def generate_signals(prices):
     
     # === 1w Indicators: Weekly Pivot Points (using prior week's OHLC) ===
     if len(df_1w) >= 1:  # Need at least one week of data
-        # Use weekly OHLC directly from 1w data
-        weekly_high = df_1w['high'].values
-        weekly_low = df_1w['low'].values
-        weekly_close = df_1w['close'].values
+        # Use prior week's OHLC for pivot calculation
+        # Rolling window of 7 days (1 week) for OHLC
+        high_7d = pd.Series(high).rolling(window=7, min_periods=7).max().values
+        low_7d = pd.Series(low).rolling(window=7, min_periods=7).min().values
+        close_7d = pd.Series(close).rolling(window=7, min_periods=7).last().values
         
         # Weekly Pivot Point = (Prior Week H + L + C) / 3
-        # Need to shift by 1 to use prior week's values (no look-ahead)
-        pp = (np.roll(weekly_high, 1) + np.roll(weekly_low, 1) + np.roll(weekly_close, 1)) / 3.0
-        pp[0] = np.nan  # First value is invalid
+        pp = (high_7d + low_7d + close_7d) / 3.0
         
         # Weekly Support/Resistance Levels
-        rng = np.roll(weekly_high, 1) - np.roll(weekly_low, 1)
-        r1 = (2 * pp) - np.roll(weekly_low, 1)
-        s1 = (2 * pp) - np.roll(weekly_high, 1)
+        rng = high_7d - low_7d
+        r1 = (2 * pp) - low_7d
+        s1 = (2 * pp) - high_7d
         r2 = pp + rng
         s2 = pp - rng
-        r3 = np.roll(weekly_high, 1) + 2 * (pp - np.roll(weekly_low, 1))
-        s3 = np.roll(weekly_low, 1) - 2 * (np.roll(weekly_high, 1) - pp)
+        r3 = high_7d + 2 * (pp - low_7d)
+        s3 = low_7d - 2 * (high_7d - pp)
         r4 = pp + 3 * rng
         s4 = pp - 3 * rng
         
@@ -62,7 +61,7 @@ def generate_signals(prices):
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume confirmation (2x spike) ===
+    # === 1d Indicators: Volume confirmation (1.5x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -102,8 +101,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -111,8 +110,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -121,8 +120,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>2.0x)
-        vol_confirm = vol_ratio[i] > 2.0
+        # Volume filter: confirmation (>1.5x)
+        vol_confirm = vol_ratio[i] > 1.5
         
         # Donchian breakout conditions with weekly pivot alignment
         # Long: Donchian breakout above R4 (strong breakout) OR above R3 with volume (mean reversion fail)
@@ -156,3 +155,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
