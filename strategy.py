@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-exp_6835_6h_donchian20_1w_pivot_v1
-Hypothesis: 6h Donchian(20) breakout with weekly pivot filter and volume confirmation.
-Weekly pivot levels (from 1w data) act as institutional support/resistance.
-In weekly uptrend (price > weekly pivot): long breakouts only.
-In weekly downtrend (price < weekly pivot): short breakouts only.
-Volume confirms breakout legitimacy to avoid false signals.
-Designed for 6h timeframe targeting 50-150 total trades over 4 years (12-37/year).
-Uses weekly pivot as structural filter to avoid counter-trend trades in both bull/bear markets.
+exp_6835_6h_donchian20_1w_pivot_vol_v1
+Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation.
+Weekly pivot levels (calculated from prior week OHLC) provide structural bias: 
+- Price above weekly pivot = bullish bias (long breakouts only)
+- Price below weekly pivot = bearish bias (short breakouts only)
+This avoids counter-trend trades in ranging markets. Volume confirms breakout legitimacy.
+Designed for 6h timeframe to capture medium swings with ~12-37 trades/year (50-150 total over 4 years).
+Works in both bull and bear markets by aligning with weekly pivot direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6835_6h_donchian20_1w_pivot_v1"
+name = "exp_6835_6h_donchian20_1w_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -26,6 +26,7 @@ SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 MAX_HOLD_BARS = 20  # ~5 days (6h bars)
+WEEKLY_LOOKBACK = 5  # 5 days for prior week
 
 def generate_signals(prices):
     n = len(prices)
@@ -35,14 +36,17 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop - using 1w for weekly pivot
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot points (standard floor trader pivots)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Weekly high, low, close from completed weekly bars
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    
+    # Pivot point = (H + L + C) / 3
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
     # Align to LTF (6h)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -76,7 +80,7 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(pivot_1w_aligned[i]):
+        if np.isnan(weekly_pivot_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -104,13 +108,13 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend direction from weekly pivot
-        weekly_uptrend = close[i] > pivot_1w_aligned[i]
-        weekly_downtrend = close[i] < pivot_1w_aligned[i]
+        # Determine bias from weekly pivot
+        weekly_bullish = close[i] > weekly_pivot_aligned[i]
+        weekly_bearish = close[i] < weekly_pivot_aligned[i]
         
-        # Breakout signals aligned with weekly pivot
-        long_breakout = weekly_uptrend and (close[i] > highest_high[i]) and vol_confirmed
-        short_breakout = weekly_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
+        # Breakout signals aligned with weekly pivot bias
+        long_breakout = weekly_bullish and (close[i] > highest_high[i]) and vol_confirmed
+        short_breakout = weekly_bearish and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
@@ -131,3 +135,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
