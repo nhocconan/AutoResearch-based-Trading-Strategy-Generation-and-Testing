@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4139: 6h Donchian(20) breakout + 12h Camarilla pivot + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 12h Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) capture institutional order flow. Volume confirmation filters false breakouts. Works in both bull/bear as Camarilla adapts to volatility. Target: 75-150 total trades over 4 years (19-37/year).
+Experiment #4140: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend direction capture strong momentum moves. Volume confirmation filters false breakouts. Works in both bull/bear as EMA adapts to volatility. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4139_6h_donchian20_12h_camarilla_vol_v1"
-timeframe = "6h"
+name = "exp_4140_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,39 +19,25 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h Camarilla pivot levels ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 2:
-        high_12h = df_12h['high'].values
-        low_12h = df_12h['low'].values
-        close_12h = df_12h['close'].values
-        daily_range = high_12h - low_12h
-        # Camarilla levels: H3/L3 = close ± 1.1*range/2, H4/L4 = close ± 1.1*range
-        camarilla_h3 = close_12h + 1.1 * daily_range / 2
-        camarilla_l3 = close_12h - 1.1 * daily_range / 2
-        camarilla_h4 = close_12h + 1.1 * daily_range
-        camarilla_l4 = close_12h - 1.1 * daily_range
-        camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
-        camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
-        camarilla_h4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h4)
-        camarilla_l4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l4)
+    # === HTF: 1d EMA(50) for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 50:
+        ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     else:
-        camarilla_h3_aligned = np.full(n, np.nan)
-        camarilla_l3_aligned = np.full(n, np.nan)
-        camarilla_h4_aligned = np.full(n, np.nan)
-        camarilla_l4_aligned = np.full(n, np.nan)
+        ema_50_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel(20) for breakout ===
+    # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 6h Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for volatility and stoploss ===
+    # === 4h Indicators: ATR(14) for volatility and stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -75,8 +61,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
-            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i])):
+            np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -114,17 +99,15 @@ def generate_signals(prices):
             breakout_up = price > highest_high[i-1]
             breakout_down = price < lowest_low[i-1]
             
-            # Camarilla pivot logic
-            at_h3 = abs(price - camarilla_h3_aligned[i]) < 0.1 * camarilla_h3_aligned[i]
-            at_l3 = abs(price - camarilla_l3_aligned[i]) < 0.1 * camarilla_l3_aligned[i]
-            above_h4 = price > camarilla_h4_aligned[i]
-            below_l4 = price < camarilla_l4_aligned[i]
+            # EMA trend filter
+            above_ema = price > ema_50_aligned[i]
+            below_ema = price < ema_50_aligned[i]
             
-            # Long conditions: Donchian breakout up + above H4 (continuation) OR at L3 (mean reversion)
-            long_entry = (breakout_up and above_h4) or (breakout_up and at_l3)
+            # Long conditions: Donchian breakout up + above EMA (trend continuation)
+            long_entry = breakout_up and above_ema
             
-            # Short conditions: Donchian breakout down + below L4 (continuation) OR at H3 (mean reversion)
-            short_entry = (breakout_down and below_l4) or (breakout_down and at_h3)
+            # Short conditions: Donchian breakout down + below EMA (trend continuation)
+            short_entry = breakout_down and below_ema
             
             if long_entry:
                 in_position = True
