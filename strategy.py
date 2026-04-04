@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4593: 4h Donchian(20) Breakout + 12h EMA(20) Trend + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h EMA(20) direction and volume spikes (>1.5x average) capture medium-term momentum with filtered entries. The 12h EMA(20) provides a responsive HTF bias that adapts to both bull and bear markets by identifying the intermediate trend direction. Uses discrete position sizing (0.25) and ATR trailing stop (2.0x) to target 75-200 trades over 4 years. Volume confirmation reduces false breakouts, while the ATR trailing stop manages risk in volatile markets.
+Experiment #4593: 4h Donchian(20) Breakout + 12h EMA(25) Trend + Volume Confirmation
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h EMA(25) direction and volume spikes (>1.8x average) capture medium-term momentum with filtered entries. Uses discrete position sizing (0.30) and ATR trailing stop (2.0x) to target 25-50 trades/year. The 12h EMA(25) provides HTF bias that adapts to both bull and bear markets by identifying the primary trend direction from 12h candles. Timeframe 4h balances trade frequency and signal quality, minimizing fee drag while capturing multi-day trends. Volume confirmation (>1.8x) ensures breakouts have conviction, reducing false signals in choppy markets.
 """
 
 import numpy as np
@@ -19,16 +19,16 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 12h data for EMA(20)
+    # Precompute HTF: 12h data for EMA(25)
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate EMA(20) on 12h close
-    if len(df_12h) >= 20:
-        ema_12h = pd.Series(df_12h['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Calculate EMA(25) on 12h close
+    if len(df_12h) >= 25:
+        ema_12h = pd.Series(df_12h['close'].values).ewm(span=25, min_periods=25, adjust=False).mean().values
     else:
         ema_12h = np.array([])
     
-    # Align 12h EMA(20) to 4h timeframe
+    # Align 12h EMA(25) to 4h timeframe
     if len(ema_12h) > 0:
         ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     else:
@@ -54,7 +54,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.30  # 30% position size
     
     # Position tracking state variables
     in_position = False
@@ -63,7 +63,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 20)  # Donchian, vol MA, ATR, 12h EMA warmup
+    warmup = max(20, 20, 14, 25)  # Donchian, vol MA, ATR, 12h EMA warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -98,10 +98,10 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume confirmation (> 1.8x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.8
         
-        # Higher timeframe trend filter: bullish when price > 12h EMA(20), bearish when price < 12h EMA(20)
+        # Higher timeframe trend filter: bullish when price > 12h EMA(25), bearish when price < 12h EMA(25)
         htf_bullish = price > ema_12h_aligned[i]
         htf_bearish = price < ema_12h_aligned[i]
         
@@ -109,10 +109,10 @@ def generate_signals(prices):
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
         breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
         
-        # Long conditions: upward breakout above 12h EMA(20) + volume confirmation
+        # Long conditions: upward breakout above 12h EMA(25) + volume confirmation
         long_entry = breakout_up and htf_bullish and volume_confirm
         
-        # Short conditions: downward breakout below 12h EMA(20) + volume confirmation
+        # Short conditions: downward breakout below 12h EMA(25) + volume confirmation
         short_entry = breakout_down and htf_bearish and volume_confirm
         
         if long_entry:
@@ -133,3 +133,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
