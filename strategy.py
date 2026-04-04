@@ -4,8 +4,7 @@ Experiment #2928: 12h Donchian Breakout + Weekly Pivot Direction + Volume Spike
 HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture medium-term trends with lower trade frequency.
 Weekly pivot (from 1d data) provides directional bias: only take long breakouts when price > weekly pivot,
 and short breakouts when price < weekly pivot. Volume spike (>2.0x 20-period average) confirms breakout strength.
-This combination filters false breakouts in choppy markets while capturing strong trends in both bull and bear regimes.
-12h timeframe targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+ATR-based trailing stop (2.5x) manages risk. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -137,5 +136,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
