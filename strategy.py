@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4693: 4h Donchian(20) Breakout + 12h HMA Trend + Volume Confirmation
-HYPOTHESIS: 4h price breaking Donchian(20) channels with volume confirmation (>1.5x avg volume) and aligned with 12h HMA21 trend captures momentum while minimizing whipsaws. The 12h HMA21 provides a smoother, more reliable trend filter than shorter timeframes, reducing false signals in choppy markets. This strategy targets 19-50 trades/year on 4h timeframe to avoid fee drag while maintaining statistical significance. Works in both bull (breakouts with volume) and bear (short breakdowns with volume).
+HYPOTHESIS: 4h price breaking Donchian(20) channels with volume confirmation (>1.5x avg volume) and aligned with 12h HMA21 trend captures momentum while minimizing whipsaws. The 12h HMA21 provides a reliable trend filter that adapts faster than EMA in trending markets but lags in chop, reducing false signals. This strategy targets 19-50 trades/year on 4h timeframe to avoid fee drag while maintaining statistical significance. Works in both bull (breakouts with volume) and bear (short breakdowns with volume) markets.
 """
 
 import numpy as np
@@ -11,6 +11,18 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 name = "exp_4693_4h_donchian20_12h_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
+
+def calculate_hma(arr, period):
+    """Calculate Hull Moving Average"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan)
+    half = int(period / 2)
+    sqrt = int(np.sqrt(period))
+    wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean().values
+    wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean().values
+    raw_hma = 2 * wma2 - wma1
+    hma = pd.Series(raw_hma).ewm(span=sqrt, adjust=False).mean().values
+    return hma
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
@@ -24,14 +36,7 @@ def generate_signals(prices):
     
     # === 12h Indicators: HMA21 for trend filter ===
     if len(df_12h) >= 21:
-        # Calculate HMA: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-        half = len(df_12h) // 2
-        sqrt_n = int(np.sqrt(len(df_12h)))
-        close_12h = df_12h['close'].values
-        wma_half = pd.Series(close_12h).ewm(span=half, adjust=False).mean().values
-        wma_full = pd.Series(close_12h).ewm(span=len(df_12h), adjust=False).mean().values
-        raw_hma = 2 * wma_half - wma_full
-        hma_12h = pd.Series(raw_hma).ewm(span=sqrt_n, adjust=False).mean().values
+        hma_12h = calculate_hma(df_12h['close'].values, 21)
     else:
         hma_12h = np.full(len(df_12h), np.nan)
     
@@ -73,7 +78,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 14)  # Donchian, Volume MA, ATR warmup
+    warmup = max(20, 14, 21)  # Donchian, Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
