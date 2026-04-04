@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4853: 4h Donchian(20) Breakout + 12h HMA Trend + Volume Spike
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts in direction of 12h HMA21 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) stoploss (2.5x) to limit downside. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts in direction of 12h HMA21 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) trailing stoploss (2.5x) to limit downside. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 """
 
 import numpy as np
@@ -47,8 +47,8 @@ def generate_signals(prices):
         # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
         hma_raw = 2 * wma_half - wma_full
         hma_12h = np.array([wma(hma_raw[i:i+sqrt_len], sqrt_len)[-1] 
-                           if i+sqrt_len <= len(hma_raw) else np.nan 
-                           for i in range(len(hma_raw))])
+                          if i+sqrt_len <= len(hma_raw) else np.nan 
+                          for i in range(len(hma_raw))])
     else:
         hma_12h = np.full(len(df_12h), np.nan)
     
