@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #2659: 6h Donchian(20) breakout + 12h/1d EMA trend + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts with 12h/1d EMA trend alignment and volume spikes 
-capture institutional participation across multiple timeframes. Uses 12h/1d for signal 
-direction, 6h only for entry timing. Target: 75-200 total trades over 4 years.
+Experiment #2659: 6h Donchian(20) breakout + 12h EMA trend + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts with 12h EMA trend alignment and volume spikes capture
+institutional participation with lower frequency than 1h/4h strategies. Uses 12h for signal
+direction, 6h only for entry timing. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2659_6h_donchian20_12h_1d_ema_vol_v1"
+name = "exp_2659_6h_donchian20_12h_ema_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -29,15 +29,6 @@ def generate_signals(prices):
     ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
     trend_12h = np.where(close_12h > ema_12h, 1, -1)
     trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
-    
-    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d EMA(50)
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     # === 6h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
@@ -64,7 +55,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(trend_12h_aligned[i]) or np.isnan(trend_1d_aligned[i]) or
+        if (np.isnan(trend_12h_aligned[i]) or
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
@@ -110,29 +101,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require both 12h and 1d trend alignment for bias filter (more stringent)
-        trend_bias_12h = trend_12h_aligned[i]
-        trend_bias_1d = trend_1d_aligned[i]
+        # Require 12h trend alignment for bias filter
+        trend_bias = trend_12h_aligned[i]
         
-        # Only trade when both timeframes agree
-        if trend_bias_12h == 0 or trend_bias_1d == 0 or trend_bias_12h != trend_bias_1d:
-            signals[i] = 0.0
-            continue
-        
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Long entry: price breaks above Donchian high with uptrend on both 12h and 1d
-            if trend_bias_12h > 0 and trend_bias_1d > 0 and price > highest_20[i]:
+            # Long entry: price breaks above Donchian high with uptrend on 12h
+            if trend_bias > 0 and price > highest_20[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with downtrend on both 12h and 1d
-            elif trend_bias_12h < 0 and trend_bias_1d < 0 and price < lowest_20[i]:
+            # Short entry: price breaks below Donchian low with downtrend on 12h
+            elif trend_bias < 0 and price < lowest_20[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
