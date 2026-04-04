@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #6100: 4h Donchian(20) breakout + 1d EMA200 trend + volume confirmation
+Experiment #6101: 4h Donchian(20) breakout + 1d EMA200 trend + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA200 direction capture medium-term trends with proper structure. 
 1d EMA200 provides robust trend bias that works in both bull and bear markets by filtering counter-trend noise. 
 Volume >1.8x average confirms strong participation. ATR(14) trailing stop (2.5x) manages risk. 
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6100_4h_donchian20_1d_ema200_vol_v1"
+name = "exp_6101_4h_donchian20_1d_ema200_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
