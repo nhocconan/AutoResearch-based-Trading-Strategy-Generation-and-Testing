@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #3417: 4h Donchian Breakout + 1d HMA Trend + Volume Spike (REVISED)
-HYPOTHESIS: 4h Donchian(20) breakouts capture medium-term trends with ideal trade frequency for 4h timeframe.
-1d HMA(50) trend filter ensures alignment with daily momentum. Volume spike (>2.0x 20-period average) confirms breakout strength.
-ATR-based trailing stop (2.5x) manages risk. Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-Revision: Added minimum holding period of 3 bars to reduce churn and ensure trades develop.
+Experiment #3417: 4h Donchian Breakout + 1d HMA Trend + Volume Spike
+HYPOTHESIS: 4h Donchian(20) breakouts with 1d HMA(50) trend filter and volume confirmation (>2.0x) capture medium-term trends. 
+ATR trailing stop (2.5x) manages risk. Position size 0.25. Designed for 4h timeframe with target 75-200 trades over 4 years.
+Works in bull markets via trend continuation and bear markets via mean reversion from channel extremes when price re-enters Donchian bands.
 """
 
 import numpy as np
@@ -68,7 +67,6 @@ def generate_signals(prices):
     entry_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    bars_since_entry = 0
     
     warmup = max(50, lookback, 20, 14, 50)  # sufficient for all indicators
     
@@ -83,16 +81,6 @@ def generate_signals(prices):
         
         # --- Exit Logic ---
         if in_position:
-            bars_since_entry += 1
-            
-            # Enforce minimum holding period of 3 bars
-            if bars_since_entry < 3:
-                if position_side > 0:
-                    signals[i] = SIZE
-                else:
-                    signals[i] = -SIZE
-                continue
-            
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
@@ -100,13 +88,11 @@ def generate_signals(prices):
                 if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
-                    bars_since_entry = 0
                     signals[i] = 0.0
                 # Exit if price re-enters Donchian channel (mean reversion)
                 elif price <= highest_high[i]:
                     in_position = False
                     position_side = 0
-                    bars_since_entry = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
@@ -116,13 +102,11 @@ def generate_signals(prices):
                 if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
-                    bars_since_entry = 0
                     signals[i] = 0.0
                 # Exit if price re-enters Donchian channel (mean reversion)
                 elif price >= lowest_low[i]:
                     in_position = False
                     position_side = 0
-                    bars_since_entry = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -SIZE
@@ -143,7 +127,6 @@ def generate_signals(prices):
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                bars_since_entry = 0
                 signals[i] = SIZE
             # Short entry: price breaks below Donchian low with bearish 1d trend
             elif price < lowest_low[i] and price_vs_hma < 0:
@@ -152,7 +135,6 @@ def generate_signals(prices):
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                bars_since_entry = 0
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
