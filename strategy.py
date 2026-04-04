@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-exp_6605_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Uses 12h primary timeframe (target: 50-150 total trades over 4 years). 1d EMA(50) provides
-clear trend direction: long when price > EMA50, short when price < EMA50. Volume ensures
-breakout conviction. Symmetric long/short works in bull/bear markets. Discrete sizing (0.25)
-minimizes fee churn. ATR-based stoploss and max hold time reduce drawdown.
+exp_6606_4h_donchian20_1d_ema_vol_v3
+Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+Uses 4h primary timeframe (target: 75-200 total trades over 4 years). 1d EMA(50) provides
+clear trend direction for filtering breakouts: only long when price > EMA50, short when price < EMA50.
+Volume ensures breakout conviction. Symmetric long/short logic works in both bull and bear markets.
+Discrete sizing (0.25) minimizes fee churn. Includes ATR-based stoploss and max hold time.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6605_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_6606_4h_donchian20_1d_ema_vol_v3"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -24,7 +24,7 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 5  # ~5 * 12h = ~2.5 days
+MAX_HOLD_BARS = 10  # ~10 * 4h = ~1.67 days
 
 def generate_signals(prices):
     n = len(prices)
@@ -38,7 +38,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False).mean().values
     
-    # Align to LTF (12h) with shift(1) for completed bars only
+    # Align to LTF (4h) with shift(1) for completed bars only
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -139,4 +139,4 @@ def generate_signals(prices):
     
     return signals
 
-</think>
+</lyra>
