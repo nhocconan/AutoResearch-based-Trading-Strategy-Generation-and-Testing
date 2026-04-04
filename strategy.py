@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4110: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA(21) trend direction and volume confirmation capture strong trending moves while minimizing whipsaws. Weekly timeframe filters noise and adapts to regime changes. Target: 30-100 total trades over 4 years (7-25/year).
+Experiment #4111: 6h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts aligned with 1d Camarilla pivot structure (R3/S3 for mean reversion, R4/S4 for breakout) and volume confirmation capture institutional order flow. Works in bull/bear by using pivot levels as dynamic support/resistance. Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4110_1d_donchian20_1w_hma21_vol_v1"
-timeframe = "1d"
+name = "exp_4111_6h_donchian20_1d_camarilla_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,31 +19,49 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w HMA(21) for trend direction ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 1:
-        # Calculate HMA: HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        wma_half = pd.Series(df_1w['close'].values).ewm(span=half_len, adjust=False).mean().values
-        wma_full = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False).mean().values
-        raw_hma = 2 * wma_half - wma_full
-        hma_21 = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False).mean().values
-        hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
+    # === HTF: 1d Camarilla Pivot Levels ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 1:
+        # Calculate Camarilla pivot points from previous day
+        # PP = (H + L + C) / 3
+        # R4 = PP + (H - L) * 1.1/2
+        # R3 = PP + (H - L) * 1.1/4
+        # S3 = PP - (H - L) * 1.1/4
+        # S4 = PP - (H - L) * 1.1/2
+        h_1d = df_1d['high'].values
+        l_1d = df_1d['low'].values
+        c_1d = df_1d['close'].values
+        
+        pp = (h_1d + l_1d + c_1d) / 3.0
+        r4 = pp + (h_1d - l_1d) * 1.1 / 2.0
+        r3 = pp + (h_1d - l_1d) * 1.1 / 4.0
+        s3 = pp - (h_1d - l_1d) * 1.1 / 4.0
+        s4 = pp - (h_1d - l_1d) * 1.1 / 2.0
+        
+        # Align to 6h timeframe (shifted by 1 for completed bars only)
+        pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     else:
-        hma_21_aligned = np.full(n, np.nan)
+        pp_aligned = np.full(n, np.nan)
+        r3_aligned = np.full(n, np.nan)
+        r4_aligned = np.full(n, np.nan)
+        s3_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: Donchian Channel(20) for breakout ===
+    # === 6h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 1d Indicators: Volume MA(20) for confirmation ===
+    # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(20) for volatility and stoploss ===
+    # === 6h Indicators: ATR(20) for volatility and stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -67,7 +85,9 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(hma_21_aligned[i])):
+            np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -101,19 +121,31 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # HTF 1w HMA(21) trend bias: 
-            price_above_hma = price > hma_21_aligned[i]
-            price_below_hma = price < hma_21_aligned[i]
+            # Camarilla pivot logic:
+            # R3/S3: mean reversion zone (fade extremes)
+            # R4/S4: breakout zone (continuation)
+            near_r3 = abs(price - r3_aligned[i]) / r3_aligned[i] < 0.005  # within 0.5%
+            near_s3 = abs(price - s3_aligned[i]) / s3_aligned[i] < 0.005
+            breakout_r4 = price > r4_aligned[i]
+            breakdown_s4 = price < s4_aligned[i]
             
-            # Breakout logic: 
+            # Donchian breakout logic
             breakout_up = price > highest_high[i-1]
             breakout_down = price < lowest_low[i-1]
             
-            # Long conditions: above 1w HMA(21) + upper Donchian breakout
-            long_entry = breakout_up and price_above_hma
+            # Long conditions:
+            # 1. Breakout above R4 with Donchian breakout (continuation)
+            # 2. Mean reversion from S3 with Donchian breakout (bounce)
+            long_continuation = breakout_r4 and breakout_up
+            long_mean_reversion = near_s3 and breakout_up
+            long_entry = long_continuation or long_mean_reversion
             
-            # Short conditions: below 1w HMA(21) + lower Donchian breakout
-            short_entry = breakout_down and price_below_hma
+            # Short conditions:
+            # 1. Breakdown below S4 with Donchian breakdown (continuation)
+            # 2. Mean reversion from R3 with Donchian breakdown (rejection)
+            short_continuation = breakdown_s4 and breakout_down
+            short_mean_reversion = near_r3 and breakout_down
+            short_entry = short_continuation or short_mean_reversion
             
             if long_entry:
                 in_position = True
