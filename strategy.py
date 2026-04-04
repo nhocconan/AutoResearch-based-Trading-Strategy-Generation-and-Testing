@@ -2,13 +2,13 @@
 """
 Experiment #5471: 6h Donchian(20) breakout + 1d weekly pivot + volume confirmation
 HYPOTHESIS: On 6h timeframe, price breaking above/below the 20-period Donchian channel with 
-volume > 2.0x average and aligned with 1d weekly pivot bias (price above weekly pivot = bullish, 
-below = bearish) captures strong momentum moves while avoiding false breakouts in ranging markets. 
-Weekly pivot provides structural support/resistance from higher timeframe, reducing whipsaws. 
-Discrete position sizing (0.25) and ATR-based stoploss (2.5x ATR) control risk. Target: 12-37 
-trades/year (50-150 total over 4 years) to minimize fee drag while maintaining statistical 
-significance. Works in bull markets via breakouts above rising weekly pivot alignment and in 
-bear markets via short breakdowns below falling weekly pivot alignment.
+volume > 2.0x average and aligned with 1d weekly pivot direction (bullish above weekly pivot, 
+bearish below) captures strong momentum moves while avoiding false breakouts in choppy markets. 
+Weekly pivot provides structural support/resistance from higher timeframe, reducing whipsaw. 
+Discrete position sizing (0.25) and ATR-based stoploss (2.0x ATR) control risk. Target: 
+12-37 trades/year (50-150 total over 4 years) to minimize fee drag while maintaining statistical 
+significance. Works in bull markets via breakouts above rising weekly pivot and in bear markets 
+via short breakdowns below falling weekly pivot.
 """
 
 import numpy as np
@@ -32,46 +32,37 @@ def generate_signals(prices):
     # === HTF: 1d data for weekly pivot calculation ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 5:
-        # Calculate weekly pivot from prior week's OHLC (using last 5 trading days approx)
-        # For simplicity, use prior 5-day high, low, close
-        if len(df_1d) >= 5:
-            # Get prior week's OHLC (5 days ago to 1 day ago)
-            prior_week_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(1).values
-            prior_week_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(1).values
-            prior_week_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().shift(1).values
-            
-            # Weekly pivot point: (Prior Week High + Prior Week Low + Prior Week Close) / 3
-            weekly_pivot = (prior_week_high + prior_week_low + prior_week_close) / 3.0
-            # Weekly resistance 1: (2 * Pivot) - Prior Week Low
-            weekly_r1 = (2 * weekly_pivot) - prior_week_low
-            # Weekly support 1: (2 * Pivot) - Prior Week High
-            weekly_s1 = (2 * weekly_pivot) - prior_week_high
-            
-            # Align to LTF (6h) with shift(1) for completed bars only
-            weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot) if len(weekly_pivot) > 0 else np.full(n, np.nan)
-            weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1) if len(weekly_r1) > 0 else np.full(n, np.nan)
-            weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1) if len(weekly_s1) > 0 else np.full(n, np.nan)
-            
-            # Pivot bias: price above weekly pivot = bullish, below = bearish
-            price_above_pivot = weekly_pivot_aligned > 0  # placeholder, will update below
-            price_below_pivot = weekly_pivot_aligned > 0  # placeholder, will update below
-        else:
-            weekly_pivot_aligned = np.full(n, np.nan)
-            weekly_r1_aligned = np.full(n, np.nan)
-            weekly_s1_aligned = np.full(n, np.nan)
-            price_above_pivot = np.full(n, False)
-            price_below_pivot = np.full(n, False)
+        # Calculate weekly pivot points from 1d OHLC (using prior week's data)
+        # We'll use the prior week's high, low, close to calculate pivot for current week
+        # For simplicity, we approximate weekly by taking 5-day rolling (1 trading week)
+        high_5d = pd.Series(df_1d['high'].values).rolling(window=5, min_periods=5).max().values
+        low_5d = pd.Series(df_1d['low'].values).rolling(window=5, min_periods=5).min().values
+        close_5d = pd.Series(df_1d['close'].values).rolling(window=5, min_periods=5).last().values
+        
+        # Weekly pivot: P = (H + L + C) / 3
+        weekly_pivot = (high_5d + low_5d + close_5d) / 3.0
+        # Weekly R1 = 2*P - L, S1 = 2*P - H
+        weekly_r1 = 2 * weekly_pivot - low_5d
+        weekly_s1 = 2 * weekly_pivot - high_5d
+        
+        # Align to LTF (6h) with shift(1) for completed bars only
+        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot) if len(weekly_pivot) > 0 else np.full(n, np.nan)
+        weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1) if len(weekly_r1) > 0 else np.full(n, np.nan)
+        weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1) if len(weekly_s1) > 0 else np.full(n, np.nan)
+        
+        # Trend bias: price above weekly pivot = bullish, below = bearish
+        # We'll use the aligned 1d close price to compare with pivot
+        close_1d = df_1d['close'].values
+        close_1d_aligned = align_htf_to_ltf(prices, df_1d, close_1d) if len(close_1d) > 0 else np.full(n, np.nan)
+        weekly_bullish_aligned = close_1d_aligned > weekly_pivot_aligned
+        weekly_bearish_aligned = close_1d_aligned < weekly_pivot_aligned
     else:
         weekly_pivot_aligned = np.full(n, np.nan)
         weekly_r1_aligned = np.full(n, np.nan)
         weekly_s1_aligned = np.full(n, np.nan)
-        price_above_pivot = np.full(n, False)
-        price_below_pivot = np.full(n, False)
-    
-    # Update pivot bias with actual price comparison
-    if len(df_1d) >= 5:
-        price_above_pivot = close > weekly_pivot_aligned
-        price_below_pivot = close < weekly_pivot_aligned
+        close_1d_aligned = np.full(n, np.nan)
+        weekly_bullish_aligned = np.full(n, False)
+        weekly_bearish_aligned = np.full(n, False)
     
     # === 6h Indicators: Donchian Channel (20-period) ===
     # Upper band: 20-period high
@@ -104,7 +95,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 20, 14, 5)  # Donchian, volume avg, ATR warmup, 5-day lookback
+    warmup = max(20, 20, 20, 14, 5)  # Donchian, volume avg, ATR warmup, 5d for weekly
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -118,7 +109,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or 
-            np.isnan(weekly_pivot_aligned[i])):
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(close_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -129,13 +120,13 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop logic
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Stoploss: 2.5 * ATR below highest since entry
-                stop_price = highest_since_entry - 2.5 * atr[i]
+                # Stoploss: 2.0 * ATR below highest since entry
+                stop_price = highest_since_entry - 2.0 * atr[i]
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks below Donchian lower band (failed breakout)
-                # 3. Price moves below weekly pivot (trend weakening)
-                if price <= stop_price or price <= donchian_low[i] or price < weekly_pivot_aligned[i]:
+                # 3. Weekly alignment turns bearish (trend weakening)
+                if price <= stop_price or price <= donchian_low[i] or not weekly_bullish_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -143,13 +134,13 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Stoploss: 2.5 * ATR above lowest since entry
-                stop_price = lowest_since_entry + 2.5 * atr[i]
+                # Stoploss: 2.0 * ATR above lowest since entry
+                stop_price = lowest_since_entry + 2.0 * atr[i]
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks above Donchian upper band (failed breakout)
-                # 3. Price moves above weekly pivot (trend weakening)
-                if price >= stop_price or price >= donchian_high[i] or price > weekly_pivot_aligned[i]:
+                # 3. Weekly alignment turns bullish (trend weakening)
+                if price >= stop_price or price >= donchian_high[i] or not weekly_bearish_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -166,14 +157,14 @@ def generate_signals(prices):
         volume_confirmed = volume_ratio[i] > 2.0
         
         # Entry conditions
-        if breakout_up and volume_confirmed and price_above_pivot[i]:
+        if breakout_up and volume_confirmed and weekly_bullish_aligned[i]:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif breakout_down and volume_confirmed and price_below_pivot[i]:
+        elif breakout_down and volume_confirmed and weekly_bearish_aligned[i]:
             in_position = True
             position_side = -1
             entry_price = close[i]
