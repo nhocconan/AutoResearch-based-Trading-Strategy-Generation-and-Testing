@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #3526: 4h Donchian Breakout + 1d Trend Filter + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts with 1d EMA(50) trend filter and volume confirmation capture medium-term momentum. 
-The 1d EMA provides the primary trend direction (bullish if price > EMA50, bearish if price < EMA50). 
-Volume (> 2.0x 20-period MA) confirms breakout strength. Position size 0.25. 
-Target: 75-200 total trades over 4 years (19-50/year). Works in bull (continuation from bullish trend) and bear 
-(continuation from bearish trend) via price channels. Uses 1d for trend filter, 4h only for entry timing and risk management.
+Experiment #3526: 4h Donchian Breakout + 1d Trend + Volume Confirmation
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 1d EMA(50) trend and volume confirmation capture medium-term momentum.
+The 1d EMA(50) provides a robust trend filter that works in both bull and bear markets - price above EMA(50) favors longs, below favors shorts.
+Volume confirmation ensures breakouts have conviction. Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+Uses 1d for trend filter and 4h only for entry timing and risk management.
 """
 
 import numpy as np
@@ -27,8 +26,10 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(50) for trend filter
+    # Calculate EMA(50) on 1d timeframe
     ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Align EMA(50) to 4h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # === 4h Indicators: Donchian channels (20-period) for entry timing ===
@@ -41,7 +42,7 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -52,14 +53,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     SIZE = 0.25  # 25% position size
     
-    # Position tracking state variables
-    in_position = False
-    position_side = 0
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
-    
-    warmup = max(lookback_4h, 50, 20, 14)  # sufficient for all indicators
+    warmup = max(50, lookback_4h, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -70,68 +64,42 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Exit Logic ---
-        if in_position:
-            # Update highest/lowest since entry for trailing stop
-            if position_side > 0:  # Long
-                highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry
-                if price < highest_since_entry - 2.5 * atr[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                # Exit if price breaks below 4h Donchian low (failed breakout)
-                elif price < lowest_low_4h[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                else:
+        # --- Stoploss Logic ---
+        if signals[i-1] > 0:  # Long position
+            if price < high[i] - 2.5 * atr[i]:  # Stoploss: 2.5*ATR below session high
+                signals[i] = 0.0
+            else:
+                # Continue long if price above 1d EMA(50) and volume confirmation
+                if price > ema_50_1d_aligned[i] and vol_ratio[i] > 1.5:
                     signals[i] = SIZE
-            else:  # Short
-                lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry
-                if price > lowest_since_entry + 2.5 * atr[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                # Exit if price breaks above 4h Donchian high (failed breakout)
-                elif price > highest_high_4h[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
                 else:
+                    signals[i] = 0.0
+        elif signals[i-1] < 0:  # Short position
+            if price > low[i] + 2.5 * atr[i]:  # Stoploss: 2.5*ATR above session low
+                signals[i] = 0.0
+            else:
+                # Continue short if price below 1d EMA(50) and volume confirmation
+                if price < ema_50_1d_aligned[i] and vol_ratio[i] > 1.5:
                     signals[i] = -SIZE
-            continue
-        
-        # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
-        
-        if volume_spike:
-            # Determine trend bias from 1d EMA(50)
-            price_vs_ema = price - ema_50_1d_aligned[i]
+                else:
+                    signals[i] = 0.0
+        else:
+            # --- New Position Entry Logic ---
+            # Require volume confirmation (> 1.5x average) for entry
+            volume_confirm = vol_ratio[i] > 1.5
             
-            # Long entry: price breaks above 4h Donchian high with bullish bias (above EMA)
-            if (price > highest_high_4h[i] and 
-                price_vs_ema > 0):  # Above 1d EMA50 = bullish bias
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = SIZE
-            # Short entry: price breaks below 4h Donchian low with bearish bias (below EMA)
-            elif (price < lowest_low_4h[i] and 
-                  price_vs_ema < 0):  # Below 1d EMA50 = bearish bias
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = -SIZE
+            if volume_confirm:
+                # Long entry: price breaks above 4h Donchian high with bullish trend (above 1d EMA50)
+                if (price > highest_high_4h[i] and 
+                    price > ema_50_1d_aligned[i]):
+                    signals[i] = SIZE
+                # Short entry: price breaks below 4h Donchian low with bearish trend (below 1d EMA50)
+                elif (price < lowest_low_4h[i] and 
+                      price < ema_50_1d_aligned[i]):
+                    signals[i] = -SIZE
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
-        else:
-            signals[i] = 0.0
     
     return signals
