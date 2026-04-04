@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3929: 4h Donchian(20) breakout + 1d EMA-200 trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA-200 trend capture primary trend momentum with minimal whipsaws. Volume > 2.0x MA(20) confirms breakout strength. ATR(14) trailing stop (2.5x) manages risk. Uses discrete sizing (0.30) to balance return and fee drag. Target: 75-200 trades over 4 years (19-50/year). Works in bull/bear via 1d EMA-200 trend filter (avoids counter-trend trades).
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA-200 trend capture major trend moves with minimal whipsaws. Volume > 2.0x MA(20) confirms breakout strength. ATR(14) trailing stop (2.5x) manages risk. Target: 75-200 trades over 4 years (19-50/year). Uses discrete sizing (0.25) to minimize fee drag. Works in bull/bear via 1d EMA-200 trend filter.
 """
 
 import numpy as np
@@ -44,7 +44,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
