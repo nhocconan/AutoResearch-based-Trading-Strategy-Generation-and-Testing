@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #3850: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: 1d Donchian breakouts with 1-week HMA trend filter capture strong momentum moves.
-Volume > 1.5x MA(20) confirms institutional participation. Works in bull/bear: 
-In uptrend (price > 1w HMA), buy upper band breakouts; in downtrend (price < 1w HMA), 
-short lower band breakdowns. Discrete sizing (0.25) limits fee drag. ATR(14) trailing stop (2.0x) 
-manages risk. Target: 30-100 total trades over 4 years (7-25/year).
+HYPOTHESIS: 1d Donchian breakouts aligned with 1-week HMA trend capture medium-term momentum.
+Volume > 1.5x MA(20) confirms institutional participation. Works in bull/bear: In uptrend,
+buy upper band breaks; in downtrend, short lower band breaks. In ranging markets (price
+between HMA bands), no entries to avoid whipsaw. Discrete sizing (0.25) limits fee drag.
+ATR(14) trailing stop (2.0x) manages risk. Target: 30-100 trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -31,16 +31,16 @@ def generate_signals(prices):
     def hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
-        half = period // 2
-        sqrt = int(np.sqrt(period))
-        wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean().values
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma2 = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
         wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean().values
         raw = 2 * wma2 - wma1
-        hma_vals = pd.Series(raw).ewm(span=sqrt, adjust=False).mean().values
+        hma_vals = pd.Series(raw).ewm(span=sqrt_period, adjust=False).mean().values
         return hma_vals
     
-    hma_1w = hma(close_1w, 21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_21 = hma(close_1w, 21)
+    hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
     
     # === 1d Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -75,7 +75,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(hma_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(hma_21_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -120,21 +120,22 @@ def generate_signals(prices):
         
         if volume_spike:
             # Determine market regime based on price vs 1w HMA
-            # If price > 1w HMA: uptrend -> buy breakouts
-            # If price < 1w HMA: downtrend -> short breakdowns
+            # If price > HMA: bullish bias -> long breakouts
+            # If price < HMA: bearish bias -> short breakdowns
+            # If price near HMA: ranging -> no entries (avoid whipsaw)
             
-            hma_1w_val = hma_1w_aligned[i]
+            hma_val = hma_21_aligned[i]
             
             # Long entry conditions
             long_signal = False
-            if price > hma_1w_val and price > highest_high[i-1]:
-                # Uptrend + breakout above upper band
+            if price > hma_val and price > highest_high[i-1]:
+                # Bullish breakout above upper Donchian in uptrend
                 long_signal = True
             
             # Short entry conditions
             short_signal = False
-            if price < hma_1w_val and price < lowest_low[i-1]:
-                # Downtrend + breakdown below lower band
+            if price < hma_val and price < lowest_low[i-1]:
+                # Bearish breakdown below lower Donchian in downtrend
                 short_signal = True
             
             if long_signal and not short_signal:
@@ -157,4 +158,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-</response>
