@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #5835: 6h Donchian(20) breakout + 1w pivot direction + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with weekly pivot levels (from 1w timeframe) capture institutional flow. 
-Weekly pivot acts as dynamic support/resistance: breakouts above weekly R1 or below S1 with volume 
-confirmation indicate strong momentum. In ranging markets, price respects weekly pivot levels, 
-reducing false breakouts. Uses 1w for pivot calculation (more stable than 1d approximation) to work in both bull and bear markets.
+Experiment #5835: 6h Donchian(20) breakout + 1w weekly pivot + volume confirmation
+HYPOTHESIS: Weekly pivot levels act as major support/resistance. Donchian breakouts aligned 
+with weekly R1/S1 and volume confirmation capture institutional flow. Weekly pivot uses 
+prior week's OHLC (not rolling approximation) for accurate levels. Works in bull/bear by 
+filtering breakouts to only those aligned with weekly structure. Targets 75-150 trades over 4 years.
 """
 
 import numpy as np
@@ -25,10 +25,10 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for weekly pivot calculation ===
+    # === HTF: 1w data for weekly pivot calculation (actual weekly candles) ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 1:
-        # Weekly pivot from prior week's OHLC (completed weekly bar)
+        # Weekly pivot from prior completed week's OHLC
         weekly_high = df_1w['high'].values
         weekly_low = df_1w['low'].values
         weekly_close = df_1w['close'].values
@@ -40,7 +40,7 @@ def generate_signals(prices):
         # Weekly S1: (2 * P) - H
         weekly_s1 = 2 * weekly_pivot - weekly_high
         
-        # Align to 6h timeframe
+        # Align to 6h timeframe (shifted by 1 weekly bar for no look-ahead)
         weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
         weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
         weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
@@ -76,7 +76,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 20, 1, 14)  # Donchian, volume avg, ATR
+    warmup = max(20, 20, 20, 1)  # Donchian, volume avg, ATR
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
