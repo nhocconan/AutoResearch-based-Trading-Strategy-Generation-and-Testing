@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4420: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with 1d EMA50 trend direction (price above/below EMA = long/short bias) and confirmed by volume (>1.8x average) capture institutional momentum with minimal false signals. 1d EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
+Experiment #4420: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation (Tightened)
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 1d EMA50 trend direction and volume >2.0x average capture strong institutional moves. Tightened volume filter (>2.0) and added ATR-based momentum filter (price change > 0.5*ATR) to reduce trades to target 75-200 over 4 years. Works in bull (breakouts with volume) and bear (sharp breakdowns with volume). Position size 0.25.
 """
 
 import numpy as np
@@ -43,7 +43,7 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss and momentum filter ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -102,8 +102,12 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = vol_ratio[i] > 2.0
+        
+        # Momentum filter: price change > 0.5*ATR to ensure strong breakout
+        price_change = abs(close[i] - close[i-1])
+        momentum_confirm = price_change > 0.5 * atr[i]
         
         # Daily EMA bias: price > EMA = long bias, price < EMA = short bias
         long_bias = price > ema_1d_aligned[i]
@@ -113,11 +117,11 @@ def generate_signals(prices):
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
         breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
         
-        # Long conditions: upward breakout + long bias + volume
-        long_entry = breakout_up and long_bias and volume_confirm
+        # Long conditions: upward breakout + long bias + volume + momentum
+        long_entry = breakout_up and long_bias and volume_confirm and momentum_confirm
         
-        # Short conditions: downward breakout + short bias + volume
-        short_entry = breakout_down and short_bias and volume_confirm
+        # Short conditions: downward breakout + short bias + volume + momentum
+        short_entry = breakout_down and short_bias and volume_confirm and momentum_confirm
         
         if long_entry:
             in_position = True
