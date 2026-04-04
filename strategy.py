@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4506: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with 1d EMA(50) trend direction and confirmed by volume (>2.0x average) capture medium-term momentum with reduced noise. The 1d EMA provides a higher timeframe trend filter to avoid counter-trend trades, while volume confirmation ensures breakout conviction. This strategy targets 75-200 total trades over 4 years (19-50/year) with position size 0.25. Designed to work in both bull and bear markets by only trading in the direction of the 1d trend.
+Experiment #4506: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation + Chop Filter
+HYPOTHESIS: Combining Donchian breakouts with 1d EMA trend filter, volume confirmation (>2.0x average), and choppiness regime (CHOP < 50 for trending) reduces false signals and overtrading. This strategy targets 75-200 total trades over 4 years (19-50/year) with position size 0.25. Designed to work in both bull and bear markets by only trading in the direction of the 1d trend and avoiding range-bound markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4506_4h_donchian20_1d_ema_vol_v1"
+name = "exp_4506_4h_donchian20_1d_ema_vol_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,6 +27,24 @@ def generate_signals(prices):
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
         ema_1d_aligned = np.full(n, np.nan)
+    
+    # Precompute HTF: 1d data for Chop Index (14)
+    if len(df_1d) >= 1:
+        high_1d = pd.Series(df_1d['high'].values)
+        low_1d = pd.Series(df_1d['low'].values)
+        close_1d = pd.Series(df_1d['close'].values)
+        tr1 = high_1d - low_1d
+        tr2 = (high_1d - close_1d.shift(1)).abs()
+        tr3 = (low_1d - close_1d.shift(1)).abs()
+        tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr_1d = tr_1d.ewm(span=14, min_periods=14, adjust=False).mean()
+        max_high_1d = high_1d.rolling(window=14, min_periods=14).max()
+        min_low_1d = low_1d.rolling(window=14, min_periods=14).min()
+        chop_1d = 100 * np.log10(atr_1d.rolling(window=14, min_periods=14).sum() / 
+                                np.log10(max_high_1d - min_low_1d)) / np.log10(14)
+        chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d.values)
+    else:
+        chop_1d_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
@@ -62,7 +80,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -94,6 +112,8 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         # Require volume confirmation (> 2.0x average) to filter noise
         volume_confirm = vol_ratio[i] > 2.0
+        # Require trending market (Choppiness Index < 50)
+        trending_market = chop_1d_aligned[i] < 50.0
         
         # 1d EMA trend filter: price above EMA = long bias, below EMA = short bias
         long_bias = price > ema_1d_aligned[i]
@@ -103,11 +123,11 @@ def generate_signals(prices):
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
         breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
         
-        # Long conditions: upward breakout + long bias + volume
-        long_entry = breakout_up and long_bias and volume_confirm
+        # Long conditions: upward breakout + long bias + volume + trending
+        long_entry = breakout_up and long_bias and volume_confirm and trending_market
         
-        # Short conditions: downward breakout + short bias + volume
-        short_entry = breakout_down and short_bias and volume_confirm
+        # Short conditions: downward breakout + short bias + volume + trending
+        short_entry = breakout_down and short_bias and volume_confirm and trending_market
         
         if long_entry:
             in_position = True
