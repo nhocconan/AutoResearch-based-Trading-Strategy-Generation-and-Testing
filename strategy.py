@@ -2,10 +2,10 @@
 """
 exp_6530_1d_donchian20_1w_ema_vol_v1
 Hypothesis: 1d Donchian(20) breakout with 1w EMA50 as trend filter and volume confirmation.
-Uses weekly trend to filter daily breakouts - in bull markets only take longs above weekly EMA50,
-in bear markets only take shorts below weekly EMA50. Volume confirmation (2.0x MA) ensures
-breakout strength. Designed for low frequency (target: 30-100 trades over 4 years) to minimize fee drag.
-Works in both bull and bear by aligning with higher timeframe trend.
+In bull markets: long when price > 1w EMA50 and breaks above Donchian high with volume > 2.0x MA.
+In bear markets: short when price < 1w EMA50 and breaks below Donchian low with volume > 2.0x MA.
+Uses weekly EMA for stronger trend filter to reduce whipsaw and volume spike to confirm breakout strength.
+Target: 30-100 total trades over 4 years (7-25/year) with discrete position sizing to minimize fee drag.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -18,7 +18,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+EMA_PERIOD = 50  # Weekly EMA for stronger trend
 VOL_MA_PERIOD = 20
 VOL_THRESHOLD = 2.0  # volume must be 2.0x its 20-period MA for confirmation
 SIGNAL_SIZE = 0.25   # 25% position size
