@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #2467: 6h Donchian(20) breakout + 1d trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h with daily trend alignment and volume spikes 
-capture institutional participation. Works in both bull/bear markets by only taking 
-breakouts in direction of daily trend. Volume confirmation reduces false breakouts. 
-Target: 75-200 total trades over 4 years (19-50/year) with discrete sizing (0.30) 
-to minimize fee drag while maintaining statistical significance.
+Experiment #2468: 12h Donchian(20) breakout + 1w EMA trend + volume confirmation
+HYPOTHESIS: Donchian channel breakouts on 12h timeframe with weekly trend alignment and volume spikes capture institutional participation during trend acceleration. Uses 12h primary timeframe to reduce trade frequency (target: 50-150 total trades over 4 years) and minimize fee drag. Works in bull markets (breakouts with volume) and bear markets (breakdowns with volume). Discrete position sizing (0.25) limits risk per trade.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2467_6h_donchian20_1d_trend_vol_v1"
-timeframe = "6h"
+name = "exp_2468_12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,16 +19,16 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for trend filter (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # === HTF: 1w data for EMA trend (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA(50) for trend
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # Calculate 1w EMA(50)
+    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1w = np.where(close_1w > ema_1w, 1, -1)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # === 6h Indicators: Donchian(20) channels, Volume MA(20) ===
+    # === 12h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -44,7 +40,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -57,7 +53,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(trend_1d_aligned[i]) or
+        if (np.isnan(trend_1w_aligned[i]) or
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
@@ -103,8 +99,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1d trend alignment for bias filter
-        trend_bias = trend_1d_aligned[i]
+        # Require 1w trend alignment for bias filter
+        trend_bias = trend_1w_aligned[i]
         
         # Volume confirmation: require volume spike (> 2.0x average)
         volume_spike = vol_ratio[i] > 2.0
@@ -132,3 +128,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
