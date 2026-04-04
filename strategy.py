@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3760: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts capture medium-term momentum, filtered by 1d EMA(50) for primary trend alignment. Volume confirmation (>2.0x average) ensures conviction. Works in bull markets (long breakouts above EMA50) and bear markets (short breakdowns below EMA50). ATR trailing stop (2.0x) manages drawdown. Position size 0.25 balances risk and return. Target: 75-150 trades over 4 years.
+Experiment #3761: 4h Donchian(20) breakout + 1d EMA(50) + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts capture intermediate-term momentum, with 1d EMA(50) providing trend filter (price > EMA for long, price < EMA for short). Volume confirmation (>1.8x average) ensures conviction. Works in bull markets (long breakouts above EMA) and bear markets (short breakdowns below EMA). ATR trailing stop (2.0x) manages drawdown. Position size 0.25 balances risk and return. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3760_4h_donchian20_1d_ema_vol_v1"
+name = "exp_3761_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,8 +23,8 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1d timeframe
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA(50) for 1d timeframe
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
     # Align 1d EMA(50) to 4h timeframe (shifted by 1 for completed 1d bar)
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
@@ -62,8 +62,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -103,22 +102,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
+        # Require volume spike (> 1.8x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Long entry: Price breaks above Donchian upper band AND above 1d EMA50 (bullish trend alignment)
+            # Long entry: Price breaks above Donchian upper band AND above 1d EMA(50) (bullish breakout in uptrend)
             if (price > highest_high[i-1] and  # Breakout above previous period's high
-                price > ema_50_1d_aligned[i]):    # Above 1d EMA50 (bullish trend)
+                price > ema_50_1d_aligned[i]):    # Above 1d EMA(50) (bullish trend)
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Price breaks below Donchian lower band AND below 1d EMA50 (bearish trend alignment)
+            # Short entry: Price breaks below Donchian lower band AND below 1d EMA(50) (bearish breakdown in downtrend)
             elif (price < lowest_low[i-1] and    # Breakout below previous period's low
-                  price < ema_50_1d_aligned[i]):    # Below 1d EMA50 (bearish trend)
+                  price < ema_50_1d_aligned[i]):    # Below 1d EMA(50) (bearish trend)
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
