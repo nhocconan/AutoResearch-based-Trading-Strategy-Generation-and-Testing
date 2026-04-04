@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #5956: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 12h aligned with 1d HMA trend capture sustained moves in both bull and bear markets.
-Daily HMA provides trend filter from higher timeframe (avoid counter-trend trades). Volume >1.5x average confirms breakout strength.
-ATR trailing stop manages risk. Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag.
+Experiment #5957: 4h Donchian(20) breakout + 1d volume confirmation + chop regime filter
+HYPOTHESIS: Donchian breakouts on 4h with 1d volume confirmation (>1.5x average) and 
+choppiness regime filter (CHOP < 61.8 = trending) capture sustained moves in both bull and bear markets.
+Volume confirms breakout strength, chop filter avoids whipsaws in ranging markets.
+ATR trailing stop manages risk. Target: 75-200 trades over 4 years (19-50/year) to minimize fee drift.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5956_12h_donchian20_1d_hma_vol_v1"
-timeframe = "12h"
+name = "exp_5957_4h_donchian20_1d_vol_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,32 +25,58 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for HMA trend ===
+    # === HTF: 1d data for volume average ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 21:
-        # Calculate HMA(21) on 1d close
-        close_1d = pd.Series(df_1d['close'].values)
-        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        wma_half = close_1d.ewm(span=half_len, adjust=False).mean()
-        wma_full = close_1d.ewm(span=21, adjust=False).mean()
-        raw_hma = 2 * wma_half - wma_full
-        hma_1d = raw_hma.ewm(span=sqrt_len, adjust=False).mean()
-        hma_1d_values = hma_1d.values
-        hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_values)
+    if len(df_1d) >= 20:
+        # Calculate 20-day average volume from daily data
+        vol_1d = pd.Series(df_1d['volume'].values)
+        avg_vol_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
+        avg_vol_1d_values = avg_vol_1d
+        avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d_values)
     else:
-        hma_1d_aligned = np.full(n, np.nan)
+        avg_vol_1d_aligned = np.full(n, 1.0)  # fallback to avoid division by zero
     
-    # === 12h Indicators: Donchian Channel (20-period) ===
+    # === HTF: 1w data for chop regime filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 14:
+        # Calculate Choppiness Index (CHOP) on weekly data
+        high_1w = pd.Series(df_1w['high'].values)
+        low_1w = pd.Series(df_1w['low'].values)
+        close_1w = pd.Series(df_1w['close'].values)
+        
+        # True Range
+        tr1 = high_1w - low_1w
+        tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+        tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+        tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr_1w[0] = tr1[0]
+        atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).sum().values
+        
+        # Highest high and lowest low over 14 periods
+        hh_1w = high_1w.rolling(window=14, min_periods=14).max().values
+        ll_1w = low_1w.rolling(window=14, min_periods=14).min().values
+        
+        # Choppiness Index: 100 * log10(atr_1w / (hh_1w - ll_1w)) / log10(14)
+        # Avoid division by zero
+        range_1w = hh_1w - ll_1w
+        chop_1w = np.where(
+            (range_1w > 0) & (atr_1w > 0),
+            100 * np.log10(atr_1w / range_1w) / np.log10(14),
+            50.0  # neutral when range is zero
+        )
+        chop_1w_values = chop_1w
+        chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w_values)
+    else:
+        chop_1w_aligned = np.full(n, 50.0)  # neutral chop when insufficient data
+    
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation ===
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
+    # === 4h Indicators: Volume confirmation (using 1d average) ===
+    volume_ratio = volume / np.where(avg_vol_1d_aligned > 0, avg_vol_1d_aligned, 1)
     
-    # === 12h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -68,7 +95,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21) + 1  # Donchian, volume avg, ATR, HMA + 1
+    warmup = max(20, 20, 14, 20, 14) + 1  # Donchian, volume avg, ATR, 1d vol, 1w chop + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -80,7 +107,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(hma_1d_aligned[i])):
+            np.isnan(chop_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -114,16 +141,13 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
-        
-        # HMA trend filter: price above/below 1d HMA
-        above_hma = price > hma_1d_aligned[i]
-        below_hma = price < hma_1d_aligned[i]
+        chop_filter = chop_1w_aligned[i] < 61.8  # trending regime (chop < 61.8)
         
         # Entry conditions: 
-        # Long: breakout up with volume AND above daily HMA (uptrend)
-        # Short: breakout down with volume AND below daily HMA (downtrend)
-        long_setup = breakout_up and volume_confirmed and above_hma
-        short_setup = breakout_down and volume_confirmed and below_hma
+        # Long: breakout up with volume AND chop filter
+        # Short: breakout down with volume AND chop filter
+        long_setup = breakout_up and volume_confirmed and chop_filter
+        short_setup = breakout_down and volume_confirmed and chop_filter
         
         if long_setup:
             in_position = True
@@ -143,5 +167,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
