@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3820: 4h Donchian(20) breakout + 1d volume confirmation + chop regime filter
-HYPOTHESIS: 4h Donchian breakouts capture intermediate-term swings with 1d volume (>1.3x) confirming institutional participation. Choppiness Index (14) > 61.8 filters range markets to avoid false breakouts. Works in bull markets (breakouts above resistance) and bear markets (breakdowns below support). Discrete position sizing (0.25) minimizes fee drag. Target: 75-200 trades over 4 years.
+Experiment #3821: 4h Donchian(20) breakout + 1d volume confirmation + chop regime filter
+HYPOTHESIS: 4h Donchian breakouts capture intermediate-term swings with 1d volume (>1.5x) confirming institutional participation. Choppiness Index (14) > 61.8 filters range markets to avoid false breakouts. Works in bull markets (breakouts above resistance) and bear markets (breakdowns below support). Discrete position sizing (0.25) minimizes fee drag. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3820_4h_donchian20_1d_vol_chop_v1"
+name = "exp_3821_4h_donchian20_1d_vol_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -132,8 +132,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.3x average) AND chop > 61.8 (range regime)
-        volume_spike = vol_ratio[i] > 1.3
+        # Require volume spike (> 1.5x average) AND chop > 61.8 (range regime)
+        volume_spike = vol_ratio[i] > 1.5
         chop_filter = chop[i] > 61.8
         
         if volume_spike and chop_filter:
