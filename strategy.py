@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #5764: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA(21) trend capture medium-term momentum with lower noise than intraday timeframes. Volume > 1.5x average confirms breakout strength. Designed for 30-100 total trades over 4 years (7-25/year) to minimize fee drag while maintaining statistical validity. Works in both bull and bear markets by requiring trend alignment rather than directional bias. Uses 1d primary timeframe with 1w HTF for trend filter as specified in experiment instructions.
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA(21) trend capture strong trending moves while avoiding counter-trend whipsaws. Volume > 1.5x average confirms breakout strength. Designed for 1d timeframe to minimize fees (target: 30-100 trades over 4 years) and work in both bull and bear markets by requiring trend alignment rather than directional bias. Uses discrete sizing 0.25 to minimize churn.
 """
 
 import numpy as np
@@ -25,18 +25,17 @@ def generate_signals(prices):
     # === HTF: 1w data for HMA trend filter ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 21:
-        # Calculate HMA(21) on weekly close prices
+        # Calculate HMA(21) on weekly close
         close_1w = pd.Series(df_1w['close'].values)
         half_len = int(21 / 2)
         sqrt_len = int(np.sqrt(21))
         wma_half = close_1w.ewm(span=half_len, adjust=False).mean()
         wma_full = close_1w.ewm(span=21, adjust=False).mean()
-        raw_hma = 2 * wma_half - wma_full
-        hma_1w = raw_hma.ewm(span=sqrt_len, adjust=False).mean().values
+        hma_1w = (2 * wma_half - wma_full).ewm(span=sqrt_len, adjust=False).mean().values
     else:
         hma_1w = np.full(len(df_1w), np.nan)
     
-    # Align 1w HMA to 1d timeframe (shifted by 1 for completed weekly bars only)
+    # Align 1w HMA to 1d timeframe (shifted by 1 for completed 1w bars only)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
     # === 1d Indicators: Donchian Channel (20-period) ===
