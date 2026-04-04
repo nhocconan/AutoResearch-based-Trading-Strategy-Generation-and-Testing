@@ -2,9 +2,10 @@
 """
 Experiment #2683: 4h Donchian(20) breakout + 12h EMA trend + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts with 12h EMA trend alignment and volume spikes capture
-institutional participation. 4h balances trade frequency (target: 75-200 total over 4 years)
-with sufficient signal quality. Uses 12h EMA for trend filter, 4h only for entry/exit timing.
-Works in both bull (breakouts with trend) and bear (short breakdowns with downtrend) markets.
+institutional participation. Primary timeframe 4h balances trade frequency (~25-50/year)
+with enough samples for statistical validity. Uses 12h EMA for trend filter, volume spike
+for confirmation, and ATR-based trailing stop for risk control. Designed to work in both
+bull and bear markets by following the higher timeframe trend.
 """
 
 import numpy as np
