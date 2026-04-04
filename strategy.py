@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #3339: 6h Donchian Breakout + 12h ADX Trend + Volume Spike
-HYPOTHESIS: 6h Donchian(20) breakouts with 12h ADX(14) > 25 trend filter and volume confirmation (>2.0x 20-period average) capture strong trends while avoiding chop. 
-ADX ensures we only trade in trending regimes, reducing whipsaws in sideways markets. Works in bull (breakouts with momentum) and bear (strong downtrend continuations) by filtering for actual trend strength.
-Target: 75-150 total trades over 4 years (19-37/year). Position size: 0.25.
+Experiment #3339: 6h Williams %R Reversal + 12h ADX Trend Filter + Volume Spike
+HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h timeframe.
+Only take reversals when 12h ADX > 25 (trending market) to avoid false signals in chop.
+Volume spike (>1.8x 20-period average) confirms reversal strength.
+ATR-based stoploss (2.0x) manages risk. Position size 0.25.
+Designed to work in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend).
+Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3339_6h_donchian20_12h_adx_vol_v1"
+name = "exp_3339_6h_williamsr_adx_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -37,36 +40,37 @@ def generate_signals(prices):
         tr3 = np.abs(low[1:] - close[:-1])
         tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
         # Directional Movement
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        # Smoothed values
-        tr_period = pd.Series(tr).rolling(window=period, min_periods=period).mean().values
-        plus_dm_period = pd.Series(plus_dm).rolling(window=period, min_periods=period).mean().values
-        minus_dm_period = pd.Series(minus_dm).rolling(window=period, min_periods=period).mean().values
+        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                           np.maximum(high[1:] - high[:-1], 0), 0)
+        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                            np.maximum(low[:-1] - low[1:], 0), 0)
+        # Smooth TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
+        atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+        dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+        dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
         # Directional Indicators
-        plus_di = 100 * plus_dm_period / tr_period
-        minus_di = 100 * minus_dm_period / tr_period
+        di_plus = 100 * dm_plus_smooth / atr
+        di_minus = 100 * dm_minus_smooth / atr
         # DX and ADX
-        dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-        adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
+        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+        adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
         return adx
     
     adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
     adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
-    # === 6h Indicators: Donchian channels (20-period) ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # === 6h Indicators: Williams %R(14) ===
+    lookback_willr = 14
+    highest_high = pd.Series(high).rolling(window=lookback_willr, min_periods=lookback_willr).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback_willr, min_periods=lookback_willr).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for volatility and stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -82,40 +86,30 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     
-    warmup = max(50, lookback, 20, 14, 14)  # sufficient for all indicators
+    warmup = max(50, lookback_willr, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(adx_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(williams_r[i]) or np.isnan(adx_12h_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic: Stoploss at 2.5*ATR or mean reversion to channel midpoint ---
+        # --- Exit Logic ---
         if in_position:
+            # Exit if Williams %R reverses back toward mean (exit at -50 for longs, -50 for shorts)
             if position_side > 0:  # Long
-                # Stoploss: 2.5*ATR below entry
-                if price < entry_price - 2.5 * atr[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                # Mean reversion exit: price returns to Donchian midpoint
-                elif price <= (highest_high[i] + lowest_low[i]) / 2:
+                if williams_r[i] > -50:  # Exit long when %R crosses above -50
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
-                # Stoploss: 2.5*ATR above entry
-                if price > entry_price + 2.5 * atr[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                # Mean reversion exit: price returns to Donchian midpoint
-                elif price >= (highest_high[i] + lowest_low[i]) / 2:
+                if williams_r[i] < -50:  # Exit short when %R crosses below -50
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -124,19 +118,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require: volume spike (> 2.0x average) AND strong trend (ADX > 25)
-        volume_spike = vol_ratio[i] > 2.0
-        strong_trend = adx_12h_aligned[i] > 25
+        # Requvolume spike (> 1.8x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.8
         
-        if volume_spike and strong_trend:
-            # Long entry: price breaks above Donchian high
-            if price > highest_high[i]:
+        if volume_spike and adx_12h_aligned[i] > 25:  # Only trade in trending markets (ADX > 25)
+            # Long entry: Williams %R oversold (< -80) in uptrend
+            if williams_r[i] < -80:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low
-            elif price < lowest_low[i]:
+            # Short entry: Williams %R overbought (> -20) in downtrend
+            elif williams_r[i] > -20:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -147,5 +140,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
