@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4214: 1h Donchian(20) breakout + 4h/1d EMA filter + volume confirmation
-HYPOTHESIS: Donchian breakouts on 1h timeframe capture momentum when aligned with 4h EMA20 and 1d EMA50 trend filters (price > both EMAs for longs, < both for shorts) and confirmed by volume (>1.5x average). Uses 4h/1d for signal direction, 1h only for entry timing. Session filter (08-20 UTC) reduces noise trades. Discrete position sizing (0.20) targets 60-150 total trades over 4 years (15-37/year). ATR-based trailing stop (2.0x) for risk management.
+Experiment #4215: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
+HYPOTHESIS: Donchian breakouts on 6h timeframe capture momentum when aligned with weekly pivot bias (price > weekly pivot for longs, < weekly pivot for shorts) and confirmed by volume (>1.5x average). Uses 1w for signal direction, 6h only for entry timing. Session filter (08-20 UTC) reduces noise trades. Discrete position sizing (0.25) targets 50-150 total trades over 4 years (12-37/year). ATR-based trailing stop (2.0x) for risk management.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4214_1h_donchian20_4h_1d_ema_vol_v1"
-timeframe = "1h"
+name = "exp_4215_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,22 +23,20 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 4h EMA20 and 1d EMA50 for trend filter ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) >= 20:
-        ema_4h = pd.Series(df_4h['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
-        ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    else:
-        ema_4h_aligned = np.full(n, np.nan)
-    
+    # === Precompute HTF: 1d and 1w for weekly pivot calculation ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    if len(df_1d) >= 5:
+        # Calculate weekly pivot from prior week's daily OHLC
+        # Use last 5 daily bars (Mon-Fri) to approximate weekly OHLC
+        weekly_high = pd.Series(df_1d['high'].values).rolling(window=5, min_periods=5).max().values
+        weekly_low = pd.Series(df_1d['low'].values).rolling(window=5, min_periods=5).min().values
+        weekly_close = pd.Series(df_1d['close'].values).rolling(window=5, min_periods=5).last().values
+        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        weekly_pivot_aligned = np.full(n, np.nan)
     
-    # === 1h Indicators: Donchian Channel (20) ===
+    # === 6h Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -46,12 +44,12 @@ def generate_signals(prices):
     
     donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
-    # === 1h Indicators: Volume MA(20) for confirmation ===
+    # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -60,7 +58,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -69,12 +67,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 20, 50)  # Donchian, vol MA, ATR, 4h EMA, 1d EMA
+    warmup = max(20, 20, 14, 5)  # Donchian, vol MA, ATR, 1d lookback for pivot
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(weekly_pivot_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -118,15 +116,15 @@ def generate_signals(prices):
             breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
             breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
             
-            # 4h EMA20 and 1d EMA50 trend filter (both must agree)
-            price_above_emas = price > ema_4h_aligned[i] and price > ema_1d_aligned[i]
-            price_below_emas = price < ema_4h_aligned[i] and price < ema_1d_aligned[i]
+            # Weekly pivot bias filter
+            price_above_pivot = price > weekly_pivot_aligned[i]
+            price_below_pivot = price < weekly_pivot_aligned[i]
             
-            # Long conditions: Donchian breakout up + price above both EMAs
-            long_entry = breakout_up and price_above_emas
+            # Long conditions: Donchian breakout up + price above weekly pivot
+            long_entry = breakout_up and price_above_pivot
             
-            # Short conditions: Donchian breakout down + price below both EMAs
-            short_entry = breakout_dn and price_below_emas
+            # Short conditions: Donchian breakout down + price below weekly pivot
+            short_entry = breakout_dn and price_below_pivot
             
             if long_entry:
                 in_position = True
