@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3283: 4h Donchian Breakout + 12h HMA Trend + Volume Spike
-HYPOTHESIS: 4h Donchian(20) breakouts with volume confirmation capture medium-term trends with optimal trade frequency for 4h timeframe. 
-12h HMA(50) trend filter ensures alignment with higher timeframe momentum. Volume spike (>2.0x 20-period average) confirms breakout strength.
-ATR-based trailing stop (2.5x) manages risk. Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets by using price channels and volatility filters.
+HYPOTHESIS: 4h Donchian(20) breakouts with volume confirmation and 12h HMA trend filter capture medium-term trends while minimizing false breakouts. The 4h primary timeframe balances trade frequency and signal quality, targeting 75-200 total trades over 4 years (19-50/year). Works in bull markets via trend continuation and in bear markets via mean reversion from extreme price levels when price re-enters the channel after a breakout failure.
 """
 
 import numpy as np
@@ -69,7 +66,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 20, 14)  # sufficient for all indicators
+    warmup = max(50, lookback, 20, 14, 50)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
