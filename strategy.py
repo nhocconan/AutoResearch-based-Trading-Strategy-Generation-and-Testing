@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 """
-exp_6545_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
-Uses daily EMA for strong trend bias, reducing whipsaw in ranging markets. Volume > 1.5x MA confirms breakout strength.
-Designed for 50-150 total trades over 4 years with discrete sizing (0.25). Works in both bull and bear by following HTF trend.
+exp_6546_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 1d EMA200 as trend filter and volume confirmation.
+Uses 1d EMA200 for strong trend filter that works in both bull/bear markets.
+Volume spike (2.0x 20-period MA) confirms breakout strength.
+Designed for 75-200 total trades over 4 years with discrete sizing (0.25) to minimize fee drag.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6545_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_6546_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 200
+EMA_PERIOD = 200          # 1d EMA200 for strong trend filter
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 1.5  # volume must be 1.5x its MA for confirmation
-SIGNAL_SIZE = 0.25   # 25% position size
+VOL_THRESHOLD = 2.0      # volume must be 2.0x its 20-period MA
+SIGNAL_SIZE = 0.25       # 25% position size
 
 def generate_signals(prices):
     n = len(prices)
@@ -33,7 +34,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False).mean().values
     
-    # Align to LTF (12h) with shift(1) for completed bars only
+    # Align to LTF (4h) with shift(1) for completed bars only
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -54,7 +55,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
@@ -108,3 +109,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
