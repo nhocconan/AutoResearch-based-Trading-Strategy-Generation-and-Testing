@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #3308: 12h Donchian Breakout + 1w HMA Trend + Volume Spike
-HYPOTHESIS: 12h Donchian(20) breakouts capture swing trends with optimal trade frequency for 12h timeframe.
+HYPOTHESIS: 12h Donchian(20) breakouts capture swing trends with ideal trade frequency for 12h timeframe.
 1w HMA(50) trend filter ensures alignment with weekly momentum. Volume spike (>2.0x 20-period average) confirms breakout strength.
-ATR-based trailing stop (2.5x) manages risk. Position size 0.25. Target: 75-150 total trades over 4 years (19-37/year).
+ATR-based trailing stop (2.5x) manages risk. Position size 0.25. Target: 50-150 total trades over 4 years (12-37/year).
 Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets by using price channels and volatility filters.
 """
 
