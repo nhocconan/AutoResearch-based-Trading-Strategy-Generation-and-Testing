@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #5038: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts aligned with weekly HMA trend (from 1w HTF) capture strong momentum with lower frequency. Weekly HMA acts as trend filter: only long when price > weekly HMA(21), only short when price < weekly HMA(21). Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. Designed for 7-25 trades/year on 1d timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
+HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts aligned with weekly HMA trend capture strong momentum with low frequency. Weekly HMA acts as trend filter: only long when price > weekly HMA(21), short when price < weekly HMA(21). Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. Designed for 7-25 trades/year on 1d timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend).
 """
 
 import numpy as np
@@ -24,35 +24,42 @@ def generate_signals(prices):
     
     # === 1w Indicators: HMA(21) for trend filter ===
     if len(df_1w) >= 21:
-        # Hull Moving Average: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        def wma(values, period):
-            if len(values) < period:
-                return np.full_like(values, np.nan)
+        # Hull Moving Average: WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        def wma(arr, period):
+            if len(arr) < period:
+                return np.full_like(arr, np.nan)
             weights = np.arange(1, period + 1)
-            return np.convolve(values, weights / weights.sum(), mode='valid')
+            return np.convolve(arr, weights / weights.sum(), mode='valid')
         
         close_series = pd.Series(df_1w['close'].values)
-        half_period = 21 // 2
-        sqrt_period = int(np.sqrt(21))
+        half_len = len(close_series) // 2
+        sqrt_len = int(np.sqrt(len(close_series)))
         
-        wma_half = wma(close_series.values, half_period)
-        wma_full = wma(close_series.values, 21)
+        wma_half = wma(close_series.values, half_len) if half_len > 0 else np.full_like(close_series.values, np.nan)
+        wma_full = wma(close_series.values, len(close_series)) if len(close_series) > 0 else np.full_like(close_series.values, np.nan)
         
-        # 2*WMA(n/2) - WMA(n)
-        diff = 2 * wma_half - wma_full
-        # WMA of diff with period sqrt(n)
-        hma_values = wma(diff, sqrt_period)
-        
-        # Pad to match original length
-        hma_1w = np.full(len(close_series), np.nan)
-        hma_1w[half_period-1:len(wma_half)+half_period-1] = wma_half
-        hma_1w[len(wma_half)+half_period-1:len(wma_half)+half_period-1+len(diff)] = hma_values
-        hma_1w = hma_1w[:len(close_series)]
-        
-        # Align to 1d timeframe
-        hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+        if len(wma_half) > 0 and len(wma_full) > 0:
+            # Pad arrays to match original length
+            wma_half_padded = np.full(len(close_series), np.nan)
+            wma_full_padded = np.full(len(close_series), np.nan)
+            wma_half_padded[-len(wma_half):] = wma_half
+            wma_full_padded[-len(wma_full):] = wma_full
+            
+            raw_hma = 2 * wma_half_padded - wma_full_padded
+            hma_values = wma(raw_hma, sqrt_len) if sqrt_len > 0 else np.full_like(raw_hma, np.nan)
+            
+            # Pad hma_values
+            hma_padded = np.full(len(close_series), np.nan)
+            if len(hma_values) > 0:
+                hma_padded[-len(hma_values):] = hma_values
+            hma_1w = hma_padded
+        else:
+            hma_1w = np.full(len(close_series), np.nan)
     else:
-        hma_1w_aligned = np.full(n, np.nan)
+        hma_1w = np.full(len(df_1w), np.nan)
+    
+    # Align HMA to 1d timeframe
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
     # === 1d Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -119,15 +126,13 @@ def generate_signals(prices):
         # Volume filter: confirmation (>1.5x)
         vol_confirm = vol_ratio[i] > 1.5
         
-        # Trend filter: price relative to weekly HMA
-        above_weekly_hma = price > hma_1w_aligned[i]
-        below_weekly_hma = price < hma_1w_aligned[i]
+        # Trend filter: price vs weekly HMA
+        trend_long = price > hma_1w_aligned[i]
+        trend_short = price < hma_1w_aligned[i]
         
-        # Donchian breakout conditions with weekly HMA trend filter
-        # Long: Donchian breakout above weekly HMA (trend alignment)
-        # Short: Donchian breakdown below weekly HMA (trend alignment)
-        breakout_long = (price >= high_roll[i]) and above_weekly_hma and vol_confirm
-        breakout_short = (price <= low_roll[i]) and below_weekly_hma and vol_confirm
+        # Donchian breakout conditions
+        breakout_long = (price >= high_roll[i]) and trend_long and vol_confirm
+        breakout_short = (price <= low_roll[i]) and trend_short and vol_confirm
         
         # Final entry conditions
         if breakout_long:
@@ -148,3 +153,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
