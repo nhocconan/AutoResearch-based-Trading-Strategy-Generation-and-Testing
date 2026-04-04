@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #5585: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts with volume > 1.8x average and aligned 
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts with volume > 2.0x average and aligned 
 with 1d EMA50 trend capture high-probability trend moves. The 1d EMA50 provides the 
 higher timeframe trend filter, reducing false breakouts in choppy markets. ATR-based 
-trailing stop (2.0x ATR) limits drawdown. Discrete position sizing (0.25) minimizes fee 
+trailing stop (2.5x ATR) limits drawdown. Discrete position sizing (0.25) minimizes fee 
 churn. Works in bull (breakouts with EMA50 support) and bear (breakouts with EMA50 
 resistance). Target: 12-37 trades/year (50-150 total over 4 years).
 """
@@ -84,7 +84,7 @@ def generate_signals(prices):
         if in_position:
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
-                stop_price = highest_since_entry - 2.0 * atr[i]
+                stop_price = highest_since_entry - 2.5 * atr[i]
                 # Exit: stoploss OR Donchian lower band break
                 if price <= stop_price or price <= donchian_low[i]:
                     in_position = False
@@ -94,7 +94,7 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                stop_price = lowest_since_entry + 2.0 * atr[i]
+                stop_price = lowest_since_entry + 2.5 * atr[i]
                 # Exit: stoploss OR Donchian upper band break
                 if price >= stop_price or price >= donchian_high[i]:
                     in_position = False
@@ -107,7 +107,7 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.8
+        volume_confirmed = volume_ratio[i] > 2.0
         
         # Determine bias from 1d EMA50
         # Long: breakout above Donchian high with volume AND price > EMA50 (uptrend)
