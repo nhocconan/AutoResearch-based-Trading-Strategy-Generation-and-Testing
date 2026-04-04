@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #2600: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+Experiment #2601: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
 HYPOTHESIS: Donchian channel breakouts with daily trend alignment and volume spikes capture 
 institutional participation during trend acceleration. Works in bull markets (breakouts with volume) 
 and bear markets (breakdowns with volume). Uses discrete position sizing (0.25) to limit fee drag 
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2600_4h_donchian20_1d_ema_vol_v1"
+name = "exp_2601_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -131,3 +131,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
