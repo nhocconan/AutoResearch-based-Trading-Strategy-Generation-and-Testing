@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #5463: 4h Donchian(20) breakout + 12h EMA trend filter + volume confirmation
-HYPOTHESIS: On 4h timeframe, price breaking above/below the 20-period Donchian channel with 
-volume > 1.8x average and aligned with the 12h EMA50 > EMA200 (bullish) or EMA50 < EMA200 (bearish) 
+Experiment #5464: 1d Donchian(20) breakout + 1w EMA trend filter + volume confirmation
+HYPOTHESIS: On daily timeframe, price breaking above/below the 20-period Donchian channel with 
+volume > 1.5x average and aligned with the weekly EMA50 > EMA200 (bullish) or EMA50 < EMA200 (bearish) 
 captures strong momentum moves while avoiding choppy regimes. Discrete position sizing (0.25) 
-and ATR-based stoploss (2.0x ATR) control risk. Target: 19-50 trades/year (75-200 total over 4 years) 
+and ATR-based stoploss (2.0x ATR) control risk. Target: 7-25 trades/year (30-100 total over 4 years) 
 to minimize fee drag while maintaining statistical significance. Works in bull markets via 
 breakouts above rising EMA alignment and in bear markets via short breakdowns below falling EMA alignment.
 """
@@ -13,8 +13,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5463_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_5464_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,40 +27,40 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 12h data for EMA50 and EMA200 ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 200:
-        close_12h = df_12h['close'].values
+    # === HTF: 1w data for EMA50 and EMA200 ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 200:
+        close_1w = df_1w['close'].values
         
-        # Calculate EMA50 and EMA200 on 12h data
-        ema50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema200_12h = pd.Series(close_12h).ewm(span=200, min_periods=200, adjust=False).mean().values
+        # Calculate EMA50 and EMA200 on 1w data
+        ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema200_1w = pd.Series(close_1w).ewm(span=200, min_periods=200, adjust=False).mean().values
         
-        # Align to LTF (4h) with shift(1) for completed bars only
-        ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h) if len(ema50_12h) > 0 else np.full(n, np.nan)
-        ema200_12h_aligned = align_htf_to_ltf(prices, df_12h, ema200_12h) if len(ema200_12h) > 0 else np.full(n, np.nan)
+        # Align to LTF (1d) with shift(1) for completed bars only
+        ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w) if len(ema50_1w) > 0 else np.full(n, np.nan)
+        ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w) if len(ema200_1w) > 0 else np.full(n, np.nan)
         
         # Trend bias: EMA50 > EMA200 = bullish, EMA50 < EMA200 = bearish
-        ema_bullish_aligned = ema50_12h_aligned > ema200_12h_aligned
-        ema_bearish_aligned = ema50_12h_aligned < ema200_12h_aligned
+        ema_bullish_aligned = ema50_1w_aligned > ema200_1w_aligned
+        ema_bearish_aligned = ema50_1w_aligned < ema200_1w_aligned
     else:
-        ema50_12h_aligned = np.full(n, np.nan)
-        ema200_12h_aligned = np.full(n, np.nan)
+        ema50_1w_aligned = np.full(n, np.nan)
+        ema200_1w_aligned = np.full(n, np.nan)
         ema_bullish_aligned = np.full(n, False)
         ema_bearish_aligned = np.full(n, False)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === 1d Indicators: Donchian Channel (20-period) ===
     # Upper band: 20-period high
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     # Lower band: 20-period low
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation ===
+    # === 1d Indicators: Volume confirmation ===
     # Average volume over 20 periods
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)  # Avoid division by zero
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for stoploss ===
     # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -94,7 +94,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or 
-            np.isnan(ema50_12h_aligned[i]) or np.isnan(ema200_12h_aligned[i])):
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(ema200_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -138,8 +138,8 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]  # Break above previous period's high
         breakout_down = price < donchian_low[i-1]  # Break below previous period's low
         
-        # Volume confirmation: current volume > 1.8x average volume
-        volume_confirmed = volume_ratio[i] > 1.8
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = volume_ratio[i] > 1.5
         
         # Entry conditions
         if breakout_up and volume_confirmed and ema_bullish_aligned[i]:
