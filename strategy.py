@@ -2,10 +2,11 @@
 """
 exp_6706_4h_donchian20_1d_ema_vol_v1
 Hypothesis: 4h Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
-Uses 20-period Donchian channels on 4h for breakout signals, filtered by 1-day EMA50 trend direction.
-Volume spike confirms institutional participation. ATR-based stoploss manages risk.
-Designed for 4h timeframe to capture medium-term swings with tight entry conditions
-(~25-50 trades/year) to minimize fee drag in both bull and bear markets.
+Enters long when price breaks above 4h Donchian upper channel AND 1d EMA50 is rising AND volume > 1.5x 20-bar MA.
+Enters short when price breaks below 4h Donchian lower channel AND 1d EMA50 is falling AND volume > 1.5x 20-bar MA.
+Exits on ATR(14) stoploss (2x) or opposite signal. Designed for 4h timeframe to capture
+medium-term trends while minimizing fee drag (~20-50 trades/year expected). Works in both
+bull and bear markets by following the 1-day trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -20,14 +21,14 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_SPIKE_THRESHOLD = 2.0
+VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop - using 1d for EMA trend filter
@@ -36,7 +37,13 @@ def generate_signals(prices):
     # Calculate 1-day EMA50 for trend filter
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    ema_1d_rising = ema_1d > np.roll(ema_1d, 1)
+    ema_1d_falling = ema_1d < np.roll(ema_1d, 1)
+    
+    # Align HTF EMA to LTF (4h) with shift(1) for completed days only
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_rising.astype(float))
+    ema_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_falling.astype(float))
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -47,8 +54,6 @@ def generate_signals(prices):
     # Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
     lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    donchian_upper = highest_high
-    donchian_lower = lowest_low
     
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
@@ -65,11 +70,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD)
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(ema_rising_aligned[i]) or 
+            np.isnan(ema_falling_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -85,24 +91,17 @@ def generate_signals(prices):
                 position = 0
                 continue
                 
-        # Determine trend from 1-day EMA50
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
-        
-        # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_SPIKE_THRESHOLD if not np.isnan(vol_ma[i]) else False
-        
-        # Donchian breakout signals
-        long_breakout = close[i] > donchian_upper[i-1] and uptrend and vol_confirmed
-        short_breakout = close[i] < donchian_lower[i-1] and downtrend and vol_confirmed
+        # Breakout conditions
+        bullish_breakout = (close[i] > highest_high[i]) and ema_rising_aligned[i] and (volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD)
+        bearish_breakout = (close[i] < lowest_low[i]) and ema_falling_aligned[i] and (volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD)
         
         # Enter new positions only if flat
         if position == 0:
-            if long_breakout:
+            if bullish_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-            elif short_breakout:
+            elif bearish_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
