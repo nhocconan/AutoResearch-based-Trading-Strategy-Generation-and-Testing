@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #5595: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
-HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts with volume > 1.8x average and aligned 
-with weekly pivot (using actual 1w data) capture high-probability moves. Weekly pivot 
+Experiment #5597: 4h Donchian(20) breakout + daily pivot direction + volume confirmation
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts with volume > 1.8x average and aligned 
+with daily pivot (using actual 1d data) capture high-probability moves. Daily pivot 
 provides structural support/resistance from higher timeframe, reducing false breakouts. 
 ATR-based trailing stop (2.0x ATR) limits drawdown. Discrete position sizing (0.25) 
-minimizes fee churn. Works in bull (breakouts with weekly pivot support) and bear 
-(breakouts with weekly pivot resistance). Target: 12-37 trades/year (50-150 total over 4 years).
+minimizes fee churn. Works in bull (breakouts with daily pivot support) and bear 
+(breakouts with daily pivot resistance). Target: 19-50 trades/year (75-200 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5595_6h_donchian20_1w_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_5597_4h_donchian20_1d_pivot_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,31 +27,31 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for Weekly Pivot ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 1:
-        # Calculate weekly pivot from prior week's OHLC
-        weekly_high = pd.Series(df_1w['high'].values).shift(1)  # prior week's high
-        weekly_low = pd.Series(df_1w['low'].values).shift(1)    # prior week's low
-        weekly_close = pd.Series(df_1w['close'].values).shift(1) # prior week's close
+    # === HTF: 1d data for Daily Pivot ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 1:
+        # Calculate daily pivot from prior day's OHLC
+        daily_high = pd.Series(df_1d['high'].values).shift(1)  # prior day's high
+        daily_low = pd.Series(df_1d['low'].values).shift(1)    # prior day's low
+        daily_close = pd.Series(df_1d['close'].values).shift(1) # prior day's close
         
-        # Weekly Pivot Point (PP) = (H + L + C) / 3
-        pp = (weekly_high + weekly_low + weekly_close) / 3.0
-        # Weekly R3 = PP + 2*(H - L)
-        r3 = pp + 2.0 * (weekly_high - weekly_low)
-        # Weekly S3 = PP - 2*(H - L)
-        s3 = pp - 2.0 * (weekly_high - weekly_low)
-        # Weekly R4 = PP + 3*(H - L)  (breakout level)
-        r4 = pp + 3.0 * (weekly_high - weekly_low)
-        # Weekly S4 = PP - 3*(H - L)  (breakdown level)
-        s4 = pp - 3.0 * (weekly_high - weekly_low)
+        # Daily Pivot Point (PP) = (H + L + C) / 3
+        pp = (daily_high + daily_low + daily_close) / 3.0
+        # Daily R3 = PP + 2*(H - L)
+        r3 = pp + 2.0 * (daily_high - daily_low)
+        # Daily S3 = PP - 2*(H - L)
+        s3 = pp - 2.0 * (daily_high - daily_low)
+        # Daily R4 = PP + 3*(H - L)  (breakout level)
+        r4 = pp + 3.0 * (daily_high - daily_low)
+        # Daily S4 = PP - 3*(H - L)  (breakdown level)
+        s4 = pp - 3.0 * (daily_high - daily_low)
         
-        # Align to LTF (6h)
-        pp_aligned = align_htf_to_ltf(prices, df_1w, pp.values)
-        r3_aligned = align_htf_to_ltf(prices, df_1w, r3.values)
-        s3_aligned = align_htf_to_ltf(prices, df_1w, s3.values)
-        r4_aligned = align_htf_to_ltf(prices, df_1w, r4.values)
-        s4_aligned = align_htf_to_ltf(prices, df_1w, s4.values)
+        # Align to LTF (4h)
+        pp_aligned = align_htf_to_ltf(prices, df_1d, pp.values)
+        r3_aligned = align_htf_to_ltf(prices, df_1d, r3.values)
+        s3_aligned = align_htf_to_ltf(prices, df_1d, s3.values)
+        r4_aligned = align_htf_to_ltf(prices, df_1d, r4.values)
+        s4_aligned = align_htf_to_ltf(prices, df_1d, s4.values)
     else:
         pp_aligned = np.full(n, np.nan)
         r3_aligned = np.full(n, np.nan)
@@ -59,15 +59,15 @@ def generate_signals(prices):
         r4_aligned = np.full(n, np.nan)
         s4_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation ===
+    # === 4h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 6h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -134,7 +134,7 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.8
         
-        # Determine bias from Weekly Pivot levels
+        # Determine bias from Daily Pivot levels
         # In ranging markets: fade at R3/S3 (mean reversion)
         # In trending markets: breakout continuation at R4/S4
         long_setup = (breakout_up and volume_confirmed and 
