@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #3076: 12h Donchian Breakout + 1d HMA Trend + Volume Spike
-HYPOTHESIS: 12h Donchian(20) breakouts capture swing moves with lower trade frequency than 4h. 
-1d HMA(50) trend filter ensures alignment with daily momentum. Volume spike (>2.0x 20-period average) 
-confirms breakout strength. ATR-based trailing stop (2.5x) manages risk. Position size 0.25. 
-Target: 75-150 total trades over 4 years (19-37/year). Designed to work in both bull (trend 
-continuation) and bear (mean reversion from extremes) markets by using price channels and volatility 
-filters. Uses 1d as HTF for trend filter per experiment instructions.
+HYPOTHESIS: 12h Donchian(20) breakouts capture medium-term trends with low trade frequency (target: 50-150 trades over 4 years). 
+1d HMA(50) trend filter ensures alignment with daily momentum. Volume spike (>1.8x 20-period average) confirms breakout strength. 
+ATR-based trailing stop (2.0x) manages risk. Position size 0.25. Designed for both bull and bear markets: 
+- Bull: Donchian breakouts with trend continuation 
+- Bear: Mean reversion from extremes via Donchian re-entry exits. 
+Using 12h primary timeframe minimizes fee drag while capturing significant moves.
 """
 
 import numpy as np
@@ -87,8 +87,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2.0*ATR below highest since entry
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -101,8 +101,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2.0*ATR above lowest since entry
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -116,8 +116,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
+        # Require volume spike (> 1.8x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
             # 1d HMA trend filter: only long above HMA, short below HMA
@@ -145,5 +145,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
