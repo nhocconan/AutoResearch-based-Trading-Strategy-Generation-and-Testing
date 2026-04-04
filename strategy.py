@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4118: 1d Donchian(20) breakout + 1w EMA filter + volume confirmation
-HYPOTHESIS: 1d Donchian breakouts aligned with weekly EMA trend (1w EMA50) and volume confirmation capture institutional order flow. Weekly EMA acts as dynamic support/resistance filter - only take breakouts in direction of weekly trend. Works in bull/bear by using weekly EMA as trend filter. Target: 75-250 total trades over 4 years (19-62/year).
+Experiment #4118: 1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA trend (1w EMA50) and volume confirmation capture institutional order flow with low frequency. Weekly EMA acts as dynamic trend filter - only take breakouts in direction of weekly target. Works in bull/bear markets by using weekly EMA as trend filter. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
