@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5951: 6h Donchian(20) breakout + 1d pivot direction + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h aligned with daily pivot (price vs daily pivot) capture sustained moves.
-Daily pivot provides structural support/resistance from higher timeframe. Volume >1.5x average confirms breakout strength.
-ATR trailing stop manages risk. Target: 75-200 trades over 4 years (19-50/year) to minimize fee drift.
+Experiment #5951: 6h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: Donchian breakouts on 6h aligned with 1d Camarilla pivot levels (R3/S3 for fade, R4/S4 for breakout) capture institutional interest.
+Volume >1.5x average confirms participation. ATR trailing stop manages risk. Target: 75-200 trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5951_6h_donchian20_1d_pivot_vol_v1"
+name = "exp_5951_6h_donchian20_1d_camarilla_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -24,25 +23,37 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for daily pivot ===
+    # === HTF: 1d data for Camarilla pivot levels ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 1:
-        # Calculate daily pivot from prior day's OHLC
+    if len(df_1d) >= 2:
+        # Calculate Camarilla levels from prior day's OHLC
         high_1d = pd.Series(df_1d['high'].values)
         low_1d = pd.Series(df_1d['low'].values)
         close_1d = pd.Series(df_1d['close'].values)
         
-        # Prior day's OHLC
-        prior_high = high_1d.shift(1)
-        prior_low = low_1d.shift(1)
-        prior_close = close_1d.shift(1)
+        # Prior day's values (shifted by 1)
+        prev_high = high_1d.shift(1).values
+        prev_low = low_1d.shift(1).values
+        prev_close = close_1d.shift(1).values
         
-        # Daily pivot point: (H + L + C) / 3
-        daily_pivot = (prior_high + prior_low + prior_close) / 3.0
-        daily_pivot_values = daily_pivot.values
-        daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot_values)
+        # Camarilla levels
+        range_ = prev_high - prev_low
+        camarilla_h4 = prev_close + range_ * 1.1 / 2
+        camarilla_l4 = prev_close - range_ * 1.1 / 2
+        camarilla_h3 = prev_close + range_ * 1.1 / 4
+        camarilla_l3 = prev_close - range_ * 1.1 / 4
+        camarilla_h2 = prev_close + range_ * 1.1 / 6
+        camarilla_l2 = prev_close - range_ * 1.1 / 6
+        camarilla_h1 = prev_close + range_ * 1.1 / 12
+        camarilla_l1 = prev_close - range_ * 1.1 / 12
+        
+        # Align all levels to LTF
+        h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+        l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+        h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+        l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     else:
-        daily_pivot_aligned = np.full(n, np.nan)
+        h4_aligned = l4_aligned = h3_aligned = l3_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -71,7 +82,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 1) + 1  # Donchian, volume avg, ATR, pivot shift + 1
+    warmup = max(20, 20, 14, 2) + 1  # Donchian, volume avg, ATR, prior day + shift
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -83,7 +94,8 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(daily_pivot_aligned[i])):
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -95,7 +107,8 @@ def generate_signals(prices):
                 highest_since_entry = max(highest_since_entry, high[i])
                 stop_price = highest_since_entry - 2.5 * atr[i]
                 # Exit: stoploss OR price breaks below Donchian low (failed breakout)
-                if price <= stop_price or price <= donchian_low[i]:
+                # OR price reaches L3 (take profit at 75% of range)
+                if price <= stop_price or price <= donchian_low[i] or price <= l3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -105,7 +118,8 @@ def generate_signals(prices):
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 stop_price = lowest_since_entry + 2.5 * atr[i]
                 # Exit: stoploss OR price breaks above Donchian high (failed breakout)
-                if price >= stop_price or price >= donchian_high[i]:
+                # OR price reaches H3 (take profit at 75% of range)
+                if price >= stop_price or price >= donchian_high[i] or price >= h3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -118,15 +132,16 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # Pivot filter: price above/below daily pivot
-        above_pivot = price > daily_pivot_aligned[i]
-        below_pivot = price < daily_pivot_aligned[i]
+        # Camarilla filters:
+        # Long: breakout above H4 (strong breakout) OR bounce from L3 (mean reversion in range)
+        # Short: breakout below L4 (strong breakdown) OR bounce from H3 (mean reversion in range)
+        long_breakout = breakout_up and volume_confirmed and price > h4_aligned[i]
+        long_reversion = (price > l3_aligned[i] and price < l4_aligned[i]) and volume_confirmed and price > close[i-1]
+        long_setup = long_breakout or long_reversion
         
-        # Entry conditions: 
-        # Long: breakout up with volume AND above daily pivot
-        # Short: breakout down with volume AND below daily pivot
-        long_setup = breakout_up and volume_confirmed and above_pivot
-        short_setup = breakout_down and volume_confirmed and below_pivot
+        short_breakout = breakout_down and volume_confirmed and price < l4_aligned[i]
+        short_reversion = (price < h3_aligned[i] and price > h4_aligned[i]) and volume_confirmed and price < close[i-1]
+        short_setup = short_breakout or short_reversion
         
         if long_setup:
             in_position = True
