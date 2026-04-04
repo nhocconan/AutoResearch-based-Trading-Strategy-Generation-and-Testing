@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #6220: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR trailing stop
+Experiment #6221: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR trailing stop
 HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA trend capture medium-term momentum 
 while avoiding noise. Volume >2.0x average confirms institutional participation. 
 ATR trailing stop manages risk. Discrete sizing (0.25) balances return and fee drag. 
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6220_4h_donchian20_1d_ema_vol_v1"
+name = "exp_6221_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
