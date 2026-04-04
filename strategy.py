@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #2657: 4h Donchian(20) breakout + 1d/1w EMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 4h Donchian breakouts with 1d/1w trend alignment and volume spikes capture 
-institutional participation in both bull and bear markets. The strategy uses higher timeframes 
-for signal direction and 4h only for entry timing, minimizing overtrading. ATR-based stoploss 
-manages risk during volatile periods. Target: 75-200 total trades over 4 years.
+Experiment #2657: 4h Donchian(20) breakout + 1d/1w EMA trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts with 1d/1w EMA trend alignment and volume spikes capture 
+institutional participation across all market regimes. Using 4h primary timeframe targets 
+19-50 trades/year. Volume confirmation (>2.0x average) ensures institutional participation. 
+Trend filter uses 1d and 1w EMA(50) alignment for multi-timeframe consensus. 
+Stoploss uses 2x ATR(14) to manage risk in volatile markets.
 """
 
 import numpy as np
@@ -40,7 +41,7 @@ def generate_signals(prices):
     trend_1w = np.where(close_1w > ema_1w, 1, -1)
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # === 4h Indicators: Donchian(20) channels, Volume MA(20) ===
+    # === 4h Indicators: Donchian(20) channels, Volume MA(20), ATR(14) ===
     # Donchian channels (20-period high/low)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -50,11 +51,13 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === ATR(14) for stoploss ===
-    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
-    tr2 = np.maximum(np.abs(low[1:] - close[:-1]), tr1)
-    tr = np.concatenate([[np.nan], tr2])
-    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    # True Range and ATR(14)
+    tr1 = np.abs(high - low)
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar TR is just high-low
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -84,8 +87,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2*ATR below highest since entry
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -98,8 +101,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2*ATR above lowest since entry
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -113,7 +116,7 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require both 1d and 1w trend alignment for bias filter (more stringent)
+        # Require both 1d and 1w trend alignment for bias filter
         trend_bias_1d = trend_1d_aligned[i]
         trend_bias_1w = trend_1w_aligned[i]
         
@@ -122,8 +125,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: require volume spike (> 1.8x average)
-        volume_spike = vol_ratio[i] > 1.8
+        # Volume confirmation: require volume spike (> 2.0x average)
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # Long entry: price breaks above Donchian high with uptrend on both 1d and 1w
