@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #5459: 6h Donchian(20) breakout + 12h ADX trend filter + volume confirmation
-HYPOTHESIS: On 6h timeframe, price breaking above/below the 20-period Donchian channel with 
-volume > 1.8x average and aligned with the 12h ADX > 25 (trending market) captures strong 
+Experiment #5460: 4h Donchian(20) breakout + 1d EMA trend filter + volume confirmation
+HYPOTHESIS: On 4h timeframe, price breaking above/below the 20-period Donchian channel with 
+volume > 1.8x average and aligned with the 1d EMA50 (trending market) captures strong 
 momentum moves while avoiding choppy regimes. Discrete position sizing (0.25) and ATR-based 
-stoploss (2.0x ATR) control risk. Target: 12-37 trades/year (50-150 total over 4 years) 
+stoploss (2.0x ATR) control risk. Target: 19-50 trades/year (75-200 total over 4 years) 
 to minimize fee drag while maintaining statistical significance. Works in bull markets via 
-breakouts above rising ADX and in bear markets via short breakdowns below falling ADX.
+breakouts above rising EMA and in bear markets via short breakdowns below falling EMA.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5459_6h_donchian20_12h_adx_vol_v1"
-timeframe = "6h"
+name = "exp_5460_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,65 +27,28 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 12h data for ADX(14) ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 14:
-        high_12h = df_12h['high'].values
-        low_12h = df_12h['low'].values
-        close_12h = df_12h['close'].values
-        
-        # True Range
-        tr1 = high_12h - low_12h
-        tr2 = np.abs(high_12h - np.roll(close_12h, 1))
-        tr3 = np.abs(low_12h - np.roll(close_12h, 1))
-        tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr_12h[0] = tr1[0]
-        
-        # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
-        up_move = high_12h - np.roll(high_12h, 1)
-        down_move = np.roll(low_12h, 1) - low_12h
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
-        def WilderSmoothing(data, period):
-            result = np.full_like(data, np.nan)
-            if len(data) >= period:
-                result[period-1] = np.nansum(data[:period])
-                for i in range(period, len(data)):
-                    result[i] = result[i-1] - (result[i-1] / period) + data[i]
-            return result
-        
-        atr_12h = WilderSmoothing(tr_12h, 14)
-        plus_dm_smooth = WilderSmoothing(plus_dm, 14)
-        minus_dm_smooth = WilderSmoothing(minus_dm, 14)
-        
-        # Plus Directional Indicator (+DI) and Minus Directional Indicator (-DI)
-        plus_di_12h = np.where(atr_12h > 0, (plus_dm_smooth / atr_12h) * 100, 0)
-        minus_di_12h = np.where(atr_12h > 0, (minus_dm_smooth / atr_12h) * 100, 0)
-        
-        # Directional Index (DX) and ADX
-        dx_12h = np.where((plus_di_12h + minus_di_12h) > 0, 
-                          np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h) * 100, 0)
-        adx_12h = WilderSmoothing(dx_12h, 14)
-        
-        # Align to LTF (6h) with shift(1) for completed bars only
-        adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h) if len(adx_12h) > 0 else np.full(n, np.nan)
+    # === HTF: 1d data for EMA50 ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 50:
+        close_1d = df_1d['close'].values
+        ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+        # Align to LTF (4h) with shift(1) for completed bars only
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d) if len(ema_1d) > 0 else np.full(n, np.nan)
     else:
-        adx_12h_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Donchian Channel (20-period) ===
     # Upper band: 20-period high
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     # Lower band: 20-period low
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation ===
+    # === 4h Indicators: Volume confirmation ===
     # Average volume over 20 periods
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)  # Avoid division by zero
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -105,7 +68,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 20, 14, 14+14+14)  # Donchian, volume avg, ATR warmup, ADX (14+14+14 for Wilder smoothing)
+    warmup = max(20, 20, 20, 14)  # Donchian, volume avg, ATR warmup
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -119,15 +82,16 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or 
-            np.isnan(adx_12h_aligned[i])):
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- ADX trend bias (using prior ADX only) ---
-        # Trend filter: ADX > 25 indicates trending market
-        adx_trending = adx_12h_aligned[i] > 25
+        # --- EMA trend bias (using prior EMA only) ---
+        # Trend filter: price above EMA50 = bullish bias, below = bearish bias
+        ema_bullish = price > ema_1d_aligned[i]
+        ema_bearish = price < ema_1d_aligned[i]
         
         # --- Exit Logic: Close position on stoploss or trend reversal ---
         if in_position:
@@ -139,8 +103,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks below Donchian lower band (failed breakout)
-                # 3. ADX falls below 20 (trend weakening)
-                if price <= stop_price or price <= donchian_low[i] or adx_12h_aligned[i] < 20:
+                # 3. Price crosses below EMA50 (trend weakening)
+                if price <= stop_price or price <= donchian_low[i] or not ema_bullish:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -153,8 +117,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks above Donchian upper band (failed breakout)
-                # 3. ADX falls below 20 (trend weakening)
-                if price >= stop_price or price >= donchian_high[i] or adx_12h_aligned[i] < 20:
+                # 3. Price crosses above EMA50 (trend weakening)
+                if price >= stop_price or price >= donchian_high[i] or not ema_bearish:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -171,14 +135,14 @@ def generate_signals(prices):
         volume_confirmed = volume_ratio[i] > 1.8
         
         # Entry conditions
-        if breakout_up and volume_confirmed and adx_trending:
+        if breakout_up and volume_confirmed and ema_bullish:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif breakout_down and volume_confirmed and adx_trending:
+        elif breakout_down and volume_confirmed and ema_bearish:
             in_position = True
             position_side = -1
             entry_price = close[i]
