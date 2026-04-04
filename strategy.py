@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #5027: 6h Camarilla Pivot Reversal + 1d Trend Filter + Volume Confirmation
-HYPOTHESIS: On 6h timeframe, price reversals from Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) 
-in alignment with 1d trend (EMA50) and volume confirmation (>1.5x average) capture high-probability swing trades. 
-Designed for 12-37 trades/year on 6h timeframe to minimize fee drag while working in both bull (breakout continuation) 
-and bear (mean reversion at extremes) markets through adaptive logic based on 1d trend strength.
+Experiment #5028: 12h Donchian(20) Breakout + 1w HMA Trend + Volume Confirmation
+HYPOTHESIS: On 12h timeframe, Donchian channel breakouts (20-bar) aligned with 1-week HMA(21) trend 
+and volume confirmation (>1.5x average) capture high-probability swing trades. 
+In bull markets: breakouts in direction of weekly trend. In bear markets: only take breakouts 
+when price is above weekly HMA (avoiding false breakdowns). Designed for 12-37 trades/year on 12h 
+timeframe to minimize fee drag while working in both bull (breakout continuation) and bear 
+(selective long-only) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5027_6h_camarilla_pivot_1d_trend_vol_v1"
-timeframe = "6h"
+name = "exp_5028_12h_donchian20_1w_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,72 +24,87 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for trend filter and pivot calculation
+    # Precompute HTF: 1w data for HMA trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # === 1w Indicators: HMA(21) for trend filter ===
+    if len(df_1w) >= 21:
+        close_1w = df_1w['close'].values
+        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+        half_len = 21 // 2
+        sqrt_len = int(np.sqrt(21))
+        
+        def wma(arr, period):
+            if len(arr) < period:
+                return np.full_like(arr, np.nan)
+            weights = np.arange(1, period + 1)
+            return np.convolve(arr, weights / weights.sum(), mode='valid')
+        
+        wma_half = np.full_like(close_1w, np.nan)
+        wma_full = np.full_like(close_1w, np.nan)
+        
+        if len(close_1w) >= half_len:
+            wma_half[half_len-1:] = wma(close_1w, half_len)
+        if len(close_1w) >= 21:
+            wma_full[20:] = wma(close_1w, 21)
+        
+        raw_hma = 2 * wma_half - wma_full
+        hma_1w = np.full_like(raw_hma, np.nan)
+        if len(raw_hma) >= sqrt_len:
+            hma_1w[sqrt_len-1:] = wma(raw_hma[sqrt_len-1:], sqrt_len)
+    else:
+        hma_1w = np.full(len(df_1w), np.nan)
+    
+    # Align HTF HMA to 12h timeframe
+    if len(hma_1w) > 0:
+        hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    else:
+        hma_1w_aligned = np.full(n, np.nan)
+    
+    # Precompute HTF: 1d data for Donchian channel calculation (using previous day's data)
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d Indicators: EMA50 for trend filter ===
-    if len(df_1d) >= 50:
-        close_1d = df_1d['close'].values
-        ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    else:
-        ema_1d = np.full(len(df_1d), np.nan)
-    
-    # Align HTF EMA50 to 6h timeframe
-    if len(ema_1d) > 0:
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    else:
-        ema_1d_aligned = np.full(n, np.nan)
-    
-    # === 1d Indicators: Camarilla Pivot Levels (based on previous day) ===
-    # Camarilla formula: 
-    # R4 = close + ((high - low) * 1.1/2)
-    # R3 = close + ((high - low) * 1.1/4)
-    # R2 = close + ((high - low) * 1.1/6)
-    # R1 = close + ((high - low) * 1.1/12)
-    # PP = (high + low + close) / 3
-    # S1 = close - ((high - low) * 1.1/12)
-    # S2 = close - ((high - low) * 1.1/6)
-    # S3 = close - ((high - low) * 1.1/4)
-    # S4 = close - ((high - low) * 1.1/2)
-    
-    if len(df_1d) >= 2:
-        # Use previous day's OHLC to calculate today's pivot levels (no look-ahead)
+    # === 1d Indicators: Donchian Channel (20) based on previous day ===
+    if len(df_1d) >= 20:
         high_1d = df_1d['high'].values
         low_1d = df_1d['low'].values
-        close_1d = df_1d['close'].values
         
-        # Shift by 1 to use previous day's data for current day's levels
+        # Use previous day's data to avoid look-ahead
         high_prev = np.concatenate([[np.nan], high_1d[:-1]])
         low_prev = np.concatenate([[np.nan], low_1d[:-1]])
-        close_prev = np.concatenate([[np.nan], close_1d[:-1]])
         
-        # Calculate pivot levels based on previous day
-        pp = (high_prev + low_prev + close_prev) / 3.0
-        range_prev = high_prev - low_prev
+        # Calculate 20-period Donchian channels on previous day's data
+        def rolling_max(arr, window):
+            result = np.full_like(arr, np.nan)
+            for i in range(window-1, len(arr)):
+                result[i] = np.max(arr[i-window+1:i+1])
+            return result
         
-        r4 = close_prev + (range_prev * 1.1 / 2.0)
-        r3 = close_prev + (range_prev * 1.1 / 4.0)
-        s3 = close_prev - (range_prev * 1.1 / 4.0)
-        s4 = close_prev - (range_prev * 1.1 / 2.0)
+        def rolling_min(arr, window):
+            result = np.full_like(arr, np.nan)
+            for i in range(window-1, len(arr)):
+                result[i] = np.min(arr[i-window+1:i+1])
+            return result
+        
+        donch_high_prev = rolling_max(high_prev, 20)
+        donch_low_prev = rolling_min(low_prev, 20)
     else:
-        pp = r3 = s3 = r4 = s4 = np.full(len(df_1d), np.nan)
+        donch_high_prev = donch_low_prev = np.full(len(df_1d), np.nan)
     
-    # Align HTF Camarilla levels to 6h timeframe
-    if len(pp) > 0:
-        pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align HTF Donchian levels to 12h timeframe
+    if len(donch_high_prev) > 0:
+        donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high_prev)
+        donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low_prev)
     else:
-        pp_aligned = r3_aligned = s3_aligned = r4_aligned = s4_aligned = np.full(n, np.nan)
+        donch_high_aligned = np.full(n, np.nan)
+        donch_low_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Volume confirmation (1.5x spike) ===
+    # === 12h Indicators: Volume confirmation (1.5x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -109,8 +126,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(ema_1d_aligned[i]) or
+        if (np.isnan(hma_1w_aligned[i]) or np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -144,34 +160,30 @@ def generate_signals(prices):
         # Volume filter: confirmation (>1.5x)
         vol_confirm = vol_ratio[i] > 1.5
         
-        # Determine market regime based on 1d trend strength
-        # Strong trend: price > 1.02 * EMA50 (bullish) or price < 0.98 * EMA50 (bearish)
-        # Weak/ranging: price within 2% of EMA50
-        strong_uptrend = price > ema_1d_aligned[i] * 1.02
-        strong_downtrend = price < ema_1d_aligned[i] * 0.98
-        ranging_market = (price >= ema_1d_aligned[i] * 0.98) and (price <= ema_1d_aligned[i] * 1.02)
+        # Determine market regime based on 1w HMA trend
+        # Bullish: price > 1.01 * HMA (avoid whipsaws in strong uptrend)
+        # Bearish: price < 0.99 * HMA (avoid false breakdowns in downtrend)
+        bullish_regime = price > hma_1w_aligned[i] * 1.01
+        bearish_regime = price < hma_1w_aligned[i] * 0.99
         
-        # Adaptive logic based on regime:
-        # In strong trends: look for breakout continuation at R4/S4
-        # In ranging markets: look for mean reversion at R3/S3
+        # Long conditions: Donchian breakout above upper band
+        # In bullish regime: take all breakouts
+        # In bearish regime: only take breakouts if price is above HMA (avoid false signals)
+        long_breakout = (price >= donch_high_aligned[i]) and vol_confirm and (bullish_regime or price > hma_1w_aligned[i])
         
-        # Long conditions
-        long_breakout = strong_uptrend and (price >= r4_aligned[i]) and vol_confirm
-        long_reversion = ranging_market and (price <= s3_aligned[i]) and vol_confirm
-        
-        # Short conditions
-        short_breakout = strong_downtrend and (price <= s4_aligned[i]) and vol_confirm
-        short_reversion = ranging_market and (price >= r3_aligned[i]) and vol_confirm
+        # Short conditions: Donchian breakdown below lower band
+        # Only take shorts in bearish regime when price is below HMA
+        short_breakout = (price <= donch_low_aligned[i]) and vol_confirm and bearish_regime and (price < hma_1w_aligned[i])
         
         # Final entry conditions
-        if long_breakout or long_reversion:
+        if long_breakout:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif short_breakout or short_reversion:
+        elif short_breakout:
             in_position = True
             position_side = -1
             entry_price = close[i]
