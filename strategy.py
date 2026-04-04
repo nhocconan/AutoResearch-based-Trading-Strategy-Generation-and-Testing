@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4499: 6h Donchian(20) Breakout + 12h Supertrend + Volume Confirmation
-HYPOTHESIS: 6h Donchian(20) breakouts aligned with 12h Supertrend direction and confirmed by volume (>2.0x average) capture medium-term momentum with reduced whipsaws. Supertrend on 12h provides robust trend filtering that works in both bull and bear markets by adapting to volatility. Volume filters low-conviction moves. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25. The 6h timeframe reduces noise while the 12h Supertrend ensures alignment with higher timeframe trend.
+HYPOTHESIS: 6h Donchian(20) breakouts aligned with 12h Supertrend direction and confirmed by volume (>2.0x average) capture medium-term momentum with reduced whipsaws. Supertrend provides adaptive trend following that works in both bull and bear markets by adjusting to volatility. Volume filters ensure only high-conviction breakouts are traded. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25. This avoids overtrading seen in recent 6h strategies by adding stricter trend filter (Supertrend) and higher volume threshold.
 """
 
 import numpy as np
@@ -26,11 +26,12 @@ def generate_signals(prices):
     # === Precompute HTF: 12h data for Supertrend ===
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) >= 1:
-        high_12h = df_12h['high'].values
-        low_12h = df_12h['low'].values
-        close_12h = df_12h['close'].values
+        # Calculate Supertrend on 12h data
+        high_12h = df_12h['high'].values.astype(np.float64)
+        low_12h = df_12h['low'].values.astype(np.float64)
+        close_12h = df_12h['close'].values.astype(np.float64)
         
-        # Calculate ATR(10) for Supertrend
+        # ATR(10) for Supertrend
         tr1_12h = high_12h[1:] - low_12h[1:]
         tr2_12h = np.abs(high_12h[1:] - close_12h[:-1])
         tr3_12h = np.abs(low_12h[1:] - close_12h[:-1])
@@ -38,63 +39,56 @@ def generate_signals(prices):
         atr_12h = pd.Series(tr_12h).ewm(span=10, min_periods=10, adjust=False).mean().values
         
         # Supertrend parameters
-        atr_mult = 3.0
+        atr_multiplier = 3.0
+        period = 10
         
         # Basic upper and lower bands
         hl2_12h = (high_12h + low_12h) / 2.0
-        upper_band_12h = hl2_12h + (atr_mult * atr_12h)
-        lower_band_12h = hl2_12h - (atr_mult * atr_12h)
+        upper_band_12h = hl2_12h + (atr_multiplier * atr_12h)
+        lower_band_12h = hl2_12h - (atr_multiplier * atr_12h)
         
         # Initialize Supertrend arrays
         supertrend_12h = np.full_like(close_12h, np.nan)
         direction_12h = np.full_like(close_12h, np.nan)  # 1 for uptrend, -1 for downtrend
         
         # Calculate Supertrend
-        for i in range(1, len(close_12h)):
-            if np.isnan(atr_12h[i]) or np.isnan(upper_band_12h[i]) or np.isnan(lower_band_12h[i]):
-                continue
-                
+        for i in range(period, len(close_12h)):
             # Upper band logic
-            if close_12h[i-1] <= upper_band_12h[i-1]:
-                upper_band_12h[i] = min(upper_band_12h[i], upper_band_12h[i-1])
-            else:
+            if upper_band_12h[i] < upper_band_12h[i-1] or close_12h[i-1] > upper_band_12h[i-1]:
                 upper_band_12h[i] = upper_band_12h[i]
-                
+            else:
+                upper_band_12h[i] = upper_band_12h[i-1]
+            
             # Lower band logic
-            if close_12h[i-1] >= lower_band_12h[i-1]:
-                lower_band_12h[i] = max(lower_band_12h[i], lower_band_12h[i-1])
-            else:
+            if lower_band_12h[i] > lower_band_12h[i-1] or close_12h[i-1] < lower_band_12h[i-1]:
                 lower_band_12h[i] = lower_band_12h[i]
-                
-            # Supertrend logic
-            if i == 1:
-                # Initialize first value
-                if close_12h[i] > upper_band_12h[i]:
-                    direction_12h[i] = -1  # downtrend
-                    supertrend_12h[i] = upper_band_12h[i]
-                else:
-                    direction_12h[i] = 1   # uptrend
-                    supertrend_12h[i] = lower_band_12h[i]
             else:
-                if direction_12h[i-1] == 1:  # previous uptrend
-                    if close_12h[i] <= supertrend_12h[i-1]:
-                        direction_12h[i] = -1  # change to downtrend
+                lower_band_12h[i] = lower_band_12h[i-1]
+            
+            # Supertrend logic
+            if i == period:
+                supertrend_12h[i] = upper_band_12h[i]
+                direction_12h[i] = 1
+            else:
+                if supertrend_12h[i-1] == upper_band_12h[i-1]:
+                    if close_12h[i] <= upper_band_12h[i]:
                         supertrend_12h[i] = upper_band_12h[i]
+                        direction_12h[i] = 1
                     else:
-                        direction_12h[i] = 1   # remain uptrend
-                        supertrend_12h[i] = max(lower_band_12h[i], supertrend_12h[i-1])
-                else:  # previous downtrend
-                    if close_12h[i] >= supertrend_12h[i-1]:
-                        direction_12h[i] = 1   # change to uptrend
                         supertrend_12h[i] = lower_band_12h[i]
+                        direction_12h[i] = -1
+                else:
+                    if close_12h[i] >= lower_band_12h[i]:
+                        supertrend_12h[i] = lower_band_12h[i]
+                        direction_12h[i] = -1
                     else:
-                        direction_12h[i] = -1  # remain downtrend
-                        supertrend_12h[i] = min(upper_band_12h[i], supertrend_12h[i-1])
+                        supertrend_12h[i] = upper_band_12h[i]
+                        direction_12h[i] = 1
         
         # Align Supertrend direction to 6h timeframe
-        supertrend_dir_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
+        direction_12h_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
     else:
-        supertrend_dir_aligned = np.full(n, np.nan)
+        direction_12h_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
@@ -125,12 +119,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 10)  # Donchian, vol MA, ATR, Supertrend init
+    warmup = max(20, 20, 14, 10)  # Donchian, vol MA, ATR, Supertrend
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(supertrend_dir_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(direction_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -166,12 +160,12 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 2.0x average) to filter noise
+        # Require volume confirmation (> 2.0x average) to filter noise - increased threshold
         volume_confirm = vol_ratio[i] > 2.0
         
-        # Supertrend bias: 1 = uptrend (long bias), -1 = downtrend (short bias)
-        long_bias = supertrend_dir_aligned[i] == 1
-        short_bias = supertrend_dir_aligned[i] == -1
+        # 12h Supertrend direction: 1 = uptrend (long bias), -1 = downtrend (short bias)
+        long_bias = direction_12h_aligned[i] > 0
+        short_bias = direction_12h_aligned[i] < 0
         
         # Donchian breakout conditions
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
