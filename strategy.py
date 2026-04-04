@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #4194: 1h Donchian(20) breakout + 4h/1d EMA trend + volume confirmation + session filter
-HYPOTHESIS: Donchian breakouts on 1h capture momentum when aligned with 4h and 1d EMA trends,
-confirmed by volume (>1.5x average) and restricted to active session (08-20 UTC). Uses 4h/1d for
-signal direction, 1h only for entry timing. Target: 60-150 total trades over 4 years (15-37/year).
-Discrete position size 0.20 minimizes fee churn. Works in bull/bear via EMA trend filter.
+Experiment #4193: 4h Donchian(20) breakout + 12h EMA(50) trend + volume confirmation
+HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture significant momentum moves
+when aligned with 12h EMA(50) trend (price above EMA = bullish, below = bearish)
+and confirmed by volume spikes (>1.8x average). Uses discrete position sizing (0.25)
+to limit fee churn and targets 75-200 total trades over 4 years (19-50/year).
+12h EMA provides intermediate-term trend bias that works in both bull/bear markets by
+identifying the primary trend direction where breakouts are more likely to succeed.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4194_1h_donchian20_4h1d_ema_vol_sess_v1"
-timeframe = "1h"
+name = "exp_4193_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,28 +24,16 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute session hours (08-20 UTC) once before loop
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    
-    # === Precompute HTF: 4h and 1d data for EMA(50) trend ===
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    if len(df_4h) >= 50:
-        close_4h = df_4h['close'].values
-        ema_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # === Precompute HTF: 12h data for EMA(50) trend ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) >= 50:
+        close_12h = df_12h['close'].values
+        ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     else:
-        ema_4h_aligned = np.full(n, np.nan)
+        ema_12h_aligned = np.full(n, np.nan)
     
-    if len(df_1d) >= 50:
-        close_1d = df_1d['close'].values
-        ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    else:
-        ema_1d_aligned = np.full(n, np.nan)
-    
-    # === 1h Indicators: Donchian Channel (20) ===
+    # === 4h Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -51,12 +41,12 @@ def generate_signals(prices):
     
     donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
-    # === 1h Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -65,7 +55,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -77,16 +67,9 @@ def generate_signals(prices):
     warmup = max(20, 20, 50)  # Donchian, vol MA, EMA
     
     for i in range(warmup, n):
-        # --- Session Filter: 08-20 UTC ---
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        if not in_session:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -116,17 +99,17 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume confirmation (> 1.8x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.8
         
         if volume_confirm:
             # Donchian breakout conditions
             breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
             breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
             
-            # 4h and 1d EMA trend bias: both must agree
-            bullish_bias = (price > ema_4h_aligned[i]) and (price > ema_1d_aligned[i])
-            bearish_bias = (price < ema_4h_aligned[i]) and (price < ema_1d_aligned[i])
+            # 12h EMA trend bias: price above EMA = bullish, below = bearish
+            bullish_bias = price > ema_12h_aligned[i]
+            bearish_bias = price < ema_12h_aligned[i]
             
             # Long conditions: Donchian breakout up + bullish bias + volume confirmation
             long_entry = breakout_up and bullish_bias
