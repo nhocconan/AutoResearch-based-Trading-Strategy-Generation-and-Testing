@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 exp_6555_6h_donchian20_1w_pivot_vol_v1
-Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation.
-Weekly pivot provides long-term trend bias (bullish/bearish) that works across market regimes.
-Volume spike (2.0x 20-period MA) confirms breakout authenticity.
+Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
+Weekly pivot (calculated from prior week's OHLC) provides structural bias: long above weekly pivot, short below.
+Donchian breakout confirms momentum in direction of weekly bias. Volume spike (2.0x 20-period MA) validates breakout.
 Designed for 75-150 total trades over 4 years with discrete sizing (0.25) to minimize fee drag.
+Works in bull/bear: weekly pivot adapts to longer-term structure, avoiding whipsaws in ranging markets.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -17,7 +18,6 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-PIVOT_LOOKBACK = 5  # days for weekly pivot calculation
 VOL_MA_PERIOD = 20
 VOL_THRESHOLD = 2.0     # volume must be 2.0x its 20-period MA
 SIGNAL_SIZE = 0.25      # 25% position size
@@ -30,19 +30,14 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop - using 1w for weekly pivot
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H
+    # Calculate weekly pivot points: P = (H+L+C)/3
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    
-    pivot_point = (high_1w + low_1w + close_1w) / 3.0
-    r1 = 2 * pivot_point - low_1w
-    s1 = 2 * pivot_point - high_1w
+    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
     
     # Align to LTF (6h) with shift(1) for completed bars only
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -66,27 +61,23 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
+        if np.isnan(weekly_pivot_aligned[i]):
             continue
             
-        # Determine weekly trend bias
-        weekly_bullish = close[i] > pivot_aligned[i]   # price above weekly pivot = bullish bias
-        weekly_bearish = close[i] < pivot_aligned[i]   # price below weekly pivot = bearish bias
-        
-        # Long conditions: weekly bullish bias + breaks above Donchian HIGH + volume spike
-        long_bias = weekly_bullish
+        # Long conditions: price > weekly pivot (bullish bias) + breaks above Donchian HIGH + volume spike
+        long_bias = close[i] > weekly_pivot_aligned[i]  # price above weekly pivot
         long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
         long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Short conditions: weekly bearish bias + breaks below Donchian LOW + volume spike
-        short_bias = weekly_bearish
+        # Short conditions: price < weekly pivot (bearish bias) + breaks below Donchian LOW + volume spike
+        short_bias = close[i] < weekly_pivot_aligned[i]  # price below weekly pivot
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Exit conditions: weekly pivot reversal or Donchian midpoint reversal
         if position == 1:  # long position
-            # Exit if price drops back below weekly pivot (trend change)
-            exit_long = close[i] < pivot_aligned[i]
+            # Exit if price drops back below weekly pivot (bias change)
+            exit_long = close[i] < weekly_pivot_aligned[i]
             # Or if price drops below Donchian midpoint
             exit_long = exit_long or close[i] < (donchian_high[i-1] + donchian_low[i-1]) / 2
             if exit_long:
@@ -94,8 +85,8 @@ def generate_signals(prices):
                 position = 0
                 continue
         elif position == -1:  # short position
-            # Exit if price rises back above weekly pivot (trend change)
-            exit_short = close[i] > pivot_aligned[i]
+            # Exit if price rises back above weekly pivot (bias change)
+            exit_short = close[i] > weekly_pivot_aligned[i]
             # Or if price rises above Donchian midpoint
             exit_short = exit_short or close[i] > (donchian_high[i-1] + donchian_low[i-1]) / 2
             if exit_short:
