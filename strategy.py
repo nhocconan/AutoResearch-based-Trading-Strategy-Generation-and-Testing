@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #5625: 12h Donchian(20) breakout + 1d volume spike + ADX regime filter
-HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts with volume > 2.0x average and aligned 
-with 1d ADX(14) > 25 (strong trend) capture high-probability trend continuation moves. 
-The 1d ADX filter ensures we only trade in strong trending regimes, reducing whipsaws 
-in choppy markets. Volume confirmation validates breakout strength. Works in both bull 
-and bear markets by trading breakouts in the direction of the 1d trend. 
-ATR-based trailing stop (2.0x ATR) manages risk. Discrete position sizing (0.25) 
-minimizes fee churn. Target: 12-37 trades/year (50-150 total over 4 years).
+Experiment #5627: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
+HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts with volume > 1.8x average, aligned with 
+weekly pivot direction (price above/below weekly pivot point), capture high-probability trend 
+continuation moves. Weekly pivot from 1w timeframe acts as a structural bias filter, reducing 
+whipsaws in ranging markets. Volume confirmation validates breakout strength. Works in both 
+bull and bear markets by trading breakouts in the direction of the weekly pivot bias. 
+ATR-based trailing stop (2.0x ATR) manages risk. Discrete position sizing (0.25) minimizes 
+fee churn. Target: 12-37 trades/year (50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5625_12h_donchian20_1d_adx_vol_v1"
-timeframe = "12h"
+name = "exp_5627_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,50 +28,28 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for ADX(14) trend strength ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 14:
-        # Calculate ADX(14) on 1d data
-        high_1d = pd.Series(df_1d['high'].values)
-        low_1d = pd.Series(df_1d['low'].values)
-        close_1d = pd.Series(df_1d['close'].values)
-        
-        # True Range
-        tr1 = high_1d - low_1d
-        tr2 = np.abs(high_1d - close_1d.shift(1))
-        tr3 = np.abs(low_1d - close_1d.shift(1))
-        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr_1d = tr.rolling(window=14, min_periods=14).mean()
-        
-        # Directional Movement
-        up_move = high_1d - high_1d.shift(1)
-        down_move = low_1d.shift(1) - low_1d
-        
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        plus_di = 100 * (pd.Series(plus_dm).rolling(window=14, min_periods=14).mean() / atr_1d)
-        minus_di = 100 * (pd.Series(minus_dm).rolling(window=14, min_periods=14).mean() / atr_1d)
-        
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = dx.rolling(window=14, min_periods=14).mean()
-        
-        adx_values = adx.values
+    # === HTF: 1w data for weekly pivot point (using prior completed week) ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 1:
+        # Calculate weekly pivot point: (Prior week High + Low + Close) / 3
+        weekly_high = df_1w['high'].values
+        weekly_low = df_1w['low'].values
+        weekly_close = df_1w['close'].values
+        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+        # Align to 6h timeframe (prior week's pivot for current week bias)
+        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     else:
-        adx_values = np.full(len(df_1d), np.nan)
+        weekly_pivot_aligned = np.full(n, np.nan)
     
-    # Align 1d ADX to 12h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_values)
-    
-    # === 12h Indicators: Donchian Channel (20-period) ===
+    # === 6h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation ===
+    # === 6h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 12h Indicators: ATR(14) for trailing stop ===
+    # === 6h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -102,7 +80,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(adx_1d_aligned[i])):
+            np.isnan(weekly_pivot_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -113,8 +91,8 @@ def generate_signals(prices):
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
                 stop_price = highest_since_entry - 2.0 * atr[i]
-                # Exit: stoploss OR ADX weakens (< 20) OR price breaks below Donchian low
-                if price <= stop_price or adx_1d_aligned[i] < 20 or price <= donchian_low[i]:
+                # Exit: stoploss OR price breaks below Donchian low OR price crosses below weekly pivot
+                if price <= stop_price or price <= donchian_low[i] or price < weekly_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -123,8 +101,8 @@ def generate_signals(prices):
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 stop_price = lowest_since_entry + 2.0 * atr[i]
-                # Exit: stoploss OR ADX weakens (< 20) OR price breaks above Donchian high
-                if price >= stop_price or adx_1d_aligned[i] < 20 or price >= donchian_high[i]:
+                # Exit: stoploss OR price breaks above Donchian high OR price crosses above weekly pivot
+                if price >= stop_price or price >= donchian_high[i] or price > weekly_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -135,14 +113,14 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 2.0
-        strong_trend = adx_1d_aligned[i] > 25
+        volume_confirmed = volume_ratio[i] > 1.8
+        # Weekly pivot bias: long if price above pivot, short if below
+        long_bias = price > weekly_pivot_aligned[i]
+        short_bias = price < weekly_pivot_aligned[i]
         
-        # Trend filter: breakout in direction of strong 1d trend
-        # Long: breakout above Donchian high with strong uptrend (ADX > 25)
-        # Short: breakout below Donchian low with strong downtrend (ADX > 25)
-        long_setup = breakout_up and volume_confirmed and strong_trend
-        short_setup = breakout_down and volume_confirmed and strong_trend
+        # Entry: breakout in direction of weekly pivot bias with volume confirmation
+        long_setup = breakout_up and volume_confirmed and long_bias
+        short_setup = breakout_down and volume_confirmed and short_bias
         
         if long_setup:
             in_position = True
@@ -162,3 +140,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
