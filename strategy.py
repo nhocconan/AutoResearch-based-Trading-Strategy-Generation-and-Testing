@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #2891: 6h Williams %R + 1d Trend Filter + Volume Confirmation
-HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h.
-Only take trades in direction of 1d EMA50 trend: long when price > EMA50, short when price < EMA50.
-Volume spike (>1.8x 20-period average) confirms momentum. This avoids counter-trend
-whipsaws in ranging markets while capturing strong trending moves. 6h timeframe
-provides sufficient signal quality with controlled trade frequency.
+Experiment #2892: 12h Donchian Breakout + Daily Pivot Direction + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture medium-term trends with lower trade frequency.
+Daily pivot (from 1d data) provides directional bias: only take long breakouts when daily pivot shows bullish bias (price > daily pivot), and short breakouts when bearish (price < daily pivot). Volume spike (>1.5x 20-period average) confirms breakout strength. This combination filters false breakouts in choppy markets while capturing strong trends in both bull and bear regimes. 12h timeframe minimizes fee drag while maintaining sufficient trades for statistical validity.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2891_6h_williamsr_1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_2892_12h_donchian20_1d_pivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,28 +20,25 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA50 trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for daily pivot calculation (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on daily closes
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate daily pivot from OHLC: Pivot = (High + Low + Close) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     
-    # Align to 6h timeframe (shifted by 1 for completed bars only)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Align to 12h timeframe (shifted by 1 for completed bars only)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
-    # === 6h Indicators: Williams %R(14) ===
-    lookback = 14
+    # === 12h Indicators: Donchian channels (20-period) ===
+    lookback = 20
+    # Rolling max/min for Donchian channels
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = np.full(n, np.nan)
-    denominator = highest_high - lowest_low
-    mask = denominator != 0
-    williams_r[mask] = ((highest_high[mask] - close[mask]) / denominator[mask]) * -100
-    
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -57,13 +51,15 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
     warmup = max(50, lookback, 20)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(williams_r[i]) or np.isnan(ema50_1d_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(pivot_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -71,16 +67,33 @@ def generate_signals(prices):
         
         # --- Exit Logic ---
         if in_position:
-            # Exit conditions: Williams %R returns to neutral zone (between -20 and -80)
+            # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
-                if williams_r[i] > -20:  # Exited overbought
+                highest_since_entry = max(highest_since_entry, high[i])
+                # Exit if price drops 2.5*ATR below highest since entry
+                # Use 12h ATR(14) approximation from price range
+                atr_estimate = (high[i] - low[i]) * 0.5
+                if price < highest_since_entry - 2.5 * atr_estimate:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price re-enters Donchian channel (mean reversion)
+                elif price <= highest_high[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
-                if williams_r[i] < -80:  # Exited oversold
+                lowest_since_entry = min(lowest_since_entry, low[i])
+                # Exit if price rises 2.5*ATR above lowest since entry
+                atr_estimate = (high[i] - low[i]) * 0.5
+                if price > lowest_since_entry + 2.5 * atr_estimate:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price re-enters Donchian channel (mean reversion)
+                elif price >= lowest_low[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -89,24 +102,28 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) for confirmation
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume spike (> 1.5x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Get 1d trend filter: price vs EMA50
-            price_above_ema = price > ema50_1d_aligned[i]
+            # Get daily pivot bias
+            price_vs_pivot = price - pivot_aligned[i]
             
-            # Long entry: Williams %R oversold (< -80) AND bullish trend (price > EMA50)
-            if williams_r[i] < -80 and price_above_ema:
+            # Long entry: price breaks above Donchian high with bullish daily bias
+            if price > highest_high[i] and price_vs_pivot > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Williams %R overbought (> -20) AND bearish trend (price < EMA50)
-            elif williams_r[i] > -20 and not price_above_ema:
+            # Short entry: price breaks below Donchian low with bearish daily bias
+            elif price < lowest_low[i] and price_vs_pivot < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
@@ -114,5 +131,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
