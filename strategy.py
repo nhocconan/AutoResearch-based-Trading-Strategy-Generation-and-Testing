@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #3893: 4h Donchian(20) breakout + 12h EMA trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA-50 trend capture medium-term momentum with reduced whipsaw. 
-Volume > 1.5x MA(30) confirms participation. ATR(14) trailing stop (2.0x) manages risk. 
-In bull markets (price above 12h EMA), buy breakouts; in bear markets (price below 12h EMA), short breakdowns.
-Target: 75-200 trades over 4 years (19-50/year).
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA-20 trend capture medium-term momentum with reduced whipsaw.
+Volume > 1.4x MA(20) confirms participation. ATR(14) trailing stop (2.0x) manages risk.
+In bull markets (price above EMA), buy breakouts; in bear markets (price below EMA), short breakdowns.
+Target: 75-200 trades over 4 years (19-50/year). Works in both bull and bear via EMA filter.
 """
 
 import numpy as np
@@ -24,7 +24,7 @@ def generate_signals(prices):
     
     # === HTF: 12h data for EMA trend ===
     df_12h = get_htf_data(prices, '12h')
-    ema_period = 50
+    ema_period = 20
     ema_values = pd.Series(df_12h['close'].values).ewm(span=ema_period, adjust=False).mean().values
     ema_aligned = align_htf_to_ltf(prices, df_12h, ema_values)
     
@@ -33,10 +33,10 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 4h Indicators: Volume MA(30) for spike detection ===
-    vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
+    # === 4h Indicators: Volume MA(20) for spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
-    vol_ratio[30:] = volume[30:] / vol_ma[30:]
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === 4h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
@@ -56,7 +56,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 30, ema_period)
+    warmup = max(lookback_dc + 1, 20, ema_period)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -101,8 +101,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.5x average) to filter noise
-        volume_spike = vol_ratio[i] > 1.5
+        # Require volume spike (> 1.4x average) to filter noise
+        volume_spike = vol_ratio[i] > 1.4
         
         if volume_spike:
             # Determine trend: bullish if price above 12h EMA, bearish if below
