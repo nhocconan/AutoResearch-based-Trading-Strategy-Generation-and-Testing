@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #6205: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with daily EMA trend capture medium-term momentum 
-while avoiding noise. Volume >1.5x average confirms participation. ATR trailing stop manages risk. 
-Discrete sizing (0.25) balances return and fee drag. Target: 75-200 trades over 4 years (19-50/year) 
+Experiment #6205: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR trailing stop
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA trend capture medium-term momentum 
+while avoiding noise. Volume >1.8x average confirms participation. ATR trailing stop manages risk. 
+Discrete sizing (0.25) balances return and fee drag. Target: 75-150 trades over 4 years (19-37/year) 
 for 12h timeframe. Works in bull/bear via trend filter and strict entry conditions.
 Timeframe: 12h. HTF: 1d for EMA trend filter.
 """
@@ -106,7 +106,7 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.5  # Volume filter for stronger signals
+        volume_confirmed = volume_ratio[i] > 1.8  # Volume filter for stronger signals
         
         # 1d EMA21 trend filter: price relative to EMA21
         bullish_trend = price > ema_1d_aligned[i]
