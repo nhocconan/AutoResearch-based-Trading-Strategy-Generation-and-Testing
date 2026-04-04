@@ -5,7 +5,7 @@ Hypothesis: 12h Donchian(20) breakout with 1w HMA(21) trend filter and volume co
 In bull markets: buy breakouts above upper Donchian when 1w HMA is rising.
 In bear markets: sell breakdowns below lower Donchian when 1w HMA is falling.
 Volume confirmation ensures breakout legitimacy. ATR-based stoploss limits drawdown.
-Designed for 12h timeframe to capture medium-term swings with ~12-37 trades/year.
+Designed for 12h timeframe to capture long-term swings with ~12-37 trades/year.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -19,11 +19,11 @@ leverage = 1.0
 # Parameters
 DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5
+VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 4  # ~2 weeks (12h bars)
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 12  # ~6 days (12h bars)
 
 def generate_signals(prices):
     n = len(prices)
