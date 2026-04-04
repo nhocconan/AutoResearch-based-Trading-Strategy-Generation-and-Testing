@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4320: 4h Donchian(20) breakout + 1d HMA(50) trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 4h timeframe capture swing momentum when aligned with 1d HMA50 trend (price > HMA50 for longs, < HMA50 for shorts) and confirmed by volume (>2.0x average). Uses 1d HMA for smoother trend filter (less whipsaw than shorter periods) while targeting 75-200 total trades over 4 years (19-50/year). ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 75-200 total trades over 4 years (19-50/year). Works in bull via breakout continuation, in bear via shorting breakdowns.
+Experiment #4321: 4h Donchian(20) breakout + 1d HMA(50) trend + volume confirmation + chop filter
+HYPOTHESIS: Adding a choppiness regime filter (CHOP > 61.8 = range, < 38.2 = trend) to the Donchian breakout strategy reduces whipsaw in ranging markets, improving trade quality and reducing overtrading. Targets 75-200 total trades over 4 years by requiring volume > 2.0x average and alignment with 1d HMA50 trend. ATR trailing stop (2.5x) manages risk. Position size 0.25 aims for 19-50 trades/year. Works in bull via breakout continuation, in bear via shorting breakdowns, and avoids chop-induced losses.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4320_4h_donchian20_1d_hma_vol_v1"
+name = "exp_4321_4h_donchian20_1d_hma_vol_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -57,6 +57,20 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
+    # === 4h Indicators: Choppiness Index (14) for regime filter ===
+    def calculate_chop(high, low, close, period=14):
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        atr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+        highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+        return chop
+    
+    chop = calculate_chop(high, low, close, 14)
+    
     # === Signals Initialization ===
     signals = np.zeros(n)
     SIZE = 0.25  # 25% position size
@@ -68,12 +82,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, 1d HMA
+    warmup = max(20, 20, 14, 50, 14)  # Donchian, vol MA, ATR, 1d HMA, chop
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(hma_1d_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(hma_1d_aligned[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -111,8 +125,10 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         # Require volume confirmation (> 2.0x average) to filter noise
         volume_confirm = vol_ratio[i] > 2.0
+        # Require trending regime (CHOP < 38.2) to avoid whipsaw in chop
+        trending_regime = chop[i] < 38.2
         
-        if volume_confirm:
+        if volume_confirm and trending_regime:
             # Donchian breakout conditions (using previous bar's levels)
             breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
             breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
