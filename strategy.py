@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #5823: 4h Donchian(20) breakout + 12h/1d HTF regime + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA25 trend and 1d weekly pivot regime capture institutional flow with proper frequency (target: 75-200 trades/4 years). Volume confirmation filters false breakouts. ATR-based trailing stop manages risk. Dual HTF regime filter works in bull markets (breakouts with bullish HTF bias) and avoids false signals in bear via price > EMA25 and price > weekly pivot for longs (reverse for shorts). Discrete position sizing (0.25) minimizes fee churn. Timeframe: 4h.
+HYPOTHESIS: 4h Donchian breakouts aligned with both 12h EMA20 trend and 1d EMA50 trend capture institutional flow with proper frequency. Volume confirmation filters false breakouts. ATR-based trailing stop manages risk. Dual HTF regime filter reduces false signals in bear markets. Discrete position sizing (0.25) minimizes fee churn. Targets 75-200 trades over 4 years. Works in bull markets (breakouts with bullish HTF bias) and avoids false signals in bear via dual HTF regime filter.
 """
 
 import numpy as np
@@ -22,24 +22,21 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 12h data for EMA25 trend ===
+    # === HTF: 12h data for EMA20 trend ===
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 25:
-        ema_12h = pd.Series(df_12h['close'].values).ewm(span=25, min_periods=25, adjust=False).mean().values
+    if len(df_12h) >= 20:
+        ema_12h = pd.Series(df_12h['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
     else:
         ema_12h = np.full(len(df_12h), np.nan)
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # === HTF: 1d data for weekly pivot regime ===
+    # === HTF: 1d data for EMA50 trend ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 1:
-        weekly_high = df_1d['high'].values
-        weekly_low = df_1d['low'].values
-        weekly_close = df_1d['close'].values
-        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     else:
-        weekly_pivot = np.full(len(df_1d), np.nan)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+        ema_1d = np.full(len(df_1d), np.nan)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -68,7 +65,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 25, 1, 14)  # Donchian, volume avg, EMA25, weekly pivot, ATR
+    warmup = max(20, 20, 20, 50, 14)  # Donchian, volume avg, EMA20, EMA50, ATR
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -80,7 +77,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_12h_aligned[i]) or np.isnan(weekly_pivot_aligned[i])):
+            np.isnan(ema_12h_aligned[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -114,9 +111,9 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
-        # Dual regime filter: 12h EMA25 trend + 1d weekly pivot bias
-        regime_long = (price > ema_12h_aligned[i]) and (price > weekly_pivot_aligned[i])
-        regime_short = (price < ema_12h_aligned[i]) and (price < weekly_pivot_aligned[i])
+        # Dual regime filter: 12h EMA20 trend + 1d EMA50 trend
+        regime_long = (price > ema_12h_aligned[i]) and (price > ema_1d_aligned[i])
+        regime_short = (price < ema_12h_aligned[i]) and (price < ema_1d_aligned[i])
         
         # Entry conditions: breakout in direction of dual HTF regime with volume confirmation
         long_setup = breakout_up and regime_long and volume_confirmed
