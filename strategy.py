@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3975: 6h Donchian(20) breakout + 1w Camarilla pivot regime + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with weekly Camarilla pivot levels capture multi-week swings. 
-Weekly Camarilla levels (R3/S3 = fade zone, R4/S4 = breakout zone) provide institutional reference points. 
-Volume > 2.0x MA(20) confirms breakout strength. ATR(14) trailing stop (2.5x) manages risk. 
-Discrete sizing (0.25) reduces fee drag. Target: 75-200 trades over 4 years (19-50/year). 
-Works in bull/bear via weekly Camarilla regime filter (price above/below weekly pivot).
+Experiment #3976: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA50 trend (price above EMA50 = bullish bias, below = bearish) capture multi-week swings with low frequency. Volume > 2.0x MA(20) confirms breakout strength. ATR(14) trailing stop (2.5x) manages risk. Discrete sizing (0.25) reduces fee drag. Target: 50-150 trades over 4 years (12-37/year). Works in bull/bear via 1d EMA50 regime filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3975_6h_donchian20_1w_camarilla_vol_v1"
-timeframe = "6h"
+name = "exp_3976_12h_donchian20_1d_ema50_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,39 +19,22 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w Camarilla pivot levels for regime ===
-    df_1w = get_htf_data(prices, '1w')
-    # Calculate weekly OHLC from daily data (approximation using weekly resample is not allowed, 
-    # so we use the actual weekly candles from get_htf_data)
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
-    weekly_range = weekly_high - weekly_low
-    # Camarilla levels: R4 = close + range * 1.1/2, R3 = close + range * 1.1/4, 
-    # S3 = close - range * 1.1/4, S4 = close - range * 1.1/2
-    camarilla_r4 = weekly_close + weekly_range * 1.1 / 2
-    camarilla_r3 = weekly_close + weekly_range * 1.1 / 4
-    camarilla_s3 = weekly_close - weekly_range * 1.1 / 4
-    camarilla_s4 = weekly_close - weekly_range * 1.1 / 2
-    # Pivot point (optional)
-    camarilla_pivot = (weekly_high + weekly_low + weekly_close) / 3
+    # === HTF: 1d EMA50 for trend regime ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_1d_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
-    
-    # === 6h Indicators: Donchian Channel(20) for breakout ===
+    # === 12h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -73,14 +52,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20)  # DC lookback, vol MA
+    warmup = max(lookback_dc + 1, 20, 50)  # DC lookback, vol MA, EMA50
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
-            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_1d_50_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -124,21 +101,14 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Determine regime using weekly Camarilla levels:
-            # Bullish bias: price above weekly R3 (strong) or above pivot (moderate)
-            # Bearish bias: price below weekly S3 (strong) or below pivot (moderate)
-            # For breakouts: look for price > R4 (bullish breakout) or < S4 (bearish breakout)
-            bullish_breakout = price > camarilla_r4_aligned[i-1]
-            bearish_breakout = price < camarilla_s4_aligned[i-1]
+            # Determine trend: bullish if price above 1d EMA50, bearish if below
+            bullish = price > ema_1d_50_aligned[i]
+            bearish = price < ema_1d_50_aligned[i]
             
-            # Additional confirmation: price should be above/below R3/S3 for stronger signal
-            bullish_regime = price > camarilla_r3_aligned[i]
-            bearish_regime = price < camarilla_s3_aligned[i]
-            
-            # Long entry: breakout above weekly R4 with bullish regime
-            long_breakout = bullish_breakout and bullish_regime
-            # Short entry: breakdown below weekly S4 with bearish regime
-            short_breakout = bearish_breakout and bearish_regime
+            # Long entry: breakout above Donchian upper band in bullish regime
+            long_breakout = price > highest_high[i-1] and bullish
+            # Short entry: breakdown below Donchian lower band in bearish regime
+            short_breakout = price < lowest_low[i-1] and bearish
             
             if long_breakout and not short_breakout:
                 in_position = True
