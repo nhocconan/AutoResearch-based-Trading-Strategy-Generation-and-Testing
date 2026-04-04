@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #5380: 4h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation
+Experiment #5381: 4h Donchian(20) breakout + 1d EMA(50) filter + volume confirmation
 HYPOTHESIS: On 4h timeframe, price breaking above/below the 20-period Donchian channel 
 with volume > 2.0x average and aligned with 1d EMA(50) trend captures strong momentum 
 moves while minimizing false breakouts. The 1d EMA acts as a higher timeframe trend 
 filter to avoid counter-trend trades. Discrete position sizing (0.25) and ATR-based 
-stoploss (2.5x ATR) control risk. Target: 19-50 trades/year (75-200 total over 4 years) 
-to minimize fee drag while maintaining statistical significance. Works in bull markets 
-via breakouts above rising EMA and in bear markets via short breakdowns below falling EMA.
+trailing stoploss (2.5x ATR) control risk. Target: 19-50 trades/year (75-200 total 
+over 4 years) to minimize fee drag while maintaining statistical significance. 
+Works in bull markets via breakouts above rising EMA and in bear markets via short 
+breakdowns below falling EMA.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5380_4h_donchian20_1d_ema_vol_v1"
+name = "exp_5381_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
