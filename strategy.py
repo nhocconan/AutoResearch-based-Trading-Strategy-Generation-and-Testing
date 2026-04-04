@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #6335: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
-HYPOTHESIS: Tight Donchian breakouts on 6h with weekly Camarilla pivot bias (R3/S3 as key levels) 
-and volume > 2.0x average capture institutional momentum. Weekly pivot provides structural bias 
-that works in both bull (breakouts above R3 in uptrend) and bear (breakouts below S3 in downtrend) 
-markets. Volume filter ensures breakouts have participation. Uses discrete sizing (0.25) to 
-minimize fee churn. Target: 75-200 trades over 4 years.
+HYPOTHESIS: 6h Donchian breakouts with weekly pivot direction filter and volume confirmation capture institutional momentum while avoiding false breakouts. Weekly pivot provides structural bias from higher timeframe (works in bull/bear via pivot direction), volume ensures participation, and 6h timeframe reduces noise vs lower TFs. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -26,30 +22,23 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for Camarilla pivot levels ===
+    # === HTF: 1w data for weekly pivot direction ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 5:
-        # Calculate weekly Camarilla pivot levels
-        # Based on previous week's high, low, close
+        # Calculate weekly pivot points (using prior week's OHLC)
         weekly_high = df_1w['high'].values
         weekly_low = df_1w['low'].values
         weekly_close = df_1w['close'].values
-        
-        pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-        range_val = weekly_high - weekly_low
-        
-        # Camarilla levels: R3, R4, S3, S4
-        r3 = pivot + range_val * 1.1 / 2.0
-        r4 = pivot + range_val * 1.1
-        s3 = pivot - range_val * 1.1 / 2.0
-        s4 = pivot - range_val * 1.1
-        
-        # Align to 6h timeframe (using R3/S3 as bias levels)
-        r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-        s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+        # Pivot direction: 1 if weekly close > weekly open (bullish week), -1 if bearish
+        weekly_open = df_1w['open'].values
+        weekly_direction = np.where(weekly_close > weekly_open, 1.0, -1.0)
+        # Align to 6h timeframe
+        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+        weekly_direction_aligned = align_htf_to_ltf(prices, df_1w, weekly_direction)
     else:
-        r3_aligned = np.full(n, np.nan)
-        s3_aligned = np.full(n, np.nan)
+        weekly_pivot_aligned = np.full(n, np.nan)
+        weekly_direction_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -90,7 +79,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_direction_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -104,8 +93,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks below Donchian low (failed breakout)
-                # 3. Price crosses below weekly S3 (longer-term reversal)
-                if price <= stop_price or price <= donchian_low[i] or price < s3_aligned[i]:
+                # 3. Price crosses below weekly pivot (higher timeframe reversal)
+                if price <= stop_price or price <= donchian_low[i] or price < weekly_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -117,8 +106,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks above Donchian high (failed breakout)
-                # 3. Price crosses above weekly R3 (longer-term reversal)
-                if price >= stop_price or price >= donchian_high[i] or price > r3_aligned[i]:
+                # 3. Price crosses above weekly pivot (higher timeframe reversal)
+                if price >= stop_price or price >= donchian_high[i] or price > weekly_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -131,11 +120,11 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 2.0  # Strong volume filter
         
-        # Entry logic: Donchian breakout with volume AND aligned with weekly Camarilla
-        # LONG: breakout above Donchian high + volume + price > weekly R3
-        # SHORT: breakout below Donchian low + volume + price < weekly S3
-        long_entry = breakout_up and volume_confirmed and price > r3_aligned[i]
-        short_entry = breakout_down and volume_confirmed and price < s3_aligned[i]
+        # Entry logic: Donchian breakout with volume AND aligned with weekly pivot direction
+        # LONG: breakout above Donchian high + volume + weekly direction bullish
+        # SHORT: breakout below Donchian low + volume + weekly direction bearish
+        long_entry = breakout_up and volume_confirmed and weekly_direction_aligned[i] > 0
+        short_entry = breakout_down and volume_confirmed and weekly_direction_aligned[i] < 0
         
         if long_entry:
             in_position = True
@@ -155,3 +144,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
