@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5771: 6h Donchian(20) breakout + 1d weekly pivot + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 1d weekly pivot levels (R3/S3 for fade, R4/S4 for breakout) capture institutional order flow. Volume > 1.5x average confirms participation. Designed for 6h timeframe to balance trade frequency (target: 75-150 trades over 4 years) and work in both bull/bear by requiring confluence of structure (pivots), momentum (breakout), and participation (volume). Uses discrete sizing 0.25.
+Experiment #5773: 4h Donchian(20) breakout + 12h EMA trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA trend direction capture institutional momentum. Volume > 1.5x average confirms participation. Designed for 4h timeframe to balance trade frequency (target: 75-200 trades over 4 years) and work in both bull/bear by requiring confluence of structure (Donchian), momentum (EMA), and participation (volume). Uses discrete sizing 0.25-0.30.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5771_6h_donchian20_1d_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_5773_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,65 +22,27 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for weekly pivot calculation ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 5:
-        # Calculate weekly pivot from prior week (Mon-Sun) using 1d data
-        # Need to group by week: find Monday of each week
-        # We'll use: for each 1d bar, if it's Sunday, calculate pivot for prior week (Mon-Sun)
-        close_1d = df_1d['close'].values
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        
-        # Calculate weekly pivot for each week (using prior completed week)
-        # We'll store pivot values aligned to each 1d bar (Sunday close)
-        weekly_pivot = np.full(len(df_1d), np.nan)
-        weekly_r3 = np.full(len(df_1d), np.nan)
-        weekly_s3 = np.full(len(df_1d), np.nan)
-        weekly_r4 = np.full(len(df_1d), np.nan)
-        weekly_s4 = np.full(len(df_1d), np.nan)
-        
-        # Group by week: find weeks where we have Mon-Sun data
-        # Simpler: for each Sunday, look back 6 days for Mon-Sun
-        for i in range(6, len(df_1d)):  # start at index 6 (7th day, assuming index 0 is Monday)
-            # Check if we have 7 consecutive days (Mon-Sun)
-            # We'll use: if we can look back 6 days, calculate pivot for that week
-            week_high = np.max(high_1d[i-6:i+1])  # Mon-Sun high
-            week_low = np.min(low_1d[i-6:i+1])    # Mon-Sun low
-            week_close = close_1d[i]               # Sunday close
-            
-            pivot_point = (week_high + week_low + week_close) / 3.0
-            weekly_pivot[i] = pivot_point
-            
-            # Camarilla levels
-            range_val = week_high - week_low
-            weekly_r3[i] = pivot_point + range_val * 1.1 / 2
-            weekly_s3[i] = pivot_point - range_val * 1.1 / 2
-            weekly_r4[i] = pivot_point + range_val * 1.1
-            weekly_s4[i] = pivot_point - range_val * 1.1
+    # === HTF: 12h data for EMA trend ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) >= 21:
+        close_12h = df_12h['close'].values
+        # Calculate EMA(21) on 12h close
+        ema_12h = pd.Series(close_12h).ewm(span=21, min_periods=21, adjust=False).mean().values
     else:
-        weekly_pivot = np.full(len(df_1d), np.nan)
-        weekly_r3 = np.full(len(df_1d), np.nan)
-        weekly_s3 = np.full(len(df_1d), np.nan)
-        weekly_r4 = np.full(len(df_1d), np.nan)
-        weekly_s4 = np.full(len(df_1d), np.nan)
+        ema_12h = np.full(len(df_12h), np.nan)
     
-    # Align weekly pivot levels to 6h timeframe (shifted by 1 for completed 1d bars only)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r3_aligned = align_htf_to_ltf(prices, df_1d, weekly_r3)
-    weekly_s3_aligned = align_htf_to_ltf(prices, df_1d, weekly_s3)
-    weekly_r4_aligned = align_htf_to_ltf(prices, df_1d, weekly_r4)
-    weekly_s4_aligned = align_htf_to_ltf(prices, df_1d, weekly_s4)
+    # Align 12h EMA to 4h timeframe (shifted by 1 for completed 12h bars only)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # === 6h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation ===
+    # === 4h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 6h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -99,7 +61,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 7)  # Donchian, volume avg, ATR, weekly data
+    warmup = max(20, 20, 14, 21)  # Donchian, volume avg, ATR, EMA
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -111,9 +73,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r3_aligned[i]) or
-            np.isnan(weekly_s3_aligned[i]) or np.isnan(weekly_r4_aligned[i]) or
-            np.isnan(weekly_s4_aligned[i])):
+            np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -124,8 +84,8 @@ def generate_signals(prices):
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
                 stop_price = highest_since_entry - 2.5 * atr[i]
-                # Exit: stoploss OR price breaks below S3 (fade failed) OR price breaks above R4 (take profit)
-                if price <= stop_price or price < weekly_s3_aligned[i] or price >= weekly_r4_aligned[i]:
+                # Exit: stoploss OR price breaks below Donchian low (trend failed)
+                if price <= stop_price or price < donchian_low[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -134,8 +94,8 @@ def generate_signals(prices):
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 stop_price = lowest_since_entry + 2.5 * atr[i]
-                # Exit: stoploss OR price breaks above R3 (fade failed) OR price breaks below S4 (take profit)
-                if price >= stop_price or price > weekly_r3_aligned[i] or price <= weekly_s4_aligned[i]:
+                # Exit: stoploss OR price breaks above Donchian high (trend failed)
+                if price >= stop_price or price > donchian_high[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -149,23 +109,22 @@ def generate_signals(prices):
         volume_confirmed = volume_ratio[i] > 1.5
         
         # Entry conditions:
-        # LONG: breakout above R4 with volume (breakout continuation)
-        # SHORT: breakout below S4 with volume (breakout continuation)
-        # LONG: pullback to S3 with volume (fade at support)
-        # SHORT: pullback to R3 with volume (fade at resistance)
-        long_breakout = breakout_up and volume_confirmed and price > weekly_r4_aligned[i]
-        short_breakout = breakout_down and volume_confirmed and price < weekly_s4_aligned[i]
-        long_fade = (price <= weekly_s3_aligned[i] * 1.005) and volume_confirmed and price > weekly_s3_aligned[i] * 0.995  # near S3
-        short_fade = (price >= weekly_r3_aligned[i] * 0.995) and volume_confirmed and price <= weekly_r3_aligned[i] * 1.005  # near R3
+        # LONG: breakout above Donchian high with volume AND 12h EMA trending up
+        # SHORT: breakout below Donchian low with volume AND 12h EMA trending down
+        ema_trending_up = ema_12h_aligned[i] > ema_12h_aligned[i-1]
+        ema_trending_down = ema_12h_aligned[i] < ema_12h_aligned[i-1]
         
-        if long_breakout or long_fade:
+        long_entry = breakout_up and volume_confirmed and ema_trending_up
+        short_entry = breakout_down and volume_confirmed and ema_trending_down
+        
+        if long_entry:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif short_breakout or short_fade:
+        elif short_entry:
             in_position = True
             position_side = -1
             entry_price = close[i]
