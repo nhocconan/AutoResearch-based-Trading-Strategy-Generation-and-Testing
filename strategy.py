@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5015: 6h Donchian(20) Breakout + 1w Higher High/Lower Low + Volume Spike
-HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts aligned with weekly trend (higher highs/lows) capture strong momentum moves with low false breakouts. Volume confirmation (>2x average) ensures institutional participation. Designed for 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with higher highs) and bear markets (breakdowns with lower lows).
+Experiment #5017: 4h Donchian(20) Breakout + 1d HMA21 Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts in direction of 1d HMA21 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) trailing stop (2.5x) to limit downside. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5015_6h_donchian20_1w_hhll_vol_v1"
-timeframe = "6h"
+name = "exp_5017_4h_donchian20_1d_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,34 +19,55 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1w data for HH/LL trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Precompute HTF: 1d data for HMA21 trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # === 1w Indicators: Higher High/Lower Low (HH/LL) trend ===
-    if len(df_1w) >= 2:
-        hh = df_1w['high'].rolling(window=2, min_periods=2).max().values
-        ll = df_1w['low'].rolling(window=2, min_periods=2).min().values
-        # Trend: 1 = HH (bullish), -1 = LL (bearish), 0 = mixed/unclear
-        trend_1w = np.where(hh > ll, 1, np.where(hh < ll, -1, 0))
+    # === 1d Indicators: HMA21 for trend filter ===
+    if len(df_1d) >= 21:
+        # Hull Moving Average calculation
+        half_len = len(df_1d) // 2
+        sqrt_len = int(np.sqrt(len(df_1d)))
+        
+        # WMA function
+        def wma(values, window):
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, 'valid') / weights.sum()
+        
+        close_1d = df_1d['close'].values
+        wma_half = np.array([wma(close_1d[i:i+half_len], half_len)[-1] 
+                            if i+half_len <= len(close_1d) else np.nan 
+                            for i in range(len(close_1d))])
+        wma_full = np.array([wma(close_1d[i:i+len(close_1d)], len(close_1d))[-1] 
+                            if i+len(close_1d) <= len(close_1d) else np.nan 
+                            for i in range(len(close_1d))])
+        wma_sqrt = np.array([wma(close_1d[i:i+sqrt_len], sqrt_len)[-1] 
+                            if i+sqrt_len <= len(close_1d) else np.nan 
+                            for i in range(len(close_1d))])
+        
+        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        hma_raw = 2 * wma_half - wma_full
+        hma_1d = np.array([wma(hma_raw[i:i+sqrt_len], sqrt_len)[-1] 
+                          if i+sqrt_len <= len(hma_raw) else np.nan 
+                          for i in range(len(hma_raw))])
     else:
-        trend_1w = np.full(len(df_1w), 0)
+        hma_1d = np.full(len(df_1d), np.nan)
     
-    # Align HTF HH/LL to 6h timeframe
-    if len(trend_1w) > 0:
-        trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # Align HTF HMA21 to 4h timeframe
+    if len(hma_1d) > 0:
+        hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     else:
-        trend_1w_aligned = np.full(n, 0)
+        hma_1d_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian(20) channels ===
+    # === 4h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation (2x spike) ===
+    # === 4h Indicators: Volume confirmation (2x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -69,7 +90,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(hma_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -102,9 +123,9 @@ def generate_signals(prices):
         # Volume filter: confirmation (>2.0x)
         vol_confirm = vol_ratio[i] > 2.0
         
-        # Donchian breakout conditions with HH/LL trend alignment
-        breakout_long = (price >= high_roll[i]) and (trend_1w_aligned[i] >= 0) and vol_confirm
-        breakout_short = (price <= low_roll[i]) and (trend_1w_aligned[i] <= 0) and vol_confirm
+        # Donchian breakout conditions with trend alignment
+        breakout_long = (price >= high_roll[i]) and (price > hma_1d_aligned[i]) and vol_confirm
+        breakout_short = (price <= low_roll[i]) and (price < hma_1d_aligned[i]) and vol_confirm
         
         # Final entry conditions
         if breakout_long:
@@ -125,5 +146,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
