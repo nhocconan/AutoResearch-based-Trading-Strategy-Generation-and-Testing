@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #5112: 12h Donchian(20) Breakout + 1d HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with 1d HMA(21) trend capture strong momentum in both bull and bear markets. Volume > 1.8x average confirms participation. ATR(14) trailing stop (2.5x) manages risk. Designed for 12-37 trades/year on 12h timeframe to minimize fee drag. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend). Uses discrete position sizing (0.30) to minimize fee churn.
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with 1d HMA(21) trend capture strong momentum with fewer trades than lower timeframes. 
+Volume > 1.8x average confirms participation. ATR(14) trailing stop (2.5x) manages risk. 
+Designed for 12-37 trades/year on 12h timeframe to minimize fee drag. Works in bull markets (breakouts with trend) 
+and bear markets (breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
@@ -64,7 +67,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
