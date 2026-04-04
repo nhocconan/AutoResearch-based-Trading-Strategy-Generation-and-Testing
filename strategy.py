@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4785: 12h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
-HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts in direction of 1d HMA21 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) trailing stop (2.5x) to limit downside. Designed for 12-37 trades/year on 12h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
+Experiment #4786: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts in direction of 1d HMA21 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) trailing stoploss (2.5x) to limit downside. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4785_12h_donchian20_1d_hma_vol_v1"
-timeframe = "12h"
+name = "exp_4786_4h_donchian20_1d_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,49 +25,54 @@ def generate_signals(prices):
     # === 1d Indicators: HMA21 for trend filter ===
     if len(df_1d) >= 21:
         # Hull Moving Average calculation
-        half_len = len(df_1d) // 2
-        sqrt_len = int(np.sqrt(len(df_1d)))
+        half_len = max(2, len(df_1d) // 2)
+        sqrt_len = max(2, int(np.sqrt(len(df_1d))))
         
         # WMA function
         def wma(values, window):
+            if len(values) < window:
+                return np.full(len(values), np.nan)
             weights = np.arange(1, window + 1)
             return np.convolve(values, weights, 'valid') / weights.sum()
         
         close_1d = df_1d['close'].values
-        wma_half = np.array([wma(close_1d[i:i+half_len], half_len)[-1] 
-                            if i+half_len <= len(close_1d) else np.nan 
-                            for i in range(len(close_1d))])
-        wma_full = np.array([wma(close_1d[i:i+len(close_1d)], len(close_1d))[-1] 
-                            if i+len(close_1d) <= len(close_1d) else np.nan 
-                            for i in range(len(close_1d))])
-        wma_sqrt = np.array([wma(close_1d[i:i+sqrt_len], sqrt_len)[-1] 
-                            if i+sqrt_len <= len(close_1d) else np.nan 
-                            for i in range(len(close_1d))])
+        wma_half = np.full(len(close_1d), np.nan)
+        wma_full = np.full(len(close_1d), np.nan)
+        wma_sqrt = np.full(len(close_1d), np.nan)
+        
+        for i in range(len(close_1d)):
+            if i + half_len <= len(close_1d):
+                wma_half[i] = wma(close_1d[i:i+half_len], half_len)[-1]
+            if i + len(close_1d) <= len(close_1d):
+                wma_full[i] = wma(close_1d[i:i+len(close_1d)], len(close_1d))[-1]
+            if i + sqrt_len <= len(close_1d):
+                wma_sqrt[i] = wma(close_1d[i:i+sqrt_len], sqrt_len)[-1]
         
         # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
         hma_raw = 2 * wma_half - wma_full
-        hma_1d = np.array([wma(hma_raw[i:i+sqrt_len], sqrt_len)[-1] 
-                          if i+sqrt_len <= len(hma_raw) else np.nan 
-                          for i in range(len(hma_raw))])
+        hma_1d = np.full(len(hma_raw), np.nan)
+        for i in range(len(hma_raw)):
+            if i + sqrt_len <= len(hma_raw):
+                hma_1d[i] = wma(hma_raw[i:i+sqrt_len], sqrt_len)[-1]
     else:
         hma_1d = np.full(len(df_1d), np.nan)
     
-    # Align HTF HMA21 to 12h timeframe
+    # Align HTF HMA21 to 4h timeframe
     if len(hma_1d) > 0:
         hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     else:
         hma_1d_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian(20) channels ===
+    # === 4h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation (2x spike) ===
+    # === 4h Indicators: Volume confirmation (2x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
