@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3725: 12h Donchian(20) breakout + 1d EMA50 trend + volume spike + ATR trailing stop
-HYPOTHESIS: 12h Donchian breakouts capture medium-term momentum with fewer trades than lower timeframes. 1d EMA50 provides trend bias to filter false breakouts. Volume spike (>1.8x) confirms authenticity. ATR trailing stop (2.0x) manages risk. Targets 50-150 total trades over 4 years (12-37/year) on 12h timeframe. Position size 0.25 manages drawdown. Works in bull (breakouts with trend) and bear (breakouts against trend filtered by EMA) regimes.
+HYPOTHESIS: 12h Donchian breakouts capture intermediate momentum, with 1d EMA50 providing higher timeframe trend bias to reduce false signals. Volume spike (>2.0x) confirms breakout strength. ATR trailing stop (2.5x) manages risk. Target: 50-150 trades over 4 years (12-37/year). Position size 0.30 manages drawdown. Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered by 1d EMA50).
 """
 
 import numpy as np
@@ -48,7 +48,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.30  # 30% position size
     
     # Position tracking state variables
     in_position = False
@@ -73,8 +73,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -87,8 +87,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -102,8 +102,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) for confirmation
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume spike (> 2.0x average) for confirmation
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # Long entry: Price breaks above Donchian upper band AND above 1d EMA50 (bullish trend)
