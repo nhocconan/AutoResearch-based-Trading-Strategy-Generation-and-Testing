@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #6365: 12h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts with volume confirmation (>1.8x avg) and 1d EMA(50) trend filter capture institutional momentum on a slower timeframe to reduce trade frequency and fee drag. Works in bull markets (breakouts with trend) and bear markets (failed breakouts/ reversals at EMA). Target: 50-150 trades over 4 years.
+HYPOTHESIS: 12h Donchian breakouts with volume confirmation (>1.8x avg) and 1d EMA(50) trend filter capture institutional momentum. 
+In bull markets, EMA(50) acts as dynamic support for long breakouts; in bear markets, as resistance for short breakdowns.
+Volume confirmation filters false breakouts. Discrete sizing (0.25) minimizes fee churn. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
