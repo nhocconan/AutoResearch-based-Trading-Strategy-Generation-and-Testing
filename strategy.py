@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #2976: 12h Donchian Breakout + 1d HMA Trend + Volume Spike
-HYPOTHESIS: Donchian(20) breakouts on 12h capture swing moves in BTC/ETH/SOL. 1d HMA(50) provides
-trend filter: only take longs when price > HMA, shorts when price < HMA. Volume spike (>2.0x 20-period average)
-confirms breakout strength. This combination filters false breakouts in choppy markets while capturing
-strong trends. 12h timeframe targets 50-150 trades over 4 years (12-37/year) to minimize fee drag.
-Works in bull markets via breakout continuation and bear markets via short breakdowns with trend filter.
+HYPOTHESIS: Donchian(20) breakouts on 12h capture primary trends. 1d HMA(21) provides
+trend filter: only take longs when price > HMA, shorts when price < HMA. Volume spike
+(>2.0x 20-period average) confirms breakout strength. This combination filters false
+breakouts in choppy markets while capturing strong trends. 12h timeframe minimizes
+fee drag. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -27,7 +27,7 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate HMA(50) on 1d close
+    # Calculate HMA(21) on 1d close
     def calculate_hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -39,7 +39,7 @@ def generate_signals(prices):
         hma = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
         return hma.values
     
-    hma_1d = calculate_hma(close_1d, 50)
+    hma_1d = calculate_hma(close_1d, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
     # === 12h Indicators: Donchian channels (20-period) ===
