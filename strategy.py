@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Experiment #6340: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume confirmation
-HYPOTHESIS: Tight Donchian breakouts on 4h with 1d EMA50 trend filter and volume > 1.8x average capture institutional momentum. 
-The 1d EMA50 provides structural bias that works in both bull (breakouts above EMA50 in uptrend) and bear (breakouts below EMA50 in downtrend) markets. 
+Experiment #6340: 4h Donchian(20) breakout + 1d trend filter + volume confirmation
+HYPOTHESIS: Tight Donchian breakouts on 4h with 1d EMA50 trend filter and volume > 1.8x average capture institutional momentum in both bull and bear markets. 
+The 1d EMA50 provides structural bias that works in bull (breakouts above EMA50 in uptrend) and bear (breakouts below EMA50 in downtrend) markets. 
 Volume filter ensures breakouts have participation. Uses discrete sizing (0.25) to minimize fee churn. Target: 75-200 trades over 4 years.
 """
 
@@ -137,5 +137,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
