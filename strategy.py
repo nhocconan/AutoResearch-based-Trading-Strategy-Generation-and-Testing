@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4391: 6h Camarilla Pivot Reversal + 1d Volume Spike + ATR Regime Filter
-HYPOTHESIS: At 6h timeframe, price reversing from Camarilla R3/S3 levels with 1d volume confirmation (>2.0x average) and ADX < 25 (low volatility regime) captures mean-reversion bounces in ranging markets while avoiding false breakouts. In bear markets, the same logic applies for short reversals at R3. Uses tight entry conditions to target 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+Experiment #4391: 6h Donchian Breakout + Daily Pivot Direction + Volume Confirmation
+HYPOTHESIS: 6h Donchian(20) breakouts aligned with daily Camarilla pivot direction (price above/below pivot = long/short bias) and confirmed by volume (>2.0x average) capture institutional momentum with minimal false signals. Daily pivot provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4391_6h_camarilla1d_vol_atr_v1"
+name = "exp_4391_6h_donchian20_1d_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,57 +23,34 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1d data for Camarilla pivots and volume MA ===
+    # === Precompute HTF: 1d Camarilla Pivot for bias ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 2:
-        # Typical price for 1d: (H+L+C)/3
-        typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
-        # Calculate pivot and Camarilla levels from previous 1d bar
-        pivot = typical_price.shift(1).values
-        range_1d = (df_1d['high'] - df_1d['low']).shift(1).values
-        # Camarilla R3/S3 = pivot ± 1.1 * range/2
-        r3 = pivot + 1.1 * range_1d / 2.0
-        s3 = pivot - 1.1 * range_1d / 2.0
-        # Volume MA(20) for 1d
-        vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-        vol_ratio_1d = np.ones(len(df_1d))
-        vol_ratio_1d[20:] = df_1d['volume'].values[20:] / vol_ma_1d[20:]
-        # Align to 6h timeframe with shift(1) for completed bars only
-        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-        vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    if len(df_1d) >= 1:
+        # Calculate daily pivot points: P = (H+L+C)/3
+        pivot = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+        # Camarilla levels: R4 = C + ((H-L)*1.1/2), S4 = C - ((H-L)*1.1/2)
+        # But for bias, we just use pivot: price > pivot = long bias, < pivot = short bias
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     else:
-        r3_aligned = np.full(n, np.nan)
-        s3_aligned = np.full(n, np.nan)
-        vol_ratio_1d_aligned = np.full(n, np.nan)
+        pivot_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: ATR(14) for volatility regime ===
+    # === 6h Indicators: Donchian Channel(20) ===
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donch_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donch_lower = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # === 6h Indicators: Volume MA(20) for confirmation ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.ones(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    atr_ma = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
-    atr_ratio = np.ones(n)
-    atr_ratio[50:] = atr[50:] / atr_ma[50:]
-    
-    # === 6h Indicators: ADX(14) for trend strength ===
-    # +DM, -DM calculation
-    up_move = high[1:] - high[:-1]
-    down_move = low[:-1] - low[1:]
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    # True range already calculated as 'tr'
-    # Smoothed values
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    plus_dm_smooth = pd.Series(np.concatenate([[np.nan], plus_dm])).ewm(span=14, min_periods=14, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(np.concatenate([[np.nan], minus_dm])).ewm(span=14, min_periods=14, adjust=False).mean().values
-    # DI+ and DI-
-    plus_di = 100 * plus_dm_smooth / atr_14
-    minus_di = 100 * minus_dm_smooth / atr_14
-    # DX and ADX
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -83,13 +60,15 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    warmup = max(50, 20, 14)  # ATR MA, volume MA, ADX
+    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(vol_ratio_1d_aligned[i]) or
-            np.isnan(atr_ratio[i]) or np.isnan(adx[i])):
+        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(atr[i]) or np.isnan(pivot_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -101,18 +80,22 @@ def generate_signals(prices):
         
         price = close[i]
         
-        # --- Exit Logic: Reverse at opposite Camarilla level or ATR stop ---
+        # --- Exit Logic ---
         if in_position:
-            # Exit if price reaches opposite Camarilla level (mean reversion complete)
-            if position_side > 0:  # Long - exit at S3
-                if price <= s3_aligned[i]:
+            # Update highest/lowest since entry for trailing stop
+            if position_side > 0:  # Long
+                highest_since_entry = max(highest_since_entry, high[i])
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
-            else:  # Short - exit at R3
-                if price >= r3_aligned[i]:
+            else:  # Short
+                lowest_since_entry = min(lowest_since_entry, low[i])
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -121,27 +104,36 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: 1d volume > 2.0x average
-        volume_confirm = vol_ratio_1d_aligned[i] > 2.0
-        # Low volatility regime: ATR ratio < 1.2 (avoid high volatility breakouts)
-        vol_regime = atr_ratio[i] < 1.2
-        # Low trend strength: ADX < 25 (ranging market)
-        trend_filter = adx[i] < 25
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = vol_ratio[i] > 2.0
         
-        # Long entry: price at or below S3 with volume confirmation in low vol ranging market
-        long_entry = (price <= s3_aligned[i]) and volume_confirm and vol_regime and trend_filter
-        # Short entry: price at or above R3 with volume confirmation in low vol ranging market
-        short_entry = (price >= r3_aligned[i]) and volume_confirm and vol_regime and trend_filter
+        # Daily pivot bias: price > pivot = long bias, price < pivot = short bias
+        long_bias = price > pivot_aligned[i]
+        short_bias = price < pivot_aligned[i]
+        
+        # Donchian breakout conditions
+        breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
+        breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
+        
+        # Long conditions: upward breakout + long bias + volume
+        long_entry = breakout_up and long_bias and volume_confirm
+        
+        # Short conditions: downward breakout + short bias + volume
+        short_entry = breakout_down and short_bias and volume_confirm
         
         if long_entry:
             in_position = True
             position_side = 1
             entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
             signals[i] = SIZE
         elif short_entry:
             in_position = True
             position_side = -1
             entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
