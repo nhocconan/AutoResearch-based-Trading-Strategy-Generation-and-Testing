@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4147: 6h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation + ATR trailing stop
-HYPOTHESIS: 6h Donchian breakouts aligned with 1d EMA(50) trend direction capture strong momentum moves with minimal lag. 1d EMA provides smoother trend filter than shorter EMAs, reducing whipsaw in ranging markets. Volume confirmation (>1.8x average) filters false breakouts. ATR trailing stop (2.5x) manages risk. Designed for 75-200 total trades over 4 years (19-50/year) to avoid fee drag while maintaining statistical significance. Works in both bull (breakouts with trend) and bear (breakdowns against trend) markets by using EMA as dynamic trend filter rather than fixed bias.
+HYPOTHESIS: 6h Donchian breakouts aligned with 1d EMA(50) trend capture strong momentum moves with minimal lag. Volume confirmation filters false breakouts. ATR trailing stop manages risk. Works in both bull/bear as EMA adapts to trend. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -55,7 +55,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 5, 50 + 5, 14 + 5)  # DC lookback, vol MA buffer, EMA buffer, ATR buffer
+    warmup = max(lookback_dc + 1, 20 + 5, 20 + 5, 14 + 5)  # DC lookback, vol MA buffer, EMA buffer, ATR buffer
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
