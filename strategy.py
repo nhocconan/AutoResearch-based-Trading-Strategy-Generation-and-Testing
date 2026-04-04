@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #6086: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 direction capture swing moves with proper structure. 
-1d EMA50 provides clean trend bias: price above EMA50 = bullish, below = bearish. 
-Volume >1.5x average confirms institutional participation. Works in bull markets (breakouts above rising EMA50) 
-and bear markets (breakdowns below falling EMA50) by only taking trades in trend direction. 
-Target: 75-200 trades over 4 years (19-50/year). Discrete sizing (0.25) minimizes fee drag.
+Experiment #6087: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts aligned with weekly pivot levels (R3/S3 for fade, R4/S4 for continuation) capture swing moves with institutional participation. 
+Weekly pivots provide key structural levels: price above weekly R3 = bullish bias, below S3 = bearish bias. 
+Volume >1.5x average confirms breakout validity. Works in bull markets (breakouts above R3) and bear markets (breakdowns below S3) by taking continuation trades at R4/S4 and fade trades at R3/S3. 
+Target: 75-150 trades over 4 years (19-38/year). Discrete sizing (0.25) minimizes fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6086_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_6087_6h_donchian20_1d_weekly_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,23 +25,73 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for EMA50 trend ===
+    # === HTF: 1d data for weekly pivot levels ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    if len(df_1d) >= 5:
+        # Calculate weekly pivot points from daily OHLC (using prior week's data)
+        # We need to group by week and calculate pivot for each week
+        df_1d_copy = df_1d.copy()
+        df_1d_copy['week_start'] = pd.to_datetime(df_1d_copy['open_time']).dt.to_period('W').dt.start_time
+        weekly_data = df_1d_copy.groupby('week_start').agg({
+            'high': 'max',
+            'low': 'min',
+            'close': 'last'
+        }).reset_index()
+        
+        if len(weekly_data) >= 1:
+            # Calculate pivot points for each week: P = (H + L + C) / 3
+            weekly_data['pivot'] = (weekly_data['high'] + weekly_data['low'] + weekly_data['close']) / 3.0
+            weekly_data['r1'] = 2 * weekly_data['pivot'] - weekly_data['low']
+            weekly_data['s1'] = 2 * weekly_data['pivot'] - weekly_data['high']
+            weekly_data['r2'] = weekly_data['pivot'] + (weekly_data['high'] - weekly_data['low'])
+            weekly_data['s2'] = weekly_data['pivot'] - (weekly_data['high'] - weekly_data['low'])
+            weekly_data['r3'] = weekly_data['high'] + 2 * (weekly_data['pivot'] - weekly_data['low'])
+            weekly_data['s3'] = weekly_data['low'] - 2 * (weekly_data['high'] - weekly_data['pivot'])
+            weekly_data['r4'] = weekly_data['r3'] + (weekly_data['high'] - weekly_data['low'])
+            weekly_data['s4'] = weekly_data['s3'] - (weekly_data['high'] - weekly_data['low'])
+            
+            # Create arrays aligned to daily data
+            week_start_series = pd.to_datetime(df_1d_copy['open_time']).dt.to_period('W').dt.start_time
+            pivot_map = weekly_data.set_index('week_start')['pivot']
+            r3_map = weekly_data.set_index('week_start')['r3']
+            s3_map = weekly_data.set_index('week_start')['s3']
+            r4_map = weekly_data.set_index('week_start')['r4']
+            s4_map = weekly_data.set_index('week_start')['s4']
+            
+            pivot_values = week_start_series.map(pivot_map).values
+            r3_values = week_start_series.map(r3_map).values
+            s3_values = week_start_series.map(s3_map).values
+            r4_values = week_start_series.map(r4_map).values
+            s4_values = week_start_series.map(s4_map).values
+            
+            # Align to 6h timeframe
+            pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_values)
+            r3_aligned = align_htf_to_ltf(prices, df_1d, r3_values)
+            s3_aligned = align_htf_to_ltf(prices, df_1d, s3_values)
+            r4_aligned = align_htf_to_ltf(prices, df_1d, r4_values)
+            s4_aligned = align_htf_to_ltf(prices, df_1d, s4_values)
+        else:
+            pivot_aligned = np.full(n, np.nan)
+            r3_aligned = np.full(n, np.nan)
+            s3_aligned = np.full(n, np.nan)
+            r4_aligned = np.full(n, np.nan)
+            s4_aligned = np.full(n, np.nan)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        pivot_aligned = np.full(n, np.nan)
+        r3_aligned = np.full(n, np.nan)
+        s3_aligned = np.full(n, np.nan)
+        r4_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === 6h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation ===
+    # === 6h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 4h Indicators: ATR(14) for trailing stop ===
+    # === 6h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -61,7 +110,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 50, 14) + 1  # Donchian, volume avg, EMA50, ATR + 1
+    warmup = max(20, 20, 20, 14) + 1  # Donchian, volume avg, weekly pivot, ATR + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -73,7 +122,8 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_1d_aligned[i])):
+            np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -108,15 +158,16 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5  # Volume filter for stronger signals
         
-        # Multi-timeframe trend filter: price must be aligned with 1d EMA50
-        bullish_trend = price > ema_1d_aligned[i]
-        bearish_trend = price < ema_1d_aligned[i]
+        # Weekly pivot levels for entry logic
+        # Long: breakout above R4 (continuation) OR fade at S3 with rejection
+        # Short: breakout below S4 (continuation) OR fade at R3 with rejection
+        long_continuation = breakout_up and volume_confirmed and (price > r4_aligned[i])
+        long_fade = (price <= s3_aligned[i] * 1.005) and volume_confirmed and (close[i] > open[i])  # bullish rejection at S3
+        short_continuation = breakout_down and volume_confirmed and (price < s4_aligned[i])
+        short_fade = (price >= r3_aligned[i] * 0.995) and volume_confirmed and (close[i] < open[i])  # bearish rejection at R3
         
-        # Entry conditions:
-        # Long: breakout up with volume AND bullish trend on 1d EMA50
-        # Short: breakout down with volume AND bearish trend on 1d EMA50
-        long_entry = breakout_up and volume_confirmed and bullish_trend
-        short_entry = breakout_down and volume_confirmed and bearish_trend
+        long_entry = long_continuation or long_fade
+        short_entry = short_continuation or short_fade
         
         if long_entry:
             in_position = True
