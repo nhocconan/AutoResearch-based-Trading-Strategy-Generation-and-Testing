@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4498: 1d Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: 1d Donchian(20) breakouts aligned with weekly pivot bias (price above/below weekly pivot) and confirmed by volume (>1.8x average) capture medium-term momentum with reduced noise. Weekly pivot provides structural bias from higher timeframe (1w), reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25. Daily timeframe avoids overtrading while providing sufficient signals.
+Experiment #4499: 6h Donchian(20) Breakout + 12h Supertrend + Volume Confirmation
+HYPOTHESIS: 6h Donchian(20) breakouts aligned with 12h Supertrend direction and confirmed by volume (>2.0x average) capture medium-term momentum with reduced whipsaws. Supertrend on 12h provides robust trend filtering that works in both bull and bear markets by adapting to volatility. Volume filters low-conviction moves. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25. The 6h timeframe reduces noise while the 12h Supertrend ensures alignment with higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4498_1d_donchian20_1w_pivot_vol_v1"
-timeframe = "1d"
+name = "exp_4499_6h_donchian20_12h_supertrend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,66 +23,91 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1d data for weekly pivot calculation ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 1:
-        # Calculate weekly pivot from prior week's OHLC (using 1d data)
-        # We need to resample 1d to weekly manually since we avoid resample in loop
-        # But we can use the 1d data to compute weekly OHLC for the prior completed week
-        # For simplicity, we'll use the prior week's Friday OHLC as proxy for weekly pivot
-        # However, to properly compute weekly pivot, we need to aggregate 1d to weekly
-        # Since we cannot resample in loop, we'll compute weekly pivot from 1d data by
-        # grouping by week number - but this requires datetime index
-        # Instead, we'll use a simpler approach: use prior 5-day (1-week) OHLC from 1d data
-        # This is approximate but avoids look-ahead and resampling
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        close_1d = df_1d['close'].values
+    # === Precompute HTF: 12h data for Supertrend ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) >= 1:
+        high_12h = df_12h['high'].values
+        low_12h = df_12h['low'].values
+        close_12h = df_12h['close'].values
         
-        # Calculate rolling weekly OHLC from 1d data (5-day week)
-        # Weekly high = max of prior 5 daily highs
-        # Weekly low = min of prior 5 daily lows
-        # Weekly close = close of prior 5th day (Friday)
-        # Weekly open = open of prior 1st day (Monday) - we'll approximate with prior 5th day open
-        # For pivot, we need (weekly high + weekly low + weekly close) / 3
-        # We'll use: weekly high = max(high_1d[-5:]), weekly low = min(low_1d[-5:]), weekly close = close_1d[-1]
-        # But to avoid look-ahead, we shift by 5 days: use prior 5 days ending 6 days ago
-        # Actually, simpler: use prior week's complete OHLC
-        # We'll compute prior weekly pivot using 1d data with a 5-day lag
+        # Calculate ATR(10) for Supertrend
+        tr1_12h = high_12h[1:] - low_12h[1:]
+        tr2_12h = np.abs(high_12h[1:] - close_12h[:-1])
+        tr3_12h = np.abs(low_12h[1:] - close_12h[:-1])
+        tr_12h = np.concatenate([[np.nan], np.maximum(tr1_12h, np.maximum(tr2_12h, tr3_12h))])
+        atr_12h = pd.Series(tr_12h).ewm(span=10, min_periods=10, adjust=False).mean().values
         
-        # Precompute arrays for weekly OHLC (5-day periods)
-        # We'll use pandas Series for rolling on 1d data, then align to 1d
-        high_1d_series = pd.Series(high_1d)
-        low_1d_series = pd.Series(low_1d)
-        close_1d_series = pd.Series(close_1d)
+        # Supertrend parameters
+        atr_mult = 3.0
         
-        # Weekly high = max of prior 5 daily highs (completed week)
-        weekly_high = high_1d_series.rolling(window=5, min_periods=5).max().shift(5).values
-        # Weekly low = min of prior 5 daily lows
-        weekly_low = low_1d_series.rolling(window=5, min_periods=5).min().shift(5).values
-        # Weekly close = close of prior 5th day (Friday)
-        weekly_close = close_1d_series.rolling(window=5, min_periods=5).apply(lambda x: x[-1], raw=True).shift(5).values
+        # Basic upper and lower bands
+        hl2_12h = (high_12h + low_12h) / 2.0
+        upper_band_12h = hl2_12h + (atr_mult * atr_12h)
+        lower_band_12h = hl2_12h - (atr_mult * atr_12h)
         
-        # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
-        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+        # Initialize Supertrend arrays
+        supertrend_12h = np.full_like(close_12h, np.nan)
+        direction_12h = np.full_like(close_12h, np.nan)  # 1 for uptrend, -1 for downtrend
         
-        # Align to 1d timeframe
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+        # Calculate Supertrend
+        for i in range(1, len(close_12h)):
+            if np.isnan(atr_12h[i]) or np.isnan(upper_band_12h[i]) or np.isnan(lower_band_12h[i]):
+                continue
+                
+            # Upper band logic
+            if close_12h[i-1] <= upper_band_12h[i-1]:
+                upper_band_12h[i] = min(upper_band_12h[i], upper_band_12h[i-1])
+            else:
+                upper_band_12h[i] = upper_band_12h[i]
+                
+            # Lower band logic
+            if close_12h[i-1] >= lower_band_12h[i-1]:
+                lower_band_12h[i] = max(lower_band_12h[i], lower_band_12h[i-1])
+            else:
+                lower_band_12h[i] = lower_band_12h[i]
+                
+            # Supertrend logic
+            if i == 1:
+                # Initialize first value
+                if close_12h[i] > upper_band_12h[i]:
+                    direction_12h[i] = -1  # downtrend
+                    supertrend_12h[i] = upper_band_12h[i]
+                else:
+                    direction_12h[i] = 1   # uptrend
+                    supertrend_12h[i] = lower_band_12h[i]
+            else:
+                if direction_12h[i-1] == 1:  # previous uptrend
+                    if close_12h[i] <= supertrend_12h[i-1]:
+                        direction_12h[i] = -1  # change to downtrend
+                        supertrend_12h[i] = upper_band_12h[i]
+                    else:
+                        direction_12h[i] = 1   # remain uptrend
+                        supertrend_12h[i] = max(lower_band_12h[i], supertrend_12h[i-1])
+                else:  # previous downtrend
+                    if close_12h[i] >= supertrend_12h[i-1]:
+                        direction_12h[i] = 1   # change to uptrend
+                        supertrend_12h[i] = lower_band_12h[i]
+                    else:
+                        direction_12h[i] = -1  # remain downtrend
+                        supertrend_12h[i] = min(upper_band_12h[i], supertrend_12h[i-1])
+        
+        # Align Supertrend direction to 6h timeframe
+        supertrend_dir_aligned = align_htf_to_ltf(prices, df_12h, direction_12h)
     else:
-        weekly_pivot_aligned = np.full(n, np.nan)
+        supertrend_dir_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: Donchian Channel(20) ===
+    # === 6h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume MA(20) for confirmation ===
+    # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -100,12 +125,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 5*5)  # Donchian, vol MA, ATR, weekly pivot (5d*5=25)
+    warmup = max(20, 20, 14, 10)  # Donchian, vol MA, ATR, Supertrend init
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(weekly_pivot_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(supertrend_dir_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -141,12 +166,12 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = vol_ratio[i] > 2.0
         
-        # Weekly pivot bias: price > pivot = long bias, price < pivot = short bias
-        long_bias = price > weekly_pivot_aligned[i]
-        short_bias = price < weekly_pivot_aligned[i]
+        # Supertrend bias: 1 = uptrend (long bias), -1 = downtrend (short bias)
+        long_bias = supertrend_dir_aligned[i] == 1
+        short_bias = supertrend_dir_aligned[i] == -1
         
         # Donchian breakout conditions
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
