@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #4582: 12h Donchian(20) Breakout + 1d HTF EMA Trend + Volume Spike
+Experiment #4585: 12h Donchian(20) Breakout + 1d HTF EMA Trend + Volume Spike
 HYPOTHESIS: 12h Donchian(20) breakouts aligned with 1d EMA(50) trend, confirmed by volume spikes (>1.8x average), capture medium-term momentum. Uses discrete position sizing (0.25) and ATR trailing stop (2.0x) to target 12-37 trades/year. Works in bull/bear via trend filter and volatility-adjusted stops. Based on proven DB patterns for 12h timeframe.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4582_12h_donchian20_1d_ema_vol_v1"
+name = "exp_4585_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -133,5 +133,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
