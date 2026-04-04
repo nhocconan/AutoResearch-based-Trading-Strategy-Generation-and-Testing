@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4585: 12h Donchian(20) Breakout + 1d HTF EMA Trend + Volume Spike
-HYPOTHESIS: 12h Donchian(20) breakouts aligned with 1d EMA(50) trend, confirmed by volume spikes (>1.8x average), capture medium-term momentum. Uses discrete position sizing (0.25) and ATR trailing stop (2.0x) to target 12-37 trades/year. Works in bull/bear via trend filter and volatility-adjusted stops. Based on proven DB patterns for 12h timeframe.
+Experiment #4586: 4h Donchian(20) Breakout + 1d HTF Trend + Volume Spike
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 1d EMA(50) trend, confirmed by volume spikes (>1.8x average), capture medium-term momentum. Uses discrete position sizing (0.25) and ATR trailing stop (2.0x) to target 19-50 trades/year. Works in bull/bear via trend filter and volatility-adjusted stops. Based on proven DB patterns (exp_141, exp_146, exp_149, exp_481, exp_060, exp_061).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4585_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_4586_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,24 +28,24 @@ def generate_signals(prices):
     else:
         ema_1d = np.array([])
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     if len(ema_1d) > 0:
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
         ema_1d_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel(20) ===
+    # === 4h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
