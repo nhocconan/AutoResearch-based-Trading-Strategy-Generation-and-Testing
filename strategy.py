@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #3601: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts capture strong momentum moves. 1d EMA filters trend direction (long above EMA, short below). Volume confirmation avoids false breakouts. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend). Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #3601: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts capture strong momentum moves. 1d EMA(50) filters for higher timeframe trend alignment to avoid counter-trend trades. Volume confirmation ensures breakout validity. Works in bull markets (breakouts in uptrend) and bear markets (breakdowns in downtrend). Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year). Uses 1d for trend filter.
 """
 
 import numpy as np
@@ -28,16 +28,16 @@ def generate_signals(prices):
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # === 4h Indicators: Donchian Channel(20) for breakouts ===
-    lookback_donch = 20
-    highest_high = pd.Series(high).rolling(window=lookback_donch, min_periods=lookback_donch).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback_donch, min_periods=lookback_donch).min().values
+    lookback_donchian = 20
+    highest_high = pd.Series(high).rolling(window=lookback_donchian, min_periods=lookback_donchian).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback_donchian, min_periods=lookback_donchian).min().values
     
-    # === 4h Indicators: Volume MA(20) for spike confirmation ===
+    # === 4h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for volatility and stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -52,10 +52,8 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    warmup = max(lookback_donch + 1, 50, 20, 14)  # sufficient for all indicators
+    warmup = max(lookback_donchian + 1, 50, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -68,30 +66,16 @@ def generate_signals(prices):
         
         # --- Exit Logic ---
         if in_position:
-            # Update highest/lowest since entry for trailing stop
+            # Fixed ATR stoploss: exit if price moves 2.5*ATR against position
             if position_side > 0:  # Long
-                highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry
-                if price < highest_since_entry - 2.5 * atr[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                # Exit if price re-enters Donchian channel (take profit)
-                elif price < highest_high[i-1]:  # price below previous period's high
+                if price < entry_price - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
-                lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry
-                if price > lowest_since_entry + 2.5 * atr[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                # Exit if price re-enters Donchian channel (take profit)
-                elif price > lowest_low[i-1]:  # price above previous period's low
+                if price > entry_price + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -100,30 +84,24 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.5x average) for confirmation
-        volume_spike = vol_ratio[i] > 1.5
+        # Require volume confirmation (> 1.5x average)
+        volume_confirm = vol_ratio[i] > 1.5
         
-        if volume_spike:
-            # Determine trend bias from 1d EMA
-            bullish_bias = ema_1d_aligned[i] > close_1d[-1] if len(close_1d) > 0 else ema_1d_aligned[i] > price  # fallback
+        if volume_confirm:
+            # Bullish breakout: price above Donchian upper band + 1d EMA uptrend
+            bullish_breakout = (price > highest_high[i]) and (ema_1d_aligned[i] > close_1d[-1] if len(close_1d) > 0 else ema_1d_aligned[i] > price)
+            # Bearish breakdown: price below Donchian lower band + 1d EMA downtrend
+            bearish_breakdown = (price < lowest_low[i]) and (ema_1d_aligned[i] < close_1d[-1] if len(close_1d) > 0 else ema_1d_aligned[i] < price)
             
-            # Long entry: price breaks above Donchian high in bullish 1d trend
-            if (price > highest_high[i-1] and 
-                bullish_bias):
+            if bullish_breakout:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low in bearish 1d trend
-            elif (price < lowest_low[i-1] and 
-                  not bullish_bias):
+            elif bearish_breakdown:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
