@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-exp_6725_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Buy breakouts above upper Donchian when 1d EMA is rising, sell breakdowns below lower Donchian when 1d EMA is falling.
+exp_6726_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+In bull markets: buy breakouts above upper Donchian when 1d EMA is rising.
+In bear markets: sell breakdowns below lower Donchian when 1d EMA is falling.
 Volume confirmation ensures breakout legitimacy. ATR-based stoploss limits drawdown.
-Designed for 12h timeframe to capture medium-term swings with ~12-37 trades/year.
-Works in bull markets via trend-following breakouts and in bear markets via short breakdowns.
+Designed for 4h timeframe to capture medium-term swings with ~20-50 trades/year.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6725_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_6726_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -23,8 +23,7 @@ VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-EMA_PERIOD = 50
-MAX_HOLD_BARS = 4  # ~2 weeks (12h bars)
+MAX_HOLD_BARS = 8  # ~2 weeks (4h bars)
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,7 +35,7 @@ def generate_signals(prices):
     
     # Calculate 1d EMA(50)
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -65,7 +64,7 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
