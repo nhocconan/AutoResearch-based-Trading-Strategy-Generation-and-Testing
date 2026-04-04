@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3951: 6h Donchian(20) breakout + 1d EMA-50 trend + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 1d EMA-50 trend capture major swings with lower frequency than 4h. Volume > 2.0x MA(20) confirms strength. ATR(14) trailing stop (2.5x) manages risk. Discrete sizing (0.25) reduces fee drag. Target: 75-150 trades over 4 years (19-37/year). Works in bull/bear via 1d EMA-50 trend filter.
+Experiment #3952: 12h Donchian(20) breakout + 1d EMA-50 trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA-50 trend capture major swings with lower frequency than 4h/6h. Volume > 2.0x MA(20) confirms strength. ATR(14) trailing stop (2.5x) manages risk. Discrete sizing (0.25) reduces fee drag. Target: 50-150 trades over 4 years (12-37/year). Works in bull/bear via 1d EMA-50 trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3951_6h_donchian20_1d_ema50_vol_v1"
-timeframe = "6h"
+name = "exp_3952_12h_donchian20_1d_ema50_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,17 +25,17 @@ def generate_signals(prices):
     ema_values = pd.Series(df_1d['close'].values).ewm(span=ema_period, adjust=False).mean().values
     ema_aligned = align_htf_to_ltf(prices, df_1d, ema_values)
     
-    # === 6h Indicators: Donchian Channel(20) for breakout ===
+    # === 12h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
