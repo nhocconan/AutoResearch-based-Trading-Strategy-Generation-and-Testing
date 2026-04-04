@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #5050: 1d Donchian(20) Breakout + 1w Weekly Pivot Direction + Volume Spike + ATR Stoploss
-HYPOTHESIS: On daily timeframe, Donchian(20) breakouts aligned with weekly pivot levels (from 1w HTF) capture strong momentum with lower frequency. Weekly pivot acts as regime filter: R3/S3 for mean reversion, R4/S4 for breakout confirmation. Volume > 2x average confirms institutional participation. ATR(14) trailing stop (2.5x) manages risk. Designed for 7-25 trades/year on 1d timeframe to minimize fee drag while maintaining statistical significance. Weekly pivot provides structural support/resistance that works in both bull (breakouts through R4) and bear (breakdowns through S4) markets.
+HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts aligned with weekly pivot levels (from 1w HTF) capture strong momentum with lower frequency. Weekly pivot acts as regime filter: R3/S3 for mean reversion, R4/S4 for breakout confirmation. Volume > 2x average confirms institutional participation. ATR(14) trailing stop (2.5x) manages risk. Designed for 7-25 trades/year on 1d timeframe to minimize fee drag while maintaining statistical significance. Weekly pivot provides structural support/resistance that works in both bull (breakouts through R4) and bear (breakdowns through S4) markets.
 """
 
 import numpy as np
@@ -19,18 +19,20 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1w data for weekly pivot levels
+    # Precompute HTF: 1w data for weekly pivot levels (call ONCE before loop)
     df_1w = get_htf_data(prices, '1w')
     
     # === 1w Indicators: Weekly Pivot Points (using prior week's OHLC) ===
-    if len(df_1w) >= 2:  # Need at least 2 weeks of data for prior week
-        # Calculate weekly OHLC from weekly data (already weekly)
-        # We need prior week's H, L, C
+    if len(df_1w) >= 5:  # Need at least a week of data
+        # Calculate weekly OHLC from weekly data (df_1w already contains 1w bars)
+        # We'll use rolling window of 1 to get the prior week's OHLC (since each row is a week)
+        # For true weekly pivot, we need prior week's H, L, C
+        # Since df_1w is already weekly data, we shift by 1 to get prior week
         high_1w = df_1w['high'].values
         low_1w = df_1w['low'].values
         close_1w = df_1w['close'].values
         
-        # Shift by 1 to get prior week's values (completed week only)
+        # Prior week's OHLC (shifted by 1)
         high_prior = np.concatenate([[np.nan], high_1w[:-1]])
         low_prior = np.concatenate([[np.nan], low_1w[:-1]])
         close_prior = np.concatenate([[np.nan], close_1w[:-1]])
@@ -49,8 +51,7 @@ def generate_signals(prices):
         r4 = pp + 3 * rng
         s4 = pp - 3 * rng
         
-        # Align to 1d timeframe (weekly data already aligned via get_htf_data)
-        # Need to shift by 1 more to ensure we only use completed weekly bars
+        # Align to 1d timeframe
         pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
         r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
         s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
