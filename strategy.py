@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-exp_6720_4h_donchian20_1d_ema_vol_v1
+exp_6721_4h_donchian20_1d_ema_vol_v1
 Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
 In bull markets: buy breakouts above upper Donchian when 1d EMA is rising.
 In bear markets: sell breakdowns below lower Donchian when 1d EMA is falling.
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6720_4h_donchian20_1d_ema_vol_v1"
+name = "exp_6721_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -64,7 +64,7 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, 50) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
