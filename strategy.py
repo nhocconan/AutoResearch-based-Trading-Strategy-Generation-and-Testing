@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #4120: 4h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d HMA(21) trend direction capture strong momentum moves. 
-Volume confirmation filters false breakouts. Works in bull markets via breakout continuation and in bear 
-markets via mean reversion at channel edges. Uses discrete position sizing (0.25) to minimize fee drag. 
-Target: 100-180 total trades over 4 years (25-45/year).
+Experiment #4121: 4h Donchian(20) breakout + 1d Camarilla pivot levels + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) 
+and volume confirmation capture institutional order flow. Camarilla levels act as natural support/resistance - 
+take mean reversion trades at R3/S3 and breakout continuation at R4/S4. Works in bull/bear by using price 
+action relative to pivot levels. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4120_4h_donchian20_1d_hma21_vol_v1"
+name = "exp_4121_4h_donchian20_1d_camarilla_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,28 +22,35 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d HMA(21) for trend filter ===
+    # === HTF: 1d Camarilla pivot levels ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 21:
+    if len(df_1d) >= 2:
+        # Calculate Camarilla levels for each 1d bar
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
         close_1d = df_1d['close'].values
-        # Hull Moving Average: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        def wma(arr, window):
-            weights = np.arange(1, window + 1, dtype=np.float64)
-            return np.convolve(arr, weights / weights.sum(), mode='valid')
-        wma_half = wma(close_1d, half_len)
-        wma_full = wma(close_1d, 21)
-        wma_diff = 2 * wma_half - wma_full
-        hma_21 = wma(wma_diff, sqrt_len)
-        # Pad beginning with NaN
-        hma_padded = np.full(len(close_1d), np.nan)
-        hma_padded[half_len:] = hma_21[:len(close_1d)-half_len]
-        hma_1d = hma_padded
+        
+        # Camarilla formula: range = high - low
+        # R4 = close + range * 1.1/2
+        # R3 = close + range * 1.1/4
+        # S3 = close - range * 1.1/4
+        # S4 = close - range * 1.1/2
+        range_1d = high_1d - low_1d
+        r4_1d = close_1d + range_1d * 1.1 / 2
+        r3_1d = close_1d + range_1d * 1.1 / 4
+        s3_1d = close_1d - range_1d * 1.1 / 4
+        s4_1d = close_1d - range_1d * 1.1 / 2
+        
         # Align to 4h timeframe (shifted by 1 for completed bars only)
-        hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+        r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+        r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+        s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+        s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     else:
-        hma_1d_aligned = np.full(n, np.nan)
+        r4_1d_aligned = np.full(n, np.nan)
+        r3_1d_aligned = np.full(n, np.nan)
+        s3_1d_aligned = np.full(n, np.nan)
+        s4_1d_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -79,7 +86,8 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(hma_1d_aligned[i])):
+            np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
+            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -117,26 +125,30 @@ def generate_signals(prices):
             breakout_up = price > highest_high[i-1]
             breakout_down = price < lowest_low[i-1]
             
-            # HMA trend filter
-            hma_bullish = price > hma_1d_aligned[i]
-            hma_bearish = price < hma_1d_aligned[i]
+            # Camarilla level conditions
+            # Mean reversion: price at R3/S3 levels
+            # Breakout continuation: price breaks R4/S4 levels
             
-            # Long conditions: breakout up + bullish trend OR mean reversion at lower band
-            long_breakout = breakout_up and hma_bullish
-            long_mean_rev = breakout_up and (price <= lowest_low[i-1] * 1.001) and hma_bearish  # slight bounce from lower band
+            # Long conditions:
+            # 1. Mean reversion long: price near S3 and bouncing up
+            long_mean_rev = (price <= s3_1d_aligned[i] * 1.002) and (price > low[i]) and breakout_up
+            # 2. Breakout continuation long: price breaks above R4
+            long_breakout = price > r4_1d_aligned[i] and breakout_up
             
-            # Short conditions: breakout down + bearish trend OR mean reversion at upper band
-            short_breakout = breakout_down and hma_bearish
-            short_mean_rev = breakout_down and (price >= highest_high[i-1] * 0.999) and hma_bullish  # slight rejection from upper band
+            # Short conditions:
+            # 1. Mean reversion short: price near R3 and bouncing down
+            short_mean_rev = (price >= r3_1d_aligned[i] * 0.998) and (price < high[i]) and breakout_down
+            # 2. Breakout continuation short: price breaks below S4
+            short_breakout = price < s4_1d_aligned[i] and breakout_down
             
-            if long_breakout or long_mean_rev:
+            if long_mean_rev or long_breakout:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            elif short_breakout or short_mean_rev:
+            elif short_mean_rev or short_breakout:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
