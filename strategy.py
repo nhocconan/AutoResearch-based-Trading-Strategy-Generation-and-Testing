@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #2855: 6h Camarilla Pivot Fade + Volume Spike + 1w Trend Filter
-HYPOTHESIS: Camarilla pivot levels (R3/S3, R4/S4) from daily timeframe act as 
-intraday support/resistance. Fade trades at R3/S3 with volume confirmation and 
-weekly trend filter capture mean reversals in ranging markets while avoiding 
-strong trends. Weekly trend filter ensures we only fade against the weekly trend 
-(buy in weekly uptrend at S3, sell in weekly downtrend at R3), reducing false 
-signals. 6h timeframe balances trade frequency and fee drag. Target: 75-150 total 
-trades over 4 years.
+Experiment #2856: 12h Donchian(20) Breakout + Volume Spike + 1d Trend Filter
+HYPOTHESIS: Donchian channel breakouts on 12h timeframe capture significant price moves. 
+Volume confirmation ensures breakout legitimacy, while 1d EMA(50) trend filter aligns 
+trades with higher timeframe momentum. This combination reduces false breakouts and 
+works in both bull and bear markets by trading in the direction of the daily trend. 
+Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2855_6h_camarilla_fade_1w_trend_vol_v1"
-timeframe = "6h"
+name = "exp_2856_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,39 +23,21 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for each day
-    # Pivot = (High + Low + Close) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
+    # Calculate 1d EMA(50) for trend
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)  # 1 = uptrend, -1 = downtrend
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Camarilla levels
-    r3_1d = pivot_1d + range_1d * 1.1 / 2.0
-    s3_1d = pivot_1d - range_1d * 1.1 / 2.0
-    r4_1d = pivot_1d + range_1d * 1.1
-    s4_1d = pivot_1d - range_1d * 1.1
+    # === 12h Indicators: Donchian(20) channels ===
+    # Calculate rolling max/min for Donchian channels
+    high_roll_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align to 6h timeframe (shifted by 1 for completed bars only)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # Calculate 1w EMA(50) for trend
-    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1w = np.where(close_1w > ema_1w, 1, -1)  # 1 = uptrend, -1 = downtrend
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
-    
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -77,8 +57,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(high_roll_max[i]) or np.isnan(low_roll_min[i])):
             signals[i] = 0.0
             continue
         
@@ -90,14 +70,14 @@ def generate_signals(prices):
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
                 # Exit if price drops 2*ATR below highest since entry
-                # Use 6h ATR(14) approximation from price range
+                # Use 12h ATR(14) approximation from price range
                 atr_estimate = (high[i] - low[i]) * 0.5  # rough ATR estimate
                 if price < highest_since_entry - 2.0 * atr_estimate:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price reaches opposite Camarilla level (take profit)
-                elif position_side > 0 and price >= r3_1d_aligned[i]:
+                # Exit if price breaks below Donchian low (trend reversal)
+                elif price < low_roll_min[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -111,8 +91,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price reaches opposite Camarilla level (take profit)
-                elif position_side < 0 and price <= s3_1d_aligned[i]:
+                # Exit if price breaks above Donchian high (trend reversal)
+                elif price > high_roll_max[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -125,21 +105,19 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Get weekly trend bias
-            trend_bias = trend_1w_aligned[i]
+            # Get daily trend bias
+            trend_bias = trend_1d_aligned[i]
             
-            # Long entry: price at S3 support in weekly uptrend
-            # (fade downside move in uptrend)
-            if trend_bias > 0 and price <= s3_1d_aligned[i]:
+            # Long entry: price breaks above Donchian high in daily uptrend
+            if trend_bias > 0 and price > high_roll_max[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price at R3 resistance in weekly downtrend
-            # (fade upside move in downtrend)
-            elif trend_bias < 0 and price >= r3_1d_aligned[i]:
+            # Short entry: price breaks below Donchian low in daily downtrend
+            elif trend_bias < 0 and price < low_roll_min[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
