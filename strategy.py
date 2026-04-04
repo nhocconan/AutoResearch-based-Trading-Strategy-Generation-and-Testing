@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4335: 6h Donchian Breakout + Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: 6h Donchian(20) breakouts aligned with weekly pivot bias (price above/below weekly pivot) 
-and confirmed by volume spikes (>1.5x average) capture institutional breakout moves in both bull 
-and bear markets. Weekly pivot provides structural bias, Donchian captures breakouts, volume 
-confirms authenticity. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+Experiment #4336: 12h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
+HYPOTHESIS: 12h Donchian breakouts capture medium-term momentum when aligned with 1d HMA(21) trend direction and confirmed by volume >2.0x average. Works in bull via upside breakouts, in bear via downside breakouts. Volume confirmation filters false breakouts. ATR(14) trailing stop (2.5x) manages risk. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4335_6h_donchian20_1w_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_4336_12h_donchian20_1d_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,41 +23,39 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1w data for weekly pivot ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 1:
-        # Calculate weekly pivot points (standard formula)
-        weekly_pivot = (df_1w['high'] + df_1w['low'] + df_1w['close']) / 3.0
-        weekly_r1 = 2 * weekly_pivot - df_1w['low']
-        weekly_s1 = 2 * weekly_pivot - df_1w['high']
-        weekly_r2 = weekly_pivot + (df_1w['high'] - df_1w['low'])
-        weekly_s2 = weekly_pivot - (df_1w['high'] - df_1w['low'])
+    # === Precompute HTF: 1d HMA(21) for trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 21:
+        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+        half = 21 // 2
+        sqrt_n = int(np.sqrt(21))
         
-        # Align to 6h timeframe (shifted by 1 for completed weekly bars only)
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot.values)
-        weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1.values)
-        weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1.values)
-        weekly_r2_aligned = align_htf_to_ltf(prices, df_1w, weekly_r2.values)
-        weekly_s2_aligned = align_htf_to_ltf(prices, df_1w, weekly_s2.values)
+        def wma(arr, period):
+            if len(arr) < period:
+                return np.full(len(arr), np.nan)
+            weights = np.arange(1, period + 1, dtype=np.float64)
+            return pd.Series(arr).rolling(window=period, min_periods=period).apply(
+                lambda x: np.dot(x, weights) / weights.sum(), raw=True
+            ).values
+        
+        wma_close = wma(df_1d['close'].values, 21)
+        wma_half = wma(df_1d['close'].values, half)
+        wma_diff = 2 * wma_half - wma_close
+        hma_1d = wma(wma_diff, sqrt_n)
+        hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     else:
-        weekly_pivot_aligned = np.full(n, np.nan)
-        weekly_r1_aligned = np.full(n, np.nan)
-        weekly_s1_aligned = np.full(n, np.nan)
-        weekly_r2_aligned = np.full(n, np.nan)
-        weekly_s2_aligned = np.full(n, np.nan)
+        hma_1d_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20) ===
-    # Upper = max(high, lookback=20), Lower = min(low, lookback=20)
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # === 12h Indicators: Donchian Channel(20) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -78,12 +73,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback, 20, 14)  # Donchian, vol MA, ATR
+    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(weekly_pivot_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(hma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -119,40 +114,37 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.5
+        # Volume confirmation: require > 2.0x average volume
+        volume_confirm = vol_ratio[i] > 2.0
         
-        if volume_confirm:
-            # Donchian breakout conditions
-            breakout_up = price > highest_high[i]  # Price breaks above Donchian upper
-            breakout_down = price < lowest_low[i]  # Price breaks below Donchian lower
-            
-            # Weekly pivot bias
-            price_above_pivot = price > weekly_pivot_aligned[i]
-            price_below_pivot = price < weekly_pivot_aligned[i]
-            
-            # Long conditions: Breakout above Donchian upper + price above weekly pivot
-            long_entry = breakout_up and price_above_pivot
-            
-            # Short conditions: Breakout below Donchian lower + price below weekly pivot
-            short_entry = breakout_down and price_below_pivot
-            
-            if long_entry:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = SIZE
-            elif short_entry:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = -SIZE
-            else:
-                signals[i] = 0.0
+        # Trend filter: price above/below 1d HMA(21)
+        price_above_hma = close[i] > hma_1d_aligned[i]
+        price_below_hma = close[i] < hma_1d_aligned[i]
+        
+        # Donchian breakout conditions
+        breakout_up = high[i] > highest_high[i-1]  # New 20-period high
+        breakout_down = low[i] < lowest_low[i-1]   # New 20-period low
+        
+        # Long conditions: Upside breakout + price above HMA + volume
+        long_entry = breakout_up and price_above_hma and volume_confirm
+        
+        # Short conditions: Downside breakout + price below HMA + volume
+        short_entry = breakout_down and price_below_hma and volume_confirm
+        
+        if long_entry:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = SIZE
+        elif short_entry:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = -SIZE
         else:
             signals[i] = 0.0
     
