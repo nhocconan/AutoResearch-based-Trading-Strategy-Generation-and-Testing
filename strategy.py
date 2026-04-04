@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4427: 6h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: 6h Donchian(20) breakouts aligned with weekly pivot levels (from 1d HTF) capture institutional momentum with minimal false signals. Weekly pivot provides structural bias from higher timeframe, reducing whipsaws. Volume (>1.5x average) filters low-conviction moves. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+Experiment #4428: 12h Donchian(20) Breakout + 1w EMA200 Trend + Volume Confirmation
+HYPOTHESIS: 12h Donchian(20) breakouts aligned with 1w EMA200 trend direction and confirmed by volume (>2.0x average) capture strong institutional moves while minimizing false signals. The 1w EMA200 provides robust long-term bias, reducing whipsaws across bull/bear cycles. Volume filter ensures conviction. Targets 50-150 total trades over 4 years with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4427_6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_4428_12h_donchian20_1w_ema200_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,50 +23,27 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1d data for weekly pivot levels ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 5:
-        # Calculate weekly pivot from prior week's daily OHLC
-        # We'll use the last completed week's data (shift by 1 to avoid look-ahead)
-        # For simplicity, we calculate pivot points on daily data and align
-        # Pivot = (H + L + C) / 3
-        # R1 = 2*P - L, S1 = 2*P - H
-        # R2 = P + (H - L), S2 = P - (H - L)
-        # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        close_1d = df_1d['close'].values
-        
-        # Calculate pivot points for each day (using that day's OHLC)
-        pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-        r1_1d = 2 * pivot_1d - low_1d
-        s1_1d = 2 * pivot_1d - high_1d
-        r2_1d = pivot_1d + (high_1d - low_1d)
-        s2_1d = pivot_1d - (high_1d - low_1d)
-        r3_1d = high_1d + 2 * (pivot_1d - low_1d)
-        s3_1d = low_1d - 2 * (high_1d - pivot_1d)
-        
-        # Align to 6h timeframe (shifted by 1 to use only completed daily bars)
-        pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-        r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-        s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    # === Precompute HTF: 1w EMA200 for trend bias ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 200:
+        close_1w = pd.Series(df_1w['close'].values)
+        ema_1w = close_1w.ewm(span=200, min_periods=200, adjust=False).mean().values
+        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     else:
-        pivot_1d_aligned = np.full(n, np.nan)
-        r3_1d_aligned = np.full(n, np.nan)
-        s3_1d_aligned = np.full(n, np.nan)
+        ema_1w_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel(20) ===
+    # === 12h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -84,13 +61,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
+    warmup = max(20, 20, 14, 200)  # Donchian, vol MA, ATR, EMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(pivot_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or 
-            np.isnan(s3_1d_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -126,23 +102,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = vol_ratio[i] > 2.0
         
-        # Weekly pivot bias: price > R3 = strong short bias, price < S3 = strong long bias
-        # In ranging markets, we fade extremes; in trending markets, we break through
-        # For this strategy, we use: long when price < S3 (oversold), short when price > R3 (overbought)
-        long_bias = price < s3_1d_aligned[i]  # Price below weekly S3 = potential long
-        short_bias = price > r3_1d_aligned[i]  # Price above weekly R3 = potential short
+        # 1w EMA bias: price > EMA = long bias, price < EMA = short bias
+        long_bias = price > ema_1w_aligned[i]
+        short_bias = price < ema_1w_aligned[i]
         
         # Donchian breakout conditions
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
         breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
         
-        # Long conditions: upward breakout + long bias (price < S3) + volume
+        # Long conditions: upward breakout + long bias + volume
         long_entry = breakout_up and long_bias and volume_confirm
         
-        # Short conditions: downward breakout + short bias (price > R3) + volume
+        # Short conditions: downward breakout + short bias + volume
         short_entry = breakout_down and short_bias and volume_confirm
         
         if long_entry:
