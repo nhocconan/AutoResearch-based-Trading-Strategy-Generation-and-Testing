@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4622: 12h Donchian(20) Breakout + Volume Spike + Chop Regime Filter
-HYPOTHESIS: 12h price breaking 20-bar Donchian channels with volume >2x 20-bar MA in non-choppy markets (Choppiness Index < 38.2) captures strong trending moves. Uses 1d HTF for Donchian calculation and 1w HTF for chop regime to avoid look-ahead. Discrete sizing (0.25) and ATR trailing stop (2.5x) manage risk. Target: 12-37 trades/year on 12h timeframe.
+Experiment #4623: 4h Donchian(20) Breakout + HMA(21) Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: 4h price breaking Donchian(20) channel with HMA(21) trend confirmation and volume spike (>2.0x avg) captures strong momentum moves. Uses 12h HTF for regime filter (ADX>25) to avoid whipsaws. Discrete sizing (0.30) and ATR trailing stop (2.5x) manage risk. Target: 19-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4622_12h_donchian20_vol_chop_v1"
-timeframe = "12h"
+name = "exp_4623_4h_donchian20_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,74 +19,71 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for Donchian channels (20-period)
-    df_1d = get_htf_data(prices, '1d')
+    # Precompute HTF: 12h data for ADX regime filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Donchian channels from prior 1d data (shifted by 1 to avoid look-ahead)
-    if len(df_1d) >= 20:
-        # Use prior 20 days' high/low (shifted by 1)
-        dh_20 = pd.Series(df_1d['high'].values).rolling(window=20, min_periods=20).max().values
-        dl_20 = pd.Series(df_1d['low'].values).rolling(window=20, min_periods=20).min().values
-        # Shift by 1 to use only completed periods
-        dh_20 = np.concatenate([[np.nan], dh_20[:-1]])
-        dl_20 = np.concatenate([[np.nan], dl_20[:-1]])
-    else:
-        dh_20 = np.array([])
-        dl_20 = np.array([])
-    
-    # Precompute HTF: 1w data for Choppiness Index regime filter
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate Choppiness Index (14-period) from prior 1w data
-    if len(df_1w) >= 14:
-        high_1w = df_1w['high'].values
-        low_1w = df_1w['low'].values
-        close_1w = df_1w['close'].values
+    # Calculate ADX(14) on 12h
+    if len(df_12h) >= 14:
+        high_12h = df_12h['high'].values
+        low_12h = df_12h['low'].values
+        close_12h = df_12h['close'].values
         
         # True Range
-        tr1 = high_1w[1:] - low_1w[1:]
-        tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-        tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        tr1 = high_12h[1:] - low_12h[1:]
+        tr2 = np.abs(high_12h[1:] - close_12h[:-1])
+        tr3 = np.abs(low_12h[1:] - close_12h[:-1])
+        tr_12h = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
         
-        # Sum of TR over 14 periods
-        tr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+        # Directional Movement
+        dm_plus = np.where((high_12h[1:] - high_12h[:-1]) > (low_12h[:-1] - low_12h[1:]), 
+                           np.maximum(high_12h[1:] - high_12h[:-1], 0), 0)
+        dm_plus = np.concatenate([[0], dm_plus])
+        dm_minus = np.where((low_12h[:-1] - low_12h[1:]) > (high_12h[1:] - high_12h[:-1]), 
+                            np.maximum(low_12h[:-1] - low_12h[1:], 0), 0)
+        dm_minus = np.concatenate([[0], dm_minus])
         
-        # Highest high and lowest low over 14 periods
-        hh_14 = pd.Series(high_1w).rolling(window=14, min_periods=14).max().values
-        ll_14 = pd.Series(low_1w).rolling(window=14, min_periods=14).min().values
+        # Smoothed values
+        tr_ma = pd.Series(tr_12h).ewm(span=14, min_periods=14, adjust=False).mean().values
+        dm_plus_ma = pd.Series(dm_plus).ewm(span=14, min_periods=14, adjust=False).mean().values
+        dm_minus_ma = pd.Series(dm_minus).ewm(span=14, min_periods=14, adjust=False).mean().values
         
-        # Choppiness Index formula: 100 * log10(sum(tr)/(hh-ll)) / log10(14)
-        # Avoid division by zero
-        range_14 = hh_14 - ll_14
-        chop_raw = np.zeros_like(tr_sum)
-        mask = (range_14 > 0) & (~np.isnan(tr_sum))
-        chop_raw[mask] = 100 * np.log10(tr_sum[mask] / range_14[mask]) / np.log10(14)
+        # DI+ and DI-
+        di_plus = 100 * dm_plus_ma / tr_ma
+        di_minus = 100 * dm_minus_ma / tr_ma
         
-        # Shift by 1 to use only completed periods
-        chop_raw = np.concatenate([[np.nan], chop_raw[:-1]])
+        # DX and ADX
+        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+        adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
     else:
-        chop_raw = np.array([])
+        adx = np.array([])
     
-    # Align HTF indicators to 12h timeframe
-    if len(dh_20) > 0:
-        dh_20_aligned = align_htf_to_ltf(prices, df_1d, dh_20)
-        dl_20_aligned = align_htf_to_ltf(prices, df_1d, dl_20)
+    # Align ADX to 4h timeframe
+    if len(adx) > 0:
+        adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     else:
-        dh_20_aligned = np.full(n, np.nan)
-        dl_20_aligned = np.full(n, np.nan)
-        
-    if len(chop_raw) > 0:
-        chop_aligned = align_htf_to_ltf(prices, df_1w, chop_raw)
-    else:
-        chop_aligned = np.full(n, np.nan)
+        adx_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Volume MA(20) for spike confirmation ===
+    # === 4h Indicators: Donchian Channel (20) ===
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === 4h Indicators: HMA(21) ===
+    def hull_moving_average(arr, period):
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma2 = pd.Series(arr).ewm(span=half, min_periods=half, adjust=False).mean().values
+        wma1 = 2 * pd.Series(arr).ewm(span=half, min_periods=half, adjust=False).mean().values
+        wma3 = pd.Series(arr).ewm(span=sqrt, min_periods=sqrt, adjust=False).mean().values
+        return pd.Series(2 * wma2 - wma1 + wma3).ewm(span=sqrt, min_periods=sqrt, adjust=False).mean().values
+    
+    hma = hull_moving_average(close, 21)
+    
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -95,7 +92,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.30  # 30% position size
     
     # Position tracking state variables
     in_position = False
@@ -104,12 +101,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 14)  # Donchian, Vol MA, ATR warmup
+    warmup = max(20, 21, 14)  # Donchian, HMA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(dh_20_aligned[i]) or np.isnan(dl_20_aligned[i]) or 
-            np.isnan(chop_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(hma[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or np.isnan(adx_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -139,15 +136,15 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: spike >2x average for confirmation
+        # Regime filter: only trade when ADX > 25 (trending market)
+        is_trending = adx_aligned[i] > 25
+        
+        # Volume filter: spike > 2.0x average
         vol_spike = vol_ratio[i] > 2.0
         
-        # Regime filter: non-choppy market (Choppiness Index < 38.2 = trending)
-        trending_regime = chop_aligned[i] < 38.2
-        
-        # Breakout conditions: price breaks Donchian channels with volume spike in trending regime
-        breakout_long = price > dh_20_aligned[i] and vol_spike and trending_regime
-        breakout_short = price < dl_20_aligned[i] and vol_spike and trending_regime
+        # Donchian breakout conditions
+        breakout_long = price > donchian_high[i] and hma[i] > hma[i-1] and vol_spike and is_trending
+        breakout_short = price < donchian_low[i] and hma[i] < hma[i-1] and vol_spike and is_trending
         
         if breakout_long:
             in_position = True
