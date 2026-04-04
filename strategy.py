@@ -3,9 +3,9 @@
 exp_6496_12h_donchian20_1d_ema_vol_v1
 Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
 Uses daily EMA(50) as trend filter: long only when price > EMA50, short only when price < EMA50.
-Donchian(20) breakout provides entry timing, volume confirmation filters weak breakouts.
+Donchian(20) breakout provides entry timing on 12h timeframe, volume confirmation filters weak breakouts.
 Designed to work in both bull and bear markets by using 1d EMA as trend filter and Donchian breakouts for momentum.
-Target: 50-150 trades over 4 years (12-37/year) on 12h timeframe.
+Target: 50-150 trades over 4 years (12-37/year) on 12h timeframe per experiment instructions.
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
