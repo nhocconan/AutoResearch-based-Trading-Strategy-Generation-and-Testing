@@ -1,45 +1,44 @@
 #!/usr/bin/env python3
 """
-exp_6588_12h_donchian20_1w_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-Uses 12h primary timeframe (target: 50-150 total trades over 4 years). 1w EMA50 provides
-clear trend direction that works in both bull and bear markets (above EMA50 = bullish bias,
-below = bearish bias). Volume confirmation ensures breakouts have conviction.
-Discrete sizing (0.25) minimizes fee churn. Includes ATR-based stoploss.
+exp_6589_4h_donchian20_1d_ema_vol_v2
+Hypothesis: 4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
+Uses 4h primary timeframe (target: 75-200 total trades over 4 years). 1d EMA200 provides
+stronger trend filter than EMA50, reducing false signals in choppy markets. Volume confirmation
+ensures breakouts have conviction. Discrete sizing (0.25) minimizes fee churn. Includes ATR-based stoploss.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6588_12h_donchian20_1w_ema_vol_v1"
-timeframe = "12h"
+name = "exp_6589_4h_donchian20_1d_ema_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+EMA_PERIOD = 200  # Longer-term trend filter
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0  # Volume threshold for confirmation
 SIGNAL_SIZE = 0.25      # 25% position size
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5  # Stoploss at 2.5 * ATR
-MAX_HOLD_BARS = 20      # Max hold: ~20 * 12h = 10 days
+MAX_HOLD_BARS = 30      # Max hold: ~30 * 4h = 5 days
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1w for EMA50
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop - using 1d for EMA200
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA50
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False).mean().values
+    # Calculate 1d EMA200
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False).mean().values
     
-    # Align to LTF (12h) with shift(1) for completed bars only
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align to LTF (4h) with shift(1) for completed bars only
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -73,7 +72,7 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -98,23 +97,23 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Determine trend bias from 1w EMA50
-        # Price above EMA50: bullish bias (favor longs)
-        # Price below EMA50: bearish bias (favor shorts)
-        bullish_bias = close[i] > ema_1w_aligned[i]
-        bearish_bias = close[i] < ema_1w_aligned[i]
+        # Determine trend bias from 1d EMA200
+        # Price above EMA200: bullish bias (favor longs)
+        # Price below EMA200: bearish bias (favor shorts)
+        bullish_bias = close[i] > ema_1d_aligned[i]
+        bearish_bias = close[i] < ema_1d_aligned[i]
         
         # Long conditions: 
         # 1. Break above Donchian HIGH (breakout)
         # 2. Volume confirmation
-        # 3. Bullish bias from 1w EMA50
+        # 3. Bullish bias from 1d EMA200
         long_breakout = close[i] > donchian_high[i-1]
         long_volume = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Short conditions:
         # 1. Break below Donchian LOW (breakdown)
         # 2. Volume confirmation
-        # 3. Bearish bias from 1w EMA50
+        # 3. Bearish bias from 1d EMA200
         short_breakout = close[i] < donchian_low[i-1]
         short_volume = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
@@ -137,5 +136,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
