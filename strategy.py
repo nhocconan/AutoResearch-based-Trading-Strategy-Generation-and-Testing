@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #3504: 1d Donchian Breakout + 1w HMA Trend + Volume Confirmation
-HYPOTHESIS: 1d Donchian(20) breakouts aligned with 1w HMA(21) trend direction and volume confirmation capture medium-term momentum with low overtrading. 
-The 1w HMA acts as a robust trend filter (reduces whipsaw in ranging markets). Volume confirms institutional participation. 
-Position size 0.25. Target: 30-100 total trades over 4 years (7-25/year).
-Uses 1w for trend filter and Donchian calculation, 1d only for entry timing and risk management.
+Experiment #3505: 12h Donchian Breakout + 1d HMA Trend + Volume Confirmation
+HYPOTHESIS: 12h Donchian(20) breakouts aligned with 1d HMA(21) trend direction and volume confirmation capture medium-term momentum with low overtrading.
+The 1d HMA acts as a robust trend filter (reduces whipsaw in ranging markets). Volume confirms institutional participation.
+Position size 0.25. Target: 50-150 total trades over 4 years (12-37/year).
+Uses 12h for entry signals and 1d only for trend filter and Donchian calculation.
 Works in bull (continuation from HMA uptrend) and bear (continuation from HMA downtrend) via price channels.
 """
 
@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3504_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_3505_12h_donchian20_1d_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,14 +24,14 @@ def generate_signals(prices):
     open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1w data for HMA trend filter and Donchian channels (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    volume_1w = df_1w['volume'].values
+    # === HTF: 1d data for HMA trend filter and Donchian channels (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 1w HMA(21) for trend
+    # Calculate 1d HMA(21) for trend
     def hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -43,22 +43,22 @@ def generate_signals(prices):
         hma_vals = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
         return hma_vals.values
     
-    hma_1w = hma(close_1w, 21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    hma_1d = hma(close_1d, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 1w Donchian channels (20-period)
-    lookback_1w = 20
-    highest_high_1w = pd.Series(high_1w).rolling(window=lookback_1w, min_periods=lookback_1w).max().values
-    lowest_low_1w = pd.Series(low_1w).rolling(window=lookback_1w, min_periods=lookback_1w).min().values
-    highest_high_1w_aligned = align_htf_to_ltf(prices, df_1w, highest_high_1w)
-    lowest_low_1w_aligned = align_htf_to_ltf(prices, df_1w, lowest_low_1w)
+    # Calculate 1d Donchian channels (20-period)
+    lookback_1d = 20
+    highest_high_1d = pd.Series(high_1d).rolling(window=lookback_1d, min_periods=lookback_1d).max().values
+    lowest_low_1d = pd.Series(low_1d).rolling(window=lookback_1d, min_periods=lookback_1d).min().values
+    highest_high_1d_aligned = align_htf_to_ltf(prices, df_1d, highest_high_1d)
+    lowest_low_1d_aligned = align_htf_to_ltf(prices, df_1d, lowest_low_1d)
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for volatility and trailing stop ===
+    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -76,12 +76,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback_1w + 1, 21, 20, 14)  # sufficient for all indicators
+    warmup = max(50, lookback_1d + 1, 21, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_high_1w_aligned[i]) or np.isnan(lowest_low_1w_aligned[i]) or
-            np.isnan(hma_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(highest_high_1d_aligned[i]) or np.isnan(lowest_low_1d_aligned[i]) or
+            np.isnan(hma_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -97,8 +97,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below 1w Donchian low - trend reversal
-                elif price < lowest_low_1w_aligned[i]:
+                # Exit if price breaks below 1d Donchian low - trend reversal
+                elif price < lowest_low_1d_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -111,8 +111,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above 1w Donchian high - trend reversal
-                elif price > highest_high_1w_aligned[i]:
+                # Exit if price breaks above 1d Donchian high - trend reversal
+                elif price > highest_high_1d_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -125,11 +125,11 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Determine trend direction from 1w HMA
-            hma_trend = hma_1w_aligned[i]
+            # Determine trend direction from 1d HMA
+            hma_trend = hma_1d_aligned[i]
             
-            # Long entry: price breaks above 1w Donchian high with uptrend (price > HMA)
-            if (price > highest_high_1w_aligned[i] and 
+            # Long entry: price breaks above 1d Donchian high with uptrend (price > HMA)
+            if (price > highest_high_1d_aligned[i] and 
                 price > hma_trend):
                 in_position = True
                 position_side = 1
@@ -137,8 +137,8 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below 1w Donchian low with downtrend (price < HMA)
-            elif (price < lowest_low_1w_aligned[i] and 
+            # Short entry: price breaks below 1d Donchian low with downtrend (price < HMA)
+            elif (price < lowest_low_1d_aligned[i] and 
                   price < hma_trend):
                 in_position = True
                 position_side = -1
