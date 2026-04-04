@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4463: 4h Donchian(20) Breakout + 12h EMA Trend + Volume Confirmation + Chop Filter
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h EMA50 trend and volume (>1.8x average) capture institutional momentum. Added choppiness index (CHOP>61.8) as regime filter to avoid whipsaws in ranging markets. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25. Works in both bull/bear via trend alignment and regime adaptation.
+Experiment #4464: 1d Donchian(20) Breakout + 1w EMA Trend + Volume Confirmation
+HYPOTHESIS: Daily Donchian(20) breakouts aligned with weekly EMA50 trend direction and confirmed by volume (>1.8x average) capture institutional momentum with minimal false signals. The weekly EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 30-100 total trades over 4 years (7-25/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4463_4h_donchian20_12h_ema_vol_chop_v1"
-timeframe = "4h"
+name = "exp_4464_1d_donchian20_1w_ema50_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,50 +23,27 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 12h EMA50 for trend bias ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 50:
-        close_12h = pd.Series(df_12h['close'].values)
-        ema_12h = close_12h.ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # === Precompute HTF: 1w EMA50 for trend bias ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 50:
+        close_1w = pd.Series(df_1w['close'].values)
+        ema_1w = close_1w.ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     else:
-        ema_12h_aligned = np.full(n, np.nan)
+        ema_1w_aligned = np.full(n, np.nan)
     
-    # === Precompute HTF: 1d data for Choppiness Index ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 14:
-        high_1d = pd.Series(df_1d['high'].values)
-        low_1d = pd.Series(df_1d['low'].values)
-        close_1d = pd.Series(df_1d['close'].values)
-        
-        # True Range
-        tr1 = high_1d[1:] - low_1d[1:]
-        tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-        tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-        tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-        atr_1d = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
-        
-        # Choppiness Index: 100 * log10(sum(ATR14) / (max(high)-min(low))) / log10(14)
-        sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
-        max_high = high_1d.rolling(window=14, min_periods=14).max().values
-        min_low = low_1d.rolling(window=14, min_periods=14).min().values
-        chop_raw = 100 * np.log10(sum_atr_14 / (max_high - min_low + 1e-10)) / np.log10(14)
-        chop = align_htf_to_ltf(prices, df_1d, chop_raw)
-    else:
-        chop = np.full(n, np.nan)
-    
-    # === 4h Indicators: Donchian Channel(20) ===
+    # === 1d Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 1d Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -84,12 +61,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50, 14)  # Donchian, vol MA, ATR, EMA, chop
+    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, EMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(chop[i])):
+            np.isnan(atr[i]) or np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -128,23 +105,19 @@ def generate_signals(prices):
         # Require volume confirmation (> 1.8x average) to filter noise
         volume_confirm = vol_ratio[i] > 1.8
         
-        # Choppiness filter: only trade in ranging markets (CHOP > 61.8) for mean reversion
-        # OR in trending markets (CHOP < 38.2) for trend following - we'll use both regimes
-        chop_filter = (chop[i] > 61.8) or (chop[i] < 38.2)
-        
-        # 12h EMA bias: price > EMA = long bias, price < EMA = short bias
-        long_bias = price > ema_12h_aligned[i]
-        short_bias = price < ema_12h_aligned[i]
+        # 1w EMA bias: price > EMA = long bias, price < EMA = short bias
+        long_bias = price > ema_1w_aligned[i]
+        short_bias = price < ema_1w_aligned[i]
         
         # Donchian breakout conditions
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
         breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
         
-        # Long conditions: upward breakout + long bias + volume + chop filter
-        long_entry = breakout_up and long_bias and volume_confirm and chop_filter
+        # Long conditions: upward breakout + long bias + volume
+        long_entry = breakout_up and long_bias and volume_confirm
         
-        # Short conditions: downward breakout + short bias + volume + chop filter
-        short_entry = breakout_down and short_bias and volume_confirm and chop_filter
+        # Short conditions: downward breakout + short bias + volume
+        short_entry = breakout_down and short_bias and volume_confirm
         
         if long_entry:
             in_position = True
