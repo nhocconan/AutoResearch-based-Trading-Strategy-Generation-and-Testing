@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-exp_6511_6h_donchian20_1d_pivot_vol_v1
-Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot direction filter and volume confirmation.
+exp_6512_12h_donchian20_1d_pivot_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d Camarilla pivot direction filter and volume confirmation.
 Uses 1d Camarilla pivot levels (R3, S3, R4, S4) to determine bias: long when price > R3, short when price < S3.
 Donchian(20) breakout provides entry timing in the direction of 1d pivot bias, volume confirmation filters weak breakouts.
 Designed to work in both bull and bear markets by using 1d Camarilla levels as structural support/resistance.
-Target: 75-150 trades over 4 years (19-37/year). Uses 6h primary timeframe per experiment instructions.
+Target: 50-150 trades over 4 years (12-37/year). Uses 12h primary timeframe per experiment instructions.
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6511_6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_6512_12h_donchian20_1d_pivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -42,7 +42,7 @@ def generate_signals(prices):
     s3 = close_1d - camarilla_high * 1.1 / 4
     s4 = close_1d - camarilla_high * 1.1 / 2
     
-    # Align to LTF (6h) with shift(1) for completed bars only
+    # Align to LTF (12h) with shift(1) for completed bars only
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
