@@ -2,9 +2,9 @@
 """
 Experiment #2813: 4h Donchian(20) breakout + 12h EMA trend + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA trend and volume spikes capture
-strong momentum moves while avoiding whipsaws. 12h EMA provides robust medium-term bias
-for both bull and bear markets, reducing counter-trend entries. 4h timeframe balances
-trade frequency and trend capture. Target: 75-200 total trades over 4 years (19-50/year).
+strong momentum moves while avoiding whipsaws. The 12h EMA provides a robust trend filter
+for both bull and bear markets, reducing counter-trend entries. Using 4h as primary timeframe
+balances trade frequency and trend capture, targeting 75-200 total trades over 4 years.
 """
 
 import numpy as np
@@ -26,8 +26,8 @@ def generate_signals(prices):
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
-    # Calculate 12h EMA(30)
-    ema_12h = pd.Series(close_12h).ewm(span=30, min_periods=30, adjust=False).mean().values
+    # Calculate 12h EMA(50)
+    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
     trend_12h = np.where(close_12h > ema_12h, 1, -1)
     trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
@@ -131,5 +131,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</signal>
