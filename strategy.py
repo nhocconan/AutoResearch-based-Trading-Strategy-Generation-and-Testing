@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #4665: 12h Donchian(20) Breakout + 1d EMA Trend Filter + Volume Confirmation
-HYPOTHESIS: 12h price breaking Donchian(20) channels (from prior 20 1d bars) with volume confirmation 
-and 1d EMA50 trend filter captures strong momentum moves. Works in bull (breakouts with trend) 
-and avoids false signals in ranging/choppy markets. Target: 12-37 trades/year on 12h timeframe.
+Experiment #4667: 6h Camarilla Pivot Reversal + 1d Volume Spike Filter
+HYPOTHESIS: At 6h timeframe, price reversing from Camarilla R3/S3 levels (1d) with volume confirmation 
+captures mean reversion in ranging markets while avoiding false breakouts. Works in bull (fading overextended rallies) 
+and bear (fading panic spikes). Volume spike filter ensures institutional participation. Target: 12-37 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4665_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_4667_6h_camarilla_pivot_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,44 +21,50 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for Donchian and EMA
+    # Precompute HTF: 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d Indicators: Donchian(20) from prior 20 days ===
-    if len(df_1d) >= 20:
-        # Use prior 20 days' high/low (shifted by 1)
-        ph = np.concatenate([[np.nan] * 20, df_1d['high'].values[:-20]])  # prior 20 days high
-        pl = np.concatenate([[np.nan] * 20, df_1d['low'].values[:-20]])   # prior 20 days low
+    # === 1d Indicators: Camarilla Pivot Levels (using prior day's OHLC) ===
+    if len(df_1d) >= 1:
+        # Prior day's OHLC (shifted by 1 for completed bar only)
+        prev_high = np.concatenate([[np.nan], df_1d['high'].values[:-1]])
+        prev_low = np.concatenate([[np.nan], df_1d['low'].values[:-1]])
+        prev_close = np.concatenate([[np.nan], df_1d['close'].values[:-1]])
         
-        # Rolling max/min of prior 20 days
-        donchian_high = pd.Series(ph).rolling(window=20, min_periods=20).max().values
-        donchian_low = pd.Series(pl).rolling(window=20, min_periods=20).min().values
+        # Pivot point
+        pivot = (prev_high + prev_low + prev_close) / 3.0
+        # Camarilla levels
+        rang = prev_high - prev_low
+        r3 = pivot + rang * 1.1 / 2.0
+        s3 = pivot - rang * 1.1 / 2.0
+        r4 = pivot + rang * 1.1
+        s4 = pivot - rang * 1.1
     else:
-        donchian_high = np.full(len(df_1d), np.nan)
-        donchian_low = np.full(len(df_1d), np.nan)
+        pivot = np.full(len(df_1d), np.nan)
+        r3 = np.full(len(df_1d), np.nan)
+        s3 = np.full(len(df_1d), np.nan)
+        r4 = np.full(len(df_1d), np.nan)
+        s4 = np.full(len(df_1d), np.nan)
     
-    # === 1d Indicators: EMA(50) for trend filter ===
-    if len(df_1d) >= 50:
-        ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Align HTF indicators to 6h timeframe
+    if len(r3) > 0:
+        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     else:
-        ema_50 = np.full(len(df_1d), np.nan)
+        r3_aligned = np.full(n, np.nan)
+        s3_aligned = np.full(n, np.nan)
+        r4_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
     
-    # Align HTF indicators to 12h timeframe
-    if len(donchian_high) > 0:
-        dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-        dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
-    else:
-        dh_aligned = np.full(n, np.nan)
-        dl_aligned = np.full(n, np.nan)
-        ema_50_aligned = np.full(n, np.nan)
-    
-    # === 12h Indicators: Volume MA(20) for confirmation ===
+    # === 6h Indicators: Volume Spike Filter ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    vol_spike = vol_ratio > 2.0  # Volume > 2x MA
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -80,8 +86,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(dh_aligned[i]) or np.isnan(dl_aligned[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -111,25 +117,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation for breakouts (>1.5x)
-        vol_breakout = vol_ratio[i] > 1.5
+        # Fade at R3/S3 with volume spike confirmation
+        fade_long = (price <= s3_aligned[i]) and vol_spike[i]
+        fade_short = (price >= r3_aligned[i]) and vol_spike[i]
         
-        # Trend filter: price above/below 1d EMA50
-        uptrend = price > ema_50_aligned[i]
-        downtrend = price < ema_50_aligned[i]
-        
-        # Breakout conditions: price breaks Donchian high/low with volume confirmation AND trend filter
-        breakout_long = price > dh_aligned[i] and vol_breakout and uptrend
-        breakout_short = price < dl_aligned[i] and vol_breakout and downtrend
-        
-        if breakout_long:
+        if fade_long:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif breakout_short:
+        elif fade_short:
             in_position = True
             position_side = -1
             entry_price = close[i]
