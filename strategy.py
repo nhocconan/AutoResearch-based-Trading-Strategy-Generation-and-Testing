@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #5781: 4h Donchian(20) breakout + 1d Camarilla pivot continuation + volume confirmation
+Experiment #5780: 4h Donchian(20) breakout + 1d Camarilla pivot continuation + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts aligned with 1d Camarilla R4/S4 levels (strong breakout zones) capture explosive moves with volume confirmation. Uses 1d timeframe for structure to reduce whipsaws, targeting 75-200 trades over 4 years. Works in bull/bear markets by requiring breakout alignment with pivot-derived support/resistance. Discrete sizing 0.25 minimizes fee churn.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5781_4h_donchian20_1d_camarilla_vol_v1"
+name = "exp_5780_4h_donchian20_1d_camarilla_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
