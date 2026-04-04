@@ -3,9 +3,8 @@
 Experiment #2756: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
 HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA trend and volume spikes capture
 swing moves while avoiding whipsaws. Uses 1d for trend filter, 12h for entry timing and exits.
-Target: 50-150 total trades over 4 years. Works in bull via breakouts and bear via short
-breakdowns with trend filter preventing counter-trend entries. Designed for low trade frequency
-and high win rate by requiring confluence of trend, breakout, and volume.
+Target: 75-150 total trades over 4 years. Works in bull via breakouts and bear via short breakdowns
+with trend filter preventing counter-trend entries. Uses ATR-based trailing stop for risk management.
 """
 
 import numpy as np
@@ -132,5 +131,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
