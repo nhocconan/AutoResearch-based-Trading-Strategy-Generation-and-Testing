@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #3857: 4h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend direction capture institutional participation with lower overtrading risk than 6h. Volume > 1.5x MA(20) confirms breakout strength. Works in bull/bear: In uptrend (price > EMA50), buy upper breakouts; in downtrend (price < EMA50), short lower breakouts. In ranging markets (price near EMA50), no entries to avoid whipsaw. Discrete sizing (0.25) limits fee drag. ATR(14) trailing stop (2.0x) manages risk. Target: 75-200 trades over 4 years (19-50/year).
+Experiment #3859: 6h Donchian(20) breakout + 12h Camarilla pivot + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts aligned with 12h Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) capture institutional order flow. Volume > 1.5x MA(20) confirms participation. Works in bull/bear: In ranging markets (price between R3/S3), fade extremes; in trending markets (price breaks R4/S4), continue breakout. Discrete sizing (0.25) limits fee drag. ATR(14) trailing stop (2.0x) manages risk.
+Target: 75-200 trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3857_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_3859_6h_donchian20_12h_camarilla_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,27 +20,40 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA(50) trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # === HTF: 12h data for Camarilla pivot levels ===
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Calculate EMA(50) on 1d close
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate Camarilla pivot levels for 12h
+    # Pivot = (H + L + C) / 3
+    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
+    range_12h = high_12h - low_12h
+    # Resistance levels: R3 = C + (H-L)*1.1/2, R4 = C + (H-L)*1.1
+    r3_12h = close_12h + range_12h * 1.1 / 2.0
+    r4_12h = close_12h + range_12h * 1.1
+    # Support levels: S3 = C - (H-L)*1.1/2, S4 = C - (H-L)*1.1
+    s3_12h = close_12h - range_12h * 1.1 / 2.0
+    s4_12h = close_12h - range_12h * 1.1
     
-    # Align EMA(50) to 4h timeframe (shifted by 1 for completed 1d bar)
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align Camarilla levels to 6h timeframe (shifted by 1 for completed 12h bar)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
     
-    # === 4h Indicators: Donchian Channel(20) for breakout ===
+    # === 6h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 6h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -57,12 +71,14 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20, 50)  # sufficient for all indicators
+    warmup = max(lookback_dc + 1, 20)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(r3_12h_aligned[i]) or np.isnan(r4_12h_aligned[i]) or
+            np.isnan(s3_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -106,15 +122,30 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Determine trend direction from 1d EMA(50)
-            trend_up = price > ema_50_1d_aligned[i]
-            trend_down = price < ema_50_1d_aligned[i]
+            # Determine market regime from 12h Camarilla levels
+            # Ranging market: price between S3 and R3 -> mean reversion at extremes
+            # Trending market: price breaks R4 or S4 -> continuation breakout
+            in_range = (price > s3_12h_aligned[i]) and (price < r3_12h_aligned[i])
+            breakout_up = price > r4_12h_aligned[i]
+            breakout_down = price < s4_12h_aligned[i]
             
-            # Long entry: price > EMA50 + Donchian upper breakout + volume
-            long_signal = trend_up and price > highest_high[i-1]
+            # Long entry conditions
+            long_signal = False
+            # In ranging market: fade from S3 (long when price touches/slightly below S3)
+            if in_range and price <= s3_12h_aligned[i] * 1.001:  # slight buffer
+                long_signal = True
+            # In trending market: breakout above R4
+            elif breakout_up and price > highest_high[i-1]:
+                long_signal = True
             
-            # Short entry: price < EMA50 + Donchian lower breakdown + volume
-            short_signal = trend_down and price < lowest_low[i-1]
+            # Short entry conditions
+            short_signal = False
+            # In ranging market: fade from R3 (short when price touches/slightly above R3)
+            if in_range and price >= r3_12h_aligned[i] * 0.999:  # slight buffer
+                short_signal = True
+            # In trending market: breakdown below S4
+            elif breakout_down and price < lowest_low[i-1]:
+                short_signal = True
             
             if long_signal and not short_signal:
                 in_position = True
@@ -136,3 +167,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
