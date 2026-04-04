@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #6160: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 trend capture structural moves.
+Experiment #6161: 4h Donchian(20) breakout + 1d trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA trend capture structural moves in both bull and bear markets.
 Price above 1d EMA50 = bullish bias (favor longs), below = bearish bias (favor shorts).
 Volume >1.5x average confirms strong participation. ATR trailing stop manages risk.
 Discrete sizing (0.25) minimizes fee churn. Target: 75-200 trades over 4 years.
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6160_4h_donchian20_1d_ema50_vol_v1"
+name = "exp_6161_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
