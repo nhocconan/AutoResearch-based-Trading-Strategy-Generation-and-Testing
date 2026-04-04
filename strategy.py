@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #5801: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend capture strong continuation moves. Volume confirmation filters false breakouts. ATR-based trailing stop manages risk. Uses discrete position sizing (0.25) to minimize fee churn. Targets 75-200 trades over 4 years. Works in bull markets (breakouts with trend) and avoids false signals in bear via EMA regime filter.
+Experiment #5802: 12h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation + ATR stoploss
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(50) trend capture strong continuation moves.
+Volume confirmation filters false breakouts. ATR-based trailing stop manages risk.
+Uses discrete position sizing (0.25) to minimize fee churn. Targets 50-150 trades over 4 years.
+Designed for BOTH bull (breakouts with trend) and bear (avoids false signals via EMA regime filter).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5801_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_5802_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,18 +33,18 @@ def generate_signals(prices):
     else:
         ema_50 = np.full(len(df_1d), np.nan)
     
-    # Align 1d EMA(50) to 4h timeframe (shifted by 1 for completed 1d bars only)
+    # Align 1d EMA(50) to 12h timeframe (shifted by 1 for completed 1d bars only)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation ===
+    # === 12h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 4h Indicators: ATR(14) for trailing stop ===
+    # === 12h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
