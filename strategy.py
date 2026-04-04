@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #2813: 4h Donchian(20) breakout + 12h EMA trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA trend and volume spikes capture
-strong momentum moves while avoiding whipsaws. The 12h EMA provides a robust trend filter
-for both bull and bear markets, reducing counter-trend entries. Using 4h as primary timeframe
-balances trade frequency and trend capture, targeting 75-200 total trades over 4 years.
+Experiment #2815: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts aligned with weekly Camarilla pivot levels and volume spikes
+capture strong momentum moves while avoiding whipsaws. Weekly pivot levels provide structural
+support/resistance that works in both bull and bear markets. Volume confirmation ensures
+institutional participation. 6h timeframe balances trade frequency and fee drag.
+Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2813_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_2815_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,16 +23,32 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for EMA trend (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # === HTF: 1w data for Camarilla pivot levels (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h EMA(50)
-    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_12h = np.where(close_12h > ema_12h, 1, -1)
-    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
+    # Calculate weekly Camarilla pivot levels
+    # Pivot = (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
     
-    # === 4h Indicators: Donchian(20) channels, Volume MA(20) ===
+    # Camarilla levels: R4 = C + ((H-L) * 1.1/2), S4 = C - ((H-L) * 1.1/2)
+    # R3 = C + ((H-L) * 1.1/4), S3 = C - ((H-L) * 1.1/4)
+    r4_1w = close_1w + (range_1w * 1.1 / 2.0)
+    s4_1w = close_1w - (range_1w * 1.1 / 2.0)
+    r3_1w = close_1w + (range_1w * 1.1 / 4.0)
+    s3_1w = close_1w - (range_1w * 1.1 / 4.0)
+    
+    # Align HTF levels to LTF (6h)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    
+    # === 6h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -56,7 +73,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(trend_12h_aligned[i]) or
+        if (np.isnan(pivot_1w_aligned[i]) or np.isnan(r4_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or
+            np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
@@ -76,8 +94,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below Donchian low (mean reversion)
-                elif price < lowest_20[i]:
+                # Exit if price breaks below S3 (strong support)
+                elif price < s3_1w_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -92,8 +110,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above Donchian high (mean reversion)
-                elif price > highest_20[i]:
+                # Exit if price breaks above R3 (strong resistance)
+                elif price > r3_1w_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -102,23 +120,20 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 12h trend alignment for bias filter
-        trend_bias = trend_12h_aligned[i]
-        
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Long entry: price breaks above Donchian high with uptrend on 12h
-            if trend_bias > 0 and price > highest_20[i]:
+            # Long entry: price breaks above Donchian high AND above weekly R3 (breakout confirmation)
+            if price > highest_20[i] and price > r3_1w_aligned[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with downtrend on 12h
-            elif trend_bias < 0 and price < lowest_20[i]:
+            # Short entry: price breaks below Donchian low AND below weekly S3 (breakout confirmation)
+            elif price < lowest_20[i] and price < s3_1w_aligned[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
