@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4151: 6h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation + ATR trailing stop
-HYPOTHESIS: 6h Donchian breakouts aligned with 1d EMA(50) trend capture strong momentum moves with minimal lag. Volume confirmation filters false breakouts. ATR trailing stop manages risk. Works in both bull/bear as EMA adapts to trend. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #4152: 12h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation + ATR trailing stop
+HYPOTHESIS: 12h timeframe reduces trade frequency to avoid fee drag while Donchian breakouts capture strong momentum. 1d EMA(50) aligns with primary trend, volume confirmation filters false breakouts, and ATR trailing stop manages risk. Designed to work in both bull and bear markets by adapting to trend via EMA and using discrete position sizing to minimize churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4151_6h_donchian20_1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_4152_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,17 +27,17 @@ def generate_signals(prices):
     else:
         ema_1d_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel(20) for breakout ===
+    # === 12h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 6h Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
