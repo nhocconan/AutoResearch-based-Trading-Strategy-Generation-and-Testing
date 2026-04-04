@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #5931: 6h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 1d Camarilla pivot levels (R3/S3 for fade, R4/S4 for breakout) 
-capture high-probability moves. Volume confirmation filters weak breakouts. Camarilla pivots derived from 
-daily range work well in both trending and ranging markets, effective across bull/bear regimes.
+HYPOTHESIS: 6h Donchian breakouts aligned with 1d Camarilla pivot levels (R3/S3 for reversal, R4/S4 for breakout) 
+capture high-probability trades. Volume confirmation filters weak breakouts. 
+Camarilla pivots derived from prior 1d range work in both bull and bear markets as institutional reference levels.
 Target: 75-150 total trades over 4 years (19-37/year).
 """
 
@@ -31,7 +31,7 @@ def generate_signals(prices):
         high_1d = pd.Series(df_1d['high'].values)
         low_1d = pd.Series(df_1d['low'].values)
         close_1d = pd.Series(df_1d['close'].values)
-        # Camarilla levels: based on previous day's range
+        # Camarilla pivot levels based on prior day's range
         # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
         # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
         daily_range = high_1d - low_1d
@@ -39,15 +39,11 @@ def generate_signals(prices):
         camarilla_r3 = close_1d + 1.1 * daily_range
         camarilla_s3 = close_1d - 1.1 * daily_range
         camarilla_s4 = close_1d - 1.5 * daily_range
-        # Shift by 1 to use previous day's levels (no look-ahead)
-        camarilla_r4 = camarilla_r4.shift(1)
-        camarilla_r3 = camarilla_r3.shift(1)
-        camarilla_s3 = camarilla_s3.shift(1)
-        camarilla_s4 = camarilla_s4.shift(1)
-        camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4.values)
-        camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3.values)
-        camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3.values)
-        camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4.values)
+        # Align to 6h timeframe (use prior day's levels)
+        camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+        camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+        camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+        camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     else:
         camarilla_r4_aligned = np.full(n, np.nan)
         camarilla_r3_aligned = np.full(n, np.nan)
@@ -81,7 +77,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 2)  # Donchian, volume avg, ATR, Camarilla lookback
+    warmup = max(20, 20, 14, 2)  # Donchian, volume avg, ATR, HTF data
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -130,18 +126,17 @@ def generate_signals(prices):
         volume_confirmed = volume_ratio[i] > 1.5
         
         # Camarilla pivot filters:
-        # Fade at R3/S3 (price touches extreme and reverses)
-        # Breakout continuation at R4/S4 (price breaks extreme with momentum)
-        fade_long = (price <= camarilla_s3_aligned[i]) and (price >= camarilla_s4_aligned[i])  # Between S3 and S4
-        fade_short = (price >= camarilla_r3_aligned[i]) and (price <= camarilla_r4_aligned[i])  # Between R3 and R4
-        breakout_long = price >= camarilla_r4_aligned[i]  # Above R4
-        breakout_short = price <= camarilla_s4_aligned[i]  # Below S4
+        # Breakout above R4 = strong continuation long
+        # Breakdown below S4 = strong continuation short
+        # Rejection at R3/S3 = fade opportunity
+        strong_breakout_long = breakout_up and price > camarilla_r4_aligned[i-1]
+        strong_breakout_short = breakout_down and price < camarilla_s4_aligned[i-1]
+        fade_long = price < camarilla_r3_aligned[i] and price > camarilla_s3_aligned[i] and breakout_down  # fade at R3
+        fade_short = price > camarilla_s3_aligned[i] and price < camarilla_r3_aligned[i] and breakout_up   # fade at S3
         
-        # Entry conditions: 
-        # Long: breakout up with volume AND (breakout above R4 OR fade from S3/S4 area)
-        # Short: breakout down with volume AND (breakdown below S4 OR fade from R3/R4 area)
-        long_setup = breakout_up and volume_confirmed and (breakout_long or fade_long)
-        short_setup = breakout_down and volume_confirmed and (breakout_short or fade_short)
+        # Entry conditions: strong breakouts with volume OR fades at R3/S3 with volume
+        long_setup = (strong_breakout_long or fade_long) and volume_confirmed
+        short_setup = (strong_breakout_short or fade_short) and volume_confirmed
         
         if long_setup:
             in_position = True
