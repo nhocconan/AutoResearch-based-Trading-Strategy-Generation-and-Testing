@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #3263: 4h Donchian Breakout + 12h HMA Trend + Volume Spike
-HYPOTHESIS: 4h Donchian(20) breakouts with 12h HMA(50) trend filter and volume confirmation (>2.0x) capture medium-term trends with controlled trade frequency.
-ATR(14) trailing stop (2.5x) manages risk. Position size 0.25. Designed to work in bull markets (trend continuation) and bear markets (mean reversion from extremes) by using price channels and volatility filters.
-Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #3263: 4h Donchian(20) Breakout + 12h HMA Trend + Volume Spike
+HYPOTHESIS: 4h Donchian(20) breakouts with volume confirmation and 12h HMA trend filter capture medium-term trends with optimal trade frequency for 4h timeframe (target: 75-200 trades over 4 years). Works in bull markets via trend continuation and bear markets via mean reversion from extremes when price re-enters the channel after overextension. Volume spike (>2.0x 20-period average) confirms breakout validity. ATR-based trailing stop (2.5x) manages risk. Position size 0.25. Uses discrete signal levels to minimize fee churn.
 """
 
 import numpy as np
@@ -25,7 +23,7 @@ def generate_signals(prices):
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
-    # Calculate HMA(50) on 12h close
+    # Calculate HMA(30) on 12h close
     def hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -37,7 +35,7 @@ def generate_signals(prices):
         hma_vals = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
         return hma_vals
     
-    hma_12h = hma(close_12h, 50)
+    hma_12h = hma(close_12h, 30)
     hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
     # === 4h Indicators: Donchian channels (20-period) ===
@@ -68,7 +66,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 20, 14, 50)  # sufficient for all indicators
+    warmup = max(50, lookback, 20, 14, 30)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
