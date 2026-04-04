@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #6395: 6h Donchian(20) breakout + 1w Camarilla pivot + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts with volume confirmation (>2.0x avg) and 1w Camarilla pivot filter capture strong momentum while avoiding false breakouts. 
-In bull markets: Long breakouts above weekly R4 with volume. 
-In bear markets: Short breakdowns below weekly S4 with volume. 
-Weekly Camarilla provides structure: R3/S3 = mean reversion zones, R4/S4 = breakout/breakdown zones. 
-Volume filters false breakouts. Discrete sizing (0.25) controls drawdown. Target: 75-150 trades over 4 years.
-Works in bull via breakouts with weekly pivot resistance broken, in bear via short breakdowns with weekly pivot support broken.
+HYPOTHESIS: 6h Donchian breakouts with volume confirmation (>2.0x avg) and weekly Camarilla pivot filter capture institutional order flow. Weekly R3/S3 levels act as mean-reversion zones (fade), while R4/S4 levels indicate breakout strength (continuation). This structure works in bull markets via R4 breakout continuation and in bear markets via S4 breakdown continuation, with volume filtering false signals. Target: 75-150 trades over 4 years.
 """
 
 import numpy as np
@@ -35,17 +30,13 @@ def generate_signals(prices):
         weekly_low = df_1w['low'].values
         weekly_close = df_1w['close'].values
         
-        # Camarilla formula: 
-        # R4 = Close + (High - Low) * 1.1/2
-        # R3 = Close + (High - Low) * 1.1/4
-        # S3 = Close - (High - Low) * 1.1/4
-        # S4 = Close - (High - Low) * 1.1/2
+        # Camarilla formula: R4 = Close + (High-Low)*1.1/2, R3 = Close + (High-Low)*1.1/4, etc.
         camarilla_r4 = weekly_close + (weekly_high - weekly_low) * 1.1 / 2
         camarilla_r3 = weekly_close + (weekly_high - weekly_low) * 1.1 / 4
         camarilla_s3 = weekly_close - (weekly_high - weekly_low) * 1.1 / 4
         camarilla_s4 = weekly_close - (weekly_high - weekly_low) * 1.1 / 2
         
-        # Align to 6h timeframe (shifted by 1 for completed weekly bars only)
+        # Align to 6h timeframe (shift by 1 for completed weekly bars only)
         camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
         camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
         camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
@@ -83,7 +74,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 2) + 1  # Donchian, volume avg, ATR, weekly lookback + 1
+    warmup = max(20, 20, 14) + 1  # Donchian, volume avg, ATR lookback + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (22:00-23:59 UTC) ---
@@ -109,8 +100,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks below Donchian low (failed breakout)
-                # 3. Price crosses below weekly S3 (mean reversion zone)
-                if price <= stop_price or price <= donchian_low[i] or price < camarilla_s3_aligned[i]:
+                # 3. Price retraces to weekly S3 (mean reversion in range)
+                if price <= stop_price or price <= donchian_low[i] or price <= camarilla_s3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -122,8 +113,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks above Donchian high (failed breakout)
-                # 3. Price crosses above weekly R3 (mean reversion zone)
-                if price >= stop_price or price >= donchian_high[i] or price > camarilla_r3_aligned[i]:
+                # 3. Price retraces to weekly R3 (mean reversion in range)
+                if price >= stop_price or price >= donchian_high[i] or price >= camarilla_r3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -136,9 +127,10 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 2.0  # Volume filter
         
-        # Entry logic based on weekly Camarilla:
-        # Long: breakout up + volume + price > weekly R4 (strong breakout)
+        # Entry logic based on weekly Camarilla levels:
+        # Long: breakout up + volume + price > weekly R4 (strong continuation)
         # Short: breakout down + volume + price < weekly S4 (strong breakdown)
+        # Note: Avoid fading at R3/S3 unless in extreme overbought/oversold (not implemented here for simplicity)
         
         long_entry = breakout_up and volume_confirmed and (price > camarilla_r4_aligned[i])
         short_entry = breakout_down and volume_confirmed and (price < camarilla_s4_aligned[i])
