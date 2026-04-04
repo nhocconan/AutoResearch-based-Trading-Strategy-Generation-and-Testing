@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4426: 4h Donchian(20) Breakout + 1d EMA50 Trend + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with 1d EMA50 trend direction and confirmed by volume (>1.5x average) capture institutional momentum with minimal false signals. 1d EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
+Experiment #4426: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation + ATR Stoploss
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 1d EMA50 trend direction and confirmed by volume (>2.0x average) capture institutional momentum with minimal false signals. The 1d EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. ATR-based trailing stop (2.5x) manages risk. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
 """
 
 import numpy as np
@@ -102,8 +102,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = vol_ratio[i] > 2.0
         
         # 1d EMA bias: price > EMA = long bias, price < EMA = short bias
         long_bias = price > ema_1d_aligned[i]
