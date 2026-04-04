@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4106: 4h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with daily HMA(21) trend and volume confirmation capture strong trending moves while filtering noise. Daily trend filter adapts to bull/bear regimes. Target: 75-200 total trades over 4 years (19-50/year).
+HYPOTHESIS: 4h Donchian breakouts aligned with daily HMA(21) trend and volume confirmation capture strong trending moves with proper filtering. Daily timeframe provides regime filter to avoid whipsaws in both bull and bear markets. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
