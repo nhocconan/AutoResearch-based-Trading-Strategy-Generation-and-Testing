@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5573: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts with volume > 1.8x average and aligned 
-with 12h HMA(21) trend capture high-probability trend moves. The 12h HMA acts as a higher 
-timeframe trend filter to avoid counter-trend trades, improving win rate in both bull and 
-bear markets. ATR-based trailing stop limits drawdown. Target: 19-50 trades/year (75-200 
-total over 4 years) with discrete position sizing (0.25) to minimize fee drag.
+Experiment #5575: 6h Elder Ray Index + 1w Regime Filter + Volume Confirmation
+HYPOTHESIS: On 6h timeframe, Elder Ray Bull/Bear Power (EMA13-based) filtered by weekly trend (price > weekly EMA50 = bull regime, < = bear regime) with volume > 2.0x average captures high-probability momentum moves. In bull regime, long when Bull Power > 0 and rising; in bear regime, short when Bear Power < 0 and falling. Weekly regime prevents counter-trend trading, reducing whipsaw in sideways markets. ATR-based stoploss limits drawdown. Target: 12-37 trades/year (50-150 total over 4 years) with discrete position sizing (0.25).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5573_4h_donchian20_12h_hma_vol_v1"
-timeframe = "4h"
+name = "exp_5575_6h_elder_ray_1w_regime_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,51 +22,30 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 12h data for HMA(21) trend filter ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 21:
-        # Calculate HMA(21) on 12h close prices
-        close_12h = df_12h['close'].values
-        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        
-        # WMA helper function
-        def wma(arr, period):
-            if len(arr) < period:
-                return np.full_like(arr, np.nan)
-            weights = np.arange(1, period + 1)
-            return np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
-        
-        # Calculate WMA(10.5) -> WMA(10) and WMA(21)
-        wma_half = wma(close_12h, half_len)
-        wma_full = wma(close_12h, 21)
-        # Handle array length differences
-        wma_half_padded = np.full_like(close_12h, np.nan)
-        wma_half_padded[half_len-1:half_len-1+len(wma_half)] = wma_half
-        wma_full_padded = np.full_like(close_12h, np.nan)
-        wma_full_padded[20:20+len(wma_full)] = wma_full
-        
-        raw_hma = 2 * wma_half_padded - wma_full_padded
-        hma_12h = wma(raw_hma, sqrt_len)
-        hma_12h_padded = np.full_like(close_12h, np.nan)
-        hma_12h_padded[sqrt_len-1:sqrt_len-1+len(hma_12h)] = hma_12h
-        
-        # Align to LTF (4h) with shift(1) for completed bars only
-        hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_padded)
+    # === HTF: 1w data for regime filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 50:
+        weekly_ema = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False).mean().values
+        weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
+        bull_regime = close > weekly_ema_aligned  # price above weekly EMA50 = bull regime
+        bear_regime = close < weekly_ema_aligned  # price below weekly EMA50 = bear regime
     else:
-        # Neutral values if insufficient data
-        hma_12h_aligned = np.full(n, np.nan)
+        weekly_ema_aligned = np.full(n, np.nan)
+        bull_regime = np.zeros(n, dtype=bool)
+        bear_regime = np.zeros(n, dtype=bool)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # === 6h Indicators: EMA13 for Elder Ray ===
+    ema13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
     
-    # === 4h Indicators: Volume confirmation ===
+    # === 6h Indicators: Elder Ray Bull/Bear Power ===
+    bull_power = high - ema13  # Bull Power = High - EMA13
+    bear_power = low - ema13   # Bear Power = Low - EMA13
+    
+    # === 6h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 4h Indicators: ATR(14) for trailing stop ===
+    # === 6h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -89,7 +64,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21)  # Donchian, volume avg, ATR, HTF warmup
+    warmup = max(50, 13, 20, 14)  # weekly EMA, EMA13, volume avg, ATR
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -99,9 +74,9 @@ def generate_signals(prices):
             continue
         
         # --- Data Validity Check ---
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(hma_12h_aligned[i])):
+            np.isnan(weekly_ema_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -112,8 +87,8 @@ def generate_signals(prices):
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
                 stop_price = highest_since_entry - 2.0 * atr[i]
-                # Exit: stoploss OR Donchian lower band break
-                if price <= stop_price or price <= donchian_low[i]:
+                # Exit: stoploss OR Elder Ray turns negative
+                if price <= stop_price or bull_power[i] <= 0:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -122,8 +97,8 @@ def generate_signals(prices):
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 stop_price = lowest_since_entry + 2.0 * atr[i]
-                # Exit: stoploss OR Donchian upper band break
-                if price >= stop_price or price >= donchian_high[i]:
+                # Exit: stoploss OR Elder Ray turns positive
+                if price >= stop_price or bear_power[i] >= 0:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -132,24 +107,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        breakout_up = price > donchian_high[i-1]
-        breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.8
+        volume_confirmed = volume_ratio[i] > 2.0
         
-        # Determine trend bias from 12h HMA
-        # Long: breakout above Donchian high with volume AND price > 12h HMA (uptrend)
-        # Short: breakout below Donchian low with volume AND price < 12h HMA (downtrend)
-        long_breakout = breakout_up and volume_confirmed and (price > hma_12h_aligned[i])
-        short_breakout = breakout_down and volume_confirmed and (price < hma_12h_aligned[i])
+        # Bull regime: long when Bull Power > 0 and rising (previous < current)
+        # Bear regime: short when Bear Power < 0 and falling (previous > current)
+        long_entry = bull_regime[i] and volume_confirmed and (bull_power[i] > 0) and (i > warmup and bull_power[i] > bull_power[i-1])
+        short_entry = bear_regime[i] and volume_confirmed and (bear_power[i] < 0) and (i > warmup and bear_power[i] < bear_power[i-1])
         
-        if long_breakout:
+        if long_entry:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif short_breakout:
+        elif short_entry:
             in_position = True
             position_side = -1
             entry_price = close[i]
@@ -160,4 +132,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-</trading_strategy>
+
+</think>
