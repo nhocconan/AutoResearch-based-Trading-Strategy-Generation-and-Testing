@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #6406: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation + chop filter
-HYPOTHESIS: 4h Donchian breakouts with volume confirmation (>2.0x avg) and 1d EMA(50) trend filter capture strong momentum while avoiding whipsaws. Added Choppiness Index regime filter: only trade when CHOP(14) < 38.2 (trending market) to avoid range-bound losses. Discrete sizing (0.25) balances profit potential and drawdown control. Target: 75-200 trades over 4 years. Works in bull via breakouts with 1d EMA uptrend, in bear via short breakdowns with 1d EMA downtrend. Chop filter reduces false signals in ranging markets.
+Experiment #6406: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts with volume confirmation (>2.0x avg) and 1d EMA(50) trend filter capture strong momentum while avoiding whipsaws. The 1d EMA provides higher-timeframe trend bias: price above 1d EMA = bullish bias (favor long breakouts), price below 1d EMA = bearish bias (favor short breakdowns). Volume confirmation filters false breakouts. Discrete sizing (0.25) balances profit potential and drawdown control. Target: 75-200 trades over 4 years. Works in bull via breakouts with 1d EMA uptrend, in bear via short breakdowns with 1d EMA downtrend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6406_4h_donchian20_1d_ema_vol_chop_v1"
+name = "exp_6406_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -46,21 +46,6 @@ def generate_signals(prices):
     tr[0] = tr1[0]
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # === 4h Indicators: Choppiness Index (14) for regime filter ===
-    # CHOP = 100 * LOG10(SUM(ATR(1), n) / (LOG10(HHLL - LL) / LOG10(n)))
-    # Simplified: CHOP = 100 * LOG10(ATR_sum / (HHLL_range * LOG10(n))) / LOG10(n)
-    # We'll use common approximation: CHOP = 100 * LOG10(ATR_sum / (HHLL - LL)) / LOG10(n)
-    # Where ATR_sum = SUM(ATR(1) over n periods), HHLL = highest high, LL = lowest low
-    atr1 = tr  # True Range is ATR(1)
-    atr_sum = pd.Series(atr1).rolling(window=14, min_periods=14).sum().values
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
-    hhll_range = highest_high - lowest_low
-    # Avoid division by zero and log of zero
-    safe_range = np.where(hhll_range > 0, hhll_range, 1e-10)
-    chop = 100 * (np.log10(atr_sum / safe_range) / np.log10(14))
-    chop = np.where((atr_sum > 0) & (hhll_range > 0), chop, 50.0)  # Default to neutral when invalid
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
     SIZE = 0.25  # 25% position size (discrete level)
@@ -72,7 +57,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50, 14) + 1  # Donchian, volume avg, ATR, EMA, chop lookback + 1
+    warmup = max(20, 20, 14, 50) + 1  # Donchian, volume avg, ATR, EMA lookback + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (22:00-23:59 UTC) ---
@@ -84,7 +69,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_1d_aligned[i]) or np.isnan(chop[i])):
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -99,8 +84,7 @@ def generate_signals(prices):
                 # 1. Stoploss
                 # 2. Price breaks below Donchian low (failed breakout)
                 # 3. Price crosses below 1d EMA (trend change)
-                # 4. Market becomes ranging (CHOP > 61.8)
-                if price <= stop_price or price <= donchian_low[i] or price < ema_1d_aligned[i] or chop[i] > 61.8:
+                if price <= stop_price or price <= donchian_low[i] or price < ema_1d_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -113,8 +97,7 @@ def generate_signals(prices):
                 # 1. Stoploss
                 # 2. Price breaks above Donchian high (failed breakout)
                 # 3. Price crosses above 1d EMA (trend change)
-                # 4. Market becomes ranging (CHOP > 61.8)
-                if price >= stop_price or price >= donchian_high[i] or price > ema_1d_aligned[i] or chop[i] > 61.8:
+                if price >= stop_price or price >= donchian_high[i] or price > ema_1d_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -126,14 +109,13 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 2.0  # Volume filter
-        trending_market = chop[i] < 38.2  # Chop filter: only trade in trending markets
         
         # Entry logic based on 1d EMA trend:
-        # Long: breakout up + volume + price > 1d EMA (uptrend bias) + trending market
-        # Short: breakout down + volume + price < 1d EMA (downtrend bias) + trending market
+        # Long: breakout up + volume + price > 1d EMA (uptrend bias)
+        # Short: breakout down + volume + price < 1d EMA (downtrend bias)
         
-        long_entry = breakout_up and volume_confirmed and (price > ema_1d_aligned[i]) and trending_market
-        short_entry = breakout_down and volume_confirmed and (price < ema_1d_aligned[i]) and trending_market
+        long_entry = breakout_up and volume_confirmed and (price > ema_1d_aligned[i])
+        short_entry = breakout_down and volume_confirmed and (price < ema_1d_aligned[i])
         
         if long_entry:
             in_position = True
