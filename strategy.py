@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #2935: 6h Williams %R Extreme + Weekly Trend Filter + Volume Confirmation
-HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h timeframe.
-Only take trades when weekly trend (from 1w data) aligns: long when weekly close > weekly open (bullish),
-short when weekly close < weekly open (bearish). Volume confirmation (>1.5x 20-period average) ensures
-momentum behind the reversal. This captures mean reversion in strong trends while avoiding
-counter-trend traps. Target: 75-150 total trades over 4 years.
+Experiment #2937: 4h Donchian Breakout + Daily EMA Trend + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture medium-term trends.
+Daily EMA(50) provides directional bias: only take long breakouts when price > EMA50,
+and short breakouts when price < EMA50. Volume spike (>2.0x 20-period average)
+confirms breakout strength. This combination filters false breakouts in choppy
+markets while capturing strong trends in both bull and bear regimes. 4h timeframe
+balances trade frequency and fee drag. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2935_6h_williamsr_extreme_1w_trend_vol_v1"
-timeframe = "6h"
+name = "exp_2937_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,28 +24,23 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for weekly trend bias (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    open_1w = df_1w['open'].values
+    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Weekly trend: bullish if weekly close > open, bearish if close < open
-    weekly_bullish = close_1w > open_1w
-    weekly_bullish_series = pd.Series(weekly_bullish)
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish_series.values)
+    # Calculate daily EMA(50)
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # === 6h Indicators: Williams %R(14) ===
-    lookback = 14
+    # Align to 4h timeframe (shifted by 1 for completed bars only)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # === 4h Indicators: Donchian channels (20-period) ===
+    lookback = 20
+    # Rolling max/min for Donchian channels
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    williams_r = np.full(n, np.nan)
-    denominator = highest_high - lowest_low
-    # Avoid division by zero
-    valid = denominator != 0
-    williams_r[valid] = ((highest_high[valid] - close[valid]) / denominator[valid]) * -100
     
-    # === 6h Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -53,62 +49,83 @@ def generate_signals(prices):
     signals = np.zeros(n)
     SIZE = 0.25  # 25% position size
     
-    # Position tracking
+    # Position tracking state variables
     in_position = False
     position_side = 0
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    warmup = max(lookback, 20)
+    warmup = max(50, lookback, 20)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(williams_r[i]) or np.isnan(weekly_bullish_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic: Reverse on opposite signal or weekly trend change ---
+        # --- Exit Logic ---
         if in_position:
-            # Exit conditions
-            exit_long = False
-            exit_short = False
-            
-            if position_side > 0:  # Long position
-                # Exit if Williams %R becomes overbought OR weekly trend turns bearish
-                if williams_r[i] > -20 or weekly_bullish_aligned[i] == False:
-                    exit_long = True
-            else:  # Short position
-                # Exit if Williams %R becomes oversold OR weekly trend turns bullish
-                if williams_r[i] < -80 or weekly_bullish_aligned[i] == True:
-                    exit_short = True
-            
-            if exit_long or exit_short:
-                in_position = False
-                position_side = 0
-                signals[i] = 0.0
-            else:
-                # Hold position
-                signals[i] = SIZE if position_side > 0 else -SIZE
+            # Update highest/lowest since entry for trailing stop
+            if position_side > 0:  # Long
+                highest_since_entry = max(highest_since_entry, high[i])
+                # Exit if price drops 2.5*ATR below highest since entry
+                # Use 4h ATR(14) approximation from price range
+                atr_estimate = (high[i] - low[i]) * 0.5
+                if price < highest_since_entry - 2.5 * atr_estimate:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price re-enters Donchian channel (mean reversion)
+                elif price <= highest_high[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = SIZE
+            else:  # Short
+                lowest_since_entry = min(lowest_since_entry, low[i])
+                # Exit if price rises 2.5*ATR above lowest since entry
+                atr_estimate = (high[i] - low[i]) * 0.5
+                if price > lowest_since_entry + 2.5 * atr_estimate:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price re-enters Donchian channel (mean reversion)
+                elif price >= lowest_low[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -SIZE
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average)
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume spike (> 2.0x average) for confirmation
+        volume_spike = vol_ratio[i] > 2.0
         
-        if volume_confirm:
-            # Get weekly trend bias
-            is_bullish_weekly = weekly_bullish_aligned[i] == True
+        if volume_spike:
+            # Get daily EMA bias
+            price_vs_ema = price - ema_50_aligned[i]
             
-            # Long entry: Williams %R oversold (< -80) + bullish weekly trend
-            if williams_r[i] < -80 and is_bullish_weekly:
+            # Long entry: price breaks above Donchian high with bullish EMA bias
+            if price > highest_high[i] and price_vs_ema > 0:
                 in_position = True
                 position_side = 1
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Williams %R overbought (> -20) + bearish weekly trend
-            elif williams_r[i] > -20 and not is_bullish_weekly:
+            # Short entry: price breaks below Donchian low with bearish EMA bias
+            elif price < lowest_low[i] and price_vs_ema < 0:
                 in_position = True
                 position_side = -1
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
