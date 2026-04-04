@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5206: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stop
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 1d EMA(50) trend capture momentum with controlled frequency. Volume > 2.0x average confirms participation. Designed for 19-50 trades/year on 4h (75-200 total over 4 years) to minimize fee drag. Works in bull/bear markets via trend filter. Uses discrete sizing (0.25) to reduce churn.
+Experiment #5205: 12h Donchian(20) Breakout + 1d EMA Trend + Volume Spike
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with 1d EMA(50) trend capture momentum bursts with lower overtrading risk than lower timeframes. Volume > 2.0x average confirms institutional participation. Designed for 12-37 trades/year on 12h timeframe (50-150 total over 4 years) to minimize fee drag. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5206_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_5205_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,16 +30,16 @@ def generate_signals(prices):
     else:
         ema_1d_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian(20) channels ===
+    # === 12h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation (2.0x spike) ===
+    # === 12h Indicators: Volume confirmation (2.0x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -120,3 +120,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
