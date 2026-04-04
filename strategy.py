@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4685: 12h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation
-HYPOTHESIS: 12h price breaking Donchian(20) channels with volume confirmation (>1.8x avg volume) and aligned with 1d EMA50 trend captures medium-term momentum while minimizing whipsaws. 1d EMA50 acts as a higher timeframe trend filter, reducing false signals in ranging markets. Target: 12-37 trades/year on 12h timeframe.
+Experiment #4686: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation
+HYPOTHESIS: 4h price breaking Donchian(20) channels with volume confirmation (>1.5x avg volume) and aligned with 1d EMA50 trend captures momentum while minimizing whipsaws. 1d EMA50 acts as a smoother trend filter than 12h, reducing false signals in ranging markets. Target: 25-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4685_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_4686_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,13 +28,13 @@ def generate_signals(prices):
     else:
         ema_1d = np.full(len(df_1d), np.nan)
     
-    # Align HTF EMA50 to 12h timeframe
+    # Align HTF EMA50 to 4h timeframe
     if len(ema_1d) > 0:
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
         ema_1d_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian(20) from prior 20 bars ===
+    # === 4h Indicators: Donchian(20) from prior 20 bars ===
     # Use prior 20 bars' high/low (shifted by 1 to avoid look-ahead)
     ph = np.concatenate([[np.nan] * 20, high[:-20]])  # prior 20 bars high
     pl = np.concatenate([[np.nan] * 20, low[:-20]])   # prior 20 bars low
@@ -43,12 +43,12 @@ def generate_signals(prices):
     donchian_high = pd.Series(ph).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(pl).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -101,8 +101,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation for breakouts (>1.8x)
-        vol_breakout = vol_ratio[i] > 1.8
+        # Volume filter: confirmation for breakouts (>1.5x)
+        vol_breakout = vol_ratio[i] > 1.5
         
         # Donchian breakout conditions
         breakout_long = price > donchian_high[i] and vol_breakout
