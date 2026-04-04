@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4800: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts in direction of 1d HMA21 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) trailing stoploss (2.5x) to limit downside. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
+Experiment #4801: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts in direction of 1d HMA21 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) stoploss (2.5x) to limit downside. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4800_4h_donchian20_1d_hma_vol_v1"
+name = "exp_4801_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
