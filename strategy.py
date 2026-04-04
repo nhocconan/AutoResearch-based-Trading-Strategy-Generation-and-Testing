@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4385: 12h Donchian Breakout + Daily EMA Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 12h aligned with daily EMA50 trend (price > EMA50 = long bias, < EMA50 = short bias) and confirmed by volume spikes (>1.8x average) capture institutional momentum with minimal false signals. Daily EMA50 provides structural trend filter from higher timeframe, reducing whipsaws. Works in bull via upward breakouts with long bias, in bear via downward breakouts with short bias. Volume confirmation filters low-conviction moves. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+Experiment #4386: 4h Donchian Breakout + Daily EMA Trend + Volume Confirmation (Optimized)
+HYPOTHESIS: Donchian(20) breakouts on 4h aligned with daily EMA50 trend (price > EMA50 = long bias, < EMA50 = short bias) and confirmed by volume spikes (>2.0x average) capture institutional momentum with minimal false signals. Increased volume threshold from 1.8x to 2.0x to reduce overtrading. Daily EMA50 provides structural trend filter from higher timeframe, reducing whipsaws. Works in bull via upward breakouts with long bias, in bear via downward breakouts with short bias. Volume confirmation filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4385_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_4386_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,18 +31,18 @@ def generate_signals(prices):
     else:
         ema_1d_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel(20) ===
+    # === 4h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -101,8 +101,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 2.0x average) to filter noise - INCREASED THRESHOLD
+        volume_confirm = vol_ratio[i] > 2.0
         
         # Daily EMA50 bias: price > EMA50 = long bias, price < EMA50 = short bias
         long_bias = price > ema_1d_aligned[i]
@@ -136,5 +136,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
