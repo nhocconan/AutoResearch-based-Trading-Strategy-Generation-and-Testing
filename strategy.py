@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #3158: 1d Donchian Breakout + 1w HMA Trend + Volume Spike
-HYPOTHESIS: 1d Donchian(20) breakouts capture medium-term trends with low trade frequency (target 30-100/4y). 
-1w HMA(21) trend filter ensures alignment with weekly momentum. Volume spike (>2.0x 20-period average) confirms breakout strength. 
-ATR-based trailing stop (2.5x) manages risk. Position size 0.25. Designed to work in bull (trend continuation) and bear (mean reversion from extremes) markets.
+HYPOTHESIS: Daily Donchian(20) breakouts capture intermediate-term trends with low trade frequency. 
+Weekly HMA(21) trend filter ensures alignment with higher timeframe momentum. Volume spike (>2.0x 
+20-period average) confirms breakout strength. ATR-based trailing stop (2.5x) manages risk. 
+Position size 0.25. Target: 30-100 total trades over 4 years (7-25/year). Designed to work in 
+both bull (trend continuation) and bear (mean reversion from extremes) markets by using price 
+channels and volatility filters. Using 1d primary timeframe minimizes fee drag.
 """
 
 import numpy as np
