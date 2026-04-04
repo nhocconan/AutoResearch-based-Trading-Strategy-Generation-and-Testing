@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #3835: 6h Donchian(20) breakout + 1w trend filter + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts capture medium-term swings with weekly trend alignment (price > weekly EMA20) and volume confirmation (>2.0x) to filter false breakouts. 
-Weekly EMA20 ensures we only trade in the direction of the longer-term trend, reducing whipsaws in ranging markets. 
-Volume spike confirms institutional participation. Discrete position sizing (0.25) minimizes fee drag. 
-Target: 75-150 trades over 4 years.
+Experiment #3835: 6h Williams %R + 1w EMA50 trend filter + volume spike
+HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions with mean reversion tendency. 
+1w EMA50 defines the primary trend - only take longs above EMA50, shorts below EMA50 to avoid fighting trend.
+Volume spike (>2.0x) confirms institutional participation at turning points.
+Works in bull markets (buying dips in uptrend) and bear markets (selling rallies in downtrend).
+Discrete position sizing (0.25) minimizes fee drag. Target: 75-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3835_6h_donchian20_1w_ema_vol_v1"
+name = "exp_3835_6h_williamsr_1w_ema_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -22,20 +23,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
+    # === HTF: 1w data for EMA50 trend filter (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate weekly EMA20 for trend filter
-    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate 1w EMA50
+    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align weekly EMA to 6h timeframe (shifted by 1 for completed weekly bar)
-    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Align 1w EMA50 to 6h timeframe (shifted by 1 for completed 1w bar)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # === 6h Indicators: Donchian Channel(20) for breakout ===
-    lookback_dc = 20
-    highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
+    # === 6h Indicators: Williams %R(14) ===
+    lookback_wr = 14
+    highest_high = pd.Series(high).rolling(window=lookback_wr, min_periods=lookback_wr).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback_wr, min_periods=lookback_wr).min().values
+    williams_r = np.full(n, np.nan)
+    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+    mask = (highest_high - lowest_low) != 0
+    williams_r[mask] = ((highest_high[mask] - close[mask]) / (highest_high[mask] - lowest_low[mask])) * -100
     
     # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,86 +55,61 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20)  # sufficient for all indicators
+    warmup = max(lookback_wr + 1, 20, 50)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_20_1w_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(williams_r[i]) or np.isnan(ema50_1w_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        ema50 = ema50_1w_aligned[i]
         
         # --- Exit Logic ---
         if in_position:
-            # Update highest/lowest since entry for trailing stop
+            # Exit conditions: Williams %R returns to neutral zone (-50) or opposite extreme
             if position_side > 0:  # Long
-                highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
-                # Calculate ATR manually for exit condition
-                if i > 0:
-                    atr_temp = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-                    if price < highest_since_entry - 2.0 * atr_temp:
-                        in_position = False
-                        position_side = 0
-                        signals[i] = 0.0
-                    # Exit if price breaks below Donchian lower band (trend reversal)
-                    elif price < lowest_low[i]:
-                        in_position = False
-                        position_side = 0
-                        signals[i] = 0.0
-                    else:
-                        signals[i] = SIZE
+                # Exit if Williams %R rises above -50 (returning from oversold)
+                # or if price breaks below 6h EMA20 (trend change)
+                if williams_r[i] > -50:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
-                lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
-                if i > 0:
-                    atr_temp = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-                    if price > lowest_since_entry + 2.0 * atr_temp:
-                        in_position = False
-                        position_side = 0
-                        signals[i] = 0.0
-                    # Exit if price breaks above Donchian upper band (trend reversal)
-                    elif price > highest_high[i]:
-                        in_position = False
-                        position_side = 0
-                        signals[i] = 0.0
-                    else:
-                        signals[i] = -SIZE
+                # Exit if Williams %R falls below -50 (returning from overbought)
+                # or if price breaks above 6h EMA20 (trend change)
+                if williams_r[i] < -50:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
                 else:
                     signals[i] = -SIZE
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) and weekly trend alignment
+        # Require volume spike (> 2.0x average)
         volume_spike = vol_ratio[i] > 2.0
-        weekly_uptrend = close[i] > ema_20_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_20_1w_aligned[i]
         
         if volume_spike:
-            # Long entry: Price breaks above Donchian upper band AND weekly uptrend
-            if (price > highest_high[i-1] and  # Breakout above previous period's high
-                weekly_uptrend):
+            # Long entry: Williams %R oversold (< -80) AND price above 1w EMA50 (uptrend)
+            if (williams_r[i] < -80 and  # Oversold condition
+                price > ema50):          # Above weekly EMA50 (uptrend filter)
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Price breaks below Donchian lower band AND weekly downtrend
-            elif (price < lowest_low[i-1] and    # Breakout below previous period's low
-                  weekly_downtrend):
+            # Short entry: Williams %R overbought (> -20) AND price below 1w EMA50 (downtrend)
+            elif (williams_r[i] > -20 and   # Overbought condition
+                  price < ema50):           # Below weekly EMA50 (downtrend filter)
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
