@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #5883: 4h Donchian(20) breakout + 12h EMA50 trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA50 trend capture momentum with fewer whipsaws than 1d EMA.
-Volume confirmation filters weak breakouts. ATR-based stoploss manages risk.
-Targets 75-200 trades over 4 years (19-50/year) for SOLUSDT, BTCUSDT, ETHUSDT.
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA50 trend capture strong momentum moves.
+Volume confirmation filters weak breakouts. ATR-based trailing stop manages risk.
 Works in bull markets (breakouts above EMA50 with volume) and bear markets
-(breakdowns below EMA50 with volume). Uses discrete position sizing (0.25) to minimize fee churn.
+(breakdowns below EMA50 with volume). Targets 75-200 trades over 4 years.
 """
 
 import numpy as np
