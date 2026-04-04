@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #6008: 12h Donchian(20) breakout + 1w/1d HTF EMA trend filter + volume confirmation
-HYPOTHESIS: Donchian breakouts on 12h aligned with 1d EMA50 and 1w EMA200 capture sustained moves across bull/bear markets. Volume >1.5x average confirms breakout strength. Designed for low trade frequency (12-37/year) to minimize fee drag. Uses 0.25 position sizing and ATR-based trailing stops.
+Experiment #6009: 4h Donchian(20) breakout + 1d/1w HTF EMA trend filter + volume confirmation
+HYPOTHESIS: Donchian breakouts on 4h aligned with 1d EMA50 and 1w EMA200 capture sustained moves across bull/bear markets. Volume >1.5x average confirms breakout strength. Designed for low trade frequency (19-50/year) to minimize fee drag. Uses 0.25 position sizing and ATR-based trailing stops.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6008_12h_donchian20_1w_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_6009_4h_donchian20_1d_1w_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,15 +38,15 @@ def generate_signals(prices):
     else:
         ema_1w_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation ===
+    # === 4h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 12h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
