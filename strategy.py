@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #3495: 6h Donchian Breakout + 1d Weekly Pivot + Volume Confirmation (Revised)
-HYPOTHESIS: 6h Donchian(20) breakouts aligned with 1d weekly pivot bias and volume confirmation capture medium-term momentum with controlled frequency. 
-Weekly pivot from 1d data provides institutional S/R; volume spike (>2x) confirms breakout strength. 
-Position size 0.25. Target: 80-180 total trades over 4 years (20-45/year) by tightening entry conditions.
+Experiment #3495: 6h Donchian Breakout + 1d Weekly Pivot + Volume Confirmation
+HYPOTHESIS: 6h Donchian(20) breakouts with 1d weekly pivot direction and volume confirmation capture medium-term momentum. 
+Weekly pivot (from 1d data) provides institutional support/resistance levels. Volume confirms breakout strength. 
+Position size 0.25. Target: 80-180 total trades over 4 years (20-45/year).
 Uses 1d for pivot calculation and trend filter, 6h only for entry timing and risk management.
 Works in bull (continuation from pivot support) and bear (continuation from pivot resistance) via price channels.
 """
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3495_6h_donchian20_1d_pivot_vol_v2"
+name = "exp_3495_6h_donchian20_1d_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -21,6 +21,7 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
+    open_time = prices["open_time"].values
     n = len(close)
     
     # === HTF: 1d data for weekly pivot and trend filter (Call ONCE before loop) ===
@@ -30,6 +31,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate weekly pivot points (using prior week's data)
+    # For each 1d bar, use prior 5 trading days (1 week) high/low/close
     lookback_week = 5
     prior_week_high = pd.Series(high_1d).rolling(window=lookback_week, min_periods=lookback_week).max().shift(1).values
     prior_week_low = pd.Series(low_1d).rolling(window=lookback_week, min_periods=lookback_week).min().shift(1).values
