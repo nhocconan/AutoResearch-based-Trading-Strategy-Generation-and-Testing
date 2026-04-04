@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4414: 1h Donchian(20) Breakout + 4h EMA50 Trend + Volume Confirmation + Session Filter
-HYPOTHESIS: 1h Donchian(20) breakouts aligned with 4h EMA50 trend direction (price above/below EMA = long/short bias) and confirmed by volume (>1.5x average) capture momentum with reduced false signals. 4h EMA provides structural bias from higher timeframe, reducing whipsaws. Session filter (08-20 UTC) avoids low-liquidity periods. Targets 60-150 total trades over 4 years (15-37/year) with position size 0.20. Uses 4h for signal direction, 1h only for entry timing.
+HYPOTHESIS: 1h Donchian(20) breakouts aligned with 4h EMA50 trend direction (price above/below EMA = long/short bias) and confirmed by volume (>1.8x average) capture institutional momentum with minimal false signals. Using 1h primary timeframe with 4h EMA for trend bias reduces noise while session filter (08-20 UTC) cuts low-liquidity hours. Position size 0.20 to control drawdown. Targets 60-150 total trades over 4 years (15-37/year).
 """
 
 import numpy as np
@@ -102,8 +102,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume confirmation (> 1.8x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.8
         
         # 4h EMA bias: price > EMA = long bias, price < EMA = short bias
         long_bias = price > ema_4h_aligned[i]
@@ -137,3 +137,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
