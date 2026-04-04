@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #2744: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
-HYPOTHESIS: Daily timeframe with weekly EMA trend filter captures medium-term institutional moves
-while avoiding noise. Volume spike confirms participation. Target: 30-100 trades over 4 years.
-Works in bull via breakouts, in bear via shorting breakdowns with trend filter.
+HYPOTHESIS: Daily Donchian breakouts with weekly EMA trend alignment and volume spikes capture
+institutional participation while minimizing trades. Uses 1w for signal direction, 1d only for entry
+timing. Target: 30-100 total trades over 4 years (7-25/year). Works in bull/bear via trend filter.
 """
 
 import numpy as np
