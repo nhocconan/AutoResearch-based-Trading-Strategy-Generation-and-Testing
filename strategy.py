@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #4339: 6h Camarilla Pivot Breakout + 12h Volume Spike + 1d Regime Filter
-HYPOTHESIS: Camarilla pivot levels from 12h provide institutional support/resistance. Breakouts above R4 or below S4 with volume confirmation (>2.0x 20-period average) and 1d trend regime (ADX>25) capture strong momentum moves. Works in bull via R4 breakouts, in bear via S4 breakdowns. ADX filter prevents whipsaw in ranging markets. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+Experiment #4339: 6h Camarilla Pivot + 12h Trend + Volume Spike
+HYPOTHESIS: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) from 12h timeframe provide institutional support/resistance. 
+In ranging markets (ADX<25): fade extreme moves at R3/S3 with volume confirmation. 
+In trending markets (ADX>=25): breakout continuation at R4/S4 with volume spike. 
+Uses 12h for pivot calculation (more stable than 1d) and 6h for execution. 
+Target: 75-150 total trades over 4 years (19-37/year) with position size 0.25.
+Works in bull via R4 breakouts, in bear via S4 breakdowns, and in range via R3/S3 reversals.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4339_6h_camarilla_12h_vol_1d_adx_v1"
+name = "exp_4339_6h_camarilla_12h_trend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,92 +28,85 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 12h Camarilla Pivot Levels ===
+    # === Precompute HTF: 12h data for Camarilla pivots and ADX ===
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) >= 2:
-        # Calculate pivot points from previous 12h bar
-        high_12h = df_12h['high'].values
-        low_12h = df_12h['low'].values
-        close_12h = df_12h['close'].values
+        # Calculate typical price for pivot
+        typical_price = (df_12h['high'] + df_12h['low'] + df_12h['close']) / 3.0
         
-        # Classic pivot formula
-        pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-        range_12h = high_12h - low_12h
+        # Camarilla pivot levels (based on previous day's range)
+        # R4 = Close + ((High - Low) * 1.1/2)
+        # R3 = Close + ((High - Low) * 1.1/4)
+        # S3 = Close - ((High - Low) * 1.1/4)
+        # S4 = Close - ((High - Low) * 1.1/2)
+        prev_close = df_12h['close'].shift(1)
+        prev_high = df_12h['high'].shift(1)
+        prev_low = df_12h['low'].shift(1)
+        prev_range = prev_high - prev_low
         
-        # Camarilla levels
-        r4_12h = close_12h + range_12h * 1.1 / 2
-        r3_12h = close_12h + range_12h * 1.1 / 4
-        r2_12h = close_12h + range_12h * 1.1 / 6
-        r1_12h = close_12h + range_12h * 1.1 / 12
-        s1_12h = close_12h - range_12h * 1.1 / 12
-        s2_12h = close_12h - range_12h * 1.1 / 6
-        s3_12h = close_12h - range_12h * 1.1 / 4
-        s4_12h = close_12h - range_12h * 1.1 / 2
+        r4 = prev_close + (prev_range * 1.1 / 2.0)
+        r3 = prev_close + (prev_range * 1.1 / 4.0)
+        s3 = prev_close - (prev_range * 1.1 / 4.0)
+        s4 = prev_close - (prev_range * 1.1 / 2.0)
         
-        # Align to 6h timeframe (shifted by 1 for completed bars only)
-        pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
-        r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
-        s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
-    else:
-        pivot_12h_aligned = np.full(n, np.nan)
-        r4_12h_aligned = np.full(n, np.nan)
-        s4_12h_aligned = np.full(n, np.nan)
-    
-    # === Precompute HTF: 1d ADX for regime filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 14:
-        # Calculate ADX components
-        plus_dm = np.zeros(len(df_1d))
-        minus_dm = np.zeros(len(df_1d))
-        tr = np.zeros(len(df_1d))
-        
-        for i in range(1, len(df_1d)):
-            high_diff = df_1d['high'].iloc[i] - df_1d['high'].iloc[i-1]
-            low_diff = df_1d['low'].iloc[i-1] - df_1d['low'].iloc[i]
-            
-            plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
-            minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
-            
-            tr[i] = max(
-                df_1d['high'].iloc[i] - df_1d['low'].iloc[i],
-                abs(df_1d['high'].iloc[i] - df_1d['close'].iloc[i-1]),
-                abs(df_1d['low'].iloc[i] - df_1d['close'].iloc[i-1])
-            )
-        
-        # Smooth with Wilder's smoothing (alpha = 1/period)
+        # Calculate ADX for regime filter (12h)
         period = 14
         alpha = 1.0 / period
         
-        atr_1d = np.zeros(len(df_1d))
-        atr_1d[period-1] = np.nanmean(tr[period-1:2*period-1]) if len(tr) >= 2*period-1 else np.nan
+        # True Range components
+        high_low = df_12h['high'] - df_12h['low']
+        high_close = np.abs(df_12h['high'] - df_12h['close'].shift(1))
+        low_close = np.abs(df_12h['low'] - df_12h['close'].shift(1))
+        tr_12h = np.maximum(high_low, np.maximum(high_close, low_close))
         
-        plus_dm_smooth = np.zeros(len(df_1d))
-        minus_dm_smooth = np.zeros(len(df_1d))
+        # Directional Movement
+        up_move = df_12h['high'].diff()
+        down_move = df_12h['low'].diff().mul(-1)
         
-        if len(df_1d) >= period:
-            plus_dm_smooth[period-1] = np.nanmean(plus_dm[period-1:2*period-1])
-            minus_dm_smooth[period-1] = np.nanmean(minus_dm[period-1:2*period-1])
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        # Smoothed values
+        atr_12h = np.zeros(len(df_12h))
+        plus_dm_smooth = np.zeros(len(df_12h))
+        minus_dm_smooth = np.zeros(len(df_12h))
+        
+        # Initial values
+        if len(df_12h) >= period:
+            atr_12h[period-1] = np.mean(tr_12h.iloc[:period])
+            plus_dm_smooth[period-1] = np.mean(plus_dm.iloc[:period])
+            minus_dm_smooth[period-1] = np.mean(minus_dm.iloc[:period])
             
-            for i in range(period, len(df_1d)):
-                atr_1d[i] = atr_1d[i-1] * (1 - alpha) + alpha * tr[i]
-                plus_dm_smooth[i] = plus_dm_smooth[i-1] * (1 - alpha) + alpha * plus_dm[i]
-                minus_dm_smooth[i] = minus_dm_smooth[i-1] * (1 - alpha) + alpha * minus_dm[i]
+            # Wilder's smoothing
+            for i in range(period, len(df_12h)):
+                atr_12h[i] = atr_12h[i-1] * (1 - alpha) + alpha * tr_12h.iloc[i]
+                plus_dm_smooth[i] = plus_dm_smooth[i-1] * (1 - alpha) + alpha * plus_dm.iloc[i]
+                minus_dm_smooth[i] = minus_dm_smooth[i-1] * (1 - alpha) + alpha * minus_dm.iloc[i]
         
         # Avoid division by zero
-        plus_di_1d = np.where(atr_1d != 0, 100 * plus_dm_smooth / atr_1d, 0)
-        minus_di_1d = np.where(atr_1d != 0, 100 * minus_dm_smooth / atr_1d, 0)
-        dx_1d = np.where((plus_di_1d + minus_di_1d) != 0, 
-                         100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d), 0)
+        plus_di_12h = np.where(atr_12h != 0, 100 * plus_dm_smooth / atr_12h, 0)
+        minus_di_12h = np.where(atr_12h != 0, 100 * minus_dm_smooth / atr_12h, 0)
+        dx_12h = np.where((plus_di_12h + minus_di_12h) != 0, 
+                          100 * np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h), 0)
         
-        adx_1d = np.full(len(df_1d), np.nan)
-        if len(df_1d) >= 2*period-1:
-            adx_1d[2*period-2] = np.nanmean(dx_1d[period-1:2*period-1])
-            for i in range(2*period-1, len(df_1d)):
-                adx_1d[i] = adx_1d[i-1] * (1 - alpha) + alpha * dx_1d[i]
+        adx_12h = np.full(len(df_12h), np.nan)
+        if len(df_12h) >= 2*period-1:
+            adx_12h[2*period-2] = np.nanmean(dx_12h.iloc[period-1:2*period-1])
+            for i in range(2*period-1, len(df_12h)):
+                adx_12h[i] = adx_12h[i-1] * (1 - alpha) + alpha * dx_12h.iloc[i]
         
-        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+        # Align HTF arrays to LTF
+        r4_aligned = align_htf_to_ltf(prices, df_12h, r4.values)
+        r3_aligned = align_htf_to_ltf(prices, df_12h, r3.values)
+        s3_aligned = align_htf_to_ltf(prices, df_12h, s3.values)
+        s4_aligned = align_htf_to_ltf(prices, df_12h, s4.values)
+        adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     else:
-        adx_1d_aligned = np.full(n, np.nan)
+        r4_aligned = np.full(n, np.nan)
+        r3_aligned = np.full(n, np.nan)
+        s3_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
+        adx_12h_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -133,12 +131,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 14)  # vol MA, ATR
+    warmup = max(20, 14, 2*14)  # vol MA, ATR, ADX
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(r4_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(adx_1d_aligned[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
+            np.isnan(s4_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or 
+            np.isnan(adx_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -174,25 +173,34 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 2.0x average) to filter noise
-        volume_confirm = vol_ratio[i] > 2.0
+        # Require volume confirmation (> 1.5x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.5
         
-        # Regime filter: only trade when ADX > 25 (trending market)
-        trending_regime = adx_1d_aligned[i] > 25.0
+        # Regime filter: ADX < 25 = ranging (mean reversion), ADX >= 25 = trending (breakout)
+        ranging_market = adx_12h_aligned[i] < 25.0
+        trending_market = adx_12h_aligned[i] >= 25.0
         
-        if volume_confirm and trending_regime:
-            # Camarilla breakout conditions
-            long_breakout = price > r4_12h_aligned[i]
-            short_breakout = price < s4_12h_aligned[i]
+        if volume_confirm:
+            if ranging_market:
+                # Mean reversion at extreme levels (R3/S3)
+                long_entry = price <= s3_aligned[i]  # Price at or below S3
+                short_entry = price >= r3_aligned[i]  # Price at or above R3
+            elif trending_market:
+                # Breakout continuation at stronger levels (R4/S4)
+                long_entry = price >= r4_aligned[i]  # Price breaks above R4
+                short_entry = price <= s4_aligned[i]  # Price breaks below S4
+            else:
+                long_entry = False
+                short_entry = False
             
-            if long_breakout:
+            if long_entry:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            elif short_breakout:
+            elif short_entry:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
