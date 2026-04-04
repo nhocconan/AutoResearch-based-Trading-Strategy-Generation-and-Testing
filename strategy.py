@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3589: 4h Donchian Breakout + 1d Weekly Pivot + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts with 1d weekly pivot direction and volume confirmation capture medium-term momentum in both bull and bear markets. Weekly pivot provides institutional support/resistance. Volume confirms breakout strength. Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year). Uses 1d for pivot calculation and trend filter, 4h only for entry timing and risk management.
+Experiment #3588: 12h Williams %R Extreme + 1w EMA Trend + Volume Spike
+HYPOTHESIS: 12h Williams %R identifies oversold/overbought conditions during pullbacks in the 1w EMA trend. Volume spike confirms momentum resumption. Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend). Position size 0.25. Target: 75-150 total trades over 4 years (19-37/year). Uses 1w for trend filter and 12h for entry timing and risk management.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3589_4h_donchian20_1d_pivot_vol_v1"
-timeframe = "4h"
+name = "exp_3588_12h_williamsr_extreme_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,50 +17,28 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1d data for weekly pivot and trend filter (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === HTF: 1w data for EMA trend filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot points (using prior week's data)
-    lookback_week = 5
-    prior_week_high = pd.Series(high_1d).rolling(window=lookback_week, min_periods=lookback_week).max().shift(1).values
-    prior_week_low = pd.Series(low_1d).rolling(window=lookback_week, min_periods=lookback_week).min().shift(1).values
-    prior_week_close = pd.Series(close_1d).rolling(window=lookback_week, min_periods=lookback_week).mean().shift(1).values
+    # Calculate 1w EMA(21) for trend direction
+    ema_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Weekly pivot formula: P = (H + L + C) / 3
-    weekly_pivot = (prior_week_high + prior_week_low + prior_week_close) / 3.0
-    # Resistance 1: R1 = 2*P - L
-    r1 = 2 * weekly_pivot - prior_week_low
-    # Support 1: S1 = 2*P - H
-    s1 = 2 * weekly_pivot - prior_week_high
-    # Resistance 2: R2 = P + (H - L)
-    r2 = weekly_pivot + (prior_week_high - prior_week_low)
-    # Support 2: S2 = P - (H - L)
-    s2 = weekly_pivot - (prior_week_high - prior_week_low)
+    # === 12h Indicators: Williams %R(14) for overbought/oversold ===
+    lookback_williams = 14
+    highest_high = pd.Series(high).rolling(window=lookback_williams, min_periods=lookback_williams).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback_williams, min_periods=lookback_williams).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
-    # Align all pivot levels to 4h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # === 4h Indicators: Donchian channels (20-period) for entry timing ===
-    lookback_4h = 20
-    highest_high_4h = pd.Series(high).rolling(window=lookback_4h, min_periods=lookback_4h).max().values
-    lowest_low_4h = pd.Series(low).rolling(window=lookback_4h, min_periods=lookback_4h).min().values
-    
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -78,13 +56,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback_4h, lookback_week + 1, 20, 14)  # sufficient for all indicators
+    warmup = max(50, lookback_williams + 1, 21, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_high_4h[i]) or np.isnan(lowest_low_4h[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(williams_r[i]) or np.isnan(ema_1w_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -100,8 +78,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below S1 (support 1) - mean reversion
-                elif price < s1_aligned[i]:
+                # Exit if Williams %R becomes overbought (> -20) - take profit in strong uptrend
+                elif williams_r[i] > -20:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -114,8 +92,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above R1 (resistance 1) - mean reversion
-                elif price > r1_aligned[i]:
+                # Exit if Williams %R becomes oversold (< -80) - take profit in strong downtrend
+                elif williams_r[i] < -80:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -124,25 +102,25 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
+        # Require volume spike (> 1.8x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Determine market bias relative to weekly pivot
-            price_vs_pivot = price - weekly_pivot_aligned[i]
+            # Determine trend bias from 1w EMA
+            bullish_bias = ema_1w_aligned[i] > close_1w[-1] if len(close_1w) > 0 else ema_1w_aligned[i] > price  # fallback
             
-            # Long entry: price breaks above 4h Donchian high with bullish bias (above pivot)
-            if (price > highest_high_4h[i] and 
-                price_vs_pivot > 0):  # Above weekly pivot = bullish bias
+            # Long entry: Williams %R oversold (< -80) in bullish 1w trend
+            if (williams_r[i] < -80 and 
+                bullish_bias):
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below 4h Donchian low with bearish bias (below pivot)
-            elif (price < lowest_low_4h[i] and 
-                  price_vs_pivot < 0):  # Below weekly pivot = bearish bias
+            # Short entry: Williams %R overbought (> -20) in bearish 1w trend
+            elif (williams_r[i] > -20 and 
+                  not bullish_bias):
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
