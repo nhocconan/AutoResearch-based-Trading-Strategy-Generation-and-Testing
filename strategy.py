@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #5280: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
+Experiment #5281: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
 HYPOTHESIS: On 4h timeframe, price breaking above/below the 20-period Donchian channel 
 with volume > 1.5x average and aligned with 1d EMA50 trend captures strong momentum moves. 
 Donchian channels adapt to volatility and work in both bull and bear markets by catching 
@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5280_4h_donchian20_1d_ema_vol_v1"
+name = "exp_5281_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
