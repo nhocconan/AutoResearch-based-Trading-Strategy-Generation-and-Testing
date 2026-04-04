@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5768: 12h Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with weekly HMA(21) trend capture strong trending moves while minimizing fees via 12h timeframe (target: 50-150 trades over 4 years). Volume > 1.5x average confirms breakout strength. Works in both bull and bear markets by requiring trend alignment rather than directional bias. Uses discrete sizing 0.25 to minimize churn.
+Experiment #5770: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA(21) trend capture strong trending moves while avoiding counter-trend whipsaws. Volume > 1.5x average confirms breakout strength. Designed for 1d timeframe to minimize fees (target: 30-100 trades over 4 years) and work in both bull and bear markets by requiring trend alignment rather than directional bias. Uses discrete sizing 0.25 to minimize churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5768_12h_donchian20_1w_hma_vol_v1"
-timeframe = "12h"
+name = "exp_5770_1d_donchian20_1w_hma_vol_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,18 +35,18 @@ def generate_signals(prices):
     else:
         hma_1w = np.full(len(df_1w), np.nan)
     
-    # Align 1w HMA to 12h timeframe (shifted by 1 for completed 1w bars only)
+    # Align 1w HMA to 1d timeframe (shifted by 1 for completed 1w bars only)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # === 12h Indicators: Donchian Channel (20-period) ===
+    # === 1d Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation ===
+    # === 1d Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 12h Indicators: ATR(14) for trailing stop ===
+    # === 1d Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
