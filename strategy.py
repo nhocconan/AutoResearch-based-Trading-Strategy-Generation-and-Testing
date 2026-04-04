@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4601: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 trend and volume spikes (>1.8x average) capture medium-term momentum. Uses tighter volume filter (1.8x) and ATR trailing stop (2.0x) to reduce trades to target 19-50/year. 1d EMA50 provides structural bias that works in both bull/bear markets by identifying primary trend. Discrete sizing (0.25) minimizes fee churn.
+Experiment #4602: 12h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA50 trend and volume spikes (>1.5x average) capture medium-term momentum. Uses tighter volume filter (1.5x) and ATR trailing stop (2.0x) to reduce trades to target 12-37/year. 1d EMA50 provides structural bias that works in both bull/bear markets by identifying primary trend. Discrete sizing (0.25) minimizes fee churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4601_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_4602_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,24 +28,24 @@ def generate_signals(prices):
     else:
         ema_1d = np.array([])
     
-    # Align 1d EMA50 to 4h timeframe
+    # Align 1d EMA50 to 12h timeframe
     if len(ema_1d) > 0:
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
         ema_1d_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel(20) ===
+    # === 12h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -98,8 +98,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 1.5x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.5
         
         # Higher timeframe trend filter: bullish when price > EMA50, bearish when price < EMA50
         htf_bullish = price > ema_1d_aligned[i]
