@@ -2,10 +2,8 @@
 """
 exp_6528_12h_donchian20_1w_ema_vol_v1
 Hypothesis: 12h Donchian(20) breakout with 1w EMA50 as trend filter and volume confirmation.
-In bull markets: long when price > 1w EMA50 and breaks above Donchian high with volume > 2.0x MA.
-In bear markets: short when price < 1w EMA50 and breaks below Donchian low with volume > 2.0x MA.
-Uses volume spike (2.0x) to confirm breakout strength and avoid false signals.
-Designed for low-frequency, high-conviction trades targeting 50-150 total trades over 4 years.
+Uses higher timeframe (1w) for trend to reduce whipsaw, 12h for entries to target 50-150 trades over 4 years.
+Volume spike (1.5x) confirms breakout strength. Works in both bull/bear via trend filter.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -20,7 +18,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 2.0  # volume must be 2.0x its 20-period MA for confirmation
+VOL_THRESHOLD = 1.5  # volume must be 1.5x its 20-period MA for confirmation
 SIGNAL_SIZE = 0.25   # 25% position size
 
 def generate_signals(prices):
@@ -110,3 +108,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
