@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-exp_6512_12h_donchian20_1d_pivot_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d Camarilla pivot direction filter and volume confirmation.
-Uses 1d Camarilla pivot levels (R3, S3, R4, S4) to determine bias: long when price > R3, short when price < S3.
-Donchian(20) breakout provides entry timing in the direction of 1d pivot bias, volume confirmation filters weak breakouts.
-Designed to work in both bull and bear markets by using 1d Camarilla levels as structural support/resistance.
-Target: 50-150 trades over 4 years (12-37/year). Uses 12h primary timeframe per experiment instructions.
+exp_6513_4h_donchian20_12h_pivot_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 12h Camarilla pivot direction filter and volume confirmation.
+Uses 12h Camarilla pivot levels (R3, S3) to determine bias: long when price > R3, short when price < S3.
+Donchian(20) breakout provides entry timing in the direction of 12h pivot bias, volume confirmation filters weak breakouts.
+Designed to work in both bull and bear markets by using 12h Camarilla levels as structural support/resistance.
+Target: 75-200 trades over 4 years (19-50/year).
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6512_12h_donchian20_1d_pivot_vol_v1"
-timeframe = "12h"
+name = "exp_6513_4h_donchian20_12h_pivot_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -26,27 +26,22 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for Camarilla pivot levels
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - using 12h for Camarilla pivot levels
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d Camarilla pivot levels (based on previous day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h Camarilla pivot levels (based on previous 12h bar's OHLC)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Camarilla levels: R4 = close + (high - low) * 1.1/2, R3 = close + (high - low) * 1.1/4
-    #                S3 = close - (high - low) * 1.1/4, S4 = close - (high - low) * 1.1/2
-    camarilla_high = high_1d - low_1d
-    r4 = close_1d + camarilla_high * 1.1 / 2
-    r3 = close_1d + camarilla_high * 1.1 / 4
-    s3 = close_1d - camarilla_high * 1.1 / 4
-    s4 = close_1d - camarilla_high * 1.1 / 2
+    # Camarilla levels: R3 = close + (high - low) * 1.1/4, S3 = close - (high - low) * 1.1/4
+    camarilla_high = high_12h - low_12h
+    r3 = close_12h + camarilla_high * 1.1 / 4
+    s3 = close_12h - camarilla_high * 1.1 / 4
     
-    # Align to LTF (12h) with shift(1) for completed bars only
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to LTF (4h) with shift(1) for completed bars only
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -73,7 +68,7 @@ def generate_signals(prices):
         if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             continue
             
-        # Determine bias from 1d Camarilla levels
+        # Determine bias from 12h Camarilla levels
         long_bias = close[i] > r3_aligned[i]  # price above R3 = bullish bias
         short_bias = close[i] < s3_aligned[i]  # price below S3 = bearish bias
         
