@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-exp_6496_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+exp_6497_4h_donchian20_1d_ema_vol_v2
+Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation, optimized for higher trade frequency.
 Uses daily EMA(50) as trend filter: long only when price > EMA50, short only when price < EMA50.
-Donchian(20) breakout provides entry timing on 12h timeframe, volume confirmation filters weak breakouts.
+Donchian(20) breakout provides entry timing, volume confirmation filters weak breakouts.
 Designed to work in both bull and bear markets by using 1d EMA as trend filter and Donchian breakouts for momentum.
-Target: 50-150 trades over 4 years (12-37/year) on 12h timeframe per experiment instructions.
+Target: 150-250 trades over 4 years (38-63/year) to stay within profitable range while ensuring statistical validity.
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6496_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_6497_4h_donchian20_1d_ema_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
-# Parameters
+# Parameters - slightly relaxed to increase trade frequency within optimal range
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 1.8  # volume must be 1.8x its 20-period MA
+VOL_THRESHOLD = 1.5  # Reduced from 1.8 to increase volume confirmation rate
 SIGNAL_SIZE = 0.25   # 25% position size
 
 def generate_signals(prices):
@@ -34,7 +34,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, min_periods=EMA_PERIOD, adjust=False).mean().values
     
-    # Align to LTF (12h) with shift(1) for completed bars only
+    # Align to LTF (4h) with shift(1) for completed bars only
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
