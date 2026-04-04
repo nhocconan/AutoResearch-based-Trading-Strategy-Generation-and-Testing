@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #6352: 12h Donchian(20) breakout + 1d Camarilla pivot levels + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts with volume confirmation (>1.8x avg) and Camarilla pivot bias from 1d timeframe capture institutional momentum. 
-Camarilla levels (R3/S3 for fade, R4/S4 for breakout) provide mathematically derived support/resistance that adapts to volatility. 
-In ranging markets (price between R3-S3), fade extremes; in breakout markets (price >R4 or <S4), continue the breakout direction. 
-Uses discrete sizing (0.25) to minimize fee churn. Target: 75-150 trades over 4 years.
-Timeframe: 12h (primary), HTF: 1d for Camarilla levels.
+Experiment #6353: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts with volume confirmation (>1.8x avg) aligned with 12h HMA trend capture institutional momentum with lower frequency. 
+12h HMA provides smoother trend filter than shorter timeframes, reducing whipsaw in bear markets. 
+Discrete sizing (0.25) minimizes fee churn. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6352_12h_donchian20_1d_camarilla_vol_v1"
-timeframe = "12h"
+name = "exp_6353_4h_donchian20_12h_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,47 +24,50 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for Camarilla pivot levels ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 2:
-        # Camarilla pivot calculation from prior day's OHLC
-        # Pivot = (H + L + C) / 3
-        # R4 = C + ((H-L) * 1.1/2)
-        # R3 = C + ((H-L) * 1.1/4)
-        # S3 = C - ((H-L) * 1.1/4)
-        # S4 = C - ((H-L) * 1.1/2)
-        daily_high = df_1d['high'].values
-        daily_low = df_1d['low'].values
-        daily_close = df_1d['close'].values
+    # === HTF: 12h data for HMA trend filter ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) >= 21:
+        # Hull Moving Average (HMA) calculation
+        # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n))
+        def wma(values, window):
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, 'valid') / weights.sum()
         
-        pivot = (daily_high + daily_low + daily_close) / 3.0
-        r4 = daily_close + ((daily_high - daily_low) * 1.1 / 2.0)
-        r3 = daily_close + ((daily_high - daily_low) * 1.1 / 4.0)
-        s3 = daily_close - ((daily_high - daily_low) * 1.1 / 4.0)
-        s4 = daily_close - ((daily_high - daily_low) * 1.1 / 2.0)
+        close_12h = df_12h['close'].values
+        n_12h = len(close_12h)
+        half_n = 12  # 21//2
+        sqrt_n = int(np.sqrt(21))  # 4
         
-        # Align to 12h timeframe (shift by 1 day for prior day's levels)
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+        if n_12h >= 21:
+            wma_half = np.array([wma(close_12h[i:i+half_n], half_n) 
+                                if i+half_n <= n_12h else np.nan 
+                                for i in range(n_12h)])
+            wma_full = np.array([wma(close_12h[i:i+21], 21) 
+                               if i+21 <= n_12h else np.nan 
+                               for i in range(n_12h)])
+            wma_diff = 2 * wma_half - wma_full
+            hma_12h = np.array([wma(wma_diff[i:i+sqrt_n], sqrt_n) 
+                              if i+sqrt_n <= len(wma_diff) else np.nan 
+                              for i in range(len(wma_diff))])
+            # Pad to match length
+            hma_12h = np.concatenate([np.full(n_12h - len(hma_12h), np.nan), hma_12h])
+        else:
+            hma_12h = np.full(n_12h, np.nan)
+        
+        # Align to 4h timeframe (shift by 1 for completed 12h bar)
+        hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     else:
-        pivot_aligned = np.full(n, np.nan)
-        r3_aligned = np.full(n, np.nan)
-        r4_aligned = np.full(n, np.nan)
-        s3_aligned = np.full(n, np.nan)
-        s4_aligned = np.full(n, np.nan)
+        hma_12h_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation ===
+    # === 4h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 12h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -97,8 +98,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+            np.isnan(hma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -112,8 +112,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks below Donchian low (failed breakout)
-                # 3. Price crosses below S3 (mean reversion in range)
-                if price <= stop_price or price <= donchian_low[i] or price < s3_aligned[i]:
+                # 3. Price crosses below 12h HMA (trend change)
+                if price <= stop_price or price <= donchian_low[i] or price < hma_12h_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -125,8 +125,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks above Donchian high (failed breakout)
-                # 3. Price crosses above R3 (mean reversion in range)
-                if price >= stop_price or price >= donchian_high[i] or price > r3_aligned[i]:
+                # 3. Price crosses above 12h HMA (trend change)
+                if price >= stop_price or price >= donchian_high[i] or price > hma_12h_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -138,30 +138,11 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.8  # Volume filter
+        uptrend = hma_12h_aligned[i] > hma_12h_aligned[i-1]  # 12h HMA rising
+        downtrend = hma_12h_aligned[i] < hma_12h_aligned[i-1]  # 12h HMA falling
         
-        # Entry logic based on Camarilla zones:
-        # ZONE 1: Breakout continuation (price > R4 or < S4) - trade in breakout direction
-        # ZONE 2: Fade extreme (price > R3 or < S3 but within R4/S4) - trade mean reversion
-        # ZONE 3: Range (between S3 and R3) - no trade (chop)
-        
-        long_entry = False
-        short_entry = False
-        
-        if breakout_up and volume_confirmed:
-            # Long breakout continuation above R4
-            if price > r4_aligned[i]:
-                long_entry = True
-            # Long fade from S3 (mean reversion) - only if not already above R4
-            elif price > s3_aligned[i] and price <= r4_aligned[i]:
-                long_entry = True
-                
-        if breakout_down and volume_confirmed:
-            # Short breakdown continuation below S4
-            if price < s4_aligned[i]:
-                short_entry = True
-            # Short fade from R3 (mean reversion) - only if not already below S4
-            elif price < r3_aligned[i] and price >= s4_aligned[i]:
-                short_entry = True
+        long_entry = breakout_up and volume_confirmed and uptrend
+        short_entry = breakout_down and volume_confirmed and downtrend
         
         if long_entry:
             in_position = True
@@ -181,3 +162,4 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+</trend>
