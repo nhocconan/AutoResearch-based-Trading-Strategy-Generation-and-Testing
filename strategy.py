@@ -24,29 +24,34 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 12h data for HMA(21) ===
+    # === HTF: 12h data for HMA(21) trend ===
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) >= 21:
         # Calculate HMA(21) on 12h close
-        df_12h_close = df_12h['close'].values
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
+        close_12h = df_12h['close'].values
+        n_12h = len(close_12h)
+        half_n = 21 // 2
+        sqrt_n = int(np.sqrt(21))
         
-        # WMA function
-        def wma(values, window):
-            weights = np.arange(1, window + 1)
-            return np.convolve(values, weights, mode='valid') / weights.sum()
+        # WMA helper
+        def wma(arr, window):
+            if len(arr) < window:
+                return np.full_like(arr, np.nan)
+            weights = np.arange(1, window + 1, dtype=np.float64)
+            return np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
         
         # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        wma_half = wma(df_12h_close, half_len)
-        wma_full = wma(df_12h_close, 21)
-        hma_raw = 2 * wma_half - wma_full
-        hma = wma(hma_raw, sqrt_len)
-        
-        # Align to LTF (4h) with shift(1) for completed bars only
-        hma_aligned = align_htf_to_ltf(prices, df_12h, hma)
+        wma_half = wma(close_12h, half_n)
+        wma_full = wma(close_12h, 21)
+        # Align arrays: wma_half starts at index half_n-1, wma_full at 20
+        raw = 2 * wma_half - wma_full[half_n-1:]
+        hma_12h = wma(raw, sqrt_n)
+        # Pad to original length
+        hma_12h_full = np.full(n_12h, np.nan)
+        hma_12h_full[half_n-1+sqrt_n-1:] = hma_12h
+        hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_full)
     else:
-        hma_aligned = np.full(n, np.nan)
+        hma_12h_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -75,7 +80,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 21)  # Donchian, volume avg, HMA
+    warmup = max(20, 20, 20)  # Donchian, volume avg, ATR
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -87,7 +92,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(hma_aligned[i])):
+            np.isnan(hma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -122,15 +127,18 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # Trend filter: price above/below 12h HMA
-        uptrend = price > hma_aligned[i]
-        downtrend = price < hma_aligned[i]
+        # Trend filter: 12h HMA direction
+        # Use previous bar's HMA to avoid look-ahead
+        hma_prev = hma_12h_aligned[i-1] if i > 0 else hma_12h_aligned[i]
+        hma_curr = hma_12h_aligned[i]
+        hma_rising = hma_curr > hma_prev
+        hma_falling = hma_curr < hma_prev
         
         # Entry conditions:
-        # Long: bullish breakout in uptrend
-        long_setup = breakout_up and volume_confirmed and uptrend
-        # Short: bearish breakout in downtrend
-        short_setup = breakout_down and volume_confirmed and downtrend
+        # Long: bullish breakout + volume + rising HMA (uptrend)
+        long_setup = breakout_up and volume_confirmed and hma_rising
+        # Short: bearish breakout + volume + falling HMA (downtrend)
+        short_setup = breakout_down and volume_confirmed and hma_falling
         
         if long_setup:
             in_position = True
@@ -150,4 +158,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-</s>
