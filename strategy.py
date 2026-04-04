@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #3148: 12h Donchian Breakout + 1w HMA Trend + Volume Spike
-HYPOTHESIS: 12h Donchian(20) breakouts capture swing trends with low frequency. 
-1w HMA(21) trend filter ensures alignment with weekly momentum. Volume spike (>1.8x 
-24-period average) confirms breakout strength. ATR-based trailing stop (2.0x) manages risk. 
-Position size 0.25. Target: 50-150 total trades over 4 years (12-37/year). Designed to work 
-in both bull (trend continuation) and bear (mean reversion from extremes) markets by using 
-price channels and volatility filters. Uses 12h primary timeframe per instructions.
+HYPOTHESIS: 12h Donchian(20) breakouts capture swing trends with controlled trade frequency. 
+1w HMA(21) trend filter ensures alignment with weekly momentum. Volume spike (>2.0x 20-period average) 
+confirms breakout strength. ATR-based trailing stop (2.5x) manages risk. Position size 0.25. 
+Target: 50-150 total trades over 4 years (12-37/year). Designed for 12h timeframe to work in 
+both bull (trend continuation) and bear (mean reversion from extremes) markets by using price 
+channels and volatility filters.
 """
 
 import numpy as np
@@ -48,10 +48,10 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 12h Indicators: Volume MA(24) for spike detection ===
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # === 12h Indicators: Volume MA(20) for spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
-    vol_ratio[24:] = volume[24:] / vol_ma[24:]
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === 12h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
@@ -71,7 +71,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 24, 14, 21)  # sufficient for all indicators
+    warmup = max(50, lookback, 20, 14, 21)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -87,8 +87,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -101,8 +101,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -116,8 +116,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) for confirmation
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume spike (> 2.0x average) for confirmation
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # 1w HMA trend filter: only long above HMA, short below HMA
