@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #3245: 12h Donchian Breakout + 1d HMA Trend + Volume Spike (Revised)
-HYPOTHESIS: 12h Donchian(20) breakouts with volume confirmation and 1d HMA(50) trend filter capture medium-term trends with controlled trade frequency. 
-To reduce overtrading from prior attempts, we tighten entry by requiring volume > 2.5x average (vs 2.0) and add a minimum 3-bar holding period to prevent whipsaws. 
-Position size 0.25. Target: 75-150 total trades over 4 years (19-37/year). Works in bull (trend continuation) and bear (mean reversion from extremes) via price channels.
+Experiment #3245: 12h Donchian Breakout + 1d HMA Trend + Volume Spike
+HYPOTHESIS: 12h Donchian(20) breakouts capture medium-term trends with low trade frequency ideal for 12h timeframe.
+1d HMA(50) trend filter ensures alignment with daily momentum. Volume spike (>2.0x 20-period average) confirms breakout strength.
+ATR-based trailing stop (2.5x) manages risk. Position size 0.25. Target: 75-150 total trades over 4 years (19-37/year).
+Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets by using price channels and volatility filters.
 """
 
 import numpy as np
@@ -67,7 +68,6 @@ def generate_signals(prices):
     entry_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    bars_since_entry = 0
     
     warmup = max(50, lookback, 20, 14, 50)  # sufficient for all indicators
     
@@ -82,7 +82,6 @@ def generate_signals(prices):
         
         # --- Exit Logic ---
         if in_position:
-            bars_since_entry += 1
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
@@ -90,13 +89,11 @@ def generate_signals(prices):
                 if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
-                    bars_since_entry = 0
                     signals[i] = 0.0
                 # Exit if price re-enters Donchian channel (mean reversion)
                 elif price <= highest_high[i]:
                     in_position = False
                     position_side = 0
-                    bars_since_entry = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
@@ -106,21 +103,19 @@ def generate_signals(prices):
                 if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
-                    bars_since_entry = 0
                     signals[i] = 0.0
                 # Exit if price re-enters Donchian channel (mean reversion)
                 elif price >= lowest_low[i]:
                     in_position = False
                     position_side = 0
-                    bars_since_entry = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -SIZE
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.5x average) for confirmation (tighter than before)
-        volume_spike = vol_ratio[i] > 2.5
+        # Require volume spike (> 2.0x average) for confirmation
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # 1d HMA trend filter: only long above HMA, short below HMA
@@ -133,7 +128,6 @@ def generate_signals(prices):
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                bars_since_entry = 0
                 signals[i] = SIZE
             # Short entry: price breaks below Donchian low with bearish 1d trend
             elif price < lowest_low[i] and price_vs_hma < 0:
@@ -142,7 +136,6 @@ def generate_signals(prices):
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                bars_since_entry = 0
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
@@ -150,3 +143,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
