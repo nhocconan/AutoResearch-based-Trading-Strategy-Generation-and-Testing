@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4755: 6h Donchian(20) Breakout + 1w EMA50 Trend + Volume Spike
-HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts in direction of 1w EMA50 trend with volume confirmation (>1.5x average) capture strong momentum moves. Uses ATR(14) stoploss (2.0x) for risk control. Designed for 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend) by following the higher timeframe trend.
+Experiment #4755: 6h Donchian(20) Breakout + 1w Volume Spike + 1d ADX Trend Filter
+HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts with 1w volume confirmation (>2x average) and 1d ADX > 25 (trending market) capture strong momentum moves while avoiding choppy markets. Uses ATR(14) trailing stop (2.5x) to limit downside. Designed for 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Volume filter ensures breakout validity, ADX filter ensures trend strength, reducing false breakouts in ranging markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4755_6h_donchian20_1w_ema_vol_v1"
+name = "exp_4755_6h_donchian20_1w_vol_1d_adx_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -19,30 +19,63 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1w data for EMA50 trend filter
+    # Precompute HTF: 1w data for volume confirmation
     df_1w = get_htf_data(prices, '1w')
     
-    # === 1w Indicators: EMA50 for trend filter ===
-    if len(df_1w) >= 50:
-        close_1w = df_1w['close'].values
-        ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    else:
-        ema_1w = np.full(len(df_1w), np.nan)
+    # Precompute HTF: 1d data for ADX trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Align HTF EMA50 to 6h timeframe
-    if len(ema_1w) > 0:
-        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # === 1w Indicators: Volume MA(20) for spike detection ===
+    if len(df_1w) >= 20:
+        vol_ma_1w = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=20).mean().values
+        vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     else:
-        ema_1w_aligned = np.full(n, np.nan)
+        vol_ma_1w_aligned = np.full(n, np.nan)
+    
+    # === 1d Indicators: ADX(14) for trend strength ===
+    if len(df_1d) >= 14:
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
+        close_1d = df_1d['close'].values
+        
+        # True Range
+        tr1 = high_1d[1:] - low_1d[1:]
+        tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+        tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+        tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        
+        # Directional Movement
+        dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                           np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+        dm_plus = np.concatenate([[0], dm_plus])
+        dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                            np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+        dm_minus = np.concatenate([[0], dm_minus])
+        
+        # Smoothed TR, DM+
+        tr_ma = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+        dm_plus_ma = pd.Series(dm_plus).ewm(span=14, min_periods=14, adjust=False).mean().values
+        dm_minus_ma = pd.Series(dm_minus).ewm(span=14, min_periods=14, adjust=False).mean().values
+        
+        # Directional Indicators
+        di_plus = 100 * dm_plus_ma / tr_ma
+        di_minus = 100 * dm_minus_ma / tr_ma
+        
+        # DX and ADX
+        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+        adx_1d = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
+        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    else:
+        adx_1d_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation (1.5x spike) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # === 6h Indicators: Volume confirmation (2x spike) ===
     vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    if len(df_1w) >= 20:
+        vol_ratio[20:] = volume[20:] / vol_ma_1w_aligned[20:]
     
     # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
@@ -67,7 +100,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -78,8 +111,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -87,8 +120,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -97,12 +130,15 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>1.5x)
-        vol_confirm = vol_ratio[i] > 1.5
+        # Volume filter: confirmation (>2.0x)
+        vol_confirm = vol_ratio[i] > 2.0
         
-        # Donchian breakout conditions with trend alignment
-        breakout_long = (price >= high_roll[i]) and (price > ema_1w_aligned[i]) and vol_confirm
-        breakout_short = (price <= low_roll[i]) and (price < ema_1w_aligned[i]) and vol_confirm
+        # Trend filter: ADX > 25 (strong trend)
+        trend_filter = adx_1d_aligned[i] > 25
+        
+        # Donchian breakout conditions with trend and volume confirmation
+        breakout_long = (price >= high_roll[i]) and vol_confirm and trend_filter
+        breakout_short = (price <= low_roll[i]) and vol_confirm and trend_filter
         
         # Final entry conditions
         if breakout_long:
