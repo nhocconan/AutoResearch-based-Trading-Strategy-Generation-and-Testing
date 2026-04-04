@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3765: 12h Donchian(20) breakout + 1d volume confirmation + ATR stoploss
-HYPOTHESIS: 12h Donchian breakouts capture medium-term momentum with volume confirmation ensuring conviction. Works in bull markets (long breakouts with volume) and bear markets (short breakdowns with volume). ATR trailing stop (2.0x) manages drawdown. Position size 0.25 balances risk and return. Target: 50-150 trades over 4 years.
+Experiment #3765: 12h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts capture medium-term momentum, with 1d Camarilla levels (R3/S3 for mean reversion, R4/S4 for breakout) providing confluence. Volume confirmation (>2.0x average) ensures conviction. Works in bull markets (long breakouts above R4 with volume) and bear markets (short breakdowns below S4 with volume). ATR trailing stop (2.0x) manages drawdown. Position size 0.25 balances risk and return. Target: 75-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3765_12h_donchian20_1d_vol_v1"
+name = "exp_3765_12h_donchian20_1d_camarilla_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -19,22 +19,38 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for volume confirmation (Call ONCE before loop) ===
+    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d volume MA(20) for spike detection
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = np.ones(len(volume_1d))
-    vol_ratio_1d[20:] = volume_1d[20:] / vol_ma_1d[20:]
+    # Calculate Camarilla pivot levels for 1d timeframe
+    # Pivot = (High + Low + Close) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Range = High - Low
+    range_1d = high_1d - low_1d
+    # Camarilla levels: R4 = Close + Range * 1.1/2, R3 = Close + Range * 1.1/4, etc.
+    camarilla_r4_1d = close_1d + range_1d * 1.1 / 2.0
+    camarilla_r3_1d = close_1d + range_1d * 1.1 / 4.0
+    camarilla_s3_1d = close_1d - range_1d * 1.1 / 4.0
+    camarilla_s4_1d = close_1d - range_1d * 1.1 / 2.0
     
-    # Align 1d volume ratio to 12h timeframe (shifted by 1 for completed 1d bar)
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # Align 1d Camarilla levels to 12h timeframe (shifted by 1 for completed 1d bar)
+    camarilla_r4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4_1d)
+    camarilla_r3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3_1d)
+    camarilla_s3_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3_1d)
+    camarilla_s4_1d_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4_1d)
     
     # === 12h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
+    
+    # === 12h Indicators: Volume MA(20) for spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.ones(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
@@ -59,7 +75,9 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(atr[i])):
+            np.isnan(camarilla_r4_1d_aligned[i]) or np.isnan(camarilla_r3_1d_aligned[i]) or
+            np.isnan(camarilla_s3_1d_aligned[i]) or np.isnan(camarilla_s4_1d_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -100,19 +118,21 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio_1d_aligned[i] > 2.0
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Long entry: Price breaks above Donchian upper band
-            if price > highest_high[i-1]:
+            # Long entry: Price breaks above Donchian upper band AND above 1d Camarilla R4 (strong breakout)
+            if (price > highest_high[i-1] and  # Breakout above previous period's high
+                price > camarilla_r4_1d_aligned[i]):    # Above 1d Camarilla R4 (bullish breakout)
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Price breaks below Donchian lower band
-            elif price < lowest_low[i-1]:
+            # Short entry: Price breaks below Donchian lower band AND below 1d Camarilla S4 (strong breakdown)
+            elif (price < lowest_low[i-1] and    # Breakout below previous period's low
+                  price < camarilla_s4_1d_aligned[i]):    # Below 1d Camarilla S4 (bearish breakdown)
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
