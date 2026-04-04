@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #5940: 4h Donchian(20) breakout + 1d trend filter + volume confirmation
+Experiment #5941: 4h Donchian(20) breakout + 1d trend filter + volume confirmation
 HYPOTHESIS: Donchian breakouts on 4h aligned with 1d trend (price vs EMA50) capture sustained moves.
 Volume >1.5x average confirms breakout strength. ATR trailing stop manages risk.
 Designed for fewer trades (target 75-200/4 years) to reduce fee drag and work in both bull/bear markets.
@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5940_4h_donchian20_1d_ema_vol_v1"
+name = "exp_5941_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
