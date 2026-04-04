@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4579: 6h Donchian(20) Breakout + 12h HTF EMA Trend + Volume Spike
-HYPOTHESIS: 6h Donchian(20) breakouts aligned with 12h EMA(50) trend, confirmed by volume spikes (>1.8x average), capture medium-term momentum. Uses discrete position sizing (0.25) and ATR trailing stop (2.0x) to target 12-37 trades/year. Works in bull/bear via trend filter and volatility-adjusted stops.
+Experiment #4579: 6h Donchian(20) Breakout + 12h HTF EMA Trend + Volume Spike Filter
+HYPOTHESIS: 6h Donchian(20) breakouts aligned with 12h EMA(50) trend, confirmed by volume spikes (>2.0x average) capture medium-term momentum while minimizing fee drag. Uses discrete position sizing (0.25) and ATR trailing stop (2.0x) to target 50-150 total trades over 4 years. Works in bull markets via breakout continuation and bear markets via short breakdowns, with volume filter reducing false signals during low-participation moves.
 """
 
 import numpy as np
@@ -19,7 +19,7 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 12h data for EMA trend filter
+    # Precompute HTF: 12h data for EMA trend filter (called ONCE before loop)
     df_12h = get_htf_data(prices, '12h')
     
     # Calculate EMA(50) for 12h
@@ -54,7 +54,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.25  # 25% position size (discrete level to minimize churn)
     
     # Position tracking state variables
     in_position = False
@@ -98,8 +98,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = vol_ratio[i] > 2.0
         
         # Higher timeframe trend filter: bullish when price > EMA, bearish when price < EMA
         htf_bullish = price > ema_12h_aligned[i]
