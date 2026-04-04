@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 exp_6544_1d_donchian20_1w_ema_vol_v1
-Hypothesis: Daily Donchian(20) breakout with weekly EMA50 as trend filter and volume confirmation.
-Uses 1w EMA for robust trend adaptation avoiding daily noise. Volume spike (2.0x 20-period MA)
-confirms breakout strength. Designed for 30-100 total trades over 4 years with discrete sizing (0.25)
-to minimize fee drag. Works in both bull/bear markets by following 1w EMA trend direction.
+Hypothesis: Daily Donchian(20) breakout with weekly EMA200 as trend filter and volume confirmation.
+Uses weekly EMA for slower, more reliable trend identification to reduce whipsaw in ranging markets.
+Volume > 1.5x MA confirms breakout strength. Designed for 30-100 trades over 4 years with discrete sizing.
+Timeframe: 1d, HTF: 1w. Works in both bull (breakouts with trend) and bear (avoids counter-trend trades via weekly EMA filter).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -17,20 +17,20 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50          # 1w EMA50 for robust trend adaptation
+EMA_PERIOD = 200
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 2.0      # volume must be 2.0x its 20-period MA
-SIGNAL_SIZE = 0.25       # 25% position size
+VOL_THRESHOLD = 1.5  # volume must be 1.5x its MA for confirmation
+SIGNAL_SIZE = 0.25   # 25% position size
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1w for EMA50
+    # Load HTF data ONCE before loop - using 1w for EMA200
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1w EMA50
+    # Calculate 1w EMA200
     close_1w = df_1w['close'].values
     ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False).mean().values
     
@@ -62,19 +62,19 @@ def generate_signals(prices):
         if np.isnan(ema_1w_aligned[i]):
             continue
             
-        # Long conditions: price > 1w EMA50 (bullish bias) + breaks above Donchian HIGH + volume spike
-        long_bias = close[i] > ema_1w_aligned[i]  # price above 1w EMA50 (bullish)
+        # Long conditions: price > 1w EMA200 (bullish bias) + breaks above Donchian HIGH + volume spike
+        long_bias = close[i] > ema_1w_aligned[i]  # price above weekly EMA200 (bullish)
         long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
         long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Short conditions: price < 1w EMA50 (bearish bias) + breaks below Donchian LOW + volume spike
-        short_bias = close[i] < ema_1w_aligned[i]  # price below 1w EMA50 (bearish)
+        # Short conditions: price < 1w EMA200 (bearish bias) + breaks below Donchian LOW + volume spike
+        short_bias = close[i] < ema_1w_aligned[i]  # price below weekly EMA200 (bearish)
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Exit conditions: EMA reversal or Donchian midpoint reversal
         if position == 1:  # long position
-            # Exit if price drops back below EMA50 (trend change)
+            # Exit if price drops back below weekly EMA200 (trend change)
             exit_long = close[i] < ema_1w_aligned[i]
             # Or if price drops below Donchian midpoint
             exit_long = exit_long or close[i] < (donchian_high[i-1] + donchian_low[i-1]) / 2
@@ -83,7 +83,7 @@ def generate_signals(prices):
                 position = 0
                 continue
         elif position == -1:  # short position
-            # Exit if price rises back above EMA50 (trend change)
+            # Exit if price rises back above weekly EMA200 (trend change)
             exit_short = close[i] > ema_1w_aligned[i]
             # Or if price rises above Donchian midpoint
             exit_short = exit_short or close[i] > (donchian_high[i-1] + donchian_low[i-1]) / 2
