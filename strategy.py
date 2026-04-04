@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4139: 6h Donchian(20) breakout + 12h EMA(50) trend filter + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 12h EMA trend capture institutional order flow while avoiding counter-trend whipsaws. Volume confirmation filters false breakouts. Works in both bull/bear as EMA adapts to trend. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #4139: 6h Donchian(20) breakout + 12h Camarilla pivot + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts aligned with 12h Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) capture institutional order flow. Volume confirmation filters false breakouts. Works in both bull/bear as Camarilla adapts to volatility. Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4139_6h_donchian20_12h_ema_vol_v1"
+name = "exp_4139_6h_donchian20_12h_camarilla_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -19,13 +19,27 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h EMA(50) for trend filter ===
+    # === HTF: 12h Camarilla pivot levels ===
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) >= 2:
-        ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+        high_12h = df_12h['high'].values
+        low_12h = df_12h['low'].values
+        close_12h = df_12h['close'].values
+        daily_range = high_12h - low_12h
+        # Camarilla levels: H3/L3 = close ± 1.1*range/2, H4/L4 = close ± 1.1*range
+        camarilla_h3 = close_12h + 1.1 * daily_range / 2
+        camarilla_l3 = close_12h - 1.1 * daily_range / 2
+        camarilla_h4 = close_12h + 1.1 * daily_range
+        camarilla_l4 = close_12h - 1.1 * daily_range
+        camarilla_h3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h3)
+        camarilla_l3_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l3)
+        camarilla_h4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_h4)
+        camarilla_l4_aligned = align_htf_to_ltf(prices, df_12h, camarilla_l4)
     else:
-        ema_12h_aligned = np.full(n, np.nan)
+        camarilla_h3_aligned = np.full(n, np.nan)
+        camarilla_l3_aligned = np.full(n, np.nan)
+        camarilla_h4_aligned = np.full(n, np.nan)
+        camarilla_l4_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -55,13 +69,14 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 5, 50 + 5, 14 + 5)  # DC lookback, vol MA buffer, EMA buffer, ATR buffer
+    warmup = max(lookback_dc + 1, 20 + 5, 14 + 5)  # DC lookback, vol MA buffer, ATR buffer
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_12h_aligned[i])):
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -99,15 +114,17 @@ def generate_signals(prices):
             breakout_up = price > highest_high[i-1]
             breakout_down = price < lowest_low[i-1]
             
-            # EMA trend filter: only trade in direction of 12h EMA
-            trend_up = price > ema_12h_aligned[i]
-            trend_down = price < ema_12h_aligned[i]
+            # Camarilla pivot logic
+            at_h3 = abs(price - camarilla_h3_aligned[i]) < 0.1 * camarilla_h3_aligned[i]
+            at_l3 = abs(price - camarilla_l3_aligned[i]) < 0.1 * camarilla_l3_aligned[i]
+            above_h4 = price > camarilla_h4_aligned[i]
+            below_l4 = price < camarilla_l4_aligned[i]
             
-            # Long conditions: Donchian breakout up + uptrend
-            long_entry = breakout_up and trend_up
+            # Long conditions: Donchian breakout up + above H4 (continuation) OR at L3 (mean reversion)
+            long_entry = (breakout_up and above_h4) or (breakout_up and at_l3)
             
-            # Short conditions: Donchian breakout down + downtrend
-            short_entry = breakout_down and trend_down
+            # Short conditions: Donchian breakout down + below L4 (continuation) OR at H3 (mean reversion)
+            short_entry = (breakout_down and below_l4) or (breakout_down and at_h3)
             
             if long_entry:
                 in_position = True
