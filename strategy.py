@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #2319: 6h ATR Breakout + 12h/1d Trend Alignment + Volume Spike
-HYPOTHESIS: 6h ATR breakouts with 12h/1d trend alignment and volume confirmation capture 
-institutional participation during trend acceleration phases. Works in bull markets 
-(breakouts with volume) and bear markets (breakdowns with volume). 
-- Entry: Long when price breaks above ATR(14) upper band with 12h/1d uptrend + volume spike
-         Short when price breaks below ATR(14) lower band with 12h/1d downtrend + volume spike
-- Exit: Opposite ATR band or trailing stop (2*ATR from extreme)
-- Volume: > 2.0x 20-bar average spike to confirm participation
+Experiment #2319: 6h Donchian Breakout + 12h Trend Filter + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 6h with 12h EMA(50) trend alignment and volume confirmation
+capture strong momentum moves while avoiding false breakouts in choppy markets.
+- Primary: 6h Donchian(20) breakout (long at upper band, short at lower band)
+- HTF: 12h EMA(50) trend filter (only trade in direction of 12h trend)
+- Entry: Require volume > 2.0x 20-bar average to confirm participation
+- Exit: Opposite Donchian band or ATR(14) stop (2*ATR)
 - Target: 75-150 total trades over 4 years (19-37/year) - suitable for 6h timeframe
+- Works in bull markets (breakouts with trend) and bear markets (short breakdowns with trend)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2319_6h_atr_breakout_12h1d_trend_vol_v1"
+name = "exp_2319_6h_donchian20_12h_trend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -35,15 +35,12 @@ def generate_signals(prices):
     trend_12h = np.where(close_12h > ema_12h, 1, -1)
     trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
-    # === HTF: 1d data for EMA trend ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # === 6h Indicators: Donchian(20), ATR(14), Volume MA(20) ===
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: ATR(14) bands, Volume MA(20) ===
-    # ATR calculation
+    # ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -51,12 +48,6 @@ def generate_signals(prices):
     tr3[0] = tr1[0]
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    # ATR bands using 20-period SMA as base
-    sma_20 = pd.Series(close).rolling(window=20, min_periods=20).mean().values
-    atr_multiplier = 1.5
-    upper_band = sma_20 + (atr * atr_multiplier)
-    lower_band = sma_20 - (atr * atr_multiplier)
     
     # Volume MA for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -78,8 +69,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(trend_12h_aligned[i]) or np.isnan(trend_1d_aligned[i]) or
-            np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or
+        if (np.isnan(trend_12h_aligned[i]) or
+            np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -96,8 +87,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price crosses below lower band (mean reversion)
-                elif price < lower_band[i]:
+                # Exit if price re-enters Donchian channel (breakout failed)
+                elif price <= lowest_low[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -110,8 +101,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price crosses above upper band (mean reversion)
-                elif price > upper_band[i]:
+                # Exit if price re-enters Donchian channel (breakdown failed)
+                elif price >= highest_high[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -120,30 +111,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require both 12h and 1d trend alignment for bias filter
-        trend_bias_12h = trend_12h_aligned[i]
-        trend_bias_1d = trend_1d_aligned[i]
-        
-        # Only trade when both timeframes agree
-        if trend_bias_12h == trend_bias_1d:
-            trend_bias = trend_bias_12h  # Either 1 or -1
-        else:
-            trend_bias = 0  # No clear trend, skip
+        # Require 12h trend alignment for bias filter
+        trend_bias = trend_12h_aligned[i]
         
         # Volume confirmation: require volume spike (> 2.0x average - strict to limit trades)
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike and trend_bias != 0:
-            # Long entry: price breaks above upper band with uptrend on both timeframes
-            if trend_bias > 0 and price > upper_band[i]:
+            # Long entry: price breaks above Donchian upper band with uptrend
+            if trend_bias > 0 and price > highest_high[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below lower band with downtrend on both timeframes
-            elif trend_bias < 0 and price < lower_band[i]:
+            # Short entry: price breaks below Donchian lower band with downtrend
+            elif trend_bias < 0 and price < lowest_low[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
