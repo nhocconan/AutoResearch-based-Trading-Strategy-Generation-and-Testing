@@ -3,9 +3,10 @@
 Experiment #3037: 4h Donchian Breakout + 1d HMA Trend + Volume Spike + ATR Filter
 HYPOTHESIS: Donchian(20) breakouts on 4h capture medium-term trends. 1d HMA(21) provides
 trend filter: only take longs when price > HMA, shorts when price < HMA. Volume spike
-(>2.0x 20-period average) confirms breakout strength. ATR-based stoploss (2.5x) manages risk.
-This combination filters false breakouts in choppy markets while capturing strong trends.
-Using 1d HTF instead of 12h to reduce noise and improve signal quality. Target: 75-200 total trades over 4 years.
+(>2.0x 20-period average) confirms breakout strength. ATR-based trailing stop (2.5x)
+manages risk. 1d trend filter is more stable than 12h for capturing true market direction.
+This reduces false signals in choppy markets while maintaining strong trend participation.
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -52,7 +53,7 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for volatility and stoploss ===
+    # === 4h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
