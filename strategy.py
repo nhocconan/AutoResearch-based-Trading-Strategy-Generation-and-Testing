@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #5035: 6h Donchian(20) Breakout + Weekly Pivot Fade/Continuation + Volume Spike
-HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts aligned with weekly pivot levels (from 1d HTF) capture momentum with controlled frequency. Weekly pivot acts as structural filter: fade at R3/S3 (mean reversion in ranging markets), breakout continuation at R4/S4 (trend acceleration). Volume > 2x average confirms participation. ATR(14) trailing stop (2.5x) manages risk. Designed for 50-150 total trades over 4 years (12-37/year) on 6h timeframe to balance statistical significance with fee drag minimization. Weekly pivot provides support/resistance that adapts to bull/bear regimes: in bull markets, breaks above R4 signal strength; in bear markets, breaks below S4 signal weakness; in ranging markets, rejections at R3/S3 offer mean reversion opportunities.
+Experiment #5035: 6h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Spike + ATR Stoploss
+HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts aligned with weekly pivot levels (from 1d HTF) capture strong momentum with lower frequency. Weekly pivot acts as regime filter: R3/S3 for mean reversion, R4/S4 for breakout confirmation. Volume > 2x average confirms institutional participation. ATR(14) trailing stop (2.5x) manages risk. Designed for 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Weekly pivot provides structural support/resistance that works in both bull (breakouts through R4) and bear (breakdowns through S4) markets.
 """
 
 import numpy as np
@@ -24,7 +24,9 @@ def generate_signals(prices):
     
     # === 1d Indicators: Weekly Pivot Points (using prior week's OHLC) ===
     if len(df_1d) >= 5:  # Need at least a week of data
-        # Calculate weekly OHLC from daily data using rolling window of 5 days
+        # Calculate weekly OHLC from daily data
+        # We'll use rolling window of 5 days to approximate weekly OHLC
+        # For true weekly pivot, we need prior week's H, L, C
         high_5d = pd.Series(high).rolling(window=5, min_periods=5).max().values
         low_5d = pd.Series(low).rolling(window=5, min_periods=5).min().values
         close_5d = pd.Series(close).rolling(window=5, min_periods=5).last().values
@@ -33,18 +35,34 @@ def generate_signals(prices):
         pp = (high_5d + low_5d + close_5d) / 3.0
         
         # Weekly Support/Resistance Levels
+        # R1 = (2 * PP) - Prior Week L
+        # S1 = (2 * PP) - Prior Week H
+        # R2 = PP + (Prior Week H - Prior Week L)
+        # S2 = PP - (Prior Week H - Prior Week L)
+        # R3 = Prior Week H + 2*(PP - Prior Week L)
+        # S3 = Prior Week L - 2*(Prior Week H - PP)
+        # R4 = PP + 3*(Prior Week H - Prior Week L)
+        # S4 = PP - 3*(Prior Week H - Prior Week L)
         rng = high_5d - low_5d
-        r3 = high_5d + 2 * (pp - low_5d)  # R3 = Prior Week H + 2*(PP - Prior Week L)
-        s3 = low_5d - 2 * (high_5d - pp)  # S3 = Prior Week L - 2*(Prior Week H - PP)
-        r4 = pp + 3 * rng                 # R4 = PP + 3*(Prior Week H - Prior Week L)
-        s4 = pp - 3 * rng                 # S4 = PP - 3*(Prior Week H - Prior Week L)
+        r1 = (2 * pp) - low_5d
+        s1 = (2 * pp) - high_5d
+        r2 = pp + rng
+        s2 = pp - rng
+        r3 = high_5d + 2 * (pp - low_5d)
+        s3 = low_5d - 2 * (high_5d - pp)
+        r4 = pp + 3 * rng
+        s4 = pp - 3 * rng
         
+        # For breakout confirmation, we'll use R4/S4 levels
+        # For mean reversion fade, we'll use R3/S3 levels
         # Align to 6h timeframe
+        pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
         r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
         s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
         r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
         s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     else:
+        pp_aligned = np.full(n, np.nan)
         r3_aligned = np.full(n, np.nan)
         s3_aligned = np.full(n, np.nan)
         r4_aligned = np.full(n, np.nan)
@@ -82,7 +100,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
             np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
