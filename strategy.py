@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #3328: 12h Donchian Breakout + 1w HMA Trend + Volume Spike
-HYPOTHESIS: 12h Donchian(20) breakouts with 1w HMA(50) trend filter and volume confirmation
-captures medium-term trends with optimal trade frequency for 12h timeframe (target: 50-150 total trades over 4 years).
-The 1w trend filter ensures alignment with weekly momentum, reducing false breakouts in choppy markets.
-Volume spike (>2.0x 20-period average) confirms breakout strength. ATR-based trailing stop (2.5x) manages risk.
-Position size 0.25. Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets
-by using price channels and volatility filters. Uses MTF data loading best practices: get_htf_data called ONCE before loop.
+Experiment #3330: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Spike
+HYPOTHESIS: Daily Donchian breakouts capture medium-term trends with ideal trade frequency for 1d timeframe.
+1-week HMA(50) trend filter ensures alignment with weekly momentum. Volume spike (>2.0x 20-period average) confirms breakout strength.
+ATR-based trailing stop (2.5x) manages risk. Position size 0.25. Target: 30-100 total trades over 4 years (7-25/year).
+Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets by using price channels and volatility filters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3328_12h_donchian20_1w_hma_vol_v1"
-timeframe = "12h"
+name = "exp_3330_1d_donchian20_1w_hma_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,17 +41,17 @@ def generate_signals(prices):
     hma_1w = hma(close_1w, 50)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # === 12h Indicators: Donchian channels (20-period) ===
+    # === 1d Indicators: Donchian channels (20-period) ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 1d Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 1d Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
