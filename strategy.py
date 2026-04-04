@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #5579: 6h Donchian(20) breakout + 12h EMA trend + volume confirmation
+Experiment #5579: 6h Donchian(20) breakout + 12h EMA20 trend + volume confirmation
 HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts with volume > 1.8x average and aligned 
 with 12h EMA20 trend capture high-probability trend moves. The 12h EMA20 provides the 
 higher timeframe trend filter, reducing false breakouts in choppy markets. ATR-based 
