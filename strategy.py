@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4418: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Confirmation
-HYPOTHESIS: Daily Donchian(20) breakouts aligned with weekly HMA(21) trend direction capture sustained momentum while avoiding counter-trend whipsaws. Volume confirmation (>1.5x average) filters low-conviction moves. Using 1d primary timeframe targets 30-100 trades over 4 years (7-25/year) to minimize fee drag. Position size 0.25 balances risk/reward. Works in bull markets via breakouts and bear markets via short breakdowns with trend filter.
+HYPOTHESIS: 1d Donchian(20) breakouts aligned with 1w HMA(21) trend direction (price above/below HMA = long/short bias) and confirmed by volume (>1.8x average) capture institutional momentum with minimal false signals. 1w HMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 30-100 total trades over 4 years (7-25/year) with position size 0.25.
 """
 
 import numpy as np
@@ -108,8 +108,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume confirmation (> 1.8x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.8
         
         # Weekly HMA bias: price > HMA = long bias, price < HMA = short bias
         long_bias = price > hma_1w_aligned[i]
@@ -143,3 +143,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
