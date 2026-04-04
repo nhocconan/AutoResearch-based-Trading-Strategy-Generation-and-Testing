@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #6155: 6h Donchian(20) breakout + 1w Camarilla pivot + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 1w Camarilla pivot levels (R3/S3 for fade, R4/S4 for breakout) capture institutional order flow across bull/bear regimes. Weekly Camarilla from 1w provides key support/resistance: price above R3 = bullish bias, below S3 = bearish bias. Volume >1.5x average confirms participation. ATR trailing stop manages risk. Discrete sizing (0.25) minimizes fee churn. Target: 75-200 trades over 4 years.
-Timeframe: 6h. HTF: 1w for Camarilla pivot calculation.
+Experiment #6156: 12h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d Camarilla pivot levels (R3/S3 for bias) capture institutional order flow. Daily Camarilla from 1d provides key support/resistance: price above R3 = bullish bias, below S3 = bearish bias. Volume >1.5x average confirms participation. ATR trailing stop manages risk. Discrete sizing (0.25) minimizes fee churn. Target: 75-150 trades over 4 years.
+Timeframe: 12h. HTF: 1d for Camarilla pivot calculation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6155_6h_donchian20_1w_camarilla_vol_v1"
-timeframe = "6h"
+name = "exp_6156_12h_donchian20_1d_camarilla_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,41 +23,41 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for Camarilla pivot levels (using prior week's high/low/close) ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 2:
-        # Calculate Camarilla levels from prior week's OHLC
-        # Weekly high, low, close from previous completed week
-        weekly_high = pd.Series(df_1w['high'].values).shift(1).values
-        weekly_low = pd.Series(df_1w['low'].values).shift(1).values
-        weekly_close = pd.Series(df_1w['close'].values).shift(1).values
-        weekly_range = weekly_high - weekly_low
+    # === HTF: 1d data for Camarilla pivot levels (using prior day's high/low/close) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 2:
+        # Calculate Camarilla levels from prior day's OHLC
+        # Daily high, low, close from previous completed day
+        daily_high = pd.Series(df_1d['high'].values).shift(1).values
+        daily_low = pd.Series(df_1d['low'].values).shift(1).values
+        daily_close = pd.Series(df_1d['close'].values).shift(1).values
+        daily_range = daily_high - daily_low
         
         # Camarilla levels: R4, R3, S3, S4
-        camarilla_r4 = weekly_close + weekly_range * 1.1 / 2
-        camarilla_r3 = weekly_close + weekly_range * 1.1 / 4
-        camarilla_s3 = weekly_close - weekly_range * 1.1 / 4
-        camarilla_s4 = weekly_close - weekly_range * 1.1 / 2
+        camarilla_r4 = daily_close + daily_range * 1.1 / 2
+        camarilla_r3 = daily_close + daily_range * 1.1 / 4
+        camarilla_s3 = daily_close - daily_range * 1.1 / 4
+        camarilla_s4 = daily_close - daily_range * 1.1 / 2
         
-        camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
-        camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
-        camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-        camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
+        camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+        camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+        camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+        camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     else:
         camarilla_r3_aligned = np.full(n, np.nan)
         camarilla_s3_aligned = np.full(n, np.nan)
         camarilla_r4_aligned = np.full(n, np.nan)
         camarilla_s4_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20-period) ===
+    # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation ===
+    # === 12h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 6h Indicators: ATR(14) for trailing stop ===
+    # === 12h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -76,7 +76,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 2) + 1  # Donchian, volume avg, ATR, weekly pivot + 1
+    warmup = max(20, 20, 14, 2) + 1  # Donchian, volume avg, ATR, daily pivot + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -124,7 +124,7 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5  # Volume filter for stronger signals
         
-        # Multi-timeframe trend filter: price relative to 1w Camarilla levels
+        # Multi-timeframe trend filter: price relative to 1d Camarilla levels
         # Bullish: above R3 (strong bias) or between R3-R4 (continuation bias)
         bullish_bias = price > camarilla_r3_aligned[i]
         # Bearish: below S3 (strong bias) or between S3-S4 (continuation bias)
