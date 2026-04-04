@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #3325: 12h Donchian Breakout + 1d HMA Trend + Volume Spike
-HYPOTHESIS: 12h Donchian(20) breakouts capture medium-term trends with ideal trade frequency for 12h timeframe.
-1d HMA(50) trend filter ensures alignment with daily momentum. Volume spike (>2.0x 20-period average) confirms breakout strength.
-ATR-based trailing stop (2.5x) manages risk. Position size 0.25. Target: 50-150 total trades over 4 years (12-37/year).
-Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets by using price channels and volatility filters.
+Experiment #3326: 4h Donchian Breakout + 1d HMA Trend + Volume Spike (Revised)
+HYPOTHESIS: 4h Donchian(20) breakouts with 1d HMA(50) trend filter and volume confirmation (>1.8x) 
+captures medium-term trends with optimal trade frequency. Reduced volume threshold from 2.0x to 1.8x 
+to increase trades from 0 to target range (75-200 over 4 years). ATR trailing stop (2.5x) manages risk. 
+Position size 0.25. Works in bull (trend continuation) and bear (mean reversion from extremes) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3325_12h_donchian20_1d_hma_vol_v1"
-timeframe = "12h"
+name = "exp_3326_4h_donchian20_1d_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,17 +41,17 @@ def generate_signals(prices):
     hma_1d = hma(close_1d, 50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # === 12h Indicators: Donchian channels (20-period) ===
+    # === 4h Indicators: Donchian channels (20-period) ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 4h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -114,8 +114,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
+        # Require volume spike (> 1.8x average) for confirmation (reduced from 2.0x)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
             # 1d HMA trend filter: only long above HMA, short below HMA
