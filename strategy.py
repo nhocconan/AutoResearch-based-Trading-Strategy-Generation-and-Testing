@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #2740: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts with 1d EMA trend alignment and volume spikes capture
-institutional participation while minimizing overtrading. Uses 1d for signal direction,
-4h only for entry timing. Target: 75-200 total trades over 4 years (19-50/year).
-Works in both bull (trend following) and bear (mean reversion exits) markets.
+Experiment #2741: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA trend and volume spikes capture
+institutional moves with optimal frequency (target: 75-200 trades over 4 years). Uses 1d
+for signal direction, 4h for entry/exit timing. Works in bull (breakouts with trend) and
+bear (mean reversion from extremes) markets via ATR trailing stops and Donchian-based exits.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2740_4h_donchian20_1d_ema_vol_v1"
+name = "exp_2741_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
