@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #6390: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts with volume confirmation (>1.8x avg) and weekly HMA trend filter capture institutional momentum while avoiding whipsaws. Weekly HMA provides stronger trend bias than daily: price above weekly HMA = bullish bias (long breakouts), price below weekly HMA = bearish bias (short breakdowns). Volume confirmation filters false breakouts. Discrete sizing (0.25) minimizes fee churn. Target: 30-100 trades over 4 years. Works in bull via breakouts, in bear via short breakdowns with trend filter.
+HYPOTHESIS: Daily Donchian breakouts with volume confirmation (>1.8x avg) and 1w HMA trend filter capture institutional momentum while avoiding whipsaws. 1w HMA provides a stronger trend bias than shorter timeframes: price above HMA = bullish bias (long breakouts), price below HMA = bearish bias (short breakdowns). Volume confirmation filters false breakouts. Discrete sizing (0.25) minimizes fee churn. Target: 30-100 trades over 4 years. Works in bull via breakouts, in bear via short breakdowns with trend filter.
 """
 
 import numpy as np
