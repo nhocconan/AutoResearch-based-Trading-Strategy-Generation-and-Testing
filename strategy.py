@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4478: 1d Donchian(20) Breakout + 1w EMA Trend + Volume Confirmation
-HYPOTHESIS: 1d Donchian(20) breakouts aligned with 1w EMA trend direction and confirmed by volume (>1.5x average) capture long-term momentum with reduced noise. The 1w EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 30-100 total trades over 4 years (7-25/year) with position size 0.25.
+HYPOTHESIS: Daily Donchian(20) breakouts aligned with weekly EMA trend direction and confirmed by volume (>1.5x average) capture medium-term momentum with reduced noise. The weekly EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 30-100 total trades over 4 years (7-25/year) with position size 0.25.
 """
 
 import numpy as np
@@ -137,3 +137,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
