@@ -1,86 +1,56 @@
 #!/usr/bin/env python3
 """
-exp_6571_6h_donchian20_1d_pivot_vol_v2
-Hypothesis: 6h Donchian(20) breakout with 1d weekly pivot direction filter and volume confirmation.
-Weekly pivots (from prior week) provide stronger institutional levels than daily. 
-In bull markets: buy breakouts above weekly R1 with volume.
-In bear markets: sell breakdowns below weekly S1 with volume.
-In ranging markets: fade extremes at weekly R2/S2 with volume confirmation.
-Uses 6h primary timeframe targeting 50-150 total trades over 4 years (12-37/year).
-Discrete sizing (0.25) minimizes fee churn.
+exp_6572_12h_donchian20_1d_pivot_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d Camarilla pivot direction filter and volume confirmation.
+Uses 12h primary timeframe to reduce trade frequency (target: 50-150 total trades over 4 years).
+1d Camarilla pivots provide institutional support/resistance levels that work in both bull and bear markets:
+- Fade at R3/S3 (mean reversion in ranges)
+- Breakout continuation at R4/S4 (trend acceleration)
+Volume confirmation ensures breakouts have conviction. Discrete sizing (0.25) minimizes fee churn.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6571_6h_donchian20_1d_pivot_vol_v2"
-timeframe = "6h"
+name = "exp_6572_12h_donchian20_1d_pivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+PIVOT_LOOKBACK = 1  # Use previous day's pivots
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.25
-MAX_HOLD_BARS = 30  # ~7.5 days
+VOL_BASE_THRESHOLD = 2.0  # Volume threshold for confirmation
+SIGNAL_SIZE = 0.25      # 25% position size
+MAX_HOLD_BARS = 15      # Max hold: ~7.5 days (12h bars)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE - weekly data from 1d timeframe (we'll resample to weekly ourselves)
-    # But per rules, we must use get_htf_data with actual timeframes
-    # So we'll use 1d and calculate weekly pivots from it
+    # Load HTF data ONCE before loop - using 1d for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivots from daily data
-    # Group into weeks (starting Monday) and get weekly OHLC
-    # We'll calculate pivots using the prior week's complete data
+    # Calculate 1d Camarilla pivot levels (based on previous day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly OHLC using 5-day periods (approximation for weekly)
-    # More accurate: use actual week grouping but we'll use 5-day rollback for simplicity
-    # Since we align later, we need values aligned to each 6h bar
-    # We'll calculate rolling weekly high/low/close over 5 days
-    weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-    weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-    weekly_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().values
+    # Pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3
+    # Camarilla levels
+    camarilla_h4 = pivot + (high_1d - low_1d) * 1.1 / 2  # R4
+    camarilla_h3 = pivot + (high_1d - low_1d) * 1.1 / 4  # R3
+    camarilla_l3 = pivot - (high_1d - low_1d) * 1.1 / 4  # S3
+    camarilla_l4 = pivot - (high_1d - low_1d) * 1.1 / 2  # S4
     
-    # Weekly pivot point
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_range = weekly_high - weekly_low
-    
-    # Weekly Camarilla-like levels (using standard pivot multipliers)
-    # R4 = pivot + (high-low) * 1.1/2
-    # R3 = pivot + (high-low) * 1.1/4
-    # R2 = pivot + (high-low) * 1.1/6
-    # R1 = pivot + (high-low) * 1.1/12
-    # S1 = pivot - (high-low) * 1.1/12
-    # S2 = pivot - (high-low) * 1.1/6
-    # S3 = pivot - (high-low) * 1.1/4
-    # S4 = pivot - (high-low) * 1.1/2
-    weekly_r4 = weekly_pivot + weekly_range * 1.1 / 2
-    weekly_r3 = weekly_pivot + weekly_range * 1.1 / 4
-    weekly_r2 = weekly_pivot + weekly_range * 1.1 / 6
-    weekly_r1 = weekly_pivot + weekly_range * 1.1 / 12
-    weekly_s1 = weekly_pivot - weekly_range * 1.1 / 12
-    weekly_s2 = weekly_pivot - weekly_range * 1.1 / 6
-    weekly_s3 = weekly_pivot - weekly_range * 1.1 / 4
-    weekly_s4 = weekly_pivot - weekly_range * 1.1 / 2
-    
-    # Align to LTF (6h) with shift(1) for completed bars only
-    weekly_r4_aligned = align_htf_to_ltf(prices, df_1d, weekly_r4)
-    weekly_r3_aligned = align_htf_to_ltf(prices, df_1d, weekly_r3)
-    weekly_r2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
-    weekly_s2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2)
-    weekly_s3_aligned = align_htf_to_ltf(prices, df_1d, weekly_s3)
-    weekly_s4_aligned = align_htf_to_ltf(prices, df_1d, weekly_s4)
+    # Align to LTF (12h) with shift(1) for completed bars only
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -101,45 +71,47 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, 5) + 1  # 5 for weekly calc
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if (np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]) or 
+        if (np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
             np.isnan(vol_ma[i])):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
-        # Price relative to weekly pivot levels
-        price_above_r1 = close[i] > weekly_r1_aligned[i]
-        price_below_s1 = close[i] < weekly_s1_aligned[i]
-        price_above_r2 = close[i] > weekly_r2_aligned[i]
-        price_below_s2 = close[i] < weekly_s2_aligned[i]
-        price_between_r1_s1 = (close[i] >= weekly_s1_aligned[i]) & (close[i] <= weekly_r1_aligned[i])
+        # Calculate dynamic pivot bias based on price relative to Camarilla levels
+        # Price above H3: bullish bias (favor longs)
+        # Price below L3: bearish bias (favor shorts)
+        # Price between H3 and L3: neutral (fade extremes)
+        price_above_h3 = close[i] > camarilla_h3_aligned[i]
+        price_below_l3 = close[i] < camarilla_l3_aligned[i]
         
-        # Volume confirmation
-        long_volume = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
-        short_volume = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
-        
-        # Long conditions:
-        # 1. Break above Donchian HIGH with volume
-        # 2. In bullish bias (above weekly R1) OR fading from extreme (below S2 but above S3)
+        # Long conditions: 
+        # 1. Break above Donchian HIGH (breakout)
+        # 2. Volume confirmation
+        # 3. Either: price > H3 (continuation) OR price < L3 fading to mean (contrarian)
         long_breakout = close[i] > donchian_high[i-1]
-        long_continuation = price_above_r1  # Bullish bias
-        long_fade = price_below_s2 and close[i] > weekly_s3_aligned[i]  # Fade from S2 but above S3
+        long_volume = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        long_continuation = price_above_h3  # Breakout with bullish bias
+        long_fade = price_below_l3 and close[i] > camarilla_l4_aligned[i]  # Fade from S3 but above S4
         
         # Short conditions:
-        # 1. Break below Donchian LOW with volume
-        # 2. In bearish bias (below weekly S1) OR fading from extreme (above R2 but below R3)
+        # 1. Break below Donchian LOW (breakdown)
+        # 2. Volume confirmation
+        # 3. Either: price < L3 (continuation) OR price > H3 fading to mean (contrarian)
         short_breakout = close[i] < donchian_low[i-1]
-        short_continuation = price_below_s1  # Bearish bias
-        short_fade = price_above_r2 and close[i] < weekly_r3_aligned[i]  # Fade from R2 but below R3
+        short_volume = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        short_continuation = price_below_l3  # Breakdown with bearish bias
+        short_fade = price_above_h3 and close[i] < camarilla_h4_aligned[i]  # Fade from H3 but below H4
         
         # Exit conditions: time-based exit OR Donchian midpoint reversal
         if position == 1:  # long position
+            # Exit if price drops below Donchian midpoint
             exit_long = close[i] < (donchian_high[i-1] + donchian_low[i-1]) / 2
+            # Time-based exit: prevent overstaying
             exit_long = exit_long or bars_since_entry >= MAX_HOLD_BARS
             if exit_long:
                 signals[i] = 0.0
@@ -147,7 +119,9 @@ def generate_signals(prices):
                 bars_since_entry = 0
                 continue
         elif position == -1:  # short position
+            # Exit if price rises above Donchian midpoint
             exit_short = close[i] > (donchian_high[i-1] + donchian_low[i-1]) / 2
+            # Time-based exit: prevent overstaying
             exit_short = exit_short or bars_since_entry >= MAX_HOLD_BARS
             if exit_short:
                 signals[i] = 0.0
