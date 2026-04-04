@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Experiment #3036: 12h Donchian Breakout + 1d HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: Donchian(20) breakouts on 12h capture medium-term trends. 1d HMA(21) provides
-trend filter: only take longs when price > HMA, shorts when price < HMA. Volume spike
-(>2.0x 20-period average) confirms breakout strength. ATR-based stoploss (2.5x)
-manages risk. This combination filters false breakouts in choppy markets while capturing
-strong trends. 12h timeframe targets 12-37 trades/year to minimize fee drag.
+Experiment #3036: 12h Donchian Breakout + 1d HMA Trend + Volume Spike + ATR Filter
+HYPOTHESIS: Donchian(20) breakouts on 12h capture medium-term trends with lower frequency. 
+1d HMA(21) provides trend filter: only take longs when price > HMA, shorts when price < HMA. 
+Volume spike (>2.0x 20-period average) confirms breakout strength. ATR-based trailing stop 
+(2.5x) manages risk. This combination filters false breakouts while capturing strong trends. 
+12h timeframe targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+Works in both bull (trend continuation) and bear (mean reversion via Donchian exit).
 """
 
 import numpy as np
@@ -52,7 +53,7 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for volatility and stoploss ===
+    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
