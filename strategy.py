@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #6205: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR trailing stop
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA trend capture medium-term momentum 
-while avoiding noise. Volume >1.8x average confirms participation. ATR trailing stop manages risk. 
-Discrete sizing (0.25) balances return and fee drag. Target: 75-150 trades over 4 years (19-37/year) 
-for 12h timeframe. Works in bull/bear via trend filter and strict entry conditions.
-Timeframe: 12h. HTF: 1d for EMA trend filter.
+Experiment #6206: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR trailing stop
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA trend capture medium-term momentum 
+while avoiding noise. Volume >2.0x average confirms institutional participation. 
+ATR trailing stop manages risk. Discrete sizing (0.25) balances return and fee drag. 
+Target: 75-200 trades over 4 years (19-50/year) for 4h timeframe.
+Timeframe: 4h. HTF: 1d for EMA trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6205_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_6206_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,15 +34,15 @@ def generate_signals(prices):
     else:
         ema_1d_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation ===
+    # === 4h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 12h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -106,7 +106,7 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.8  # Volume filter for stronger signals
+        volume_confirmed = volume_ratio[i] > 2.0  # Volume filter for stronger signals
         
         # 1d EMA21 trend filter: price relative to EMA21
         bullish_trend = price > ema_1d_aligned[i]
