@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 exp_6545_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA50 as trend filter and volume confirmation.
-Uses 1d EMA50 for strong trend alignment while avoiding noise. Volume spike (2.0x 20-period MA) confirms breakout strength.
-Designed for 50-150 total trades over 4 years with discrete sizing (0.25) to minimize fee drag.
-Works in both bull/bear markets by following 1d EMA50 trend direction.
+Hypothesis: 12h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
+Uses daily EMA for strong trend bias, reducing whipsaw in ranging markets. Volume > 1.5x MA confirms breakout strength.
+Designed for 50-150 total trades over 4 years with discrete sizing (0.25). Works in both bull and bear by following HTF trend.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -17,20 +16,20 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50          # 1d EMA50 for strong trend alignment
+EMA_PERIOD = 200
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 2.0      # volume must be 2.0x its 20-period MA
-SIGNAL_SIZE = 0.25       # 25% position size
+VOL_THRESHOLD = 1.5  # volume must be 1.5x its MA for confirmation
+SIGNAL_SIZE = 0.25   # 25% position size
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA50
+    # Load HTF data ONCE before loop - using 1d for EMA200
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA50
+    # Calculate 1d EMA200
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False).mean().values
     
@@ -62,19 +61,19 @@ def generate_signals(prices):
         if np.isnan(ema_1d_aligned[i]):
             continue
             
-        # Long conditions: price > 1d EMA50 (bullish bias) + breaks above Donchian HIGH + volume spike
-        long_bias = close[i] > ema_1d_aligned[i]  # price above 1d EMA50 (bullish)
+        # Long conditions: price > 1d EMA200 (bullish bias) + breaks above Donchian HIGH + volume spike
+        long_bias = close[i] > ema_1d_aligned[i]  # price above 1d EMA200 (bullish)
         long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
         long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Short conditions: price < 1d EMA50 (bearish bias) + breaks below Donchian LOW + volume spike
-        short_bias = close[i] < ema_1d_aligned[i]  # price below 1d EMA50 (bearish)
+        # Short conditions: price < 1d EMA200 (bearish bias) + breaks below Donchian LOW + volume spike
+        short_bias = close[i] < ema_1d_aligned[i]  # price below 1d EMA200 (bearish)
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Exit conditions: EMA reversal or Donchian midpoint reversal
         if position == 1:  # long position
-            # Exit if price drops back below EMA50 (trend change)
+            # Exit if price drops back below EMA200 (trend change)
             exit_long = close[i] < ema_1d_aligned[i]
             # Or if price drops below Donchian midpoint
             exit_long = exit_long or close[i] < (donchian_high[i-1] + donchian_low[i-1]) / 2
@@ -83,7 +82,7 @@ def generate_signals(prices):
                 position = 0
                 continue
         elif position == -1:  # short position
-            # Exit if price rises back above EMA50 (trend change)
+            # Exit if price rises back above EMA200 (trend change)
             exit_short = close[i] > ema_1d_aligned[i]
             # Or if price rises above Donchian midpoint
             exit_short = exit_short or close[i] > (donchian_high[i-1] + donchian_low[i-1]) / 2
