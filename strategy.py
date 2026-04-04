@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4511: 6h Elder Ray Index + 1d Regime Filter + Volume Confirmation
-HYPOTHESIS: 6h Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) combined with 1d ADX regime filter (ADX>25 = trend, ADX<20 = range) and volume confirmation (>1.5x average) captures strong directional moves while avoiding choppy markets. In trending regimes (ADX>25), we trade Elder Ray extremes (Bull Power > 0 for long, Bear Power > 0 for short). In ranging regimes (ADX<20), we fade Elder Ray extremes at 2*std dev thresholds. This adaptive approach works in both bull and bear markets by aligning with the dominant 1d regime. Designed for 6h timeframe targeting 75-175 total trades over 4 years (19-44/year) with position size 0.25.
+Experiment #4511: 6h Ichimoku Cloud Filter + 1d TK Cross + Volume Spike
+HYPOTHESIS: Ichimoku cloud acts as dynamic support/resistance on 6h, while 1d TK cross (Tenkan/Kijun) provides higher-timeframe momentum confirmation. Volume spike (>2.0x average) ensures breakout conviction. Only long when price above cloud + bullish TK cross, short when price below cloud + bearish TK cross. Ichimoku's multi-line system reduces false signals in ranging markets, while TK cross captures medium-term trends. Designed for 6h timeframe targeting 75-150 total trades over 4 years (19-38/year) with position size 0.25. Works in bull/bear via cloud filter (avoids counter-trend trades) and TK cross directionality.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4511_6h_elder_ray_1d_regime_vol_v1"
+name = "exp_4511_6h_ichimoku_1d_tk_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -19,52 +19,48 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for ADX regime filter
+    # Precompute HTF: 1d data for TK cross
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 30:  # Need sufficient data for ADX calculation
-        # Calculate ADX(14) on 1d data
+    if len(df_1d) >= 26:  # Need for Kijun (26-period)
         high_1d = pd.Series(df_1d['high'].values)
         low_1d = pd.Series(df_1d['low'].values)
         close_1d = pd.Series(df_1d['close'].values)
         
-        # True Range
-        tr1 = high_1d[1:] - low_1d[1:]
-        tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-        tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-        tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+        tenkan_1d = (high_1d.rolling(window=9, min_periods=9).max() + 
+                     low_1d.rolling(window=9, min_periods=9).min()) / 2
+        # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+        kijun_1d = (high_1d.rolling(window=26, min_periods=26).max() + 
+                    low_1d.rolling(window=26, min_periods=26).min()) / 2
         
-        # Directional Movement
-        up_move = high_1d[1:] - high_1d[:-1]
-        down_move = low_1d[:-1] - low_1d[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        # TK cross: Tenkan > Kijun = bullish, Tenkan < Kijun = bearish
+        tk_bullish = (tenkan_1d > kijun_1d).values
+        tk_bearish = (tenkan_1d < kijun_1d).values
         
-        # Smoothed values
-        tr_ma = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
-        plus_dm_ma = pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
-        minus_dm_ma = pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
-        
-        # Directional Indicators
-        plus_di = 100 * plus_dm_ma / tr_ma
-        minus_di = 100 * minus_dm_ma / tr_ma
-        
-        # ADX
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
-        
-        # Align ADX to 6h timeframe (shifted by 1 to avoid look-ahead)
-        adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+        # Align to LTF with shift(1) to avoid look-ahead
+        tk_bullish_aligned = align_htf_to_ltf(prices, df_1d, tk_bullish.astype(np.float64))
+        tk_bearish_aligned = align_htf_to_ltf(prices, df_1d, tk_bearish.astype(np.float64))
     else:
-        adx_aligned = np.full(n, 25.0)  # Default to neutral trend
+        tk_bullish_aligned = np.zeros(n)
+        tk_bearish_aligned = np.zeros(n)
     
-    # === 6h Indicators: EMA13 for Elder Ray ===
-    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    # === 6h Indicators: Ichimoku Cloud ===
+    # Conversion Line (Tenkan-sen): (9-period high + 9-period low)/2
+    tenkan_6h = (pd.Series(high).rolling(window=9, min_periods=9).max() + 
+                 pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
+    # Base Line (Kijun-sen): (26-period high + 26-period low)/2
+    kijun_6h = (pd.Series(high).rolling(window=26, min_periods=26).max() + 
+                pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
+    # Leading Span A (Senkou Span A): (Conversion + Base)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_6h + kijun_6h) / 2).shift(26)
+    # Leading Span B (Senkou Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_b = ((pd.Series(high).rolling(window=52, min_periods=52).max() + 
+                 pd.Series(low).rolling(window=52, min_periods=52).min()) / 2).shift(26)
+    # Cloud: between Senkou Span A and B
+    cloud_top = np.maximum(senkou_a, senkou_b)
+    cloud_bottom = np.minimum(senkou_a, senkou_b)
     
-    # === 6h Indicators: Elder Ray Components ===
-    bull_power = high - ema13  # High - EMA13
-    bear_power = ema13 - low   # EMA13 - Low
-    
-    # === 6h Indicators: Volume MA(20) for confirmation ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -83,16 +79,15 @@ def generate_signals(prices):
     # Position tracking state variables
     in_position = False
     position_side = 0
-    entry_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(13, 20, 14, 30)  # EMA13, vol MA, ATR, 1d ADX data
+    warmup = max(52, 26, 20, 14)  # Ichimoku needs 52 for Senkou B
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -121,51 +116,175 @@ def generate_signals(prices):
                     signals[i] = -SIZE
             continue
         
-        # --- Regime Determination ---
-        is_trending = adx_aligned[i] > 25.0
-        is_ranging = adx_aligned[i] < 20.0
+        # --- New Position Entry Logic ---
+        # Volume spike confirmation (> 2.0x average)
+        volume_confirm = vol_ratio[i] > 2.0
         
-        # --- Volume Confirmation ---
-        volume_confirm = vol_ratio[i] > 1.5
+        # Price relative to cloud
+        price_above_cloud = price > cloud_top[i]
+        price_below_cloud = price < cloud_bottom[i]
         
-        if is_trending:
-            # In trending regimes: trade Elder Ray extremes in direction of power
-            # Long when Bull Power > 0 (strong buying pressure)
-            # Short when Bear Power > 0 (strong selling pressure)
-            long_entry = bull_power[i] > 0 and volume_confirm
-            short_entry = bear_power[i] > 0 and volume_confirm
-        elif is_ranging:
-            # In ranging regimes: fade Elder Ray extremes at 2*std dev
-            # Calculate rolling statistics for Elder Ray
-            if i >= 50:  # Need sufficient history for statistics
-                bp_mean = np.nanmean(bull_power[max(0, i-50):i])
-                bp_std = np.nanstd(bull_power[max(0, i-50):i])
-                br_mean = np.nanmean(bear_power[max(0, i-50):i])
-                br_std = np.nanstd(bear_power[max(0, i-50):i])
-                
-                # Long when Bear Power is extremely low (oversold)
-                # Short when Bull Power is extremely high (overbought)
-                long_entry = bear_power[i] < (br_mean - 2.0 * br_std) and volume_confirm
-                short_entry = bull_power[i] > (bp_mean + 2.0 * bp_std) and volume_confirm
-            else:
-                long_entry = False
-                short_entry = False
-        else:
-            # Transition zone (20 <= ADX <= 25): no trading to avoid whipsaw
-            long_entry = False
-            short_entry = False
+        # Ichimoku + TK cross conditions
+        long_entry = price_above_cloud and tk_bullish_aligned[i] > 0.5 and volume_confirm
+        short_entry = price_below_cloud and tk_bearish_aligned[i] > 0.5 and volume_confirm
         
         if long_entry:
             in_position = True
             position_side = 1
-            entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
         elif short_entry:
             in_position = True
             position_side = -1
-            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = -SIZE
+        else:
+            signals[i] = 0.0
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #4511: 6h Ichimoku Cloud Filter + 1d TK Cross + Volume Spike
+HYPOTHESIS: Ichimoku cloud acts as dynamic support/resistance on 6h, while 1d TK cross (Tenkan/Kijun) provides higher-timeframe momentum confirmation. Volume spike (>2.0x average) ensures breakout conviction. Only long when price above cloud + bullish TK cross, short when price below cloud + bearish TK cross. Ichimoku's multi-line system reduces false signals in ranging markets, while TK cross captures medium-term trends. Designed for 6h timeframe targeting 75-150 total trades over 4 years (19-38/year) with position size 0.25. Works in bull/bear via cloud filter (avoids counter-trend trades) and TK cross directionality.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "exp_4511_6h_ichimoku_1d_tk_vol_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    close = prices["close"].values.astype(np.float64)
+    high = prices["high"].values.astype(np.float64)
+    low = prices["low"].values.astype(np.float64)
+    volume = prices["volume"].values.astype(np.float64)
+    n = len(close)
+    
+    # Precompute HTF: 1d data for TK cross
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 26:  # Need for Kijun (26-period)
+        high_1d = pd.Series(df_1d['high'].values)
+        low_1d = pd.Series(df_1d['low'].values)
+        close_1d = pd.Series(df_1d['close'].values)
+        
+        # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+        tenkan_1d = (high_1d.rolling(window=9, min_periods=9).max() + 
+                     low_1d.rolling(window=9, min_periods=9).min()) / 2
+        # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+        kijun_1d = (high_1d.rolling(window=26, min_periods=26).max() + 
+                    low_1d.rolling(window=26, min_periods=26).min()) / 2
+        
+        # TK cross: Tenkan > Kijun = bullish, Tenkan < Kijun = bearish
+        tk_bullish = (tenkan_1d > kijun_1d).values
+        tk_bearish = (tenkan_1d < kijun_1d).values
+        
+        # Align to LTF with shift(1) to avoid look-ahead
+        tk_bullish_aligned = align_htf_to_ltf(prices, df_1d, tk_bullish.astype(np.float64))
+        tk_bearish_aligned = align_htf_to_ltf(prices, df_1d, tk_bearish.astype(np.float64))
+    else:
+        tk_bullish_aligned = np.zeros(n)
+        tk_bearish_aligned = np.zeros(n)
+    
+    # === 6h Indicators: Ichimoku Cloud ===
+    # Conversion Line (Tenkan-sen): (9-period high + 9-period low)/2
+    tenkan_6h = (pd.Series(high).rolling(window=9, min_periods=9).max() + 
+                 pd.Series(low).rolling(window=9, min_periods=9).min()) / 2
+    # Base Line (Kijun-sen): (26-period high + 26-period low)/2
+    kijun_6h = (pd.Series(high).rolling(window=26, min_periods=26).max() + 
+                pd.Series(low).rolling(window=26, min_periods=26).min()) / 2
+    # Leading Span A (Senkou Span A): (Conversion + Base)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_6h + kijun_6h) / 2).shift(26)
+    # Leading Span B (Senkou Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_b = ((pd.Series(high).rolling(window=52, min_periods=52).max() + 
+                 pd.Series(low).rolling(window=52, min_periods=52).min()) / 2).shift(26)
+    # Cloud: between Senkou Span A and B
+    cloud_top = np.maximum(senkou_a, senkou_b)
+    cloud_bottom = np.minimum(senkou_a, senkou_b)
+    
+    # === 6h Indicators: Volume MA(20) for spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.ones(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    
+    # === 6h Indicators: ATR(14) for stoploss ===
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # === Signals Initialization ===
+    signals = np.zeros(n)
+    SIZE = 0.25  # 25% position size
+    
+    # Position tracking state variables
+    in_position = False
+    position_side = 0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
+    
+    warmup = max(52, 26, 20, 14)  # Ichimoku needs 52 for Senkou B
+    
+    for i in range(warmup, n):
+        # --- Data Validity Check ---
+        if (np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(atr[i])):
+            signals[i] = 0.0
+            continue
+        
+        price = close[i]
+        
+        # --- Exit Logic ---
+        if in_position:
+            # Update highest/lowest since entry for trailing stop
+            if position_side > 0:  # Long
+                highest_since_entry = max(highest_since_entry, high[i])
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = SIZE
+            else:  # Short
+                lowest_since_entry = min(lowest_since_entry, low[i])
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                else:
+                    signals[i] = -SIZE
+            continue
+        
+        # --- New Position Entry Logic ---
+        # Volume spike confirmation (> 2.0x average)
+        volume_confirm = vol_ratio[i] > 2.0
+        
+        # Price relative to cloud
+        price_above_cloud = price > cloud_top[i]
+        price_below_cloud = price < cloud_bottom[i]
+        
+        # Ichimoku + TK cross conditions
+        long_entry = price_above_cloud and tk_bullish_aligned[i] > 0.5 and volume_confirm
+        short_entry = price_below_cloud and tk_bearish_aligned[i] > 0.5 and volume_confirm
+        
+        if long_entry:
+            in_position = True
+            position_side = 1
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = SIZE
+        elif short_entry:
+            in_position = True
+            position_side = -1
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = -SIZE
