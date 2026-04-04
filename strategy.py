@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 exp_6670_1d_donchian20_1w_ema_vol_v1
-Hypothesis: 1d Donchian(20) breakout with 1-week EMA trend filter and volume confirmation.
+Hypothesis: Daily Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
 Primary timeframe: 1d (target: 30-100 total trades over 4 years). Uses 1-week EMA for trend bias:
 price above 1w EMA favors longs, below favors shorts. Volume confirms breakout strength.
 ATR-based stoploss limits downside. Discrete sizing (0.25) reduces fee churn.
@@ -24,7 +24,7 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # ~10 days (1d bars)
+MAX_HOLD_BARS = 30  # ~1 month (daily bars)
 
 def generate_signals(prices):
     n = len(prices)
@@ -136,3 +136,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
