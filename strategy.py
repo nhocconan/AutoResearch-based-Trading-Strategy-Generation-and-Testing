@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #5360: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation + ATR trailing stop
+Experiment #5361: 4h Donchian(20) breakout + 1d EMA200 trend + volume confirmation + ATR trailing stop
 HYPOTHESIS: On 4h timeframe, price breaking above/below the 20-period Donchian channel 
-with volume > 1.8x average and aligned with 1d EMA50 trend captures strong momentum 
-moves while minimizing overtrading. The 1d EMA filter provides stronger trend 
-confirmation than shorter timeframes, reducing false breakouts in choppy markets. 
+with volume > 1.8x average and aligned with 1d EMA200 trend captures strong momentum 
+moves while minimizing overtrading. The 1d EMA200 filter provides stronger long-term 
+trend confirmation than shorter timeframes, reducing false breakouts in choppy markets. 
 Discrete position sizing (0.25) and ATR-based trailing stoploss (2.5x ATR) control risk. 
 Target: 19-50 trades/year (75-200 total over 4 years) to minimize fee drag while 
 maintaining statistical significance. Works in bull markets via breakouts and in bear 
@@ -15,7 +15,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5360_4h_donchian20_1d_ema_vol_v1"
+name = "exp_5361_4h_donchian20_1d_ema200_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -29,16 +29,16 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for EMA50 trend filter ===
+    # === HTF: 1d data for EMA200 trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
-        # Calculate EMA(50) on 1d close
-        ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    if len(df_1d) >= 200:
+        # Calculate EMA(200) on 1d close
+        ema_200 = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
     else:
-        ema_50 = np.array([])
+        ema_200 = np.array([])
     
     # Align to LTF (4h) with shift(1) for completed bars only
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50) if len(ema_50) > 0 else np.full(n, np.nan)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200) if len(ema_200) > 0 else np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel (20-period) ===
     # Upper band: 20-period high
@@ -71,7 +71,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50)  # Donchian, volume avg, ATR, EMA50 warmup
+    warmup = max(20, 20, 14, 200)  # Donchian, volume avg, ATR, EMA200 warmup
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (optional) ---
@@ -85,7 +85,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or 
-            np.isnan(ema_50_aligned[i])):
+            np.isnan(ema_200_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -101,8 +101,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks below Donchian lower band (failed breakout)
-                # 3. Price crosses below 1d EMA50 (trend reversal)
-                if price <= stop_price or price <= donchian_low[i] or price < ema_50_aligned[i]:
+                # 3. Price crosses below 1d EMA200 (trend reversal)
+                if price <= stop_price or price <= donchian_low[i] or price < ema_200_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -115,8 +115,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks above Donchian upper band (failed breakout)
-                # 3. Price crosses above 1d EMA50 (trend reversal)
-                if price >= stop_price or price >= donchian_high[i] or price > ema_50_aligned[i]:
+                # 3. Price crosses above 1d EMA200 (trend reversal)
+                if price >= stop_price or price >= donchian_high[i] or price > ema_200_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -132,11 +132,11 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.8x average volume (stricter than 1.5x)
         volume_confirmed = volume_ratio[i] > 1.8
         
-        # 1d EMA50 trend filter
-        # Long: price above 1d EMA50 (uptrend)
-        # Short: price below 1d EMA50 (downtrend)
-        ema_trend_up = price > ema_50_aligned[i-1]
-        ema_trend_down = price < ema_50_aligned[i-1]
+        # 1d EMA200 trend filter
+        # Long: price above 1d EMA200 (uptrend)
+        # Short: price below 1d EMA200 (downtrend)
+        ema_trend_up = price > ema_200_aligned[i-1]
+        ema_trend_down = price < ema_200_aligned[i-1]
         
         # Entry conditions
         if breakout_up and volume_confirmed and ema_trend_up:
