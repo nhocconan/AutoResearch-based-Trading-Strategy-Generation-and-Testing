@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5778: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA(21) trend capture strong trending moves while avoiding counter-trend whipsaws. Volume > 1.5x average confirms breakout strength. Designed for 1d timeframe to minimize fees (target: 30-100 trades over 4 years) and work in both bull and bear markets by requiring trend alignment rather than directional bias. Uses discrete sizing 0.25 to minimize churn.
+Experiment #5779: 6h Donchian(20) breakout + 12h Williams %R(14) mean reversion + volume confirmation
+HYPOTHESIS: On 6h timeframe, price breaking above/below 20-period Donchian channel with volume > 1.5x average triggers entry in direction of breakout only when 12h Williams %R shows oversold/overbought conditions (Williams %R < -80 for longs, > -20 for shorts), indicating high-probability mean reversion within the breakout move. This combines breakout momentum with overextension filters to avoid false breakouts. Designed for 6h timeframe to balance trade frequency (target: 50-150 trades over 4 years) and work in both bull/bear markets by requiring volume confirmation and momentum alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5778_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_5779_6h_donchian20_12h_willr_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,31 +22,32 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for HMA trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 21:
-        # Calculate HMA(21) on weekly close
-        close_1w = pd.Series(df_1w['close'].values)
-        half_len = int(21 / 2)
-        sqrt_len = int(np.sqrt(21))
-        wma_half = close_1w.ewm(span=half_len, adjust=False).mean()
-        wma_full = close_1w.ewm(span=21, adjust=False).mean()
-        hma_1w = (2 * wma_half - wma_full).ewm(span=sqrt_len, adjust=False).mean().values
+    # === HTF: 12h data for Williams %R filter ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) >= 14:
+        high_12h = df_12h['high'].values
+        low_12h = df_12h['low'].values
+        close_12h = df_12h['close'].values
+        # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
+        highest_high = pd.Series(high_12h).rolling(window=14, min_periods=14).max().values
+        lowest_low = pd.Series(low_12h).rolling(window=14, min_periods=14).min().values
+        willr_12h = ((highest_high - close_12h) / (highest_high - lowest_low)) * -100
+        willr_12h = np.where((highest_high - lowest_low) == 0, -50, willr_12h)  # avoid div by zero
     else:
-        hma_1w = np.full(len(df_1w), np.nan)
+        willr_12h = np.full(len(df_12h), -50.0)  # neutral
     
-    # Align 1w HMA to 1d timeframe (shifted by 1 for completed 1w bars only)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # Align 12h Williams %R to 6h timeframe (shifted by 1 for completed 12h bars only)
+    willr_12h_aligned = align_htf_to_ltf(prices, df_12h, willr_12h)
     
-    # === 1d Indicators: Donchian Channel (20-period) ===
+    # === 6h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume confirmation ===
+    # === 6h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 1d Indicators: ATR(14) for trailing stop ===
+    # === 6h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -65,7 +66,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21)  # Donchian, volume avg, ATR, HMA period
+    warmup = max(20, 20, 14, 14)  # Donchian, volume avg, ATR, Williams %R period
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -77,7 +78,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(hma_1w_aligned[i])):
+            np.isnan(willr_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -88,8 +89,8 @@ def generate_signals(prices):
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
                 stop_price = highest_since_entry - 2.5 * atr[i]
-                # Exit: stoploss OR trend weakens (price < HMA) OR price breaks below Donchian low
-                if price <= stop_price or price < hma_1w_aligned[i] or price <= donchian_low[i]:
+                # Exit: stoploss OR price breaks below Donchian low OR Williams %R becomes overbought (> -20)
+                if price <= stop_price or price <= donchian_low[i] or willr_12h_aligned[i] > -20:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -98,8 +99,8 @@ def generate_signals(prices):
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 stop_price = lowest_since_entry + 2.5 * atr[i]
-                # Exit: stoploss OR trend weakens (price > HMA) OR price breaks above Donchian high
-                if price >= stop_price or price > hma_1w_aligned[i] or price >= donchian_high[i]:
+                # Exit: stoploss OR price breaks above Donchian high OR Williams %R becomes oversold (< -80)
+                if price >= stop_price or price >= donchian_high[i] or willr_12h_aligned[i] < -80:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -111,12 +112,14 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
-        trend_up = price > hma_1w_aligned[i]
-        trend_down = price < hma_1w_aligned[i]
+        willr_oversold = willr_12h_aligned[i] < -80  # Oversold condition
+        willr_overbought = willr_12h_aligned[i] > -20  # Overbought condition
         
-        # Entry conditions: breakout in direction of trend with volume confirmation
-        long_setup = breakout_up and volume_confirmed and trend_up
-        short_setup = breakout_down and volume_confirmed and trend_down
+        # Entry conditions: breakout with volume confirmation AND Williams %R showing overextension in opposite direction
+        # For longs: breakout up + volume + Williams %R oversold (price likely to mean revert up)
+        # For shorts: breakout down + volume + Williams %R overbought (price likely to mean revert down)
+        long_setup = breakout_up and volume_confirmed and willr_oversold
+        short_setup = breakout_down and volume_confirmed and willr_overbought
         
         if long_setup:
             in_position = True
