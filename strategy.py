@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3884: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly Hull Moving Average (HMA-21) trend capture momentum with reduced whipsaw in both bull and bear markets. Volume > 1.5x MA(30) confirms participation. ATR(14) trailing stop (2.0x) manages risk. Target: 30-100 trades over 4 years (7-25/year).
+Experiment #3885: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with daily Hull Moving Average (HMA-21) trend capture momentum with reduced whipsaw. Volume > 1.5x MA(30) confirms participation. ATR(14) trailing stop (2.0x) manages risk. Target: 50-150 trades over 4 years (12-37/year) for 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3884_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_3885_12h_donchian20_1d_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,30 +19,30 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend ===
-    df_1w = get_htf_data(prices, '1w')
+    # === HTF: 1d data for HMA trend ===
+    df_1d = get_htf_data(prices, '1d')
     hma_period = 21
     half_period = hma_period // 2
     sqrt_period = int(np.sqrt(hma_period))
     
     # Hull Moving Average calculation
-    wma_half = pd.Series(df_1w['close'].values).ewm(span=half_period, adjust=False).mean()
-    wma_full = pd.Series(df_1w['close'].values).ewm(span=hma_period, adjust=False).mean()
+    wma_half = pd.Series(df_1d['close'].values).ewm(span=half_period, adjust=False).mean()
+    wma_full = pd.Series(df_1d['close'].values).ewm(span=hma_period, adjust=False).mean()
     hma_raw = 2.0 * wma_half - wma_full
     hma_values = hma_raw.ewm(span=sqrt_period, adjust=False).mean().values
-    hma_aligned = align_htf_to_ltf(prices, df_1w, hma_values)
+    hma_aligned = align_htf_to_ltf(prices, df_1d, hma_values)
     
-    # === 1d Indicators: Donchian Channel(20) for breakout ===
+    # === 12h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 1d Indicators: Volume MA(30) for spike detection ===
+    # === 12h Indicators: Volume MA(30) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[30:] = volume[30:] / vol_ma[30:]
     
-    # === 1d Indicators: ATR(14) for volatility and trailing stop ===
+    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -109,7 +109,7 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Determine trend: bullish if price above 1w HMA, bearish if below
+            # Determine trend: bullish if price above 1d HMA, bearish if below
             bullish = price > hma_aligned[i]
             bearish = price < hma_aligned[i]
             
