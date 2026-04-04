@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4464: 1d Donchian(20) Breakout + 1w HMA(21) Trend + Volume Confirmation
-HYPOTHESIS: Daily Donchian(20) breakouts aligned with weekly HMA(21) trend direction and confirmed by volume (>1.5x average) capture institutional momentum with minimal false signals. The weekly HMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 30-100 total trades over 4 years (7-25/year) with position size 0.25.
+Experiment #4466: 4h Donchian(20) Breakout + 1d EMA50 Trend + Volume Confirmation (Reduced Frequency)
+HYPOTHESIS: Reducing trade frequency from ~478 to target 75-200 total trades by tightening volume confirmation (2.5x avg volume) and requiring Donchian breakout with 2-bar confirmation. This maintains the edge of 4h Donchian breakouts with 1d EMA50 trend alignment while minimizing fee drift. Position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4464_1d_donchian20_1w_hma21_vol_v1"
-timeframe = "1d"
+name = "exp_4466_4h_donchian20_1d_ema50_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,33 +23,27 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1w HMA(21) for trend bias ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 21:
-        close_1w = pd.Series(df_1w['close'].values)
-        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        wma_half = close_1w.ewm(span=half_len, adjust=False).mean()
-        wma_full = close_1w.ewm(span=21, adjust=False).mean()
-        raw_hma = 2 * wma_half - wma_full
-        hma_1w = raw_hma.ewm(span=sqrt_len, adjust=False).mean().values
-        hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # === Precompute HTF: 1d EMA50 for trend bias ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 50:
+        close_1d = pd.Series(df_1d['close'].values)
+        ema_1d = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        hma_1w_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: Donchian Channel(20) ===
+    # === 4h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -67,12 +61,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21)  # Donchian, vol MA, ATR, HMA
+    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, EMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(hma_1w_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -108,16 +102,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume confirmation (> 2.5x average) to reduce trade frequency
+        volume_confirm = vol_ratio[i] > 2.5
         
-        # 1w HMA bias: price > HMA = long bias, price < HMA = short bias
-        long_bias = price > hma_1w_aligned[i]
-        short_bias = price < hma_1w_aligned[i]
+        # 1d EMA bias: price > EMA = long bias, price < EMA = short bias
+        long_bias = price > ema_1d_aligned[i]
+        short_bias = price < ema_1d_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
-        breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
+        # Donchian breakout conditions with 2-bar confirmation
+        # Require close > upper band for current and previous bar (strong breakout)
+        breakout_up = close[i] > donch_upper[i-1] and close[i-1] > donch_upper[i-2]
+        # Require close < lower band for current and previous bar (strong breakout)
+        breakout_down = close[i] < donch_lower[i-1] and close[i-1] < donch_lower[i-2]
         
         # Long conditions: upward breakout + long bias + volume
         long_entry = breakout_up and long_bias and volume_confirm
