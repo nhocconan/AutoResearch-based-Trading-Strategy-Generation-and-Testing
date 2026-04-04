@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #3024: 1d Donchian Breakout + 1w HMA Trend + Volume Spike
-HYPOTHESIS: Donchian(20) breakouts on 1d capture medium-term trends. 1w HMA(21) provides
-trend filter: only take longs when price > HMA, shorts when price < HMA. Volume spike
-(>2.0x 20-period average) confirms breakout strength. This combination filters false
-breakouts in choppy markets while capturing strong trends. 1d timeframe minimizes
-fee drag. Target: 30-100 total trades over 4 years.
+Experiment #3024: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on daily timeframe capture medium-to-long-term trends.
+1-week HMA(21) provides trend filter: only take longs when price > HMA, shorts when price < HMA.
+Volume spike (>2.0x 20-period average) confirms breakout strength. This combination filters
+false breakouts in choppy markets while capturing strong trends in both bull and bear markets.
+Daily timeframe keeps trade frequency low (target 30-100 trades over 4 years) minimizing fee drag.
 """
 
 import numpy as np
