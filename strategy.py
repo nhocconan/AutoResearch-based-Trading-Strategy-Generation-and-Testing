@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #2601: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: Donchian channel breakouts with daily trend alignment and volume spikes capture 
-institutional participation during trend acceleration. Works in bull markets (breakouts with volume) 
-and bear markets (breakdowns with volume). Uses discrete position sizing (0.25) to limit fee drag 
-and ensure statistical significance with 75-200 total trades over 4 years.
+Experiment #2600: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: Donchian breakouts with daily EMA trend alignment and volume spikes capture institutional participation. 
+Works in bull markets (breakouts with volume) and bear markets (breakdowns with volume). Uses discrete position sizing (0.25) 
+to limit fee drag and ensure 75-200 total trades over 4 years. Includes ATR-based trailing stop for risk management.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2601_4h_donchian20_1d_ema_vol_v1"
+name = "exp_2600_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,7 +30,7 @@ def generate_signals(prices):
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 4h Indicators: Donchian(20) channels, Volume MA(20) ===
+    # === 4h Indicators: Donchian(20) channels, Volume MA(20), ATR(14) ===
     # Donchian channels (20-period high/low)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -40,6 +39,13 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    
+    # ATR(14) for proper stoploss calculation
+    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
+    tr2 = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(tr1, tr2)
+    tr = np.concatenate([[np.nan], tr])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -58,7 +64,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(trend_1d_aligned[i]) or
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(vol_ratio[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -69,10 +75,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2*ATR below highest since entry (using Donchian width as ATR proxy)
-                donchian_width = highest_20[i] - lowest_20[i]
-                atr_estimate = donchian_width * 0.15  # approximate ATR from channel width
-                if price < highest_since_entry - 2.0 * atr_estimate:
+                # Exit if price drops 2*ATR below highest since entry
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -86,9 +90,7 @@ def generate_signals(prices):
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 # Exit if price rises 2*ATR above lowest since entry
-                donchian_width = highest_20[i] - lowest_20[i]
-                atr_estimate = donchian_width * 0.15
-                if price > lowest_since_entry + 2.0 * atr_estimate:
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -131,5 +133,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
