@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-exp_6565_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA20 trend filter and volume confirmation.
-Uses 12h primary timeframe to balance trade frequency (target: 50-150 total trades over 4 years).
-1d EMA20 provides stable trend filter that works in both bull and bear markets.
-Volume confirmation ensures breakouts have conviction. Discrete sizing (0.30) minimizes fee churn.
+exp_6566_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 1d EMA20 trend filter and volume confirmation.
+Uses 4h primary timeframe with 1d EMA for trend bias (works in bull/bear via price > EMA long/short).
+Volume confirmation filters weak breakouts. Discrete sizing (0.25) reduces fee churn.
+Target: 75-200 trades over 4 years (19-50/year) to avoid fee drag.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6565_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_6566_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -20,7 +20,7 @@ DONCHIAN_PERIOD = 20
 EMA_PERIOD = 20         # 1d EMA20 for trend filter
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0  # Volume threshold for confirmation
-SIGNAL_SIZE = 0.30      # 30% position size
+SIGNAL_SIZE = 0.25      # 25% position size
 
 def generate_signals(prices):
     n = len(prices)
@@ -34,7 +34,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False).mean().values
     
-    # Align to LTF (12h) with shift(1) for completed bars only
+    # Align to LTF (4h) with shift(1) for completed bars only
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -76,14 +76,14 @@ def generate_signals(prices):
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
         short_volume = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Exit conditions: EMA reversal OR time-based exit (max 15 bars) OR Donchian midpoint reversal
+        # Exit conditions: EMA reversal OR time-based exit (max 20 bars) OR Donchian midpoint reversal
         if position == 1:  # long position
             # Exit if price drops back below 1d EMA20 (trend change)
             exit_long = close[i] < ema_1d_aligned[i]
             # Or if price drops below Donchian midpoint
             exit_long = exit_long or close[i] < (donchian_high[i-1] + donchian_low[i-1]) / 2
             # Time-based exit: prevent overstaying
-            exit_long = exit_long or bars_since_entry >= 15
+            exit_long = exit_long or bars_since_entry >= 20
             if exit_long:
                 signals[i] = 0.0
                 position = 0
@@ -95,7 +95,7 @@ def generate_signals(prices):
             # Or if price rises above Donchian midpoint
             exit_short = exit_short or close[i] > (donchian_high[i-1] + donchian_low[i-1]) / 2
             # Time-based exit: prevent overstaying
-            exit_short = exit_short or bars_since_entry >= 15
+            exit_short = exit_short or bars_since_entry >= 20
             if exit_short:
                 signals[i] = 0.0
                 position = 0
