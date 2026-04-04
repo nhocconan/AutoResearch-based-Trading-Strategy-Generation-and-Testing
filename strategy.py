@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4211: 6h Donchian(20) breakout + 1d pivot direction + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts capture momentum when aligned with 1d Camarilla pivot bias (price between H3/L3 for continuation, breaks of H4/L4 for acceleration) and confirmed by volume (>1.5x average). The 1d pivot provides institutional reference levels that work in both bull/bear markets by defining value areas and breakout zones. Discrete position sizing (0.25) limits fee churn, targeting 75-200 total trades over 4 years (19-50/year). Uses ATR-based trailing stop (2.5x) for risk management.
+Experiment #4212: 12h Donchian(20) breakout + 1d EMA filter + volume confirmation
+HYPOTHESIS: Donchian channel breakouts on 12h timeframe capture medium-term momentum when aligned with 1d EMA50 trend filter and confirmed by volume (>1.5x average). This strategy targets 50-150 total trades over 4 years (12-37/year) by using tighter entry conditions on the higher 12h timeframe, reducing fee drag while maintaining statistical significance. The 1d EMA provides robust trend adaptation for both bull and bear markets. Discrete position sizing (0.25) minimizes fee churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4211_6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_4212_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,38 +19,15 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === Precompute HTF: 1d Camarilla Pivot Levels ===
+    # === Precompute HTF: 1d EMA50 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 2:
-        # Calculate Camarilla pivots from previous 1d bar
-        h_1d = df_1d['high'].values
-        l_1d = df_1d['low'].values
-        c_1d = df_1d['close'].values
-        
-        # True range for Camarilla calculation
-        tr_1d = np.maximum(h_1d - l_1d, np.maximum(np.abs(h_1d - np.concatenate([[np.nan], c_1d[:-1]])), np.abs(l_1d - np.concatenate([[np.nan], c_1d[:-1]))))
-        atr_1d = pd.Series(tr_1d).ewm(span=5, min_periods=1, adjust=False).mean().values  # ATR(5) for volatility
-        
-        # Camarilla levels: H4, H3, L3, L4
-        pivot = (h_1d + l_1d + c_1d) / 3
-        range_1d = h_1d - l_1d
-        h4 = pivot + (range_1d * 1.1 / 2)
-        h3 = pivot + (range_1d * 1.1 / 4)
-        l3 = pivot - (range_1d * 1.1 / 4)
-        l4 = pivot - (range_1d * 1.1 / 2)
-        
-        # Align to 6h timeframe (shift(1) already applied inside for no look-ahead)
-        h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-        h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-        l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-        l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        h4_aligned = np.full(n, np.nan)
-        h3_aligned = np.full(n, np.nan)
-        l3_aligned = np.full(n, np.nan)
-        l4_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -58,12 +35,12 @@ def generate_signals(prices):
     
     donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
-    # === 6h Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -81,13 +58,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
+    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, 1d EMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(h4_aligned[i]) or np.isnan(h3_aligned[i]) or
-            np.isnan(l3_aligned[i]) or np.isnan(l4_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -125,16 +101,15 @@ def generate_signals(prices):
             breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
             breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
             
-            # Pivot bias conditions
-            price_above_h3 = price > h3_aligned[i]
-            price_below_l3 = price < l3_aligned[i]
-            price_between_h3_l3 = (price > l3_aligned[i]) & (price < h3_aligned[i])
+            # 1d EMA50 trend filter
+            price_above_ema = price > ema_1d_aligned[i]
+            price_below_ema = price < ema_1d_aligned[i]
             
-            # Long conditions: Donchian breakout up + price above H3 (continuation/acceleration)
-            long_entry = breakout_up and price_above_h3
+            # Long conditions: Donchian breakout up + price above 1d EMA50
+            long_entry = breakout_up and price_above_ema
             
-            # Short conditions: Donchian breakout down + price below L3 (continuation/acceleration)
-            short_entry = breakout_dn and price_below_l3
+            # Short conditions: Donchian breakout down + price below 1d EMA50
+            short_entry = breakout_dn and price_below_ema
             
             if long_entry:
                 in_position = True
