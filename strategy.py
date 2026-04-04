@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #3043: 4h Donchian Breakout + 12h HMA Trend + Volume Spike
-HYPOTHESIS: 4h Donchian(20) breakouts with 12h HMA(21) trend filter capture medium-term momentum with controlled trade frequency. 
-Volume confirmation (>2.0x 20-period average) ensures breakout strength. ATR trailing stop (2.5x) manages risk. 
-Primary timeframe 4h balances signal quality and cost efficiency. Designed for both bull (trend continuation) and bear (mean reversion from extremes) 
-markets via price channel structure and volatility-based exits.
+HYPOTHESIS: 4h Donchian(20) breakouts capture intermediate-term trends with optimal trade frequency. 
+12-period Hull Moving Average (HMA) on 12h timeframe provides trend filter to avoid counter-trend whipsaws. 
+Volume spike (>2.0x 20-period average) confirms breakout strength. ATR-based trailing stop (2.5x) manages risk. 
+Target: 75-200 total trades over 4 years (19-50/year). Designed to work in bull markets via trend continuation 
+and bear markets via mean reversion from extremes (price re-enters channel). Uses discrete position sizing 
+(0.25) to minimize fee churn.
 """
 
 import numpy as np
@@ -22,23 +24,29 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for HMA trend (Call ONCE before loop) ===
+    # === HTF: 12h data for HMA trend filter (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
-    # Calculate HMA(21) on 12h close
-    def hma(series, period):
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        if half_period < 1: half_period = 1
-        if sqrt_period < 1: sqrt_period = 1
-        wma2 = pd.Series(series).ewm(span=half_period, adjust=False).mean()
-        wma1 = pd.Series(series).ewm(span=period, adjust=False).mean()
-        raw_hma = 2 * wma2 - wma1
-        hma_result = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
-        return hma_result.values
+    # Calculate Hull Moving Average (HMA) on 12h: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    def wma(values, period):
+        if len(values) < period:
+            return np.full_like(values, np.nan)
+        weights = np.arange(1, period + 1)
+        return np.convolve(values, weights, mode='valid') / weights.sum()
     
-    hma_12h = hma(close_12h, 21)
+    n_12h = len(close_12h)
+    half = 12 // 2
+    sqrt_n = int(np.sqrt(12))
+    
+    wma_full = np.concatenate([np.full(half, np.nan), wma(close_12h, 12)])
+    wma_half = np.concatenate([np.full(half//2, np.nan), wma(close_12h, half)])
+    raw_hma = 2 * wma_half - wma_full
+    hma_12h = np.concatenate([np.full(sqrt_n - 1, np.nan), wma(raw_hma[~np.isnan(raw_hma)], sqrt_n)])
+    # Pad to original length
+    hma_12h = np.concatenate([np.full(n_12h - len(hma_12h), np.nan), hma_12h])
+    
+    # Align 12h HMA to 4h timeframe (shifted by 1 bar for completed 12h bar only)
     hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
     # === 4h Indicators: Donchian channels (20-period) ===
@@ -69,7 +77,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 20, 14, 21)  # sufficient for all indicators
+    warmup = max(50, lookback, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -118,7 +126,7 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # 12h HMA trend filter: only long when price > HMA, short when price < HMA
+            # 12h HMA trend filter: only long above HMA, short below HMA
             price_vs_hma = price - hma_12h_aligned[i]
             
             # Long entry: price breaks above Donchian high with bullish 12h trend
