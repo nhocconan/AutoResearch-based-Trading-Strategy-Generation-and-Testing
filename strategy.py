@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #5745: 12h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation
-HYPOTHESIS: Donchian breakouts on 12h aligned with 1d EMA trend capture sustained moves while avoiding counter-trend whipsaws.
-Volume > 1.8x average confirms breakout strength. ATR trailing stop (2.0x) manages risk. Discrete sizing 0.25 minimizes fees.
-Target: 12-37 trades/year (50-150 total over 4 years). Works in bull/bear via 1d trend filter.
+Experiment #5746: 4h Donchian(20) breakout + 1d trend filter (close > EMA(50)) + volume confirmation
+HYPOTHESIS: Donchian breakouts aligned with daily EMA trend capture sustained moves while avoiding counter-trend whipsaws.
+Volume > 2.0x average confirms breakout strength. ATR trailing stop (2.5x) manages risk. Discrete sizing 0.25 minimizes fees.
+Target: 20-40 trades/year (80-160 total over 4 years). Works in bull/bear via 1d trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5745_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_5746_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,18 +32,18 @@ def generate_signals(prices):
     else:
         ema_1d = np.full(len(df_1d), np.nan)
     
-    # Align 1d EMA to 12h timeframe (shifted by 1 for completed 1d bars only)
+    # Align 1d EMA to 4h timeframe (shifted by 1 for completed 1d bars only)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === 12h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation ===
+    # === 4h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 12h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -84,7 +84,7 @@ def generate_signals(prices):
         if in_position:
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
-                stop_price = highest_since_entry - 2.0 * atr[i]
+                stop_price = highest_since_entry - 2.5 * atr[i]
                 # Exit: stoploss OR price breaks below 1d EMA (trend change)
                 if price <= stop_price or price <= ema_1d_aligned[i]:
                     in_position = False
@@ -94,7 +94,7 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                stop_price = lowest_since_entry + 2.0 * atr[i]
+                stop_price = lowest_since_entry + 2.5 * atr[i]
                 # Exit: stoploss OR price breaks above 1d EMA (trend change)
                 if price >= stop_price or price >= ema_1d_aligned[i]:
                     in_position = False
@@ -107,7 +107,7 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.8
+        volume_confirmed = volume_ratio[i] > 2.0
         
         # 1d EMA bias: long above EMA, short below EMA
         long_bias = price > ema_1d_aligned[i]
