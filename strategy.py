@@ -5,6 +5,7 @@ HYPOTHESIS: 12h Donchian breakouts with volume confirmation (>1.8x avg) and Cama
 Camarilla levels (R3/S3 for fade, R4/S4 for breakout) provide mathematically derived support/resistance that adapts to volatility. 
 In ranging markets (price between R3-S3), fade extremes; in breakout markets (price >R4 or <S4), continue the breakout direction. 
 Uses discrete sizing (0.25) to minimize fee churn. Target: 75-150 trades over 4 years.
+Timeframe: 12h (primary), HTF: 1d for Camarilla levels.
 """
 
 import numpy as np
