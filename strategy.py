@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4513: 4h Donchian(20) Breakout + 12h HMA Trend + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h Hull Moving Average (HMA(21)) trend direction and confirmed by volume (>1.5x average) capture medium-term momentum with reduced noise. The 12h HMA provides a smoother, less laggy trend filter than EMA/SMA to avoid whipsaws, while volume confirmation ensures breakout conviction. Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year) with position size 0.25. Works in both bull and bear markets by only trading in direction of 12h HMA trend.
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h HMA(21) trend direction and confirmed by volume (>1.5x average) capture medium-term momentum with reduced noise. The 12h HMA provides a higher timeframe trend filter to avoid counter-trend trades, while volume confirmation ensures breakout conviction. Designed for 4h timeframe to target 75-200 total trades over 4 years (19-50/year) with position size 0.25. Works in both bull and bear markets by only trading in direction of 12h HMA trend.
 """
 
 import numpy as np
@@ -23,17 +23,17 @@ def generate_signals(prices):
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) >= 21:
         close_12h = pd.Series(df_12h['close'].values)
-        # Hull Moving Average: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        # HMA(21) = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
         half_len = 21 // 2
         sqrt_len = int(np.sqrt(21))
         wma_half = close_12h.rolling(window=half_len, min_periods=half_len).mean()
         wma_full = close_12h.rolling(window=21, min_periods=21).mean()
         raw_hma = 2 * wma_half - wma_full
-        hma_21 = raw_hma.rolling(window=sqrt_len, min_periods=sqrt_len).mean()
-        hma_21_vals = hma_21.values
-        hma_21_aligned = align_htf_to_ltf(prices, df_12h, hma_21_vals)
+        hma_12h = raw_hma.rolling(window=sqrt_len, min_periods=sqrt_len).mean()
+        hma_12h_vals = hma_12h.values
+        hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_vals)
     else:
-        hma_21_aligned = np.full(n, np.nan)
+        hma_12h_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
@@ -69,7 +69,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(hma_21_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(hma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -103,8 +103,8 @@ def generate_signals(prices):
         volume_confirm = vol_ratio[i] > 1.5
         
         # 12h HMA trend: price above HMA = uptrend, below = downtrend
-        uptrend = price > hma_21_aligned[i]
-        downtrend = price < hma_21_aligned[i]
+        uptrend = price > hma_12h_aligned[i]
+        downtrend = price < hma_12h_aligned[i]
         
         # Donchian breakout conditions (using previous bar's levels to avoid look-ahead)
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
