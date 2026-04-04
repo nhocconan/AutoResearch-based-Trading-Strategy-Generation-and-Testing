@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #5658: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
-HYPOTHESIS: On daily timeframe, Donchian(20) breakouts with volume > 1.5x average and aligned 
-with 1-week EMA trend (price above weekly EMA = long bias, below = short bias) capture 
-high-probability trend continuation moves. Weekly EMA provides smooth institutional trend 
-filter that adapts to both bull and bear markets. Volume confirms breakout strength. ATR 
-trailing stop (2.0x) manages risk. Discrete sizing (0.25) minimizes fee churn. Target: 7-25 trades/year.
+Experiment #5659: 6h Camarilla Pivot Reversal + Volume Spike + ATR Filter
+HYPOTHESIS: On 6h timeframe, reversions from extreme Camarilla levels (R4/S4) with 
+volume > 2x average and ATR > 1.5x ATR(50) capture high-probability mean-reversion 
+bounces in ranging markets. Camarilla pivots derived from 1d data provide institutional 
+support/resistance that works in both bull and bear regimes. Volume confirms rejection 
+strength, ATR filter ensures sufficient volatility. Discrete sizing (0.25) minimizes 
+fee churn. Target: 12-37 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5658_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_5659_6h_camarilla_reversal_vol_atr_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,32 +27,53 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for EMA trend ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 21:
-        # Calculate EMA(21) on weekly close
-        ema_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False).mean().values
+    # === HTF: 1d data for Camarilla pivot levels ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 2:
+        # Calculate Camarilla levels from prior completed day
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
+        close_1d = df_1d['close'].values
+        
+        # Camarilla levels: based on prior day's range
+        rng = high_1d - low_1d
+        close_prev = close_1d
+        
+        # Resistance levels
+        r4 = close_prev + rng * 1.1 / 2
+        r3 = close_prev + rng * 1.1 / 4
+        r2 = close_prev + rng * 1.1 / 6
+        r1 = close_prev + rng * 1.1 / 12
+        
+        # Support levels
+        s1 = close_prev - rng * 1.1 / 12
+        s2 = close_prev - rng * 1.1 / 6
+        s3 = close_prev - rng * 1.1 / 4
+        s4 = close_prev - rng * 1.1 / 2
+        
+        # We'll use R4 and S4 for extreme reversal signals
+        camarilla_r4 = r4
+        camarilla_s4 = s4
     else:
-        ema_1w = np.array([])
+        camarilla_r4 = np.array([])
+        camarilla_s4 = np.array([])
     
-    # Align 1w EMA to 1d timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align Camarilla levels to 6h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
-    # === 1d Indicators: Donchian Channel (20-period) ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 1d Indicators: Volume confirmation ===
+    # === 6h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 1d Indicators: ATR(14) for trailing stop ===
+    # === 6h Indicators: ATR(14) and ATR(50) for volatility filter ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_50 = pd.Series(tr).rolling(window=50, min_periods=50).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -61,10 +83,8 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21)  # Donchian, volume avg, ATR, EMA lookback
+    warmup = max(20, 14, 50)  # volume avg, ATR(14), ATR(50) lookback
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -74,31 +94,26 @@ def generate_signals(prices):
             continue
         
         # --- Data Validity Check ---
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_1w_aligned[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
+            np.isnan(volume_ratio[i]) or np.isnan(atr_14[i]) or np.isnan(atr_50[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic ---
+        # --- Exit Logic: Reverse signal or time-based (max 3 bars) ---
         if in_position:
             if position_side > 0:  # Long position
-                highest_since_entry = max(highest_since_entry, high[i])
-                stop_price = highest_since_entry - 2.0 * atr[i]
-                # Exit: stoploss OR price breaks below weekly EMA (trend change)
-                if price <= stop_price or price <= ema_1w_aligned[i]:
+                # Exit: price drops below S3 (mean reversion target) or reverse signal
+                if price < camarilla_s4_aligned[i] * 0.999:  # S3 equivalent
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short position
-                lowest_since_entry = min(lowest_since_entry, low[i])
-                stop_price = lowest_since_entry + 2.0 * atr[i]
-                # Exit: stoploss OR price breaks above weekly EMA (trend change)
-                if price >= stop_price or price >= ema_1w_aligned[i]:
+                # Exit: price rises above R3 (mean reversion target) or reverse signal
+                if price > camarilla_r4_aligned[i] * 1.001:  # R3 equivalent
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -107,31 +122,26 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        breakout_up = price > donchian_high[i-1]
-        breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.5
+        volume_spike = volume_ratio[i] > 2.0
+        sufficient_vol = atr_14[i] > 1.5 * atr_50[i]
         
-        # Trend bias: long above weekly EMA, short below weekly EMA
-        long_bias = price > ema_1w_aligned[i]
-        short_bias = price < ema_1w_aligned[i]
+        # Extreme Camarilla levels: price at or beyond R4/S4
+        at_r4 = price >= camarilla_r4_aligned[i] * 0.999
+        at_s4 = price <= camarilla_s4_aligned[i] * 1.001
         
-        # Entry conditions: breakout in direction of weekly trend with volume
-        long_setup = breakout_up and volume_confirmed and long_bias
-        short_setup = breakout_down and volume_confirmed and short_bias
+        # Entry: reversal from extreme levels with volume and volatility
+        long_setup = at_s4 and volume_spike and sufficient_vol
+        short_setup = at_r4 and volume_spike and sufficient_vol
         
         if long_setup:
             in_position = True
             position_side = 1
             entry_price = close[i]
-            highest_since_entry = high[i]
-            lowest_since_entry = low[i]
             signals[i] = SIZE
         elif short_setup:
             in_position = True
             position_side = -1
             entry_price = close[i]
-            highest_since_entry = high[i]
-            lowest_since_entry = low[i]
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
