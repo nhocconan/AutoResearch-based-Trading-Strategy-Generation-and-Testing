@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3478: 1d Donchian Breakout + 1w HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: 1d Donchian(20) breakouts with volume confirmation and 1w HMA trend alignment capture medium-term momentum with low trade frequency. Works in bull markets (trend continuation via breakouts) and bear markets (mean reversion from extremes via Donchian re-entry exits). Target: 30-100 total trades over 4 years (7-25/year). Uses 1w for signal direction, 1d only for entry timing and risk management.
+HYPOTHESIS: 1d Donchian(20) breakouts with volume confirmation and 1w HMA trend alignment capture medium-term momentum with low trade frequency. Works in bull (trend continuation) and bear (mean reversion from extremes via price channels). Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -25,14 +25,12 @@ def generate_signals(prices):
     
     # Calculate HMA(21) on 1w close
     def calculate_hma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
         half_period = period // 2
         sqrt_period = int(np.sqrt(period))
         wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
         wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
-        hma = 2 * wma_half - wma_full
-        hma = pd.Series(hma).ewm(span=sqrt_period, adjust=False).mean().values
+        hma_raw = 2 * wma_half - wma_full
+        hma = pd.Series(hma_raw).ewm(span=sqrt_period, adjust=False).mean().values
         return hma
     
     hma_1w = calculate_hma(close_1w, 21)
@@ -69,12 +67,6 @@ def generate_signals(prices):
     warmup = max(50, lookback, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
-        # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(hma_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
-            signals[i] = 0.0
-            continue
-        
         price = close[i]
         
         # --- Exit Logic ---
