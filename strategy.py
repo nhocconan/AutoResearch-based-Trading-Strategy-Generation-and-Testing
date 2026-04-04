@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5268: 12h Donchian Breakout + 1w HMA Trend + Volume Spike + ATR Stop
-HYPOTHESIS: On 12h timeframe, price breaking above/below Donchian(20) channels with 1w HMA(21) trend confirmation and volume > 1.5x 20-period average captures strong momentum moves. The 1w HMA filter ensures we only trade with the higher timeframe trend, reducing whipsaws. Volume spike confirms institutional participation. ATR-based stoploss limits downside. Designed for 12-37 trades/year on 12h timeframe (50-150 total over 4 years) to minimize fee drag. Works in bull markets by catching breakouts and in bear markets by catching breakdowns, while avoiding ranging conditions via volume and trend filters.
+Experiment #5269: 4h Donchian(20) breakout + HMA(21) trend + volume confirmation + ATR stoploss
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts capture strong momentum moves, filtered by HMA(21) trend direction and volume > 1.5x average to avoid false breakouts. ATR-based stoploss (2.5x) manages risk. Designed for 20-50 trades/year on 4h timeframe (80-200 total over 4 years) to minimize fee drag. Works in bull markets by catching upward breakouts and in bear markets by catching downward breakouts, while avoiding ranging conditions where price stays within Donchian channels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5268_12h_donchian20_1w_hma_vol_v1"
-timeframe = "12h"
+name = "exp_5269_4h_donchian20_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,38 +22,37 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for HMA trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 21:
-        # Hull Moving Average calculation
-        def hull_moving_average(arr, period):
-            half_period = period // 2
-            sqrt_period = int(np.sqrt(period))
-            wma1 = pd.Series(arr).ewm(span=half_period, adjust=False).mean()
-            wma2 = pd.Series(arr).ewm(span=period, adjust=False).mean()
-            raw_hma = 2 * wma1 - wma2
-            hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
-            return hma.values
-        
-        hma_21 = hull_moving_average(df_1w['close'].values, 21)
-        hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
-    else:
-        hma_21_aligned = np.full(n, np.nan)
+    # === HTF: 1d data for regime filter (optional, can be removed if too restrictive) ===
+    # Not using HTF for now to keep it simple and avoid over-filtering
     
-    # === 12h Indicators: Donchian Channels (20) ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # === 4h Indicators: Donchian Channel (20) ===
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume Spike (20-period average) ===
-    vol_ma_20 = pd.Series(volume).rolling(window=20, min_periods=20).mean().shift(1).values
-    vol_ratio = volume / vol_ma_20  # Current volume vs 20-period average
+    # === 4h Indicators: HMA(21) for trend filter ===
+    def hma(arr, period):
+        half = int(period / 2)
+        sqrt = int(np.sqrt(period))
+        wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean().values
+        wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean().values
+        raw = 2 * wma2 - wma1
+        hma_vals = pd.Series(raw).ewm(span=sqrt, adjust=False).mean().values
+        return hma_vals
     
-    # === 12h Indicators: ATR(14) for stoploss ===
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    hma_21 = hma(close, 21)
+    
+    # === 4h Indicators: ATR(14) for stoploss and volume average ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=14, adjust=False).mean().values
+    
+    # Volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -63,102 +62,70 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
+    stop_price = 0.0
     
-    warmup = max(20, 21, 14)  # Donchian, HMA, ATR warmup
+    warmup = max(20, 21, 14, 20)  # Donchian, HMA, ATR, volume MA warmup
     
     for i in range(warmup, n):
-        # --- Session Filter: 00-24 UTC (12h timeframe, full coverage) ---
-        # 12h candles already cover major sessions
+        # --- Session Filter: 00-24 UTC (4h timeframe, already captures major sessions) ---
+        # 4h candles already filter to 00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC
+        # These cover major session opens, so no additional filter needed
         
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(hma_21_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(hma_21[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
+        vol = volume[i]
         
-        # --- Exit Logic: Close position on Donchian reversal or ATR stop ---
+        # --- Stoploss Check ---
         if in_position:
-            # ATR-based stoploss
             if position_side > 0:  # Long position
-                stop_price = entry_price - 2.5 * atr[i]
-                if price < stop_price:
+                if price <= stop_price:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Trail stop: update highest price
-                highest_since_entry = max(highest_since_entry, price)
-                # Exit if price drops 1.5*ATR from high
-                if price < highest_since_entry - 1.5 * atr[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
-                # Exit on Donchian breakdown (price < lower channel)
-                if price < donchian_low[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
-                signals[i] = SIZE
+                else:
+                    signals[i] = SIZE
             else:  # Short position
-                stop_price = entry_price + 2.5 * atr[i]
-                if price > stop_price:
+                if price >= stop_price:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                     continue
-                # Trail stop: update lowest price
-                lowest_since_entry = min(lowest_since_entry, price)
-                # Exit if price rises 1.5*ATR from low
-                if price > lowest_since_entry + 1.5 * atr[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
-                # Exit on Donchian breakout (price > upper channel)
-                if price > donchian_high[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                    continue
-                signals[i] = -SIZE
+                else:
+                    signals[i] = -SIZE
             continue
         
         # --- New Position Entry Logic ---
-        # Trend filter from 1w HMA
-        hma_trend_up = hma_21_aligned[i] > hma_21_aligned[i-1] if i > 0 else False
-        hma_trend_down = hma_21_aligned[i] < hma_21_aligned[i-1] if i > 0 else False
+        # Donchian breakout conditions
+        breakout_up = price > donchian_high[i-1]  # Break above previous period's high
+        breakout_down = price < donchian_low[i-1]  # Break below previous period's low
         
-        # Volume confirmation
-        volume_spike = vol_ratio[i] > 1.5  # Volume > 1.5x 20-period average
+        # HMA trend filter
+        hma_bullish = price > hma_21[i]
+        hma_bearish = price < hma_21[i]
         
-        # Donchian breakout
-        breakout_up = price > donchian_high[i]
-        breakout_down = price < donchian_low[i]
+        # Volume confirmation: current volume > 1.5x 20-period average
+        vol_confirm = vol > 1.5 * vol_ma[i]
         
-        # Entry conditions: Trend + Volume + Breakout
-        if hma_trend_up and volume_spike and breakout_up:
+        # Entry conditions
+        if breakout_up and hma_bullish and vol_confirm:
             in_position = True
             position_side = 1
-            entry_price = close[i]
-            highest_since_entry = price
-            lowest_since_entry = price
+            entry_price = price
+            stop_price = entry_price - 2.5 * atr[i]  # 2.5x ATR stoploss
             signals[i] = SIZE
-        elif hma_trend_down and volume_spike and breakout_down:
+        elif breakout_down and hma_bearish and vol_confirm:
             in_position = True
             position_side = -1
-            entry_price = close[i]
-            highest_since_entry = price
-            lowest_since_entry = price
+            entry_price = price
+            stop_price = entry_price + 2.5 * atr[i]  # 2.5x ATR stoploss
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
     
     return signals
-
-</think>
