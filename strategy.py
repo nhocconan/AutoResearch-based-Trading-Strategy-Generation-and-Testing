@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #3522: 12h Donchian Breakout + 1d Weekly Pivot + Volume Confirmation
-HYPOTHESIS: 12h Donchian(20) breakouts with 1d weekly pivot direction and volume confirmation capture medium-term momentum in both bull and bear markets. 
-Weekly pivot (from 1d data) provides institutional support/resistance levels. Volume confirms breakout strength. 
-Position size 0.25. Target: 50-150 total trades over 4 years (12-37/year).
-Uses 1d for pivot calculation and trend filter, 12h only for entry timing and risk management.
-Works in bull (continuation from pivot support) and bear (continuation from pivot resistance) via price channels.
+Experiment #3522: 12h Donchian(20) breakout + 1d pivot + volume confirmation
+HYPOTHESIS: 12h Donchian(20) breakouts aligned with 1d weekly pivot direction and volume spikes capture medium-term momentum. 
+Weekly pivot provides institutional S/R; volume confirms breakout strength. Works in bull/bear via pivot bias. 
+Target: 50-150 total trades over 4 years (12-37/year). Uses 1d for pivot/trend, 12h only for entry timing and risk.
 """
 
 import numpy as np
@@ -21,7 +19,6 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
     # === HTF: 1d data for weekly pivot and trend filter (Call ONCE before loop) ===
@@ -31,7 +28,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate weekly pivot points (using prior week's data)
-    # For each 1d bar, use prior 5 trading days (1 week) high/low/close
     lookback_week = 5
     prior_week_high = pd.Series(high_1d).rolling(window=lookback_week, min_periods=lookback_week).max().shift(1).values
     prior_week_low = pd.Series(low_1d).rolling(window=lookback_week, min_periods=lookback_week).min().shift(1).values
