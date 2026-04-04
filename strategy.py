@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3789: 4h Donchian(20) breakout + 1d volume confirmation + chop regime filter
-HYPOTHESIS: 4h Donchian breakouts with 1d volume (>1.5x) and chop > 61.8 (range regime) capture institutional breakouts in both bull and bear markets. Uses discrete sizing (0.25) and ATR trailing stop (2.0x) to minimize fees and manage drawdown. Target: 75-200 trades over 4 years.
+HYPOTHESIS: 4h Donchian breakouts capture swings with 1d volume (>1.5x) confirming institutional participation. Choppiness Index (14) > 61.8 filters range markets to avoid false breakouts. Works in bull markets (breakouts above resistance) and bear markets (breakdowns below support). Discrete position sizing (0.25) minimizes fee drag. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
