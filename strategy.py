@@ -1,49 +1,46 @@
 #!/usr/bin/env python3
 """
-exp_6706_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
-Enters long when price breaks above 4h Donchian upper channel AND 1d EMA50 is rising AND volume > 1.5x 20-bar MA.
-Enters short when price breaks below 4h Donchian lower channel AND 1d EMA50 is falling AND volume > 1.5x 20-bar MA.
-Exits on ATR(14) stoploss (2x) or opposite signal. Designed for 4h timeframe to capture
-medium-term trends while minimizing fee drag (~20-50 trades/year expected). Works in both
-bull and bear markets by following the 1-day trend direction.
+exp_6707_6h_williams_vix_fix_1d_v1
+Hypothesis: 6h Williams Vix Fix (WVF) extreme readings with 1-day trend filter.
+WVF identifies volatility spikes and potential reversals. In 6h timeframe,
+extreme WVF values (>0.8) signal exhaustion. Combined with 1-day EMA trend
+filter to trade in direction of higher timeframe momentum. Uses volume
+confirmation to avoid false signals. Designed for low trade frequency
+(20-40/year) with clear entry/exit rules.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6706_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_6707_6h_williams_vix_fix_1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+WVF_PERIOD = 22
+WVF_EMA_PERIOD = 9
+WVF_THRESHOLD = 0.8
+EMA_PERIOD_1D = 50
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 8  # ~2 days (6h bars)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA trend filter
+    # Load HTF data ONCE before loop - using 1d for trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1-day EMA50 for trend filter
+    # Calculate 1-day EMA for trend filter
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
-    ema_1d_rising = ema_1d > np.roll(ema_1d, 1)
-    ema_1d_falling = ema_1d < np.roll(ema_1d, 1)
-    
-    # Align HTF EMA to LTF (4h) with shift(1) for completed days only
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD_1D, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    ema_rising_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_rising.astype(float))
-    ema_falling_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_falling.astype(float))
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -51,9 +48,15 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Williams Vix Fix: measures volatility exhaustion
+    # WVF = ((Highest High in period - Low) / (Highest High in period)) * 100
+    # We normalize to 0-1 range: (HH - Low) / HH
+    highest_high = pd.Series(high).rolling(window=WVF_PERIOD, min_periods=WVF_PERIOD).max().values
+    wvf = (highest_high - low) / highest_high
+    wvf = np.where(highest_high > 0, wvf, 0)  # avoid division by zero
+    
+    # EMA of WVF for signal smoothing
+    wvf_ema = pd.Series(wvf).ewm(span=WVF_EMA_PERIOD, adjust=False).mean().values
     
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
@@ -63,19 +66,22 @@ def generate_signals(prices):
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(WVF_PERIOD, WVF_EMA_PERIOD, EMA_PERIOD_1D, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if HTF data not available
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(ema_rising_aligned[i]) or 
-            np.isnan(ema_falling_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        bars_since_entry += 1
+        
+        # Skip if data not available
+        if (np.isnan(wvf_ema[i]) or np.isnan(ema_1d_aligned[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -84,27 +90,46 @@ def generate_signals(prices):
             if close[i] <= entry_price - ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= entry_price + ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
                 
-        # Breakout conditions
-        bullish_breakout = (close[i] > highest_high[i]) and ema_rising_aligned[i] and (volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD)
-        bearish_breakout = (close[i] < lowest_low[i]) and ema_falling_aligned[i] and (volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD)
+        # Time-based exit
+        if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
+            signals[i] = 0.0
+            position = 0
+            bars_since_entry = 0
+            continue
+            
+        # Determine trend from 1-day EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # Enter new positions only if flat
+        # Volume confirmation
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        
+        # WVF signals: extreme readings indicate exhaustion
+        # High WVF (>0.8) = volatility spike, potential reversal
+        wvf_extreme = wvf_ema[i] > WVF_THRESHOLD
+        
+        # Enter long: WVF extreme in uptrend (buy the dip in bull market)
+        # Enter short: WVF extreme in downtrend (sell the rally in bear market)
         if position == 0:
-            if bullish_breakout:
+            if wvf_extreme and uptrend and vol_confirmed:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-            elif bearish_breakout:
+                bars_since_entry = 0
+            elif wvf_extreme and downtrend and vol_confirmed:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         else:
