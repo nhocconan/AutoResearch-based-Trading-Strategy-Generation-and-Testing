@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-exp_6516_12h_donchian20_1d_pivot_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d Camarilla pivot levels as directional filter and volume confirmation.
-In bull markets: long when price > 1d pivot and breaks Donchian high with volume.
-In bear markets: short when price < 1d pivot and breaks Donchian low with volume.
-Uses 1d Camarilla pivots (calculated from prior 1d OHLC) to define institutional support/resistance.
-Volume confirmation ensures breakouts have conviction. Designed for low-frequency, high-conviction trades.
-Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+exp_6517_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 1d EMA50 as directional filter and volume confirmation.
+In bull markets: long when price > 1d EMA50 and breaks Donchian high with volume.
+In bear markets: short when price < 1d EMA50 and breaks Donchian low with volume.
+Uses 1d EMA50 to define institutional trend direction. Volume confirmation ensures breakouts have conviction.
+Designed for low-frequency, high-conviction trades targeting 75-200 total trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6516_12h_donchian20_1d_pivot_vol_v1"
-timeframe = "12h"
+name = "exp_6517_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_THRESHOLD = 1.8  # volume must be 1.8x its 20-period MA
 SIGNAL_SIZE = 0.25   # 25% position size
@@ -28,32 +28,15 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for Camarilla pivots
+    # Load HTF data ONCE before loop - using 1d for EMA50
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Camarilla pivot levels (based on prior day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA50
     close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False).mean().values
     
-    # Camarilla levels: based on previous day's range
-    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
-    # S4 = close - 1.5*(high-low), S3 = close - 1.1*(high-low), etc.
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_hl = high_1d - low_1d
-    
-    # Key levels: R3, S3 for fade; R4, S4 for breakout
-    r3 = close_1d + 1.1 * range_hl
-    s3 = close_1d - 1.1 * range_hl
-    r4 = close_1d + 1.5 * range_hl
-    s4 = close_1d - 1.5 * range_hl
-    
-    # Align to LTF (12h) with shift(1) for completed bars only
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to LTF (4h) with shift(1) for completed bars only
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -77,23 +60,23 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(pivot_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]):
             continue
             
-        # Long conditions: price > pivot (bullish bias) + breaks above Donchian HIGH + volume spike
-        long_bias = close[i] > pivot_aligned[i]  # price above daily pivot (bullish)
+        # Long conditions: price > 1d EMA50 (bullish bias) + breaks above Donchian HIGH + volume spike
+        long_bias = close[i] > ema_1d_aligned[i]  # price above daily EMA50 (bullish)
         long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
         long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Short conditions: price < pivot (bearish bias) + breaks below Donchian LOW + volume spike
-        short_bias = close[i] < pivot_aligned[i]  # price below daily pivot (bearish)
+        # Short conditions: price < 1d EMA50 (bearish bias) + breaks below Donchian LOW + volume spike
+        short_bias = close[i] < ema_1d_aligned[i]  # price below daily EMA50 (bearish)
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Exit conditions: pivot reversal or midpoint reversal
+        # Exit conditions: EMA reversal or midpoint reversal
         if position == 1:  # long position
-            # Exit if price drops back below pivot (trend change)
-            exit_long = close[i] < pivot_aligned[i]
+            # Exit if price drops back below EMA50 (trend change)
+            exit_long = close[i] < ema_1d_aligned[i]
             # Or if price drops below midpoint of channel
             exit_long = exit_long or close[i] < (donchian_high[i-1] + donchian_low[i-1]) / 2
             if exit_long:
@@ -101,8 +84,8 @@ def generate_signals(prices):
                 position = 0
                 continue
         elif position == -1:  # short position
-            # Exit if price rises back above pivot (trend change)
-            exit_short = close[i] > pivot_aligned[i]
+            # Exit if price rises back above EMA50 (trend change)
+            exit_short = close[i] > ema_1d_aligned[i]
             # Or if price rises above midpoint of channel
             exit_short = exit_short or close[i] > (donchian_high[i-1] + donchian_low[i-1]) / 2
             if exit_short:
