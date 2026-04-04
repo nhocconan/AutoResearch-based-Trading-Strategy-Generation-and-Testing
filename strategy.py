@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #5127: 6h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts aligned with weekly pivot direction from 1d timeframe capture institutional participation. Volume > 1.5x average confirms breakout strength. Designed for 12-37 trades/year on 6h timeframe to minimize fee drag. Weekly pivot provides structural bias that works in both bull (breakouts above R1) and bear (breakdowns below S1) markets.
+HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts aligned with 1d weekly pivot levels (bullish above weekly pivot, bearish below) capture strong momentum with institutional participation. Volume > 1.5x average confirms breakout validity. Designed for 12-37 trades/year on 6h timeframe (50-150 total over 4 years) to minimize fee drag. Works in bull markets (breakouts above weekly pivot) and bear markets (breakdowns below weekly pivot). Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
@@ -19,64 +19,23 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for weekly pivot
+    # Precompute HTF: 1d data for weekly pivot levels
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d Indicators: Weekly Pivot (using prior week's OHLC) ===
-    if len(df_1d) >= 5:
+    # === 1d Indicators: Weekly Pivot Levels (using prior week's OHLC) ===
+    if len(df_1d) >= 5:  # Need at least 5 days for prior week
         # Calculate weekly OHLC from daily data
-        # We'll use the prior completed week's data (shifted by 1 week)
-        df_1d_copy = df_1d.copy()
-        df_1d_copy['week'] = pd.DatetimeIndex(df_1d_copy.index).isocalendar().week
-        df_1d_copy['year'] = pd.DatetimeIndex(df_1d_copy.index).year
+        weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(1)  # Prior week
+        weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(1)
+        weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().shift(1)
         
-        # Group by year-week to get weekly OHLC
-        weekly = df_1d_copy.groupby(['year', 'week']).agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last'
-        }).reset_index()
+        # Weekly Pivot Point: (H + L + C) / 3
+        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
         
-        if len(weekly) >= 2:
-            # Use prior week's OHLC for current week's pivot
-            prior_week = weekly.iloc[-2]  # Second to last week
-            wk_high = prior_week['high']
-            wk_low = prior_week['low']
-            wk_close = prior_week['close']
-            
-            # Standard pivot calculation
-            pivot = (wk_high + wk_low + wk_close) / 3.0
-            r1 = 2 * pivot - wk_low
-            s1 = 2 * pivot - wk_high
-            r2 = pivot + (wk_high - wk_low)
-            s2 = pivot - (wk_high - wk_low)
-            r3 = wk_high + 2 * (pivot - wk_low)
-            s3 = wk_low - 2 * (wk_high - pivot)
-            
-            # Align to 6h timeframe: each weekly pivot applies to the entire following week
-            # We'll create arrays and align them
-            pivot_arr = np.full(len(df_1d), pivot)
-            r1_arr = np.full(len(df_1d), r1)
-            s1_arr = np.full(len(df_1d), s1)
-            r2_arr = np.full(len(df_1d), r2)
-            s2_arr = np.full(len(df_1d), s2)
-            r3_arr = np.full(len(df_1d), r3)
-            s3_arr = np.full(len(df_1d), s3)
-            
-            # Align to 6h timeframe
-            pivot_6h = align_htf_to_ltf(prices, df_1d, pivot_arr)
-            r1_6h = align_htf_to_ltf(prices, df_1d, r1_arr)
-            s1_6h = align_htf_to_ltf(prices, df_1d, s1_arr)
-            r2_6h = align_htf_to_ltf(prices, df_1d, r2_arr)
-            s2_6h = align_htf_to_ltf(prices, df_1d, s2_arr)
-            r3_6h = align_htf_to_ltf(prices, df_1d, r3_arr)
-            s3_6h = align_htf_to_ltf(prices, df_1d, s3_arr)
-        else:
-            # Not enough weekly data
-            pivot_6h = r1_6h = s1_6h = r2_6h = s2_6h = r3_6h = s3_6h = np.full(n, np.nan)
+        # Align to 6h timeframe (shifted by 1 week for no look-ahead)
+        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot.values)
     else:
-        pivot_6h = r1_6h = s1_6h = r2_6h = s2_6h = r3_6h = s3_6h = np.full(n, np.nan)
+        weekly_pivot_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -86,6 +45,13 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    
+    # === 6h Indicators: ATR(14) for stoploss ===
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -98,32 +64,33 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20)  # Donchian, Volume MA warmup
+    warmup = max(20, 20, 5, 14)  # Donchian, Volume MA, Weekly pivot, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(pivot_6h[i]) or np.isnan(r1_6h[i]) or np.isnan(s1_6h[i]) or
-            np.isnan(vol_ratio[i])):
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic: Reverse on opposite signal ---
+        # --- Exit Logic ---
         if in_position:
-            # Exit conditions: reverse when price crosses opposite pivot level
+            # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
-                # Exit long if price breaks below S1 (potential reversal)
-                if price <= s1_6h[i]:
+                highest_since_entry = max(highest_since_entry, high[i])
+                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
-                # Exit short if price breaks above R1 (potential reversal)
-                if price >= r1_6h[i]:
+                lowest_since_entry = min(lowest_since_entry, low[i])
+                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -135,11 +102,11 @@ def generate_signals(prices):
         # Volume filter: confirmation (>1.5x)
         vol_confirm = vol_ratio[i] > 1.5
         
-        # Donchian breakout conditions with weekly pivot bias
-        # Long: Donchian breakout above + price > R1 (bullish bias)
-        # Short: Donchian breakdown below + price < S1 (bearish bias)
-        breakout_long = (price >= high_roll[i]) and (price > r1_6h[i]) and vol_confirm
-        breakout_short = (price <= low_roll[i]) and (price < s1_6h[i]) and vol_confirm
+        # Donchian breakout conditions with 1d weekly pivot filter
+        # Long: Donchian breakout above + price > weekly pivot (bullish bias)
+        # Short: Donchian breakdown below + price < weekly pivot (bearish bias)
+        breakout_long = (price >= high_roll[i]) and (price > weekly_pivot_aligned[i]) and vol_confirm
+        breakout_short = (price <= low_roll[i]) and (price < weekly_pivot_aligned[i]) and vol_confirm
         
         # Final entry conditions
         if breakout_long:
