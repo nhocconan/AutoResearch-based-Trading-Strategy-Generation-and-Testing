@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4645: 12h Donchian(20) Breakout from 1d HTF + Volume Confirmation + ATR Stoploss
-HYPOTHESIS: 12h price breaking Donchian(20) channels calculated from prior 1d data with volume confirmation (>1.5x avg) captures strong momentum breakouts. Uses 1d HTF for structure, discrete sizing (0.25), and ATR trailing stop (2.0x). Target: 12-37 trades/year on 12h timeframe.
+Experiment #4645: 12h Donchian(20) Breakout + Volume Confirmation + ATR Stoploss
+HYPOTHESIS: 12h price breaking Donchian(20) channels from prior 1d with volume confirmation (>1.5x avg) captures strong momentum breakouts in both bull and bear markets. Uses 1d HTF for Donchian calculation to avoid look-ahead. Discrete sizing (0.25) and ATR trailing stop (2.0x) manage risk. Target: 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
