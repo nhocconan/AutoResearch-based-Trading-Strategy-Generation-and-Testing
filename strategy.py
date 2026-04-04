@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #3180: 4h Donchian Breakout + 1d HMA Trend + Volume Spike
+Experiment #3181: 4h Donchian Breakout + 1d HMA Trend + Volume Spike
 HYPOTHESIS: 4h Donchian(20) breakouts with 1d HMA(50) trend filter and volume confirmation capture medium-term trends.
-Uses ATR-based trailing stop (2.5x) for risk management. Position size 0.25.
-Designed for 4h timeframe to achieve 75-200 total trades over 4 years (19-50/year).
-Works in bull markets via trend continuation and bear markets via mean reversion from extremes.
+Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets by using price channels and volatility filters.
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3180_4h_donchian20_1d_hma_vol_v1"
+name = "exp_3181_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
