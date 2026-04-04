@@ -2,10 +2,10 @@
 """
 Experiment #6313: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation
 HYPOTHESIS: Tight Donchian breakouts on 4h with 12h HMA trend filter and volume confirmation
-capture institutional momentum with controlled trade frequency. The 12h HMA provides
-medium-term trend direction to avoid counter-trend trades, while volume confirmation
-ensures breakouts have participation. Uses discrete sizing (0.25) to minimize fee churn.
-Target: 75-200 trades over 4 years.
+capture institutional momentum with minimal overtrading. The 12h HMA provides a smoother
+trend filter than shorter timeframes, reducing false breakouts in choppy markets. Volume
+confirmation ensures breakouts have participation. Uses discrete sizing (0.25) to minimize
+fee churn. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
@@ -29,39 +29,34 @@ def generate_signals(prices):
     # === HTF: 12h data for HMA trend ===
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) >= 21:
-        # Calculate HMA(21) on 12h close
-        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        
-        def wma(values, window):
-            if len(values) < window:
+        # Calculate Hull Moving Average (HMA) on 12h close
+        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        def wma(values, period):
+            if len(values) < period:
                 return np.full_like(values, np.nan)
-            weights = np.arange(1, window + 1)
+            weights = np.arange(1, period + 1)
             return np.convolve(values, weights / weights.sum(), mode='valid')
         
         close_12h = df_12h['close'].values
-        wma_half = wma(close_12h, half_len)
-        wma_full = wma(close_12h, 21)
-        # Pad arrays to match original length
-        wma_half_padded = np.concatenate([np.full(half_len, np.nan), wma_half])
-        wma_full_padded = np.concatenate([np.full(21, np.nan), wma_full])
-        # Handle edge cases
-        if len(wma_half_padded) > len(close_12h):
-            wma_half_padded = wma_half_padded[:len(close_12h)]
-        if len(wma_full_padded) > len(close_12h):
-            wma_full_padded = wma_full_padded[:len(close_12h)]
+        n_12h = len(close_12h)
+        half_n = 21 // 2
+        sqrt_n = int(np.sqrt(21))
         
-        raw_hma = 2 * wma_half_padded - wma_full_padded
-        hma_12h = wma(raw_hma, sqrt_len)
-        # Pad HMA result
-        hma_padded = np.concatenate([np.full(sqrt_len, np.nan), hma_12h])
-        if len(hma_padded) > len(close_12h):
-            hma_padded = hma_padded[:len(close_12h)]
-        hma_12h_final = hma_padded
-        
-        # Align to 4h timeframe
-        hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_final)
+        if n_12h >= 21:
+            wma_full = wma(close_12h, 21)
+            wma_half = wma(close_12h, half_n)
+            # WMA(2*WMA(n/2) - WMA(n))
+            wma_diff = 2 * wma_half - wma_full
+            # Pad to original length
+            wma_diff_padded = np.full(n_12h, np.nan)
+            wma_diff_padded[half_n-1:half_n-1+len(wma_diff)] = wma_diff
+            hma_12h = wma(wma_diff_padded, sqrt_n)
+            # Pad HMA result
+            hma_12h_padded = np.full(n_12h, np.nan)
+            hma_12h_padded[sqrt_n-1:sqrt_n-1+len(hma_12h)] = hma_12h
+            hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_padded)
+        else:
+            hma_12h_aligned = np.full(n, np.nan)
     else:
         hma_12h_aligned = np.full(n, np.nan)
     
@@ -92,7 +87,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21) + 1  # Donchian, volume avg, ATR, HMA data + 1
+    warmup = max(20, 20, 14, 21) + 1  # Donchian, volume avg, ATR, 12h data + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (22:00-23:59 UTC) ---
@@ -146,8 +141,8 @@ def generate_signals(prices):
         volume_confirmed = volume_ratio[i] > 2.0  # Strong volume filter
         
         # Entry logic: Donchian breakout with volume AND aligned with 12h HMA trend
-        # LONG: breakout above Donchian high + volume + price > 12h HMA (uptrend)
-        # SHORT: breakout below Donchian low + volume + price < 12h HMA (downtrend)
+        # LONG: breakout above Donchian high + volume + price > 12h HMA
+        # SHORT: breakout below Donchian low + volume + price < 12h HMA
         long_entry = breakout_up and volume_confirmed and price > hma_12h_aligned[i]
         short_entry = breakout_down and volume_confirmed and price < hma_12h_aligned[i]
         
