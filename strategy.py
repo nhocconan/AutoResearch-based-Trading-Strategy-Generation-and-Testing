@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #3730: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Daily Donchian breakouts capture swing momentum, with weekly HMA(21) providing structural trend bias to filter false breakouts. Volume confirmation (>1.5x average) ensures breakout authenticity. ATR-based stoploss (2.0x) manages risk. This works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered by weekly HMA). Target: 30-100 trades over 4 years on 1d timeframe.
+Experiment #3730: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation + ATR trailing stop
+HYPOTHESIS: 1d Donchian breakouts capture intermediate-term momentum, with 1w HMA(21) providing structural trend bias to filter false breakouts. Volume spike (>2.0x) confirms breakout authenticity. ATR-based trailing stop (2.5x) manages risk. This combination avoids whipsaw in ranging markets and works in both bull (breakouts with trend) and bear (breakouts against trend filtered by HMA) regimes. Position size 0.25 manages drawdown from 2022 crash while allowing profit accumulation. Target: 30-100 trades over 4 years.
 """
 
 import numpy as np
@@ -23,19 +23,21 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate HMA(21) on weekly data
-    def hma(arr, period):
+    # Calculate HMA(21) on 1w data
+    def calculate_hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
-        half = arr[-int(period/2):]
-        wma2 = pd.Series(half).ewm(span=int(period/2), adjust=False).mean().iloc[-1]
-        wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean()
-        wma1_arr = wma1.values
-        raw = 2 * wma2 - wma1_arr
-        hma_val = pd.Series(raw).ewm(span=int(np.sqrt(period)), adjust=False).mean().values
-        return hma_val
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
+        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
+        hma_raw = 2 * wma_half - wma_full
+        hma = pd.Series(hma_raw).ewm(span=sqrt_period, adjust=False).mean().values
+        return hma
     
-    hma_21 = hma(close_1w, 21)
+    hma_21 = calculate_hma(close_1w, 21)
+    
+    # Align 1w HMA21 to 1d timeframe (shifted by 1 for completed 1w bar)
     hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
     
     # === 1d Indicators: Donchian Channel(20) for breakout ===
@@ -82,8 +84,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -96,8 +98,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -111,10 +113,10 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) for authenticity
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume spike (> 2.0x average) for confirmation
+        volume_spike = vol_ratio[i] > 2.0
         
-        if volume_confirm:
+        if volume_spike:
             # Long entry: Price breaks above Donchian upper band AND above 1w HMA21 (bullish trend)
             if (price > highest_high[i-1] and  # Breakout above previous period's high
                 price > hma_21_aligned[i]):    # Above 1w HMA21 (bullish bias)
