@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #5011: 6h Donchian(20) Breakout + 1d EMA50 Trend + Volume Confirmation + ATR Stoploss
-HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts in direction of 1d EMA50 trend with volume confirmation (>1.5x average) capture strong momentum moves. Uses ATR(14) trailing stop (2.0x) to limit downside. Designed for 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
+Experiment #5011: 6h Williams %R + 1d Volume Spike + ATR Stoploss
+HYPOTHESIS: On 6h timeframe, Williams %R(14) extreme readings (< -80 for long, > -20 for short) combined with 1d volume confirmation (>1.5x average) capture mean reversion moves in ranging markets and momentum continuations in trending markets. Uses ATR(14) trailing stop (2.0x) to limit downside. Designed for 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (buying dips in uptrends) and bear markets (selling rallies in downtrends).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5011_6h_donchian20_1d_ema_vol_v1"
+name = "exp_5011_6h_willr14_1d_vol_atr_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -19,30 +19,29 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for EMA50 trend filter
+    # Precompute HTF: 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d Indicators: EMA50 for trend filter ===
-    if len(df_1d) >= 50:
-        close_1d = df_1d['close'].values
-        ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # === 1d Indicators: Volume MA for confirmation ===
+    if len(df_1d) >= 20:
+        vol_1d = df_1d['volume'].values
+        vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+        vol_ratio_1d = np.ones(len(vol_1d))
+        vol_ratio_1d[20:] = vol_1d[20:] / vol_ma_1d[20:]
     else:
-        ema_1d = np.full(len(df_1d), np.nan)
+        vol_ratio_1d = np.full(len(df_1d), np.nan)
     
-    # Align HTF EMA50 to 6h timeframe
-    if len(ema_1d) > 0:
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align HTF 1d volume ratio to 6h timeframe
+    if len(vol_ratio_1d) > 0:
+        vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        vol_ratio_1d_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian(20) channels ===
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 6h Indicators: Volume confirmation (1.5x spike) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    # === 6h Indicators: Williams %R(14) ===
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    willr = np.full(n, np.nan)
+    willr[14:] = -100 * (highest_high[14:] - close[14:]) / (highest_high[14:] - lowest_low[14:] + 1e-10)
     
     # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
@@ -62,12 +61,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, Volume MA, ATR warmup
+    warmup = max(14, 20, 14)  # Williams %R, Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(willr[i]) or np.isnan(vol_ratio_1d_aligned[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -97,22 +96,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>1.5x)
-        vol_confirm = vol_ratio[i] > 1.5
+        # Volume filter: confirmation (>1.5x from 1d)
+        vol_confirm = vol_ratio_1d_aligned[i] > 1.5
         
-        # Donchian breakout conditions with trend alignment
-        breakout_long = (price >= high_roll[i]) and (price > ema_1d_aligned[i]) and vol_confirm
-        breakout_short = (price <= low_roll[i]) and (price < ema_1d_aligned[i]) and vol_confirm
+        # Williams %R extreme conditions
+        willr_long = willr[i] < -80  # Oversold
+        willr_short = willr[i] > -20  # Overbought
         
         # Final entry conditions
-        if breakout_long:
+        if willr_long and vol_confirm:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif breakout_short:
+        elif willr_short and vol_confirm:
             in_position = True
             position_side = -1
             entry_price = close[i]
@@ -127,15 +126,15 @@ def generate_signals(prices):
 </think>
 #!/usr/bin/env python3
 """
-Experiment #5011: 6h Donchian(20) Breakout + 1d EMA50 Trend + Volume Confirmation + ATR Stoploss
-HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts in direction of 1d EMA50 trend with volume confirmation (>1.5x average) capture strong momentum moves. Uses ATR(14) trailing stop (2.0x) to limit downside. Designed for 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
+Experiment #5011: 6h Williams %R + 1d Volume Spike + ATR Stoploss
+HYPOTHESIS: On 6h timeframe, Williams %R(14) extreme readings (< -80 for long, > -20 for short) combined with 1d volume confirmation (>1.5x average) capture mean reversion moves in ranging markets and momentum continuations in trending markets. Uses ATR(14) trailing stop (2.0x) to limit downside. Designed for 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (buying dips in uptrends) and bear markets (selling rallies in downtrends).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5011_6h_donchian20_1d_ema_vol_v1"
+name = "exp_5011_6h_willr14_1d_vol_atr_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -146,30 +145,29 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for EMA50 trend filter
+    # Precompute HTF: 1d data for volume filter
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d Indicators: EMA50 for trend filter ===
-    if len(df_1d) >= 50:
-        close_1d = df_1d['close'].values
-        ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # === 1d Indicators: Volume MA for confirmation ===
+    if len(df_1d) >= 20:
+        vol_1d = df_1d['volume'].values
+        vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+        vol_ratio_1d = np.ones(len(vol_1d))
+        vol_ratio_1d[20:] = vol_1d[20:] / vol_ma_1d[20:]
     else:
-        ema_1d = np.full(len(df_1d), np.nan)
+        vol_ratio_1d = np.full(len(df_1d), np.nan)
     
-    # Align HTF EMA50 to 6h timeframe
-    if len(ema_1d) > 0:
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align HTF 1d volume ratio to 6h timeframe
+    if len(vol_ratio_1d) > 0:
+        vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        vol_ratio_1d_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian(20) channels ===
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 6h Indicators: Volume confirmation (1.5x spike) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    # === 6h Indicators: Williams %R(14) ===
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    willr = np.full(n, np.nan)
+    willr[14:] = -100 * (highest_high[14:] - close[14:]) / (highest_high[14:] - lowest_low[14:] + 1e-10)
     
     # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
@@ -189,12 +187,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, Volume MA, ATR warmup
+    warmup = max(14, 20, 14)  # Williams %R, Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(willr[i]) or np.isnan(vol_ratio_1d_aligned[i]) or 
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -224,22 +222,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>1.5x)
-        vol_confirm = vol_ratio[i] > 1.5
+        # Volume filter: confirmation (>1.5x from 1d)
+        vol_confirm = vol_ratio_1d_aligned[i] > 1.5
         
-        # Donchian breakout conditions with trend alignment
-        breakout_long = (price >= high_roll[i]) and (price > ema_1d_aligned[i]) and vol_confirm
-        breakout_short = (price <= low_roll[i]) and (price < ema_1d_aligned[i]) and vol_confirm
+        # Williams %R extreme conditions
+        willr_long = willr[i] < -80  # Oversold
+        willr_short = willr[i] > -20  # Overbought
         
         # Final entry conditions
-        if breakout_long:
+        if willr_long and vol_confirm:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif breakout_short:
+        elif willr_short and vol_confirm:
             in_position = True
             position_side = -1
             entry_price = close[i]
