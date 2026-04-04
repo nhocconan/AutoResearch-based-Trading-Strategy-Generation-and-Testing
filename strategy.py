@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4366: 4h Donchian Breakout + Daily EMA Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 4h aligned with daily EMA50 trend (price > EMA50 = long bias, < EMA50 = short bias) and confirmed by volume spikes (>1.8x average) capture institutional momentum with proper filtering. Daily EMA50 provides structural trend filter from higher timeframe, reducing false breakouts in choppy markets. Volume confirmation ensures breakout conviction. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
+Experiment #4367: 6h Donchian Breakout + Daily Pivot + Volume Confirmation
+HYPOTHESIS: 6h Donchian(20) breakouts aligned with daily pivot bias (price above/below daily pivot = long/short bias) and confirmed by volume spikes (>1.5x average) capture institutional momentum with proper filtering. Daily pivot provides structural bias from higher timeframe, reducing false breakouts. Targets 75-150 total trades over 4 years (19-37/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4366_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_4367_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,26 +19,32 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === Precompute HTF: 1d EMA50 for trend filter ===
+    # === Precompute HTF: 1d Pivot Points (using previous day's OHLC) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    if len(df_1d) >= 1:
+        # Calculate pivot from previous day's OHLC (standard formula)
+        # Pivot = (High + Low + Close) / 3
+        # We need previous day's values, so shift by 1
+        prev_high = df_1d['high'].shift(1).values
+        prev_low = df_1d['low'].shift(1).values
+        prev_close = df_1d['close'].shift(1).values
+        pivot = (prev_high + prev_low + prev_close) / 3.0
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        pivot_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel(20) ===
+    # === 6h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -56,12 +62,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, EMA
+    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(pivot_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -91,12 +97,12 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 1.5x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.5
         
-        # Daily EMA50 trend filter: price > EMA50 = long bias, < EMA50 = short bias
-        long_bias = price > ema_1d_aligned[i]
-        short_bias = price < ema_1d_aligned[i]
+        # Daily pivot bias: price > pivot = long bias, < pivot = short bias
+        long_bias = price > pivot_aligned[i]
+        short_bias = price < pivot_aligned[i]
         
         # Donchian breakout conditions
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
@@ -126,3 +132,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+}
