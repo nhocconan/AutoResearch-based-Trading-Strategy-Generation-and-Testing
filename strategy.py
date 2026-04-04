@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3710: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts capture intermediate-term momentum with weekly HMA21 providing structural trend bias. Volume spike confirms breakout authenticity. This combination avoids whipsaw in ranging markets and works in both bull (breakouts with trend) and bear (breakouts against trend filtered by HMA) regimes. Targets 30-100 trades over 4 years (7-25/year) with strict 3-condition confluence. Position size 0.25 manages drawdown from 2022 crash while allowing profit accumulation.
+HYPOTHESIS: Daily Donchian breakouts capture intermediate-term momentum with weekly HMA21 providing structural trend bias. Volume spike confirms breakout authenticity. This combination avoids whipsaw in ranging markets and works in both bull (breakouts with trend) and bear (breakouts against trend filtered by weekly HMA) regimes. Targets 30-100 trades over 4 years (7-25/year) with strict 3-condition confluence. Position size 0.25 manages drawdown from 2022 crash while allowing profit accumulation.
 """
 
 import numpy as np
@@ -23,31 +23,22 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate weekly HMA21: HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    # Calculate weekly HMA21: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
     half_len = 21 // 2
     sqrt_len = int(np.sqrt(21))
     
     def wma(arr, period):
-        if len(arr) < period:
+        if period <= 0:
             return np.full_like(arr, np.nan)
-        weights = np.arange(1, period + 1)
-        return np.convolve(arr, weights[::-1], 'valid') / weights.sum()
+        weights = np.arange(1, period + 1, dtype=np.float64)
+        return pd.Series(arr).rolling(window=period, min_periods=period).apply(
+            lambda x: np.dot(x, weights) / weights.sum(), raw=True
+        ).values
     
-    # Compute WMA for half length
-    wma_half = np.full_like(close_1w, np.nan)
-    for i in range(half_len, len(close_1w)):
-        wma_half[i] = wma(close_1w[i-half_len+1:i+1], half_len)[-1]
-    
-    # Compute WMA for full length
-    wma_full = np.full_like(close_1w, np.nan)
-    for i in range(21, len(close_1w)):
-        wma_full[i] = wma(close_1w[i-21+1:i+1], 21)[-1]
-    
-    # HMA = WMA(2*WMA_half - WMA_full), sqrt_len
+    wma_half = wma(close_1w, half_len)
+    wma_full = wma(close_1w, 21)
     raw_hma = 2 * wma_half - wma_full
-    hma_21 = np.full_like(close_1w, np.nan)
-    for i in range(sqrt_len, len(raw_hma)):
-        hma_21[i] = wma(raw_hma[i-sqrt_len+1:i+1], sqrt_len)[-1]
+    hma_21 = wma(raw_hma, sqrt_len)
     
     # Align weekly HMA21 to daily timeframe (shifted by 1 for completed weekly bar)
     hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
