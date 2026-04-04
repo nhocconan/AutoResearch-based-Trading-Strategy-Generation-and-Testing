@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #4681: 4h Donchian(20) Breakout + 1d Camarilla Pivot + Volume + ATR Stoploss
+Experiment #4681: 4h Donchian(20) Breakout + 1d Camarilla Pivot Breakout Continuation
 HYPOTHESIS: 4h price breaking Donchian(20) channels (from prior 20 1d bars) with volume confirmation captures momentum.
-Breakouts above 1d Camarilla H4 (R3) or below L4 (S3) with volume confirm continuation.
-Works in bull (breakouts) and bear (breakdowns) by trading both directions.
-Target: 19-50 trades/year on 4h timeframe (75-200 total over 4 years).
+Breakouts above 1d Camarilla H4 (R3) or below L4 (S3) with volume confirm continuation. Works in bull (breakouts) and bear (breakdowns).
+Target: 19-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4681_4h_donchian20_camarilla_vol_v1"
+name = "exp_4681_4h_donchian20_camarilla_breakout_v1"
 timeframe = "4h"
 leverage = 1.0
 
