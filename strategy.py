@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4442: 12h Donchian(20) Breakout + 1d EMA50 Trend + Volume Confirmation
-HYPOTHESIS: 12h Donchian(20) breakouts aligned with 1d EMA50 trend direction and confirmed by volume (>1.8x average) capture institutional momentum with minimal false signals. 1d EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+Experiment #4442: 12h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation + ATR Stoploss
+HYPOTHESIS: 12h Donchian(20) breakouts aligned with 1d EMA trend direction and confirmed by volume (>1.8x average) capture institutional momentum with minimal false signals. 1d EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. ATR-based trailing stop manages risk. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4442_12h_donchian20_1d_ema50_vol_v1"
+name = "exp_4442_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
