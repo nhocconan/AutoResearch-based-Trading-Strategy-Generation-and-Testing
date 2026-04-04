@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3959: 6h Donchian(20) breakout + 12h pivot direction + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 12h pivot-based trend capture major swings with lower frequency than 4h. 12h pivot levels (R3/S3) act as institutional support/resistance - breaks above R3 or below S3 with volume confirmation indicate strong directional moves. Volume > 1.8x MA(20) confirms strength. ATR(14) trailing stop (2.0x) manages risk. Discrete sizing (0.25) reduces fee drag. Target: 75-150 trades over 4 years (19-37/year). Works in bull/bear via 12h pivot structure.
+Experiment #3959: 6h Donchian(20) breakout + 12h Camarilla pivot fade/breakout + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts aligned with 12h Camarilla pivot levels (R3/S3 for fade, R4/S4 for breakout) capture swing reversals and continuations. Volume > 1.5x MA(20) confirms strength. ATR(14) trailing stop (2.0x) manages risk. Discrete sizing (0.25) reduces fee drag. Target: 75-150 trades over 4 years (19-37/year). Works in bull/bear via pivot structure.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3959_6h_donchian20_12h_pivot_vol_v1"
+name = "exp_3959_6h_donchian20_12h_camarilla_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -19,30 +19,26 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for pivot-based trend ===
+    # === HTF: 12h data for Camarilla pivot levels ===
     df_12h = get_htf_data(prices, '12h')
-    # Calculate daily pivot points from 12h data (using previous 12h bar's H/L/C)
-    # For 12h timeframe, we use the prior 12h bar to calculate pivot for current period
-    prev_high = df_12h['high'].shift(1).values
-    prev_low = df_12h['low'].shift(1).values
-    prev_close = df_12h['close'].shift(1).values
-    
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + (prev_high - prev_low)
-    s2 = pivot - (prev_high - prev_low)
-    r3 = prev_high + 2 * (pivot - prev_low)
-    s3 = prev_low - 2 * (prev_high - pivot)
-    r4 = r3 + (prev_high - prev_low)
-    s4 = s3 - (prev_high - prev_low)
-    
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
+    # Calculate Camarilla levels from previous 12h bar (HLC of completed bar)
+    h_12h = df_12h['high'].values
+    l_12h = df_12h['low'].values
+    c_12h = df_12h['close'].values
+    # Pivot = (H + L + C) / 3
+    pivot_12h = (h_12h + l_12h + c_12h) / 3.0
+    # Range = H - L
+    range_12h = h_12h - l_12h
+    # Camarilla levels
+    r3_12h = pivot_12h + range_12h * 1.1 / 2
+    s3_12h = pivot_12h - range_12h * 1.1 / 2
+    r4_12h = pivot_12h + range_12h * 1.1
+    s4_12h = pivot_12h - range_12h * 1.1
+    # Align to 6h (shifted by 1 for completed bar)
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    r4_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
+    s4_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
     
     # === 6h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -77,7 +73,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -118,29 +115,26 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) to filter noise
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume spike (> 1.5x average) to filter noise
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Determine trend based on 12h pivot levels:
-            # Bullish if price above R3 (strong resistance turned support)
-            # Bearish if price below S3 (strong support turned resistance)
-            bullish = price > r3_aligned[i]
-            bearish = price < s3_aligned[i]
+            # Fade at R3/S3: price rejects these levels
+            fade_long = price <= s3_aligned[i] * 1.002 and price >= s3_aligned[i] * 0.998  # near S3
+            fade_short = price <= r3_aligned[i] * 1.002 and price >= r3_aligned[i] * 0.998  # near R3
             
-            # Long entry: breakout above Donchian upper band in bullish regime (above R3)
-            long_breakout = price > highest_high[i-1] and bullish
-            # Short entry: breakdown below Donchian lower band in bearish regime (below S3)
-            short_breakout = price < lowest_low[i-1] and bearish
+            # Breakout at R4/S4: price breaks these levels with momentum
+            breakout_long = price > r4_aligned[i] and price > highest_high[i-1]
+            breakout_short = price < s4_aligned[i] and price < lowest_low[i-1]
             
-            if long_breakout and not short_breakout:
+            if (fade_long or breakout_long) and not (fade_short or breakout_short):
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            elif short_breakout and not long_breakout:
+            elif (fade_short or breakout_short) and not (fade_long or breakout_long):
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
