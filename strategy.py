@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-exp_6455_6h_donchian20_1d_pivot_vol_v1
-Hypothesis: 6h Donchian(20) breakout with daily pivot confirmation and volume filter.
-Works in both bull and bear markets by trading breakouts with institutional reference points (pivots).
-Daily pivots provide static support/resistance that price respects across regimes.
-Volume confirmation ensures breakouts have conviction.
-Target: 50-150 trades over 4 years (12-37/year).
+exp_6456_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+Works in bull/bear: EMA50 filter ensures we only trade in the direction of the higher timeframe trend,
+while Donchian breakout captures momentum. Volume confirmation reduces false signals.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6455_6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_6456_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,94 +20,80 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    signals = np.zeros(n)
-    
-    # Load 1d data ONCE before loop
+    # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
-        return signals
+    if df_1d is None or len(df_1d) < 50:
+        return np.zeros(n)
     
-    # Calculate daily pivot points (standard formula)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate HTF indicators
     close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
+    # Calculate LTF indicators
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Align pivot levels to 6h timeframe (shifted by 1 for completed daily bars only)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Donchian channels (20-period)
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Calculate Donchian channels on 6h
-    lookback = 20
-    high_roll = prices['high'].rolling(window=lookback, min_periods=lookback).max()
-    low_roll = prices['low'].rolling(window=lookback, min_periods=lookback).min()
+    # Volume average (20-period)
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean()
-    vol_ratio = prices['volume'] / vol_ma
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(lookback, n):
-        # Skip if volume data not ready
-        if pd.isna(vol_ratio.iloc[i]):
+    # Start from sufficient lookback
+    start_idx = max(50, 20)
+    
+    for i in range(start_idx, n):
+        # Get aligned HTF values
+        ema_1d_val = ema_1d_aligned[i]
+        
+        # Skip if HTF data not ready
+        if np.isnan(ema_1d_val):
             continue
             
-        # Volume filter: need strong volume for breakout
-        if vol_ratio.iloc[i] < 1.5:
-            continue
+        # Volume confirmation
+        vol_ok = volume[i] > 1.5 * vol_ma[i] if not np.isnan(vol_ma[i]) else False
         
-        # Get current price and levels
-        close_price = prices['close'].iloc[i]
-        high_price = prices['high'].iloc[i]
-        low_price = prices['low'].iloc[i]
+        # Long condition: price breaks above Donchian high + above HTF EMA + volume
+        if position == 0:
+            if (close[i] > donch_high[i] and 
+                close[i] > ema_1d_val and 
+                vol_ok):
+                signals[i] = 0.30
+                position = 1
+                entry_price = close[i]
         
-        # Get pivot levels for this bar (from previous completed daily bar)
-        pivot_level = pivot_aligned[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
-        r2_level = r2_aligned[i]
-        s2_level = s2_aligned[i]
-        r3_level = r3_aligned[i]
-        s3_level = s3_aligned[i]
+        # Short condition: price breaks below Donchian low + below HTF EMA + volume
+        elif position == 0:
+            if (close[i] < donch_low[i] and 
+                close[i] < ema_1d_val and 
+                vol_ok):
+                signals[i] = -0.30
+                position = -1
+                entry_price = close[i]
         
-        # Skip if pivot levels not ready
-        if pd.isna(pivot_level) or pd.isna(r1_level) or pd.isna(s1_level):
-            continue
+        # Exit conditions
+        elif position == 1:  # Long position
+            # Stoploss: 2.5 * ATR below entry
+            # Take profit: signal reduces to 0.15 at 2R profit
+            if close[i] < entry_price - 2.5 * 0.01 * entry_price:  # Simplified ATR proxy
+                signals[i] = 0.0
+                position = 0
+            elif close[i] > entry_price + 2.5 * 0.01 * entry_price:  # 2.5R profit
+                signals[i] = 0.15  # Take half profit
         
-        # Donchian breakout conditions
-        donchian_high = high_roll.iloc[i]
-        donchian_low = low_roll.iloc[i]
-        
-        # Long: price breaks above Donchian high with volume, above daily pivot
-        if (high_price > donchian_high and 
-            close_price > pivot_level and
-            close_price > r1_level):
-            signals[i] = 0.25
-        
-        # Short: price breaks below Donchian low with volume, below daily pivot
-        elif (low_price < donchian_low and 
-              close_price < pivot_level and
-              close_price < s1_level):
-            signals[i] = -0.25
-        
-        # Exit conditions: reverse signal or stoploss proximity
-        # Exit long if price breaks below Donchian low or below S1
-        elif signals[i-1] > 0 and (low_price < donchian_low or close_price < s1_level):
-            signals[i] = 0.0
-        
-        # Exit short if price breaks above Donchian high or above R1
-        elif signals[i-1] < 0 and (high_price > donchian_high or close_price > r1_level):
-            signals[i] = 0.0
+        elif position == -1:  # Short position
+            if close[i] > entry_price + 2.5 * 0.01 * entry_price:
+                signals[i] = 0.0
+                position = 0
+            elif close[i] < entry_price - 2.5 * 0.01 * entry_price:
+                signals[i] = -0.15  # Take half profit
     
     return signals
