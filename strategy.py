@@ -1,43 +1,47 @@
 #!/usr/bin/env python3
 """
-exp_6737_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with daily EMA trend filter and volume confirmation.
-Uses price channel structure for breakouts in both bull and bear markets.
-Daily EMA50 filters trend direction: only long when price > EMA50, short when price < EMA50.
-Volume confirmation ensures breakouts are legitimate. Designed for ~25-50 trades/year (100-200 total over 4 years).
-Works in bull markets via breakout continuation and bear markets via mean reversion at channel edges.
+exp_6738_1d_donchian20_1w_ema_vol_v1
+Hypothesis: 1d Donchian(20) breakout with weekly EMA(50) trend filter and volume confirmation.
+In bull markets (price > weekly EMA50): take long breakouts above Donchian upper.
+In bear markets (price < weekly EMA50): take short breakouts below Donchian lower.
+Weekly EMA50 provides higher timeframe trend filter to avoid counter-trend trades.
+Volume confirms breakout legitimacy. Designed for 1d timeframe to capture major swings
+with ~7-25 trades/year (30-100 total over 4 years). Works in both bull and bear markets
+by aligning with weekly trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6737_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_6738_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 6  # ~1 day (4h bars)
+MAX_HOLD_BARS = 30  # ~1.5 months (1d bars)
+EMA_PERIOD = 50
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for daily EMA
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - using 1w for weekly EMA
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily EMA50
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)  # auto shift(1) for completed bars
+    # Calculate weekly EMA50
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    
+    # Align to LTF (1d)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -65,13 +69,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -99,26 +103,21 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend direction from daily EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Determine trend from weekly EMA
+        is_uptrend = close[i] > ema_1w_aligned[i]
         
-        # Breakout signals with trend filter
-        long_breakout = uptrend and (close[i] > highest_high[i]) and vol_confirmed
-        short_breakout = downtrend and (close[i] < lowest_low[i]) and vol_confirmed
-        
-        # Mean reversion at channel edges (counter-trend)
-        long_mean_revert = downtrend and (close[i] <= lowest_low[i]) and vol_confirmed
-        short_mean_revert = uptrend and (close[i] >= highest_high[i]) and vol_confirmed
+        # Breakout signals aligned with weekly trend
+        long_breakout = is_uptrend and (close[i] > highest_high[i]) and vol_confirmed
+        short_breakout = (not is_uptrend) and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if long_breakout or long_mean_revert:
+            if long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif short_breakout or short_mean_revert:
+            elif short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
