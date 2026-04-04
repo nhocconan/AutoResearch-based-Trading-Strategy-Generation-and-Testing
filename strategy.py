@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3742: 12h Donchian(20) breakout + 1d EMA200 trend + volume confirmation + ATR trailing stop
-HYPOTHESIS: 12h Donchian breakouts capture longer-term momentum with fewer trades (lower fee drag), while 1d EMA200 provides structural trend bias to filter false breakouts. Volume spike (>2.0x) confirms breakout authenticity. ATR-based trailing stop (2.5x) manages risk. This combination avoids whipsaw in ranging markets and works in both bull (breakouts with trend) and bear (breakouts against trend filtered by EMA) regimes. Position size 0.25 manages drawdown from 2022 crash while allowing profit accumulation. Target: 50-150 trades over 4 years.
+HYPOTHESIS: 12h Donchian breakouts capture longer-term momentum with fewer trades to minimize fee drag. 1d EMA200 provides structural trend bias to filter false breakouts in both bull and bear markets. Volume spike (>2.0x) confirms breakout authenticity. ATR-based trailing stop (2.5x) manages risk. Target: 50-150 total trades over 4 years (12-37/year) to balance statistical significance and fee efficiency.
 """
 
 import numpy as np
