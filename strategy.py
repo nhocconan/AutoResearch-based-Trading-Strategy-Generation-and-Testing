@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5253: 4h Donchian(20) Breakout + HMA Trend + Volume Confirmation + ATR Stoploss
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts capture institutional momentum when confirmed by volume (>1.5x 20-bar average) and aligned with 12h HMA(21) trend. Exits via ATR(14) trailing stop (2.0x). Designed for 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag. Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered by regime). Uses discrete position sizing (0.30) to minimize fee churn.
+Experiment #5255: 6h Donchian Breakout + Weekly Pivot Direction + Volume Confirmation
+HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts aligned with weekly pivot direction (from 1w timeframe) provide high-probability trend entries. Enter long when price breaks above Donchian(20) high AND weekly pivot > prior weekly pivot (bullish bias) with volume confirmation (>1.5x). Enter short when price breaks below Donchian(20) low AND weekly pivot < prior weekly pivot (bearish bias) with volume confirmation. Designed for 12-37 trades/year on 6h timeframe (50-150 total over 4 years) to minimize fee drag. Weekly pivot filter ensures we only trade with the higher-timeframe trend, reducing whipsaw in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5253_4h_donchian20_hma_vol_v1"
-timeframe = "4h"
+name = "exp_5255_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,54 +19,42 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 12h data for HMA(21) trend
-    df_12h = get_htf_data(prices, '12h')
+    # Precompute HTF: 1w data for weekly pivot direction
+    df_1w = get_htf_data(prices, '1w')
     
-    # === 12h Indicators: HMA(21) for trend filter ===
-    if len(df_12h) >= 21:
-        # Hull Moving Average: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        half_len = 12 // 2
-        sqrt_len = int(np.sqrt(12))
+    # === 1w Indicators: Weekly Pivot Direction (using prior week's OHLC) ===
+    if len(df_1w) >= 1:
+        # Prior week OHLC (shifted by 1 to avoid look-ahead)
+        prior_week_high = df_1w['high'].shift(1).values
+        prior_week_low = df_1w['low'].shift(1).values
+        prior_week_close = df_1w['close'].shift(1).values
         
-        def wma(arr, period):
-            weights = np.arange(1, period + 1)
-            return np.convolve(arr, weights/weights.sum(), mode='valid')
+        # Weekly pivot point
+        weekly_pivot = (prior_week_high + prior_week_low + prior_week_close) / 3.0
+        # Prior week's pivot for direction
+        prior_weekly_pivot = np.roll(weekly_pivot, 1)
+        prior_weekly_pivot[0] = np.nan
         
-        close_12h = df_12h['close'].values
-        if len(close_12h) >= 12:
-            wma_half = wma(close_12h, half_len)
-            wma_full = wma(close_12h, 12)
-            wma_diff = 2 * wma_half - wma_full
-            if len(wma_diff) >= sqrt_len:
-                hma_12h = wma(wma_diff, sqrt_len)
-                # Prepend NaNs for alignment
-                hma_12h_full = np.full(len(close_12h), np.nan)
-                hma_12h_full[half_len:half_len+len(hma_12h)] = hma_12h
-                hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_full)
-            else:
-                hma_12h_aligned = np.full(n, np.nan)
-        else:
-            hma_12h_aligned = np.full(n, np.nan)
+        # Weekly pivot direction: 1 = bullish (pivot rising), -1 = bearish (pivot falling)
+        weekly_pivot_dir = np.where(weekly_pivot > prior_weekly_pivot, 1, 
+                                   np.where(weekly_pivot < prior_weekly_pivot, -1, 0))
+        
+        # Align to 6h timeframe (shift(1) in align_htf_to_ltf ensures prior week only)
+        weekly_pivot_dir_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_dir.astype(np.float64))
     else:
-        hma_12h_aligned = np.full(n, np.nan)
+        weekly_pivot_dir_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian(20) channels ===
-    donch_len = 20
-    if n >= donch_len:
-        # Upper channel: highest high over past 20 periods
-        upper = pd.Series(high).rolling(window=donch_len, min_periods=donch_len).max().values
-        # Lower channel: lowest low over past 20 periods
-        lower = pd.Series(low).rolling(window=donch_len, min_periods=donch_len).min().values
-    else:
-        upper = np.full(n, np.nan)
-        lower = np.full(n, np.nan)
+    # === 6h Indicators: Donchian Channel (20) ===
+    lookback = 20
+    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 4h Indicators: Volume confirmation (1.5x spike) ===
+    # === 6h Indicators: Volume confirmation (1.5x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -75,7 +63,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -88,8 +76,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(hma_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(weekly_pivot_dir_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -122,23 +110,23 @@ def generate_signals(prices):
         # Volume filter: confirmation (>1.5x)
         vol_confirm = vol_ratio[i] > 1.5
         
-        # Trend filter: bullish if price > 12h HMA(21), bearish if price < 12h HMA(21)
-        trend_bullish = price > hma_12h_aligned[i]
-        trend_bearish = price < hma_12h_aligned[i]
+        # Donchian breakout conditions
+        breakout_long = price > donchian_high[i]
+        breakout_short = price < donchian_low[i]
         
-        # Breakout conditions
-        breakout_long = (price >= upper[i]) and trend_bullish and vol_confirm
-        breakout_short = (price <= lower[i]) and trend_bearish and vol_confirm
+        # Weekly pivot direction filter
+        pivot_bullish = weekly_pivot_dir_aligned[i] > 0
+        pivot_bearish = weekly_pivot_dir_aligned[i] < 0
         
-        # Final entry conditions
-        if breakout_long:
+        # Final entry conditions: Donchian breakout + weekly pivot direction + volume
+        if breakout_long and pivot_bullish and vol_confirm:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif breakout_short:
+        elif breakout_short and pivot_bearish and vol_confirm:
             in_position = True
             position_side = -1
             entry_price = close[i]
