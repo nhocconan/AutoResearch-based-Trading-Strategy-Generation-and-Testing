@@ -1,58 +1,41 @@
 #!/usr/bin/env python3
 """
-exp_6493_4h_donchian20_12h_hma_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 12h HMA(21) trend filter and volume confirmation.
-Uses 12h HMA(21) as trend filter for smoother trend detection than EMA, reducing whipsaw.
-Donchian breakout provides entry timing, volume confirmation filters weak breakouts.
-Designed to work in both bull and bear markets by using 12h HMA as trend filter.
-Target: 75-200 trades over 4 years (19-50/year). Uses 4h primary timeframe per experiment instructions.
+exp_6492_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+Uses 12h primary timeframe to reduce trade frequency and fee drag. Daily EMA(50) filters trend direction.
+Donchian breakouts capture momentum moves, volume confirmation ensures strong participation.
+Designed for 50-150 total trades over 4 years (12-37/year) with discrete position sizing (0.25).
+Works in both bull and bear markets by using 1d EMA as trend filter and Donchian breakouts for momentum.
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6493_4h_donchian20_12h_hma_vol_v1"
-timeframe = "4h"
+name = "exp_6492_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-HMA_PERIOD = 21
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_THRESHOLD = 1.8  # volume must be 1.8x its 20-period MA
-SIGNAL_SIZE = 0.25   # 25% position size
-
-def calculate_hma(series, period):
-    """Calculate Hull Moving Average"""
-    if len(series) < period:
-        return np.full_like(series, np.nan)
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA of half period
-    wma_half = pd.Series(series).ewm(span=half_period, adjust=False).mean()
-    # WMA of full period
-    wma_full = pd.Series(series).ewm(span=period, adjust=False).mean()
-    # Raw HMA
-    raw_hma = 2 * wma_half - wma_full
-    # Final HMA
-    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
-    return hma.values
+SIGNAL_SIZE = 0.25   # 25% position size (discrete level to minimize fee churn)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 12h for HMA trend
-    df_12h = get_htf_data(prices, '12h')
+    # Load HTF data ONCE before loop - using 1d for EMA trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h HMA(21)
-    close_12h = df_12h['close'].values
-    hma_12h = calculate_hma(close_12h, HMA_PERIOD)
+    # Calculate 1d EMA(50)
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, min_periods=EMA_PERIOD, adjust=False).mean().values
     
-    # Align to LTF (4h) with shift(1) for completed bars only
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    # Align to LTF (12h) with shift(1) for completed bars only
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -72,21 +55,21 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, HMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if HMA data not available
-        if np.isnan(hma_12h_aligned[i]):
+        # Skip if EMA data not available
+        if np.isnan(ema_1d_aligned[i]):
             continue
             
-        # Long conditions: price breaks above Donchian HIGH + above 12h HMA + volume spike
+        # Long conditions: price breaks above Donchian HIGH + above 1d EMA + volume spike
         long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
-        long_trend = close[i] > hma_12h_aligned[i]  # price above 12h HMA (bullish trend)
+        long_trend = close[i] > ema_1d_aligned[i]  # price above 1d EMA (bullish trend)
         long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Short conditions: price breaks below Donchian LOW + below 12h HMA + volume spike
+        # Short conditions: price breaks below Donchian LOW + below 1d EMA + volume spike
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
-        short_trend = close[i] < hma_12h_aligned[i]  # price below 12h HMA (bearish trend)
+        short_trend = close[i] < ema_1d_aligned[i]  # price below 1d EMA (bearish trend)
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Exit conditions: simple midpoint reversal
