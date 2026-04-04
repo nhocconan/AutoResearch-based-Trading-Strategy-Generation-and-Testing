@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #3011: 6h Donchian Breakout + 1d Pivot Direction + Volume Spike
-HYPOTHESIS: Donchian(20) breakouts on 6h capture medium-term trends. 1d pivot levels (R3/S3) provide
-directional bias: only take longs when price > S3, shorts when price < R3. Volume spike
-(>2.0x 20-period average) confirms breakout strength. This filters false breakouts while
-catching strong moves in both bull and bear markets. 6h timeframe balances trade frequency
-and fee drag. Target: 75-200 total trades over 4 years.
+Experiment #3013: 4h Donchian Breakout + 12h HMA Trend + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 4h capture medium-term trends. 12h HMA(21) provides
+trend filter: only take longs when price > HMA, shorts when price < HMA. Volume spike
+(>2.0x 20-period average) confirms breakout strength. This combination filters false
+breakouts in choppy markets while capturing strong trends. 4h timeframe balances
+trade frequency and fee drag. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3011_6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_3013_4h_donchian20_12h_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,30 +23,31 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for pivot levels (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === HTF: 12h data for HMA trend (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate Camarilla pivot levels from previous 1d bar
-    # Pivot = (H + L + C) / 3
-    # R3 = Pivot + (H - L) * 1.1
-    # S3 = Pivot - (H - L) * 1.1
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r3_1d = pivot_1d + (high_1d - low_1d) * 1.1
-    s3_1d = pivot_1d - (high_1d - low_1d) * 1.1
+    # Calculate HMA(21) on 12h close
+    def calculate_hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean()
+        wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean()
+        raw = 2 * wma2 - wma1
+        hma = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
+        return hma.values
     
-    # Align to 6h timeframe (shifted by 1 for completed bars only)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    hma_12h = calculate_hma(close_12h, 21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # === 6h Indicators: Donchian channels (20-period) ===
+    # === 4h Indicators: Donchian channels (20-period) ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -67,8 +68,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+            np.isnan(hma_12h_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -114,16 +114,19 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Long entry: price breaks above Donchian high AND above S3 pivot (bullish bias)
-            if price > highest_high[i] and price > s3_1d_aligned[i]:
+            # Get 12h HMA trend
+            price_vs_hma = price - hma_12h_aligned[i]
+            
+            # Long entry: price breaks above Donchian high with bullish 12h trend
+            if price > highest_high[i] and price_vs_hma > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low AND below R3 pivot (bearish bias)
-            elif price < lowest_low[i] and price < r3_1d_aligned[i]:
+            # Short entry: price breaks below Donchian low with bearish 12h trend
+            elif price < lowest_low[i] and price_vs_hma < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
