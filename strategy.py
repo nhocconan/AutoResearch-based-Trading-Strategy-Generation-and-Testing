@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4615: 6h Donchian Breakout + Weekly Trend Filter + Volume Confirmation
-HYPOTHESIS: 6h price breaking 20-period Donchian channels with volume confirmation (>1.5x avg) 
-and aligned with weekly trend (price above/below weekly EMA20) captures strong momentum moves. 
-Weekly trend filter prevents counter-trend trades in bear markets. Discrete sizing (0.25) 
-and ATR trailing stop (2.0x) manage risk. Target: 12-37 trades/year on 6h timeframe.
+Experiment #4615: 6h Camarilla Pivot Breakout/Fade + Volume Confirmation
+HYPOTHESIS: 6h price breaking Camarilla R4/S4 levels (from prior 1d) with volume confirmation (>1.5x avg) captures strong momentum breakouts, while fading R3/S3 levels with volume exhaustion (<0.7x avg) captures mean reversion in ranging markets. Uses 1d HTF for pivot calculation to avoid look-ahead. Discrete sizing (0.25) and ATR trailing stop (2.0x) manage risk. Target: 12-37 trades/year on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4615_6h_donchian_breakout_weekly_trend_vol_v1"
+name = "exp_4615_6h_camarilla_pivot_vol_v2"
 timeframe = "6h"
 leverage = 1.0
 
@@ -22,29 +19,41 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: weekly data for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Precompute HTF: 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA20 for trend filter
-    if len(df_1w) >= 1:
-        weekly_close = df_1w['close'].values
-        weekly_ema = pd.Series(weekly_close).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Calculate Camarilla pivot levels from prior 1d OHLC
+    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
+    # S4 = C - ((H-L) * 1.1/2), S3 = C - ((H-L) * 1.1/4), etc.
+    if len(df_1d) >= 1:
+        # Use prior day's OHLC (shifted by 1 to avoid look-ahead)
+        ph = np.concatenate([[np.nan], df_1d['high'].values[:-1]])  # prior day high
+        pl = np.concatenate([[np.nan], df_1d['low'].values[:-1]])   # prior day low
+        pc = np.concatenate([[np.nan], df_1d['close'].values[:-1]]) # prior day close
+        
+        # Camarilla calculations
+        rng = ph - pl
+        camarilla_r4 = pc + (rng * 1.1 / 2.0)
+        camarilla_r3 = pc + (rng * 1.1 / 4.0)
+        camarilla_s3 = pc - (rng * 1.1 / 4.0)
+        camarilla_s4 = pc - (rng * 1.1 / 2.0)
     else:
-        weekly_ema = np.array([])
+        camarilla_r4 = np.array([])
+        camarilla_r3 = np.array([])
+        camarilla_s3 = np.array([])
+        camarilla_s4 = np.array([])
     
-    # Align weekly EMA to 6h timeframe
-    if len(weekly_ema) > 0:
-        weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    # Align Camarilla levels to 6h timeframe
+    if len(camarilla_r4) > 0:
+        r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+        r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+        s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+        s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     else:
-        weekly_ema_aligned = np.full(n, np.nan)
-    
-    # === 6h Indicators: Donchian Channel (20) ===
-    # Upper band = highest high over 20 periods
-    # Lower band = lowest low over 20 periods
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+        r4_aligned = np.full(n, np.nan)
+        r3_aligned = np.full(n, np.nan)
+        s3_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,12 +78,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, weekly EMA, ATR warmup
+    warmup = max(20, 14)  # Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(weekly_ema_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(s4_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -104,18 +113,19 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: strong volume (>1.5x avg) for breakouts
-        vol_confirm = vol_ratio[i] > 1.5
+        # Volume filters: confirmation for breakouts (>1.5x), exhaustion for fades (<0.7x)
+        vol_breakout = vol_ratio[i] > 1.5   # Strong volume for breakout
+        vol_exhaustion = vol_ratio[i] < 0.7 # Weak volume for fade
         
-        # Weekly trend filter: price above/below weekly EMA20
-        weekly_uptrend = price > weekly_ema_aligned[i]
-        weekly_downtrend = price < weekly_ema_aligned[i]
+        # Breakout conditions: price breaks R4/S4 with volume confirmation
+        breakout_long = price > r4_aligned[i] and vol_breakout
+        breakout_short = price < s4_aligned[i] and vol_breakout
         
-        # Donchian breakout conditions
-        breakout_long = price > donchian_upper[i] and vol_confirm and weekly_uptrend
-        breakout_short = price < donchian_lower[i] and vol_confirm and weekly_downtrend
+        # Fade conditions: price rejects R3/S3 with volume exhaustion
+        fade_long = price < r3_aligned[i] and price > s3_aligned[i] and vol_exhaustion
+        fade_short = price > r3_aligned[i] and price < s3_aligned[i] and vol_exhaustion
         
-        # Enter positions
+        # Combine logic: breakouts take precedence, fades only in range
         if breakout_long:
             in_position = True
             position_side = 1
@@ -124,6 +134,20 @@ def generate_signals(prices):
             lowest_since_entry = low[i]
             signals[i] = SIZE
         elif breakout_short:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = -SIZE
+        elif fade_long and not (breakout_long or breakout_short):
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = SIZE
+        elif fade_short and not (breakout_long or breakout_short):
             in_position = True
             position_side = -1
             entry_price = close[i]
