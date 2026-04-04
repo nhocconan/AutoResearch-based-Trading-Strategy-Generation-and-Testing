@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #6064: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA trend capture major swing moves with proper trend alignment. Volume >1.5x average confirms participation. Works in bull markets (breakouts above rising EMAs) and bear markets (breakdowns below falling EMAs). Target: 30-100 trades over 4 years (7-25/year). Discrete sizing (0.25) minimizes fee drag.
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA trend capture major swing moves. Weekly trend filter ensures we only trade in direction of higher timeframe momentum, reducing false breakouts in choppy markets. Volume confirmation (>1.5x average) ensures institutional participation. Designed for low trade frequency (target: 30-100 total over 4 years) to minimize fee drag. Works in bull markets (breakouts above rising weekly EMA) and bear markets (breakdowns below falling weekly EMA).
 """
 
 import numpy as np
