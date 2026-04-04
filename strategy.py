@@ -3,8 +3,8 @@
 Experiment #2493: 4h Donchian(20) breakout + 12h EMA trend + volume confirmation
 HYPOTHESIS: Donchian channel breakouts with 12h trend alignment and volume spikes capture 
 institutional participation during trend acceleration. Uses discrete position sizing (0.25) 
-and ATR-based trailing stop to limit drawdown. Target: 75-200 total trades over 4 years 
-(19-50/year) to minimize fee drag while maintaining statistical significance.
+to limit fee drag and ensure 75-200 total trades over 4 years. Works in bull markets 
+(breakouts with volume) and bear markets (breakdowns with volume).
 """
 
 import numpy as np
