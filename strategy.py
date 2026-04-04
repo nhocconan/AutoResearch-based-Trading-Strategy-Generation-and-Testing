@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #6197: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA200 trend capture medium-term momentum
-with volume >1.5x average confirming institutional participation. ATR trailing stop manages risk.
-Discrete sizing (0.25) reduces fee drag. Target: 100-180 trades over 4 years (25-45/year).
-Timeframe: 4h. HTF: 1d for EMA200 trend filter.
+Experiment #6197: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA trend capture medium-term momentum 
+in both bull and bear markets. Volume >2.0x average confirms institutional participation. 
+ATR trailing stop manages risk. Discrete sizing (0.25) balances return and fee drag. 
+Target: 75-200 trades over 4 years (19-50/year).
+Timeframe: 4h. HTF: 1d for EMA trend filter.
 """
 
 import numpy as np
@@ -25,10 +26,10 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for EMA200 trend filter ===
+    # === HTF: 1d data for EMA trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 200:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False).mean().values
+    if len(df_1d) >= 21:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False).mean().values
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
         ema_1d_aligned = np.full(n, np.nan)
@@ -60,7 +61,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 200) + 1  # Donchian, volume avg, ATR, EMA200 + 1
+    warmup = max(20, 20, 14, 21) + 1  # Donchian, volume avg, ATR, EMA21 + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (21:00-23:59 UTC) ---
@@ -105,9 +106,9 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.5  # Volume filter for stronger signals
+        volume_confirmed = volume_ratio[i] > 2.0  # Volume filter for stronger signals
         
-        # 1d EMA200 trend filter: price relative to EMA200
+        # 1d EMA21 trend filter: price relative to EMA21
         bullish_trend = price > ema_1d_aligned[i]
         bearish_trend = price < ema_1d_aligned[i]
         
