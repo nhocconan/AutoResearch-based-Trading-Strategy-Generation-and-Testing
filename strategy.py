@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #2932: 12h Donchian Breakout + Daily Pivot Direction + Volume Spike
-HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture swing moves with lower fee drag.
-Daily pivot (from 1d data) provides directional bias: only take long breakouts when price > daily pivot,
-and short breakouts when price < daily pivot. Volume spike (>2.0x 20-period average) confirms breakout strength.
-Target: 50-150 total trades over 4 years (12-37/year). Works in both bull (breakouts with bias) and bear
-(breakouts with bias) regimes by filtering counter-trend noise.
+Experiment #2934: 1h Donchian Breakout + 4h/1d Direction + Volume Spike + Session Filter
+HYPOTHESIS: Donchian(20) breakouts on 1h timeframe capture short-term trends.
+4h EMA(50) and 1d close vs weekly pivot provide directional bias: only take long
+breakouts when 4h EMA>price and price>weekly pivot, short when opposite.
+Volume spike (>2.0x 20-period average) confirms breakout strength.
+Session filter (08-20 UTC) reduces noise trades. Target: 60-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2932_12h_donchian20_1d_pivot_vol_v1"
-timeframe = "12h"
+name = "exp_2934_1h_donchian20_4h_1d_dir_vol_sess_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,34 +21,43 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
+    open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1d data for daily pivot (Call ONCE before loop) ===
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # === HTF: 4h data for EMA(50) trend filter (Call ONCE before loop) ===
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # === HTF: 1d data for weekly pivot bias (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot: P = (H + L + C) / 3
+    # Calculate weekly pivot from daily OHLC (last 5 days)
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    weekly_pivot = pd.Series(pivot_1d).rolling(window=5, min_periods=5).mean().values
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
-    # Align to 12h timeframe (shifted by 1 for completed bars only)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    
-    # === 12h Indicators: Donchian channels (20-period) ===
+    # === 1h Indicators: Donchian channels (20-period) ===
     lookback = 20
-    # Rolling max/min for Donchian channels
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 1h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.20  # 20% position size
     
     # Position tracking state variables
     in_position = False
@@ -60,9 +69,15 @@ def generate_signals(prices):
     warmup = max(50, lookback, 20)  # sufficient for all indicators
     
     for i in range(warmup, n):
+        # --- Session Filter ---
+        if not in_session[i]:
+            signals[i] = 0.0
+            continue
+        
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(ema_4h_aligned[i]) or np.isnan(weekly_pivot_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -74,7 +89,6 @@ def generate_signals(prices):
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
                 # Exit if price drops 2.5*ATR below highest since entry
-                # Use 12h ATR(14) approximation from price range
                 atr_estimate = (high[i] - low[i]) * 0.5
                 if price < highest_since_entry - 2.5 * atr_estimate:
                     in_position = False
@@ -109,19 +123,20 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Get daily pivot bias
-            price_vs_pivot = price - pivot_aligned[i]
+            # Get directional biases
+            price_vs_ema = price - ema_4h_aligned[i]
+            price_vs_pivot = price - weekly_pivot_aligned[i]
             
-            # Long entry: price breaks above Donchian high with bullish bias
-            if price > highest_high[i] and price_vs_pivot > 0:
+            # Long entry: price breaks above Donchian high with bullish 4h EMA and weekly pivot
+            if price > highest_high[i] and price_vs_ema > 0 and price_vs_pivot > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with bearish bias
-            elif price < lowest_low[i] and price_vs_pivot < 0:
+            # Short entry: price breaks below Donchian low with bearish 4h EMA and weekly pivot
+            elif price < lowest_low[i] and price_vs_ema < 0 and price_vs_pivot < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
