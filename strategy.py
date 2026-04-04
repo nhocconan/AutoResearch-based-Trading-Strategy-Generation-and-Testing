@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-exp_6770_1d_donchian20_1w_ema_vol_v1
-Hypothesis: 1d Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation.
-In bull markets (price > weekly EMA50): long breakouts only. In bear markets (price < weekly EMA50): short breakouts only.
-Weekly EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
-Designed for 1d timeframe to capture major swings with ~7-25 trades/year (30-100 total over 4 years).
-Works in both bull and bear markets by aligning with weekly trend direction.
+exp_6771_6h_donchian20_1d_pivot_vol_v1
+Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot levels and volume confirmation.
+Long when price breaks above Donchian high AND above daily R3 pivot with volume spike.
+Short when price breaks below Donchian low AND below daily S3 pivot with volume spike.
+Uses 1d HTF for pivot structure to avoid noise, 6h for precise timing.
+Designed for ranging and trending markets - pivots act as dynamic support/resistance.
+Volume confirmation ensures breakout legitimacy. Target: 12-37 trades/year.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6770_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_6771_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
@@ -23,23 +24,35 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 30  # ~1.5 months (1d bars)
-EMA_PERIOD = 50
+MAX_HOLD_BARS = 20  # ~5 days (6h bars)
+PIVOT_LOOKBACK = 1  # use previous day's pivot
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1w for weekly EMA
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop - using 1d for daily pivots
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA50
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate daily Camarilla pivot levels (using previous day's OHLC)
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align to LTF (1d)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate pivot levels for each day
+    rng = high_1d - low_1d
+    r3_1d = close_1d + (rng * 1.1 / 4)
+    s3_1d = close_1d - (rng * 1.1 / 4)
+    r4_1d = close_1d + (rng * 1.1 / 2)
+    s4_1d = close_1d - (rng * 1.1 / 2)
+    
+    # Align to LTF (6h) - note: pivots are based on previous day's data
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -67,13 +80,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if HTF data not available
-        if np.isnan(ema_1w_aligned[i]):
+        # Skip if HTF data not available (first day)
+        if np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -101,13 +114,11 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend direction from weekly EMA50
-        weekly_uptrend = close[i] > ema_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_1w_aligned[i]
-        
-        # Breakout signals aligned with weekly trend
-        long_breakout = weekly_uptrend and (close[i] > highest_high[i]) and vol_confirmed
-        short_breakout = weekly_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
+        # Breakout signals with pivot confirmation
+        # Long: price above Donchian high AND above R3 pivot
+        long_breakout = (close[i] > highest_high[i]) and (close[i] > r3_1d_aligned[i]) and vol_confirmed
+        # Short: price below Donchian low AND below S3 pivot
+        short_breakout = (close[i] < lowest_low[i]) and (close[i] < s3_1d_aligned[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
