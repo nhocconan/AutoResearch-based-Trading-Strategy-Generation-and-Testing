@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4542: 12h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation
-HYPOTHESIS: 12h Donchian(20) breakouts aligned with 1d EMA(50) trend (bullish when price > EMA, bearish when price < EMA) and volume confirmation (>1.8x average) capture medium-term momentum with higher timeframe trend filter. Uses only 1d HTF (not 1w) to reduce complexity and increase signal reliability. Position size 0.25, ATR trailing stop 2.5x. Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year). Works in both bull and bear markets by only trading breakouts in direction of higher timeframe EMA trend.
+Experiment #4545: 12h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation
+HYPOTHESIS: 12h Donchian(20) breakouts aligned with 1d EMA(50) trend (bullish when price > EMA, bearish when price < EMA) and volume confirmation (>1.8x average) capture medium-term momentum with higher timeframe trend filter. Uses 12h primary timeframe to target 50-150 total trades over 4 years (12-37/year). Works in both bull and bear markets by only trading breakouts in direction of higher timeframe EMA trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4542_12h_donchian20_1d_ema_vol_v1"
+name = "exp_4545_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -133,5 +133,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</exp_4542_12h_donchian20_1d_ema_vol_v1>
