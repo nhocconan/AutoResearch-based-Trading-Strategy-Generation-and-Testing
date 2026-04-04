@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #4916: 12h Donchian(20) Breakout + 1d HMA21 Trend + Volume Spike + Chop Filter
-HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with 1d HMA21 trend direction with volume confirmation (>2x) and choppiness regime filter (CHOP > 61.8 = range) capture sustained moves while avoiding whipsaws. Designed for 12-37 trades/year on 12h timeframe to minimize fee drift. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend) by using HTF trend filter and volatility regime.
+Experiment #4916: 12h Donchian(20) Breakout + 1d Volume Spike + Chop Regime Filter
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts with volume confirmation (>2x average) and 
+choppiness regime filter (CHOP > 61.8 = ranging) capture sustained moves while avoiding whipsaws. 
+Uses ATR(14) trailing stop (2.5x) for risk management. Designed for 12-37 trades/year to minimize 
+fee drag while maintaining statistical significance. Works in bull markets (breakouts with momentum) 
+and bear markets (breakdowns with volume) by requiring both price expansion and participation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4916_12h_donchian20_1d_hma_vol_chop_v1"
+name = "exp_4916_12h_donchian20_1d_vol_chop_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -19,46 +23,10 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for HMA21 trend filter and chop regime
+    # Precompute HTF: 1d data for choppiness regime filter
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d Indicators: HMA21 for trend filter ===
-    if len(df_1d) >= 21:
-        # Hull Moving Average calculation
-        half_len = len(df_1d) // 2
-        sqrt_len = int(np.sqrt(len(df_1d)))
-        
-        # WMA function
-        def wma(values, window):
-            weights = np.arange(1, window + 1)
-            return np.convolve(values, weights, 'valid') / weights.sum()
-        
-        close_1d = df_1d['close'].values
-        wma_half = np.array([wma(close_1d[i:i+half_len], half_len)[-1] 
-                            if i+half_len <= len(close_1d) else np.nan 
-                            for i in range(len(close_1d))])
-        wma_full = np.array([wma(close_1d[i:i+len(close_1d)], len(close_1d))[-1] 
-                            if i+len(close_1d) <= len(close_1d) else np.nan 
-                            for i in range(len(close_1d))])
-        wma_sqrt = np.array([wma(close_1d[i:i+sqrt_len], sqrt_len)[-1] 
-                            if i+sqrt_len <= len(close_1d) else np.nan 
-                            for i in range(len(close_1d))])
-        
-        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        hma_raw = 2 * wma_half - wma_full
-        hma_1d = np.array([wma(hma_raw[i:i+sqrt_len], sqrt_len)[-1] 
-                          if i+sqrt_len <= len(hma_raw) else np.nan 
-                          for i in range(len(hma_raw))])
-    else:
-        hma_1d = np.full(len(df_1d), np.nan)
-    
-    # Align HTF HMA21 to 12h timeframe
-    if len(hma_1d) > 0:
-        hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
-    else:
-        hma_1d_aligned = np.full(n, np.nan)
-    
-    # === 1d Indicators: Choppiness Index (CHOP) for regime filter ===
+    # === 1d Indicators: Choppiness Index (CHOP) ===
     if len(df_1d) >= 14:
         high_1d = df_1d['high'].values
         low_1d = df_1d['low'].values
@@ -69,28 +37,24 @@ def generate_signals(prices):
         tr2 = np.abs(high_1d[1:] - close_1d[:-1])
         tr3 = np.abs(low_1d[1:] - close_1d[:-1])
         tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-        atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+        atr_1d = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
         
-        # MaxHigh - MinLow over 14 periods
-        max_high = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-        min_low = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-        max_min_range = max_high - min_low
+        # Highest high and lowest low over 14 periods
+        hh_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+        ll_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
         
-        # CHOP = 100 * log10(ATRsum / (MaxHigh - MinLow)) / log10(14)
-        # Avoid division by zero and log of zero
-        ratio = np.where((max_min_range > 0) & (~np.isnan(atr_sum)), atr_sum / max_min_range, 1.0)
-        log_ratio = np.log10(ratio)
-        log_14 = np.log10(14)
-        chop = 100 * log_ratio / log_14
-        chop = np.where(np.isnan(chop), 50.0, chop)  # neutral if undefined
+        # Choppiness Index: CHOP = 100 * log10(sum(ATR14) / (HH14 - LL14)) / log10(14)
+        sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+        chop_raw = 100 * np.log10(sum_atr_14 / np.maximum(hh_14 - ll_14, 1e-10)) / np.log10(14)
+        chop_1d = chop_raw  # Already in 0-100 range
     else:
-        chop = np.full(len(df_1d), 50.0)
+        chop_1d = np.full(len(df_1d), np.nan)
     
     # Align HTF CHOP to 12h timeframe
-    if len(chop) > 0:
-        chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    if len(chop_1d) > 0:
+        chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
     else:
-        chop_aligned = np.full(n, 50.0)
+        chop_1d_aligned = np.full(n, np.nan)
     
     # === 12h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -119,13 +83,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, Volume MA, ATR warmup
+    warmup = max(20, 20, 14, 14)  # Donchian, Volume MA, ATR, CHOP warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(hma_1d_aligned[i]) or np.isnan(chop_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(chop_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -155,15 +118,15 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
+        # Regime filter: only trade in ranging markets (CHOP > 61.8)
+        regime_filter = chop_1d_aligned[i] > 61.8
+        
         # Volume filter: confirmation (>2.0x)
         vol_confirm = vol_ratio[i] > 2.0
         
-        # Regime filter: only trade in ranging markets (CHOP > 61.8) to avoid whipsaws in strong trends
-        regime_filter = chop_aligned[i] > 61.8
-        
-        # Donchian breakout conditions with trend alignment
-        breakout_long = (price >= high_roll[i]) and (price > hma_1d_aligned[i]) and vol_confirm and regime_filter
-        breakout_short = (price <= low_roll[i]) and (price < hma_1d_aligned[i]) and vol_confirm and regime_filter
+        # Donchian breakout conditions
+        breakout_long = (price >= high_roll[i]) and vol_confirm and regime_filter
+        breakout_short = (price <= low_roll[i]) and vol_confirm and regime_filter
         
         # Final entry conditions
         if breakout_long:
