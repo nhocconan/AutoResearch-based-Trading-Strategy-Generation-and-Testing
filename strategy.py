@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #4640: 4h Donchian(20) Breakout + Volume Confirmation + ATR Stoploss
+Experiment #4641: 4h Donchian(20) Breakout + Volume Confirmation + ATR Stoploss
 HYPOTHESIS: 4h price breaking Donchian(20) channels from prior 1d with volume confirmation (>1.5x avg) captures strong momentum breakouts in both bull and bear markets. Uses 1d HTF for Donchian calculation to avoid look-ahead. Discrete sizing (0.25) and ATR trailing stop (2.0x) manage risk. Target: 19-50 trades/year on 4h timeframe.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4640_4h_donchian20_1d_vol_v1"
+name = "exp_4641_4h_donchian20_1d_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
