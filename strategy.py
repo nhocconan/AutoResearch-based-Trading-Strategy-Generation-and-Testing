@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Experiment #4205: 12h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation
-HYPOTHESIS: Donchian channel breakouts on 12h timeframe capture medium-term momentum when aligned with 1d EMA(50) trend
-and confirmed by volume (>1.8x average). The 1d EMA filter ensures we trade with the higher timeframe trend,
+HYPOTHESIS: Donchian channel breakouts on 12h timeframe capture momentum when aligned with 1d EMA(50) trend
+and confirmed by volume (>1.5x average). The 1d EMA filter ensures we trade with the higher timeframe trend,
 avoiding counter-trend whipsaws. Discrete position sizing (0.25) limits fee churn, targeting 75-150 total trades
 over 4 years (19-37/year). Works in both bull and bear markets by trading with the 1d trend direction.
 """
@@ -96,8 +96,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 1.5x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.5
         
         # Require alignment with 1d trend: price above EMA(50) for long, below for short
         trend_long = close[i] > ema_1d_aligned[i]
@@ -134,5 +134,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
