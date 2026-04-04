@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4096: 12h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 12h timeframe aligned with 1-day EMA(50) trend direction and volume confirmation capture significant moves while avoiding noise. The 1d EMA(50) provides intermediate-term trend filter that adapts to both bull and bear markets. Target: 50-150 total trades over 4 years (12-37/year).
+Experiment #4096: 12h Donchian(20) breakout + 1d HTF trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 12h aligned with 1d EMA(50) trend direction and volume confirmation capture continuation moves while minimizing trades. The 1d EMA(50) provides a long-term trend filter that works in both bull and bear markets by only allowing breakouts in the direction of the long-term trend. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4096_12h_donchian20_1d_ema50_vol_v1"
+name = "exp_4096_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
