@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4214: 1h RSI(14) mean reversion with 4h trend filter and 1d volume spike
-HYPOTHESIS: On 1h timeframe, buy when RSI < 30 (oversold) in uptrend (price > 4h EMA50) and sell when RSI > 70 (overbought) in downtrend (price < 4h EMA50), confirmed by 1d volume > 1.5x average. Use 4h/1d for signal direction, 1h only for entry timing. Session filter 08-20 UTC to avoid low-liquidity hours. Discrete position size 0.20 targets 60-150 trades over 4 years (15-37/year). ATR-based stoploss (2.0x) manages risk.
+Experiment #4214: 1h Donchian(20) breakout + 4h/1d EMA filter + volume confirmation
+HYPOTHESIS: Donchian breakouts on 1h timeframe capture momentum when aligned with 4h EMA20 and 1d EMA50 trend filters (price > both EMAs for longs, < both for shorts) and confirmed by volume (>1.5x average). Uses 4h/1d for signal direction, 1h only for entry timing. Session filter (08-20 UTC) reduces noise trades. Discrete position sizing (0.20) targets 60-150 total trades over 4 years (15-37/year). ATR-based trailing stop (2.0x) for risk management.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4214_1h_rsi14_4h_ema50_1d_vol_v1"
+name = "exp_4214_1h_donchian20_4h_1d_ema_vol_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -17,40 +17,39 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values  # already datetime64[ms]
+    open_time = prices["open_time"].values
     n = len(close)
     
-    # Precompute session hours (08-20 UTC)
+    # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 4h EMA50 for trend filter ===
+    # === Precompute HTF: 4h EMA20 and 1d EMA50 for trend filter ===
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) >= 50:
-        ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    if len(df_4h) >= 20:
+        ema_4h = pd.Series(df_4h['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
         ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     else:
         ema_4h_aligned = np.full(n, np.nan)
     
-    # === Precompute HTF: 1d volume MA(20) for confirmation ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 20:
-        vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
-        vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        vol_ma_1d_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
-    # === 1h Indicators: RSI(14) ===
-    def calculate_rsi(close, period=14):
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = pd.Series(gain).ewm(alpha=1/period, min_periods=period, adjust=False).mean().values
-        avg_loss = pd.Series(loss).ewm(alpha=1/period, min_periods=period, adjust=False).mean().values
-        rs = avg_gain / (avg_loss + 1e-10)
-        rsi = 100 - (100 / (1 + rs))
-        return np.concatenate([[np.nan], rsi])
+    # === 1h Indicators: Donchian Channel (20) ===
+    def calculate_donchian(high, low, period=20):
+        upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        return upper, lower
     
-    rsi = calculate_rsi(close, 14)
+    donch_upper, donch_lower = calculate_donchian(high, low, 20)
+    
+    # === 1h Indicators: Volume MA(20) for confirmation ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.ones(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === 1h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
@@ -70,18 +69,18 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(14, 14, 50, 20)  # RSI, ATR, 4h EMA50, 1d vol MA
+    warmup = max(20, 20, 14, 20, 50)  # Donchian, vol MA, ATR, 4h EMA, 1d EMA
     
     for i in range(warmup, n):
-        # --- Session Filter: 08-20 UTC ---
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        # --- Data Validity Check ---
+        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(atr[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Data Validity Check ---
-        if (np.isnan(rsi[i]) or np.isnan(atr[i]) or np.isnan(ema_4h_aligned[i]) or
-            np.isnan(vol_ma_1d_aligned[i])):
+        # --- Session Filter: 08-20 UTC ---
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
@@ -111,23 +110,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: 1d volume > 1.5x average
-        volume_confirm = volume[i] > 1.5 * vol_ma_1d_aligned[i]
+        # Require volume confirmation (> 1.5x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.5
         
         if volume_confirm:
-            # RSI conditions
-            rsi_oversold = rsi[i] < 30
-            rsi_overbought = rsi[i] > 70
+            # Donchian breakout conditions (using previous bar's levels)
+            breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
+            breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
             
-            # 4h EMA50 trend filter
-            price_above_ema = price > ema_4h_aligned[i]
-            price_below_ema = price < ema_4h_aligned[i]
+            # 4h EMA20 and 1d EMA50 trend filter (both must agree)
+            price_above_emas = price > ema_4h_aligned[i] and price > ema_1d_aligned[i]
+            price_below_emas = price < ema_4h_aligned[i] and price < ema_1d_aligned[i]
             
-            # Long conditions: RSI oversold + price above 4h EMA50 (uptrend)
-            long_entry = rsi_oversold and price_above_ema
+            # Long conditions: Donchian breakout up + price above both EMAs
+            long_entry = breakout_up and price_above_emas
             
-            # Short conditions: RSI overbought + price below 4h EMA50 (downtrend)
-            short_entry = rsi_overbought and price_below_ema
+            # Short conditions: Donchian breakout down + price below both EMAs
+            short_entry = breakout_dn and price_below_emas
             
             if long_entry:
                 in_position = True
