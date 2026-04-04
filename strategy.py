@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4594: 1h Donchian(20) Breakout + 4h EMA200 Direction + Volume Confirmation
-HYPOTHESIS: 1h Donchian(20) breakouts aligned with 4h EMA200 trend direction and volume spikes (>1.5x average) capture medium-term momentum with filtered entries. Uses discrete position sizing (0.20) and ATR trailing stop (2.0x) to target 15-37 trades/year. 4h EMA200 provides structural HTF bias that works in both bull and bear markets by identifying the dominant trend while avoiding whipsaws. Session filter (08-20 UTC) reduces noise during low-liquidity periods.
+Experiment #4594: 1h Donchian(20) Breakout + 4h EMA(50) Direction + Volume Confirmation
+HYPOTHESIS: 1h Donchian(20) breakouts aligned with 4h EMA(50) trend and volume spikes (>1.5x average) capture medium-term momentum with filtered entries. Uses 4h for signal direction (reducing noise) and 1h only for entry timing precision. Session filter (08-20 UTC) avoids low-liquidity periods. Target: 60-150 total trades over 4 years = 15-37/year. Position size 0.20 manages drawdown in bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4594_1h_donchian20_4h_ema200_vol_v1"
+name = "exp_4594_1h_donchian20_4h_ema_vol_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -20,20 +20,17 @@ def generate_signals(prices):
     open_time = prices["open_time"].values
     n = len(close)
     
-    # Precompute session hours ONCE (open_time is already datetime64[ms])
-    hours = pd.DatetimeIndex(open_time).hour
-    
-    # Precompute HTF: 4h data for EMA200
+    # Precompute HTF: 4h data for EMA direction
     df_4h = get_htf_data(prices, '4h')
     
-    # Calculate EMA200 on 4h close
-    if len(df_4h) >= 200:
+    # Calculate 4h EMA(50) for trend filter
+    if len(df_4h) >= 50:
         close_4h = pd.Series(df_4h['close'].values)
-        ema_4h = close_4h.ewm(span=200, min_periods=200, adjust=False).mean().values
+        ema_4h = close_4h.ewm(span=50, min_periods=50, adjust=False).mean().values
     else:
         ema_4h = np.array([])
     
-    # Align 4h EMA200 to 1h timeframe
+    # Align 4h EMA to 1h timeframe (shifted by 1 for completed bars only)
     if len(ema_4h) > 0:
         ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     else:
@@ -57,6 +54,10 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
+    # Session filter: 08-20 UTC (avoid low-liquidity periods)
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     # === Signals Initialization ===
     signals = np.zeros(n)
     SIZE = 0.20  # 20% position size
@@ -68,18 +69,17 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 200)  # Donchian, vol MA, ATR, 4h EMA200 warmup
+    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, 4h EMA warmup
     
     for i in range(warmup, n):
-        # --- Session Filter: 08-20 UTC ---
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(atr[i]) or np.isnan(ema_4h_aligned[i])):
+            signals[i] = 0.0
+            continue
+        
+        # --- Session Filter ---
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
@@ -112,7 +112,7 @@ def generate_signals(prices):
         # Require volume confirmation (> 1.5x average) to filter noise
         volume_confirm = vol_ratio[i] > 1.5
         
-        # Higher timeframe trend filter: bullish when price > 4h EMA200, bearish when price < 4h EMA200
+        # Higher timeframe trend filter: bullish when price > 4h EMA(50), bearish when price < 4h EMA(50)
         htf_bullish = price > ema_4h_aligned[i]
         htf_bearish = price < ema_4h_aligned[i]
         
@@ -120,10 +120,10 @@ def generate_signals(prices):
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
         breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
         
-        # Long conditions: upward breakout above 4h EMA200 + volume confirmation
+        # Long conditions: upward breakout above 4h EMA + volume confirmation
         long_entry = breakout_up and htf_bullish and volume_confirm
         
-        # Short conditions: downward breakout below 4h EMA200 + volume confirmation
+        # Short conditions: downward breakout below 4h EMA + volume confirmation
         short_entry = breakout_down and htf_bearish and volume_confirm
         
         if long_entry:
