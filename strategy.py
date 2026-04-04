@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #3320: 4h Donchian Breakout + 1d HMA Trend + Volume Spike (Revised)
+Experiment #3321: 4h Donchian Breakout + 1d HMA Trend + Volume Spike
 HYPOTHESIS: 4h Donchian(20) breakouts capture medium-term trends with ideal trade frequency for 4h timeframe.
 1d HMA(50) trend filter ensures alignment with daily momentum. Volume spike (>2.0x 20-period average) confirms breakout strength.
 ATR-based trailing stop (2.5x) manages risk. Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-Revised to fix zero-trade issue by relaxing volume confirmation slightly and ensuring proper indicator calculation.
 Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets by using price channels and volatility filters.
 """
 
@@ -12,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3320_4h_donchian20_1d_hma_vol_v1"
+name = "exp_3321_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -115,8 +114,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) for confirmation (relaxed from 2.0 to generate more trades)
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume spike (> 2.0x average) for confirmation
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # 1d HMA trend filter: only long above HMA, short below HMA
