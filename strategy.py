@@ -3,11 +3,12 @@
 Experiment #5503: 4h Donchian(20) breakout + 12h EMA50 trend + volume confirmation
 HYPOTHESIS: On 4h timeframe, price breaking above/below the 20-period Donchian channel with 
 volume > 1.8x average and aligned with 12-hour EMA50 trend captures strong momentum moves 
-while avoiding false breakouts. The 12h EMA50 provides medium-term trend filter, reducing 
-whipsaws in both bull and bear markets. Discrete position sizing (0.25) and ATR-based stoploss 
-(2.0x ATR) control risk. Target: 19-50 trades/year (75-200 total over 4 years) to minimize 
-fee drag while maintaining statistical significance. Works in bull markets via breakouts above 
-rising EMA50 alignment and in bear markets via short breakdowns below falling EMA50 alignment.
+while avoiding false breakouts. The 12h EMA50 provides medium-term trend filter (more responsive 
+than 1d EMA200 but smoother than shorter EMAs), reducing whipsaws in both bull and bear markets. 
+Discrete position sizing (0.25) and ATR-based stoploss (2.0x ATR) control risk. Target: 19-50 
+trades/year (75-200 total over 4 years) to minimize fee drag while maintaining statistical 
+significance. Works in bull markets via breakouts above rising EMA50 alignment and in bear 
+markets via short breakdowns below falling EMA50 alignment.
 """
 
 import numpy as np
