@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #6125: 12h Donchian(20) breakout + 1d EMA200 trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA200 trend capture structural moves with minimal whipsaw.
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA200 trend capture major structural moves with minimal whipsaw.
 Volume >1.5x average confirms strong participation. ATR trailing stop manages risk.
-Discrete sizing (0.25) minimizes fee churn. Target: 50-150 trades over 4 years.
+Discrete sizing (0.25) minimizes fee churn. Target: 75-150 trades over 4 years.
 Timeframe: 12h. HTF: 1d for EMA200 trend filter.
 """
 
