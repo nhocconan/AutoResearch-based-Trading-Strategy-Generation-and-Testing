@@ -1,65 +1,73 @@
 #!/usr/bin/env python3
 """
-exp_6787_6h_camarilla_pivot_1d_v1
-Hypothesis: 6h Camarilla pivot levels from 1d timeframe. Fade at R3/S3 (mean reversion in range), 
-breakout continuation at R4/S4 (trend following). Uses volume confirmation to filter false signals.
-Designed for 6h timeframe to capture intermediate swings with ~12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by adapting to price action relative to daily pivot structure.
+exp_6787_6h_donchian20_1d_pivot_v1
+Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot levels and volume confirmation.
+Go long when price breaks above Donchian high + R3 pivot level with volume confirmation.
+Go short when price breaks below Donchian low + S3 pivot level with volume confirmation.
+Use 1d HTF for structural context - only take long trades when price > 1d VWAP (bull regime),
+only short trades when price < 1d VWAP (bear regime). This avoids counter-trend whipsaws.
+Designed for 6h timeframe targeting 50-150 total trades over 4 years (12-37/year).
+Works in both bull and bear markets by aligning with 1d VWAP regime filter.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6787_6h_camarilla_pivot_1d_v1"
+name = "exp_6787_6h_donchian20_1d_pivot_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-PIVOT_LOOKBACK = 1  # Use previous day's OHLC for Camarilla calculation
+DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5
+VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 8  # ~4 days (6h bars)
-CHOP_PERIOD = 14
-CHOP_THRESHOLD = 61.8  # Above = range (mean revert), Below = trend (breakout)
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 20  # ~5 days (6h bars)
+PIVOT_LOOKBACK = 1  # use previous day's pivot levels
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for Camarilla pivot calculation
+    # Load HTF data ONCE before loop - using 1d for Camarilla pivot and VWAP
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels from previous day's OHLC
+    # Calculate 1d VWAP for regime filter
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d_array = vwap_1d.values
+    
+    # Calculate 1d Camarilla pivot levels (using previous day's OHLC)
+    # Camarilla: R4 = C + ((H-L)*1.1/2), R3 = C + ((H-L)*1.1/4), etc.
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla levels: based on previous day's range
-    R4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    R3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    R2 = close_1d + (high_1d - low_1d) * 1.1 / 6
-    R1 = close_1d + (high_1d - low_1d) * 1.1 / 12
-    S1 = close_1d - (high_1d - low_1d) * 1.1 / 12
-    S2 = close_1d - (high_1d - low_1d) * 1.1 / 6
-    S3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    S4 = close_1d - (high_1d - low_1d) * 1.1 / 2
-    Pivot = (high_1d + low_1d + close_1d) / 3
+    # Shift by 1 to use previous completed day's levels (avoid look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan  # first value has no previous day
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
     
-    # Align to LTF (6h)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    R2_aligned = align_htf_to_ltf(prices, df_1d, R2)
-    R1_aligned = align_htf_to_ltf(prices, df_1d, R1)
-    S1_aligned = align_htf_to_ltf(prices, df_1d, S1)
-    S2_aligned = align_htf_to_ltf(prices, df_1d, S2)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    Pivot_aligned = align_htf_to_ltf(prices, df_1d, Pivot)
+    # Calculate Camarilla levels
+    rng = prev_high - prev_low
+    r3 = prev_close + (rng * 1.1 / 4)
+    s3 = prev_close - (rng * 1.1 / 4)
+    r4 = prev_close + (rng * 1.1 / 2)
+    s4 = prev_close - (rng * 1.1 / 2)
+    
+    # Align HTF data to LTF (6h)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_array)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -67,23 +75,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Choppiness Index to determine market regime
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Volume MA for confirmation
+    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
+    
+    # ATR for stoploss
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_sum = tr.rolling(window=CHOP_PERIOD, min_periods=CHOP_PERIOD).sum()
-    highest_high = pd.Series(high).rolling(window=CHOP_PERIOD, min_periods=CHOP_PERIOD).max()
-    lowest_low = pd.Series(low).rolling(window=CHOP_PERIOD, min_periods=CHOP_PERIOD).min()
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(CHOP_PERIOD)
-    chop_values = chop.values
-    
-    # ATR for stoploss
-    tr_atr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr_atr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
-    
-    # Volume MA for confirmation
-    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -91,13 +95,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(PIVOT_LOOKBACK, VOL_MA_PERIOD, ATR_PERIOD, CHOP_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(Pivot_aligned[i]):
+        if np.isnan(vwap_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -125,28 +129,24 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime from Choppiness Index
-        is_range = chop_values[i] > CHOP_THRESHOLD if not np.isnan(chop_values[i]) else True
-        is_trend = chop_values[i] <= CHOP_THRESHOLD if not np.isnan(chop_values[i]) else False
+        # Regime filter: use 1d VWAP to determine bull/bear regime
+        bull_regime = close[i] > vwap_1d_aligned[i]
+        bear_regime = close[i] < vwap_1d_aligned[i]
         
-        # Camarilla-based signals
-        if is_range:
-            # Range market: mean reversion at R3/S3
-            long_signal = close[i] <= S3_aligned[i] and vol_confirmed
-            short_signal = close[i] >= R3_aligned[i] and vol_confirmed
-        else:
-            # Trending market: breakout continuation at R4/S4
-            long_signal = close[i] >= R4_aligned[i] and vol_confirmed
-            short_signal = close[i] <= S4_aligned[i] and vol_confirmed
+        # Breakout signals with Camarilla confirmation
+        # Long: price breaks above Donchian high AND above R3 level in bull regime
+        long_breakout = bull_regime and (close[i] > highest_high[i]) and (close[i] > r3_aligned[i]) and vol_confirmed
+        # Short: price breaks below Donchian low AND below S3 level in bear regime
+        short_breakout = bear_regime and (close[i] < lowest_low[i]) and (close[i] < s3_aligned[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if long_signal:
+            if long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif short_signal:
+            elif short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
