@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Experiment #5530: 1d Donchian(20) breakout + 1w EMA(20) trend + volume confirmation + ATR trailing stop
-HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts with volume > 1.5x average and aligned with 
-1w EMA(20) trend capture sustained momentum moves while avoiding choppy markets. 
+Experiment #5530: 1d Donchian(20) breakout + 1w EMA(50) trend + volume confirmation + ATR trailing stop
+HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts with volume > 1.3x average and aligned with 
+1w EMA(50) trend capture sustained momentum moves while avoiding choppy markets. 
 1w EMA provides long-term trend filter that works in both bull and bear markets. 
 Discrete position sizing (0.25) and ATR-based trailing stop (2.0x ATR from extreme) control risk. 
 Target: 7-25 trades/year (30-100 total over 4 years) to minimize fee drag.
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5530_1d_donchian20_1w_ema20_vol_v1"
+name = "exp_5530_1d_donchian20_1w_ema50_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -28,9 +28,9 @@ def generate_signals(prices):
     
     # === HTF: 1w data for EMA trend filter ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 20:
-        # Calculate EMA(20) on 1w data
-        ema_1w = pd.Series(df_1w['close'].values).ewm(span=20, adjust=False, min_periods=20).mean().values
+    if len(df_1w) >= 50:
+        # Calculate EMA(50) on 1w data
+        ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
         # Align to LTF (1d) with shift(1) for completed bars only
         ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
         # Uptrend: price > EMA, Downtrend: price < EMA
@@ -72,7 +72,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0  # For long positions
     lowest_since_entry = 0.0   # For short positions
     
-    warmup = max(20, 20, 20, 14, 20)  # Donchian, volume avg, ATR, EMA warmup
+    warmup = max(20, 20, 20, 14, 50)  # Donchian, volume avg, ATR, EMA warmup
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -130,8 +130,8 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]  # Break above previous period's high
         breakout_down = price < donchian_low[i-1]  # Break below previous period's low
         
-        # Volume confirmation: current volume > 1.5x average volume
-        volume_confirmed = volume_ratio[i] > 1.5
+        # Volume confirmation: current volume > 1.3x average volume
+        volume_confirmed = volume_ratio[i] > 1.3
         
         # Entry conditions: breakout + volume + trend alignment
         if breakout_up and volume_confirmed and uptrend[i]:
