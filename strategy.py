@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3982: 12h Donchian(20) breakout + 1d EMA(200) trend filter + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(200) trend (breakout in direction of EMA) capture multi-week swings with controlled frequency. Volume > 2.0x MA(30) confirms breakout strength. ATR(20) trailing stop (2.0x) manages risk. Discrete sizing (0.25) reduces fee drag. Target: 75-150 trades over 4 years (19-37/year). Works in bull/bear via EMA(200) as primary trend filter and Donchian as breakout mechanism.
+Experiment #3982: 12h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(50) direction capture multi-week swings with low frequency. Volume > 1.8x MA(30) confirms breakout strength. ATR(20) trailing stop (2.5x) manages risk. Discrete sizing (0.25) reduces fee drag. Target: 75-150 trades over 4 years (19-37/year). Works in bull/bear via EMA filter as dynamic trend filter and Donchian as price structure.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3982_12h_donchian20_1d_ema200_vol_v1"
+name = "exp_3982_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -19,12 +19,10 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA(200) trend filter ===
+    # === HTF: 1d data for EMA(50) trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    # Calculate EMA(200) on 1d close
-    ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-    # Align to 12h timeframe (shift by 1 for completed 1d bar)
-    ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
+    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # === 12h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -54,12 +52,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 30, 20, 200)  # DC lookback, vol MA, ATR, EMA200
+    warmup = max(lookback_dc + 1, 30, 20, 50)  # DC lookback, vol MA, ATR, EMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_200_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_1d_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -70,12 +69,12 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below Donchian low (trend reversal)
+                # Exit if price breaks below Donchian low (structure break)
                 elif price < lowest_low[i]:
                     in_position = False
                     position_side = 0
@@ -84,12 +83,12 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above Donchian high (trend reversal)
+                # Exit if price breaks above Donchian high (structure break)
                 elif price > highest_high[i]:
                     in_position = False
                     position_side = 0
@@ -99,27 +98,27 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) to filter noise
-        volume_spike = vol_ratio[i] > 2.0
+        # Require volume spike (> 1.8x average) to filter noise
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Determine trend direction from 1d EMA(200)
-            price_above_ema = price > ema_200_1d_aligned[i]
-            price_below_ema = price < ema_200_1d_aligned[i]
+            # Determine trend from 1d EMA(50)
+            uptrend = price > ema_1d_aligned[i]
+            downtrend = price < ema_1d_aligned[i]
             
-            # Long: Donchian breakout above high + price above EMA(200)
-            long_breakout = price > highest_high[i-1] and price_above_ema
-            # Short: Donchian breakdown below low + price below EMA(200)
-            short_breakout = price < lowest_low[i-1] and price_below_ema
+            # Long logic: Donchian breakout in uptrend
+            long_signal = uptrend and price > highest_high[i-1]
+            # Short logic: Donchian breakdown in downtrend
+            short_signal = downtrend and price < lowest_low[i-1]
             
-            if long_breakout and not short_breakout:
+            if long_signal and not short_signal:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            elif short_breakout and not long_breakout:
+            elif short_signal and not long_signal:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -132,3 +131,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+}
