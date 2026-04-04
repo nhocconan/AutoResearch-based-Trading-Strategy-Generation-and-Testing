@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #6385: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts with volume confirmation (>1.8x avg) and 1d EMA trend filter capture institutional momentum while avoiding whipsaws. 1d EMA provides higher timeframe trend bias: price above EMA = bullish bias (long breakouts), price below EMA = bearish bias (short breakdowns). Volume confirmation filters false breakouts. Discrete sizing (0.25) minimizes fee churn. Target: 50-150 trades over 4 years. Works in bull via breakouts, in bear via short breakdowns with trend filter.
+HYPOTHESIS: 12h Donchian breakouts with volume confirmation (>1.8x avg) and 1d EMA trend filter capture institutional momentum while avoiding whipsaws. 1d EMA provides higher timeframe trend bias: price above EMA = bullish bias (long breakouts), price below EMA = bearish bias (short breakdowns). Volume confirmation filters false breakouts. Discrete sizing (0.25) minimizes fee churn. Target: 75-150 trades over 4 years. Works in bull via breakouts, in bear via short breakdowns with trend filter.
 """
 
 import numpy as np
