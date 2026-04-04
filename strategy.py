@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #6219: 6h Donchian(20) breakout + 12h pivot direction + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 12h Camarilla pivot bias (R3/S3 levels) capture medium-term swings with institutional volume confirmation. Works in both bull/bear by using pivot-based directional filter rather than pure trend following. Target: 75-150 total trades over 4 years (19-38/year) for 6h timeframe.
+Experiment #6220: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR trailing stop
+HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA trend capture medium-term momentum 
+while avoiding noise. Volume >2.0x average confirms institutional participation. 
+ATR trailing stop manages risk. Discrete sizing (0.25) balances return and fee drag. 
+Target: 75-200 trades over 4 years (19-50/year) for 4h timeframe.
+Uses 1d EMA for trend filter to better capture longer-term bias vs 12h.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6219_6h_donchian20_12h_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_6220_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,35 +26,23 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 12h data for Camarilla pivot levels ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 2:
-        # Calculate Camarilla pivot levels from previous 12h bar
-        pivot = (df_12h['high'].iloc[-2] + df_12h['low'].iloc[-2] + df_12h['close'].iloc[-2]) / 3
-        range_ = df_12h['high'].iloc[-2] - df_12h['low'].iloc[-2]
-        r3 = pivot + (range_ * 1.1 / 4)
-        s3 = pivot - (range_ * 1.1 / 4)
-        r4 = pivot + (range_ * 1.1 / 2)
-        s4 = pivot - (range_ * 1.1 / 2)
-        # Bias: bullish if price > R3, bearish if price < S3, neutral otherwise
-        bullish_bias = df_12h['close'].iloc[-2] > r3
-        bearish_bias = df_12h['close'].iloc[-2] < s3
-        # Expand to full length arrays
-        bullish_bias_arr = np.full(n, bullish_bias)
-        bearish_bias_arr = np.full(n, bearish_bias)
+    # === HTF: 1d data for EMA trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 21:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        bullish_bias_arr = np.zeros(n, dtype=bool)
-        bearish_bias_arr = np.zeros(n, dtype=bool)
+        ema_1d_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation ===
+    # === 4h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 6h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -69,7 +61,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14) + 1  # Donchian, volume avg, ATR + 1
+    warmup = max(20, 20, 14, 21) + 1  # Donchian, volume avg, ATR, EMA21 + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (21:00-23:59 UTC) ---
@@ -80,7 +72,8 @@ def generate_signals(prices):
         
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -115,13 +108,15 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 2.0  # Volume filter for stronger signals
         
-        # 12h Camarilla pivot bias: align with R3/S3 levels
-        bullish_align = breakout_up and bullish_bias_arr[i]
-        bearish_align = breakout_down and bearish_bias_arr[i]
+        # 1d EMA21 trend filter: price relative to EMA21
+        bullish_trend = price > ema_1d_aligned[i]
+        bearish_trend = price < ema_1d_aligned[i]
         
-        # Entry conditions: breakout with volume AND pivot bias alignment
-        long_entry = bullish_align and volume_confirmed
-        short_entry = bearish_align and volume_confirmed
+        # Entry conditions: breakout with volume AND trend alignment
+        # Long: breakout up with volume AND bullish trend
+        # Short: breakout down with volume AND bearish trend
+        long_entry = breakout_up and volume_confirmed and bullish_trend
+        short_entry = breakout_down and volume_confirmed and bearish_trend
         
         if long_entry:
             in_position = True
