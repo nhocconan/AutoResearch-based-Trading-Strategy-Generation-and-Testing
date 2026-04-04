@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Experiment #5298: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
+Experiment #5298: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation + ATR stoploss
 HYPOTHESIS: On 1d timeframe, price breaking above/below the 20-period Donchian channel 
-with volume > 1.8x average and aligned with 1w HMA21 trend captures strong momentum moves. 
+with volume > 1.5x average and aligned with 1w HMA21 trend captures strong momentum moves. 
 Donchian channels adapt to volatility and work in both bull and bear markets by catching 
 breakouts from consolidation. Volume confirmation ensures breakouts have participation. 
 1w HMA21 filter ensures we only trade in the direction of the higher timeframe trend, 
 avoiding counter-trend breakouts that fail. Uses discrete position sizing (0.25) and 
-ATR-based stoploss to control drawdown. Target: 75-150 total trades over 4 years 
+ATR-based stoploss to control drawdown. Target: 75-150 trades total over 4 years 
 (19-38/year) to minimize fee drag while maintaining statistical significance.
 """
 
@@ -33,29 +33,15 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 21:
         # Calculate HMA(21) on weekly close
-        close_1w = df_1w['close'].values
-        half_len = 21 // 2
+        close_1w = pd.Series(df_1w['close'])
+        half_len = int(21 / 2)
         sqrt_len = int(np.sqrt(21))
-        
-        # WMA function
-        def wma(values, window):
-            weights = np.arange(1, window + 1)
-            return np.convolve(values, weights, 'valid') / weights.sum()
-        
-        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        wma_half = wma(close_1w, half_len)
-        wma_full = wma(close_1w, 21)
+        wma_half = close_1w.ewm(span=half_len, adjust=False).mean()
+        wma_full = close_1w.ewm(span=21, adjust=False).mean()
         raw_hma = 2 * wma_half - wma_full
-        hma_21 = wma(raw_hma, sqrt_len)
-        
-        # Pad to match original length
-        hma_21_padded = np.full(len(close_1w), np.nan)
-        hma_21_padded[half_len:] = hma_21
-        
-        # Shift by 1 for completed bar only and align
-        hma_21_shifted = np.roll(hma_21_padded, 1)
-        hma_21_shifted[0] = np.nan
-        hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21_shifted)
+        hma_21 = raw_hma.ewm(span=sqrt_len, adjust=False).mean()
+        hma_21_values = hma_21.shift(1).values  # shift(1) for completed bar
+        hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21_values)
     else:
         hma_21_aligned = np.full(n, np.nan)
     
@@ -147,8 +133,8 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]  # Break above previous period's high
         breakout_down = price < donchian_low[i-1]  # Break below previous period's low
         
-        # Volume confirmation: current volume > 1.8x average volume
-        volume_confirmed = volume_ratio[i] > 1.8
+        # Volume confirmation: current volume > 1.5x average volume
+        volume_confirmed = volume_ratio[i] > 1.5
         
         # Trend filter from 1w HMA21
         trend_bullish = price > hma_21_aligned[i]
