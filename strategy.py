@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4362: 12h Donchian Breakout + Daily EMA Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 12h aligned with daily EMA50 trend (price > EMA50 = long bias, < EMA50 = short bias) and confirmed by volume spikes (>1.8x average) capture institutional momentum with controlled frequency. Daily EMA50 provides structural trend filter from higher timeframe, reducing false breakouts. Works in bull via upward breakouts with long bias, in bear via downward breakouts with short bias. Volume confirmation filters low-conviction moves. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+Experiment #4362: 12h Donchian(20) Breakout + Daily EMA50 Trend + Volume Confirmation
+HYPOTHESIS: Donchian(20) breakouts on 12h aligned with daily EMA50 trend (price > EMA50 = long bias, < EMA50 = short bias) and confirmed by volume spikes (>1.8x average) capture institutional momentum. Daily EMA50 provides structural trend filter from higher timeframe, reducing false breakouts. Works in bull via upward breakouts with long bias, in bear via downward breakouts with short bias. Volume confirmation filters low-conviction moves. Targets 75-150 total trades over 4 years (19-37/year) with position size 0.25.
 """
 
 import numpy as np
@@ -25,12 +25,11 @@ def generate_signals(prices):
     
     # === Precompute HTF: 1d EMA50 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 1:
-        close_1d = pd.Series(df_1d['close'].values)
-        ema_1d_50 = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        ema_1d_50_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
     # === 12h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
@@ -66,7 +65,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_1d_50_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -106,8 +105,8 @@ def generate_signals(prices):
         volume_confirm = vol_ratio[i] > 1.8
         
         # Daily EMA50 bias: price > EMA50 = long bias, price < EMA50 = short bias
-        long_bias = price > ema_1d_50_aligned[i]
-        short_bias = price < ema_1d_50_aligned[i]
+        long_bias = price > ema_1d_aligned[i]
+        short_bias = price < ema_1d_aligned[i]
         
         # Donchian breakout conditions
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
@@ -137,5 +136,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
