@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4140: 4h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend direction capture strong momentum moves. Volume confirmation filters false breakouts. Works in both bull/bear as EMA adapts to trend. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #4141: 4h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation + ATR trailing stop
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend direction capture strong momentum moves. Volume confirmation filters false breakouts. ATR trailing stop manages risk. Works in both bull/bear as EMA adapts to trend. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4140_4h_donchian20_1d_ema_vol_v1"
+name = "exp_4141_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
