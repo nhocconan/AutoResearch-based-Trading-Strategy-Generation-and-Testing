@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4213: 4h Donchian(20) breakout + 12h EMA200 trend filter + volume confirmation
-HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture momentum when aligned with 12h EMA200 trend filter (price > EMA200 for longs, < EMA200 for shorts) and confirmed by volume (>1.8x average). The 12h EMA200 provides a robust long-term trend filter that adapts to both bull and bear markets. Discrete position sizing (0.25) limits fee churn, targeting 75-200 total trades over 4 years (19-50/year). Uses ATR-based trailing stop (2.5x) for risk management.
+Experiment #4213: 4h Donchian(20) breakout + 12h HMA21 trend + volume confirmation
+HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture momentum when aligned with 12h HMA21 trend filter (price > HMA21 for longs, < HMA21 for shorts) and confirmed by volume (>1.8x average). The 12h HMA provides a smooth trend filter that works in both bull and bear markets by reducing whipsaw. Discrete position sizing (0.25) limits fee churn, targeting 75-200 total trades over 4 years (19-50/year). Uses ATR-based trailing stop (2.5x) for risk management.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4213_4h_donchian20_12h_ema200_vol_v1"
+name = "exp_4213_4h_donchian20_12h_hma21_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,15 +19,34 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === Precompute HTF: 12h EMA200 for trend filter ===
+    # === Precompute HTF: 12h HMA21 for trend filter ===
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 200:
-        # Calculate EMA200 on 12h close prices
-        ema_12h = pd.Series(df_12h['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    if len(df_12h) >= 21:
+        # Calculate HMA21 on 12h close prices
+        n_hma = 21
+        half_n = n_hma // 2
+        sqrt_n = int(np.sqrt(n_hma))
+        
+        # WMA function
+        def wma(arr, window):
+            weights = np.arange(1, window + 1, dtype=np.float64)
+            return np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
+        
+        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        wma_half = wma(df_12h['close'].values, half_n)
+        wma_full = wma(df_12h['close'].values, n_hma)
+        raw_2wma = 2 * wma_half - wma_full
+        hma_12h = wma(raw_2wma, sqrt_n)
+        
+        # Pad to match original length
+        pad_len = len(df_12h) - len(hma_12h)
+        hma_12h_padded = np.full(len(df_12h), np.nan)
+        hma_12h_padded[pad_len:] = hma_12h
+        
         # Align to 4h timeframe (shift(1) already applied inside for no look-ahead)
-        ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+        hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_padded)
     else:
-        ema_12h_aligned = np.full(n, np.nan)
+        hma_12h_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
@@ -60,12 +79,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 200)  # Donchian, vol MA, ATR, 12h EMA200
+    warmup = max(20, 20, 14, 21)  # Donchian, vol MA, ATR, 12h HMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_12h_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(hma_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -103,15 +122,15 @@ def generate_signals(prices):
             breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
             breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
             
-            # 12h EMA200 trend filter
-            price_above_ema = price > ema_12h_aligned[i]
-            price_below_ema = price < ema_12h_aligned[i]
+            # 12h HMA21 trend filter
+            price_above_hma = price > hma_12h_aligned[i]
+            price_below_hma = price < hma_12h_aligned[i]
             
-            # Long conditions: Donchian breakout up + price above 12h EMA200
-            long_entry = breakout_up and price_above_ema
+            # Long conditions: Donchian breakout up + price above 12h HMA21
+            long_entry = breakout_up and price_above_hma
             
-            # Short conditions: Donchian breakout down + price below 12h EMA200
-            short_entry = breakout_dn and price_below_ema
+            # Short conditions: Donchian breakout down + price below 12h HMA21
+            short_entry = breakout_dn and price_below_hma
             
             if long_entry:
                 in_position = True
