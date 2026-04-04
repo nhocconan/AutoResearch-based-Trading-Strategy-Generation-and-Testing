@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #5814: 1h Donchian(20) breakout + 4h/1d EMA alignment + volume confirmation
-HYPOTHESIS: 1h Donchian breakouts aligned with 4h/1d EMA trend (price > EMA = bullish, price < EMA = bearish) capture momentum with institutional bias. Volume confirmation filters false breakouts. Session filter (08-20 UTC) reduces noise. Discrete position sizing (0.20) minimizes fee churn. Targets 60-150 trades over 4 years. Works in bull markets (breakouts with bullish EMA alignment) and avoids false signals in bear via EMA regime filter. Timeframe: 1h.
+HYPOTHESIS: 1h Donchian breakouts aligned with 4h and 1d EMA trend (price > EMA = bullish, price < EMA = bearish) capture momentum with institutional bias. Volume confirmation filters false breakouts. Session filter (08-20 UTC) reduces noise. Discrete position sizing (0.20) minimizes fee churn. Targets 60-150 trades over 4 years. Works in bull markets (breakouts with bullish EMA alignment) and avoids false signals in bear via EMA regime filter. Timeframe: 1h.
 """
 
 import numpy as np
@@ -22,14 +22,22 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 4h data for EMA21 trend ===
+    # === HTF: 4h and 1d data for EMA regime filter ===
     df_4h = get_htf_data(prices, '4h')
-    ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    df_1d = get_htf_data(prices, '1d')
+    
+    # 4h EMA(21) for trend
+    if len(df_4h) >= 21:
+        ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+    else:
+        ema_4h = np.full(len(df_4h), np.nan)
     ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # === HTF: 1d data for EMA50 trend ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # 1d EMA(50) for higher timeframe trend
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    else:
+        ema_1d = np.full(len(df_1d), np.nan)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # === 1h Indicators: Donchian Channel (20-period) ===
@@ -40,7 +48,7 @@ def generate_signals(prices):
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 1h Indicators: ATR(14) for trailing stop ===
+    # === 1h Indicators: ATR(14) for stoploss ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -59,10 +67,10 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 20, 21, 50, 14)  # Donchian, volume avg, EMA4h, EMA1d, ATR warmup
+    warmup = max(20, 20, 20, 14, 21, 50)  # Donchian, volume avg, ATR, 4h EMA, 1d EMA
     
     for i in range(warmup, n):
-        # --- Session Filter: Avoid low liquidity periods (08-20 UTC only) ---
+        # --- Session Filter: Trade only during active UTC hours (08-20) ---
         hour = hours[i]
         if hour < 8 or hour > 20:
             signals[i] = 0.0
