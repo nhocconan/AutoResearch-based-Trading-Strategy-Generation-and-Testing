@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-exp_6680_4h_donchian20_1d_ema_vol_v2
+exp_6681_4h_donchian20_1d_ema_vol_v1
 Hypothesis: 4h Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
-Uses 1-day EMA(50) to filter trend direction: only long when price > 1d EMA50, short when price < 1d EMA50.
-4h Donchian(20) breakout provides entry timing with volume confirmation to avoid false breakouts.
-Designed for 4h timeframe to capture medium-term swings with tight entry conditions (~20-50 trades/year).
+In trending markets (price > 1d EMA50), buy Donchian(20) breakouts with volume > 1.5x MA.
+In ranging markets (price near 1d EMA50), fade Donchian(20) extremes toward EMA50.
+Uses discrete position sizing (0.25) and ATR(14) stoploss (2x) to minimize fee drag and drawdown.
+Designed for 4h timeframe to capture swings while keeping trades < 200/4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6680_4h_donchian20_1d_ema_vol_v2"
+name = "exp_6681_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,7 +23,7 @@ VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 MAX_HOLD_BARS = 6  # ~1 day (4h bars)
 
 def generate_signals(prices):
@@ -33,7 +34,7 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop - using 1d for EMA filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1-day EMA(50)
+    # Calculate 1-day EMA50 for trend filter
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
@@ -69,8 +70,9 @@ def generate_signals(prices):
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if data not available
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -95,29 +97,32 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Determine trend direction from 1d EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Determine market regime based on 1d EMA50
+        # Above EMA50 = uptrend bias, Below EMA50 = downtrend bias
+        # Near EMA50 (within 1*ATR) = ranging market
+        near_ema = np.abs(close[i] - ema_1d_aligned[i]) <= atr[i]
+        uptrend_bias = close[i] > ema_1d_aligned[i]
+        downtrend_bias = close[i] < ema_1d_aligned[i]
         
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Donchian breakout signals
-        long_breakout = uptrend and (close[i] > highest_high[i]) and vol_confirmed
-        short_breakout = downtrend and (close[i] < lowest_low[i]) and vol_confirmed
+        # Breakout signals (donchian break with volume)
+        long_breakout = (close[i] > highest_high[i]) and vol_confirmed
+        short_breakout = (close[i] < lowest_low[i]) and vol_confirmed
         
-        # Exit conditions: opposite Donchian break
-        long_exit = downtrend and (close[i] < lowest_low[i])
-        short_exit = uptrend and (close[i] > highest_high[i])
+        # Mean reversion signals (fade donchian extremes toward ema)
+        long_mean_revert = near_ema and downtrend_bias and (close[i] <= lowest_low[i])
+        short_mean_revert = near_ema and uptrend_bias and (close[i] >= highest_high[i])
         
         # Enter new positions only if flat
         if position == 0:
-            if long_breakout:
+            if long_breakout or long_mean_revert:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif short_breakout:
+            elif short_breakout or short_mean_revert:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -125,17 +130,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:
-            # Check for exit
-            if position == 1 and long_exit:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-            elif position == -1 and short_exit:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-            else:
-                # Hold current position
-                signals[i] = position * SIGNAL_SIZE
+            # Hold current position
+            signals[i] = position * SIGNAL_SIZE
     
     return signals
