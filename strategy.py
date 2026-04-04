@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3751: 6h Donchian(20) breakout + 1d Weekly Pivot + volume confirmation + ATR trailing stop
-HYPOTHESIS: 6h Donchian breakouts capture intermediate momentum, with 1d weekly pivot levels (R4/S4) providing structural bias to filter false breakouts. Breakouts in direction of weekly pivot (above R4 for long, below S4 for short) have higher continuation probability. Volume spike (>2.0x) confirms authenticity. ATR trailing stop (2.5x) manages risk. This avoids whipsaw in ranging markets and works in both bull (breakouts with trend) and bear (breakouts against trend filtered by pivot) regimes. Position size 0.25 manages drawdown from 2022 crash. Target: 75-200 trades over 4 years.
+Experiment #3752: 12h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts capture medium-term momentum with fewer trades than lower timeframes, reducing fee drag. 1d Camarilla pivot levels provide structural support/resistance. Breakouts above R3/S3 with volume confirmation (>2.0x) indicate strong momentum. Works in bull (breakouts with volume) and bear (short breakdowns) regimes. Position size 0.25 manages drawdown. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3751_6h_donchian20_1d_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_3752_12h_donchian20_1d_camarilla_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,45 +19,37 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for weekly pivot levels (Call ONCE before loop) ===
+    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot (using prior week's daily OHLC)
-    # For simplicity, use prior day's range (can be enhanced with true weekly)
-    # Prior day's high, low, close
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
+    # Calculate Camarilla pivot levels for 1d
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    r4_1d = close_1d + range_1d * 1.1 / 2.0
+    r3_1d = close_1d + range_1d * 1.1 / 4.0
+    s3_1d = close_1d - range_1d * 1.1 / 4.0
+    s4_1d = close_1d - range_1d * 1.1 / 2.0
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    r1 = 2 * pivot - prev_low
-    s1 = 2 * pivot - prev_high
-    r2 = pivot + (prev_high - prev_low)
-    s2 = pivot - (prev_high - prev_low)
-    r3 = prev_high + 2 * (pivot - prev_low)
-    s3 = prev_low - 2 * (prev_high - pivot)
-    r4 = prev_high + 3 * (pivot - prev_low)
-    s4 = prev_low - 3 * (prev_high - pivot)
+    # Align 1d Camarilla levels to 12h timeframe (shifted by 1 for completed 1d bar)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # Align 1d weekly pivot levels to 6h timeframe (shifted by 1 for completed 1d bar)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # === 6h Indicators: Donchian Channel(20) for breakout ===
+    # === 12h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -80,7 +72,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(r4_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or
+            np.isnan(s3_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -97,8 +90,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below weekly pivot (trend change)
-                elif price < pivot_aligned[i]:
+                # Exit if price breaks below S3 (support broken)
+                elif price < s3_1d_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -111,8 +104,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above weekly pivot (trend change)
-                elif price > pivot_aligned[i]:
+                # Exit if price breaks above R3 (resistance broken)
+                elif price > r3_1d_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -125,18 +118,18 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Long entry: Price breaks above Donchian upper band AND above weekly R4 (bullish bias)
+            # Long entry: Price breaks above Donchian upper band AND above R3 (bullish breakout)
             if (price > highest_high[i-1] and  # Breakout above previous period's high
-                price > r4_aligned[i]):        # Above weekly R4 (strong bullish bias)
+                price > r3_1d_aligned[i]):     # Above Camarilla R3 (strong bullish)
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Price breaks below Donchian lower band AND below weekly S4 (bearish bias)
-            elif (price < lowest_low[i-1] and   # Breakout below previous period's low
-                  price < s4_aligned[i]):       # Below weekly S4 (strong bearish bias)
+            # Short entry: Price breaks below Donchian lower band AND below S3 (bearish breakdown)
+            elif (price < lowest_low[i-1] and    # Breakout below previous period's low
+                  price < s3_1d_aligned[i]):     # Below Camarilla S3 (strong bearish)
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
