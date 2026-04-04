@@ -24,7 +24,7 @@ VOL_BASE_THRESHOLD = 2.0  # Volume threshold for confirmation
 SIGNAL_SIZE = 0.25      # 25% position size
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5  # Stoploss at 2.5 * ATR
-MAX_HOLD_BARS = 15      # Max hold: ~15 * 12h = 7.5 days
+MAX_HOLD_BARS = 30      # Max hold: ~30 * 12h = 15 days
 
 def generate_signals(prices):
     n = len(prices)
