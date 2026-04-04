@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #4676: 12h Donchian(20) Breakout + 1d Camarilla Pivot Continuation
-HYPOTHESIS: 12h price breaking Donchian(20) channels (from prior 20 1d bars) with volume confirmation captures momentum.
-Breakouts above 1d Camarilla H4 (R3) or below L4 (S3) with volume confirm continuation. Works in bull (breakouts) and bear (breakdowns).
-Target: 12-37 trades/year on 12h timeframe. Uses discrete position sizing (0.25) to minimize fee drag.
+HYPOTHESIS: 12h price breaking Donchian(20) channels (from prior 20 daily bars) with volume confirmation captures momentum.
+Breakouts above 1d Camarilla H4 (R3) or below L4 (S3) with volume confirmation indicate strong continuation.
+Works in bull (breakouts) and bear (breakdowns) by trading with momentum and filtering with volume/volatility regime.
+Target: 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
@@ -77,7 +78,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size (discrete level)
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
