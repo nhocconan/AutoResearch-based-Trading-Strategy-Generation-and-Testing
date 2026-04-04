@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #3287: 6h Donchian Breakout + 1d Weekly Pivot + Volume Spike
-HYPOTHESIS: 6h Donchian(20) breakouts capture medium-term trends with moderate trade frequency.
-1d weekly pivot (calculated from prior week) provides institutional reference levels: 
-price above weekly pivot = bullish bias, below = bearish bias. Volume spike (>2.0x 20-period average) 
-confirms breakout strength. ATR trailing stop (2.5x) manages risk. Position size 0.25.
-Designed to work in bull markets (breakout continuation) and bear markets (fade from weekly resistance/support).
-Target: 75-150 total trades over 4 years (19-37/year) to balance opportunity with fee drag.
+Experiment #3287: 6h Donchian Breakout + 1d Weekly Pivot Direction + Volume Spike
+HYPOTHESIS: 6h Donchian(20) breakouts capture medium-term swings with controlled trade frequency.
+Weekly pivot direction from 1d data filters for institutional bias (long above weekly pivot, short below).
+Volume spike (>1.8x 20-period average) confirms breakout strength. ATR trailing stop (2.2x) manages risk.
+Position size 0.25. Target: 75-150 total trades over 4 years (19-37/year).
+Designed for both bull (breakout continuation) and bear (mean reversion from extremes) via price channels.
 """
 
 import numpy as np
@@ -30,19 +29,26 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points from prior week (using 1d data)
-    # Weekly high = max(high over last 5 trading days, assuming 5 days/week)
-    # Weekly low = min(low over last 5 trading days)
-    # Weekly close = close of last day in week
-    # Pivot = (Weekly High + Weekly Low + Weekly Close) / 3
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Weekly high = max of prior 5 daily highs (approx 1 week)
+    # Weekly low = min of prior 5 daily lows
+    # Weekly close = prior daily close
     lookback_week = 5
     weekly_high = pd.Series(high_1d).rolling(window=lookback_week, min_periods=lookback_week).max().values
     weekly_low = pd.Series(low_1d).rolling(window=lookback_week, min_periods=lookback_week).min().values
-    weekly_close = pd.Series(close_1d).rolling(window=lookback_week, min_periods=lookback_week).apply(lambda x: x[-1]).values
+    weekly_close = pd.Series(close_1d).shift(1).values  # prior week's close
+    
+    # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
     weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
-    # Align weekly pivot to 6h timeframe (shifted by 1 for completed weekly bar only)
+    # Weekly R1 = 2*pivot - weekly_low, S1 = 2*pivot - weekly_high
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    
+    # Align to 6h timeframe
     weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
     
     # === 6h Indicators: Donchian channels (20-period) ===
     lookback = 20
@@ -72,7 +78,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 20, 14, lookback_week)  # sufficient for all indicators
+    warmup = max(50, lookback, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -88,8 +94,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2.2*ATR below highest since entry
+                if price < highest_since_entry - 2.2 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -102,8 +108,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2.2*ATR above lowest since entry
+                if price > lowest_since_entry + 2.2 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -117,14 +123,14 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
+        # Require volume spike (> 1.8x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Weekly pivot bias: long above pivot, short below pivot
+            # Weekly pivot direction filter: long above pivot, short below pivot
             price_vs_pivot = price - weekly_pivot_aligned[i]
             
-            # Long entry: price breaks above Donchian high with bullish pivot bias
+            # Long entry: price breaks above Donchian high with bullish weekly bias
             if price > highest_high[i] and price_vs_pivot > 0:
                 in_position = True
                 position_side = 1
@@ -132,7 +138,7 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with bearish pivot bias
+            # Short entry: price breaks below Donchian low with bearish weekly bias
             elif price < lowest_low[i] and price_vs_pivot < 0:
                 in_position = True
                 position_side = -1
@@ -150,13 +156,12 @@ def generate_signals(prices):
 </think>
 #!/usr/bin/env python3
 """
-Experiment #3287: 6h Donchian Breakout + 1d Weekly Pivot + Volume Spike
-HYPOTHESIS: 6h Donchian(20) breakouts capture medium-term trends with moderate trade frequency.
-1d weekly pivot (calculated from prior week) provides institutional reference levels: 
-price above weekly pivot = bullish bias, below = bearish bias. Volume spike (>2.0x 20-period average) 
-confirms breakout strength. ATR trailing stop (2.5x) manages risk. Position size 0.25.
-Designed to work in bull markets (breakout continuation) and bear markets (fade from weekly resistance/support).
-Target: 75-150 total trades over 4 years (19-37/year) to balance opportunity with fee drag.
+Experiment #3287: 6h Donchian Breakout + 1d Weekly Pivot Direction + Volume Spike
+HYPOTHESIS: 6h Donchian(20) breakouts capture medium-term swings with controlled trade frequency.
+Weekly pivot direction from 1d data filters for institutional bias (long above weekly pivot, short below).
+Volume spike (>1.8x 20-period average) confirms breakout strength. ATR trailing stop (2.2x) manages risk.
+Position size 0.25. Target: 75-150 total trades over 4 years (19-37/year).
+Designed for both bull (breakout continuation) and bear (mean reversion from extremes) via price channels.
 """
 
 import numpy as np
@@ -180,19 +185,26 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points from prior week (using 1d data)
-    # Weekly high = max(high over last 5 trading days, assuming 5 days/week)
-    # Weekly low = min(low over last 5 trading days)
-    # Weekly close = close of last day in week
-    # Pivot = (Weekly High + Weekly Low + Weekly Close) / 3
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Weekly high = max of prior 5 daily highs (approx 1 week)
+    # Weekly low = min of prior 5 daily lows
+    # Weekly close = prior daily close
     lookback_week = 5
     weekly_high = pd.Series(high_1d).rolling(window=lookback_week, min_periods=lookback_week).max().values
     weekly_low = pd.Series(low_1d).rolling(window=lookback_week, min_periods=lookback_week).min().values
-    weekly_close = pd.Series(close_1d).rolling(window=lookback_week, min_periods=lookback_week).apply(lambda x: x[-1]).values
+    weekly_close = pd.Series(close_1d).shift(1).values  # prior week's close
+    
+    # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
     weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
-    # Align weekly pivot to 6h timeframe (shifted by 1 for completed weekly bar only)
+    # Weekly R1 = 2*pivot - weekly_low, S1 = 2*pivot - weekly_high
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    
+    # Align to 6h timeframe
     weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
     
     # === 6h Indicators: Donchian channels (20-period) ===
     lookback = 20
@@ -222,7 +234,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 20, 14, lookback_week)  # sufficient for all indicators
+    warmup = max(50, lookback, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -238,8 +250,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2.2*ATR below highest since entry
+                if price < highest_since_entry - 2.2 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -252,8 +264,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2.2*ATR above lowest since entry
+                if price > lowest_since_entry + 2.2 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -267,14 +279,14 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
+        # Require volume spike (> 1.8x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Weekly pivot bias: long above pivot, short below pivot
+            # Weekly pivot direction filter: long above pivot, short below pivot
             price_vs_pivot = price - weekly_pivot_aligned[i]
             
-            # Long entry: price breaks above Donchian high with bullish pivot bias
+            # Long entry: price breaks above Donchian high with bullish weekly bias
             if price > highest_high[i] and price_vs_pivot > 0:
                 in_position = True
                 position_side = 1
@@ -282,7 +294,7 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with bearish pivot bias
+            # Short entry: price breaks below Donchian low with bearish weekly bias
             elif price < lowest_low[i] and price_vs_pivot < 0:
                 in_position = True
                 position_side = -1
