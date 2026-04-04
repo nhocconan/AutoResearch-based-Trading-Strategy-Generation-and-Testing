@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4531: 6h Donchian(20) Breakout + 1d Volume Spike + 6h ATR Regime Filter
-HYPOTHESIS: 6h Donchian(20) breakouts with volume confirmation (>2.0x average volume) 
-and volatility regime filter (ATR(14) > ATR(50)) capture strong momentum moves while 
-avoiding false breakouts in low-volume, low-volatility environments. This strategy 
-targets 50-150 total trades over 4 years (12-37/year) with position size 0.25. 
-Works in both bull and bear markets by only trading breakouts with volume and 
-volatility expansion, which occurs during genuine market moves regardless of direction.
+Experiment #4534: 1h Donchian(20) Breakout + 4h/1d EMA Trend + Volume Confirmation + Session Filter
+HYPOTHESIS: 1h Donchian(20) breakouts aligned with 4h/1d EMA trend (bullish when price > both EMAs, bearish when price < both) and volume confirmation (>1.5x average) capture medium-term momentum with higher timeframe trend filter. Session filter (08-20 UTC) reduces noise trades. Designed for 1h timeframe to target 60-150 total trades over 4 years (15-37/year) with position size 0.20. Works in both bull and bear markets by only trading breakouts in direction of higher timeframe EMA trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4531_6h_donchian20_1d_vol_atr_v1"
-timeframe = "6h"
+name = "exp_4534_1h_donchian20_4h_1d_ema_vol_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,47 +17,59 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
+    open_time = prices["open_time"].values
     n = len(close)
     
-    # Precompute HTF: 1d data for volume spike filter
+    # Precompute session hours ONCE before loop (open_time is already datetime64[ms])
+    hours = pd.DatetimeIndex(open_time).hour
+    
+    # Precompute HTF: 4h and 1d data for EMA trend filter
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate volume MA(20) for 1d
-    if len(df_1d) >= 20:
-        vol_ma_1d = pd.Series(df_1d['volume'].values).rolling(window=20, min_periods=20).mean().values
+    # Calculate EMA(50) for 4h and 1d
+    if len(df_4h) >= 50:
+        ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     else:
-        vol_ma_1d = np.array([])
-    
-    # Align 1d volume MA to 6h timeframe
-    if len(vol_ma_1d) > 0:
-        vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+        ema_4h = np.array([])
+        
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     else:
-        vol_ma_1d_aligned = np.full(n, np.nan)
+        ema_1d = np.array([])
     
-    # === 6h Indicators: Donchian Channel(20) ===
+    # Align to 1h timeframe
+    if len(ema_4h) > 0:
+        ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    else:
+        ema_4h_aligned = np.full(n, np.nan)
+        
+    if len(ema_1d) > 0:
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    else:
+        ema_1d_aligned = np.full(n, np.nan)
+    
+    # === 1h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume MA(20) for confirmation ===
+    # === 1h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) and ATR(50) for volatility regime ===
+    # === 1h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_14 = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    atr_50 = pd.Series(tr).ewm(span=50, min_periods=50, adjust=False).mean().values
-    vol_regime = np.ones(n)  # 1 = high vol regime, 0 = low vol
-    vol_regime[50:] = (atr_14[50:] > atr_50[50:]).astype(float)
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.20  # 20% position size
     
     # Position tracking state variables
     in_position = False
@@ -71,12 +78,18 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 50)  # Donchian, vol MA, ATR(50) warmup
+    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, EMA warmup
     
     for i in range(warmup, n):
+        # --- Session Filter: 08-20 UTC ---
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
+        
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr_14[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(vol_regime[i])):
+            np.isnan(atr[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -88,7 +101,7 @@ def generate_signals(prices):
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
                 # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.5 * atr_14[i]:
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -97,7 +110,7 @@ def generate_signals(prices):
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.5 * atr_14[i]:
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -106,24 +119,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 2.0x average) to filter noise
-        volume_confirm = vol_ratio[i] > 2.0
+        # Require volume confirmation (> 1.5x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.5
         
-        # Higher timeframe volume spike: current volume > 1.5x 1d average volume
-        htf_vol_spike = volume[i] > (1.5 * vol_ma_1d_aligned[i])
-        
-        # Volatility regime filter: only trade in high volatility environment
-        vol_filter = vol_regime[i] > 0.5
+        # Higher timeframe trend filter: bullish when price > both EMAs, bearish when price < both
+        htf_bullish = price > ema_4h_aligned[i] and price > ema_1d_aligned[i]
+        htf_bearish = price < ema_4h_aligned[i] and price < ema_1d_aligned[i]
         
         # Donchian breakout conditions (using previous bar's levels to avoid look-ahead)
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
         breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
         
-        # Long conditions: upward breakout with volume and volatility confirmation
-        long_entry = breakout_up and volume_confirm and htf_vol_spike and vol_filter
+        # Long conditions: upward breakout in bullish HTF trend + volume
+        long_entry = breakout_up and htf_bullish and volume_confirm
         
-        # Short conditions: downward breakout with volume and volatility confirmation
-        short_entry = breakout_down and volume_confirm and htf_vol_spike and vol_filter
+        # Short conditions: downward breakout in bearish HTF trend + volume
+        short_entry = breakout_down and htf_bearish and volume_confirm
         
         if long_entry:
             in_position = True
