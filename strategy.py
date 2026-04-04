@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #5714: 1h Donchian(20) breakout + 4h EMA50 trend + 1d EMA200 filter + volume confirmation
-HYPOTHESIS: On 1h timeframe, Donchian(20) breakouts with volume > 1.5x average, aligned with 
-4h EMA50 trend (price above EMA50 = bullish, below = bearish), and filtered by 1d EMA200 
-(regime: price above EMA200 = bull market bias, below = bear market bias) capture high-probability 
-trend continuation moves. The multi-timeframe alignment reduces whipsaw, while volume confirms 
-breakout strength. Discrete sizing (0.20) minimizes fee churn. Target: 15-37 trades/year.
+Experiment #5714: 1h Donchian(20) breakout + 4h EMA200 trend + volume confirmation
+HYPOTHESIS: On 1h timeframe, Donchian(20) breakouts with volume > 1.5x average and aligned 
+with 4h EMA200 trend (price above EMA200 = bullish, below = bearish) capture high-probability 
+trend continuation moves. The 4h EMA200 provides a strong trend filter that reduces whipsaw 
+in both bull and bear markets. Volume confirms breakout strength. Session filter (08-20 UTC) 
+reduces noise trades. Discrete sizing (0.20) minimizes fee churn. Target: 15-37 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5714_1h_donchian20_4h_ema50_1d_ema200_vol_v1"
+name = "exp_5714_1h_donchian20_4h_ema200_vol_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -26,21 +26,15 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 4h data for EMA50 trend ===
+    # === HTF: 4h data for EMA200 trend ===
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) >= 50:
-        ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+    if len(df_4h) >= 200:
+        ema_4h = pd.Series(df_4h['close'].values).ewm(span=200, adjust=False).mean().values
     else:
         ema_4h = np.full(len(df_4h), np.nan)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # === HTF: 1d data for EMA200 regime filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 200:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False, min_periods=200).mean().values
-    else:
-        ema_1d = np.full(len(df_1d), np.nan)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align 4h EMA200 to 1h timeframe
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
     # === 1h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -69,10 +63,10 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50, 200)  # Donchian, volume avg, ATR, EMA50, EMA200
+    warmup = max(20, 20, 14, 200)  # Donchian, volume avg, ATR, EMA200
     
     for i in range(warmup, n):
-        # --- Session Filter: Trade only during active liquidity hours (08-20 UTC) ---
+        # --- Session Filter: Trade only during active hours (08-20 UTC) ---
         hour = hours[i]
         if hour < 8 or hour > 20:
             signals[i] = 0.0
@@ -81,7 +75,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i])):
+            np.isnan(ema_4h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -91,9 +85,9 @@ def generate_signals(prices):
         if in_position:
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
-                stop_price = highest_since_entry - 2.0 * atr[i]
-                # Exit: stoploss OR price breaks below 4h EMA50 (trend change) OR 1d EMA200 regime flip
-                if price <= stop_price or price <= ema_4h_aligned[i] or price <= ema_1d_aligned[i]:
+                stop_price = highest_since_entry - 2.5 * atr[i]
+                # Exit: stoploss OR price breaks below 4h EMA200 (trend change)
+                if price <= stop_price or price <= ema_4h_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -101,9 +95,9 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                stop_price = lowest_since_entry + 2.0 * atr[i]
-                # Exit: stoploss OR price breaks above 4h EMA50 (trend change) OR 1d EMA200 regime flip
-                if price >= stop_price or price >= ema_4h_aligned[i] or price >= ema_1d_aligned[i]:
+                stop_price = lowest_since_entry + 2.5 * atr[i]
+                # Exit: stoploss OR price breaks above 4h EMA200 (trend change)
+                if price >= stop_price or price >= ema_4h_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -116,17 +110,13 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # 4h EMA50 bias: long above EMA50, short below EMA50
-        long_bias_4h = price > ema_4h_aligned[i]
-        short_bias_4h = price < ema_4h_aligned[i]
+        # 4h EMA200 bias: long above EMA200, short below EMA200
+        long_bias = price > ema_4h_aligned[i]
+        short_bias = price < ema_4h_aligned[i]
         
-        # 1d EMA200 regime filter: long bias above EMA200, short bias below EMA200
-        long_bias_1d = price > ema_1d_aligned[i]
-        short_bias_1d = price < ema_1d_aligned[i]
-        
-        # Entry conditions: breakout in direction of both 4h and 1d bias with volume
-        long_setup = breakout_up and volume_confirmed and long_bias_4h and long_bias_1d
-        short_setup = breakout_down and volume_confirmed and short_bias_4h and short_bias_1d
+        # Entry conditions: breakout in direction of 4h EMA200 bias with volume
+        long_setup = breakout_up and volume_confirmed and long_bias
+        short_setup = breakout_down and volume_confirmed and short_bias
         
         if long_setup:
             in_position = True
