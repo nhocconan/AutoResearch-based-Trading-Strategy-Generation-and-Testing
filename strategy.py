@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4502: 12h Donchian(20) Breakout + Daily Trend + Volume Confirmation
-HYPOTHESIS: 12h Donchian(20) breakouts aligned with daily EMA50 trend and confirmed by volume (>2.0x average) capture medium-term momentum with reduced noise. Daily trend filter avoids counter-trend trades, while volume confirmation ensures conviction. Position size 0.25 manages drawdown. Targets 50-150 total trades over 4 years (12-37/year) with strict entry conditions to minimize fee drag. Works in both bull and bear markets by only trading in direction of daily trend.
+Experiment #4502: 12h Donchian(20) Breakout + Daily Pivot Direction + Volume Confirmation
+HYPOTHESIS: 12h Donchian(20) breakouts aligned with daily pivot bias (price above/below daily pivot) and confirmed by volume (>1.8x average) capture medium-term momentum with reduced noise. Daily pivot provides structural bias from higher timeframe (1d), reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25. This timeframe (12h) has higher win rate than lower timeframes due to reduced noise and better alignment with institutional trading rhythms.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4502_12h_donchian20_1d_ema_vol_v1"
+name = "exp_4502_12h_donchian20_1d_pivot_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -23,31 +23,23 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1d data for EMA50 trend ===
+    # === Precompute HTF: 1d data for daily pivot calculation ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
+    if len(df_1d) >= 1:
+        # Calculate daily pivot from prior day's OHLC
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
         close_1d = df_1d['close'].values
-        ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-        # Daily trend: price above/below EMA50
-        daily_uptrend = ema_1d_aligned > 0  # Will be replaced with actual comparison
-        daily_downtrend = ema_1d_aligned > 0  # Placeholder
+        
+        # Daily pivot = (prior day high + prior day low + prior day close) / 3
+        # Shift by 1 to use prior completed day only (no look-ahead)
+        daily_pivot_1d = (np.roll(high_1d, 1) + np.roll(low_1d, 1) + np.roll(close_1d, 1)) / 3.0
+        # First value will be NaN due to roll, which is correct (no prior day)
+        
+        # Align to 12h timeframe
+        daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot_1d)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
-        daily_uptrend = np.zeros(n, dtype=bool)
-        daily_downtrend = np.zeros(n, dtype=bool)
-    
-    if len(df_1d) >= 50:
-        close_1d = df_1d['close'].values
-        ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-        # Daily trend: 12h price above/below daily EMA50
-        daily_uptrend = close > ema_1d_aligned
-        daily_downtrend = close < ema_1d_aligned
-    else:
-        ema_1d_aligned = np.full(n, np.nan)
-        daily_uptrend = np.zeros(n, dtype=bool)
-        daily_downtrend = np.zeros(n, dtype=bool)
+        daily_pivot_aligned = np.full(n, np.nan)
     
     # === 12h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
@@ -78,12 +70,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, daily EMA
+    warmup = max(20, 20, 14, 1)  # Donchian, vol MA, ATR, daily pivot
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(daily_pivot_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -119,18 +111,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 2.0x average) to filter noise
-        volume_confirm = vol_ratio[i] > 2.0
+        # Require volume confirmation (> 1.8x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.8
+        
+        # Daily pivot bias: price > pivot = long bias, price < pivot = short bias
+        long_bias = price > daily_pivot_aligned[i]
+        short_bias = price < daily_pivot_aligned[i]
         
         # Donchian breakout conditions
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
         breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
         
-        # Long conditions: upward breakout + daily uptrend + volume
-        long_entry = breakout_up and daily_uptrend[i] and volume_confirm
+        # Long conditions: upward breakout + long bias + volume
+        long_entry = breakout_up and long_bias and volume_confirm
         
-        # Short conditions: downward breakout + daily downtrend + volume
-        short_entry = breakout_down and daily_downtrend[i] and volume_confirm
+        # Short conditions: downward breakout + short bias + volume
+        short_entry = breakout_down and short_bias and volume_confirm
         
         if long_entry:
             in_position = True
