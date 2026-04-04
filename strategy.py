@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4605: 12h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA50 trend and volume spikes (>1.8x average) capture medium-term momentum with lower trade frequency suitable for 12h timeframe. Uses discrete sizing (0.25) and ATR trailing stop (2.0x) to minimize fee churn. Designed to work in both bull and bear markets by using EMA50 as structural bias and volume confirmation to filter false breakouts.
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA50 trend and volume spikes (>1.8x average) capture medium-term momentum. Uses tighter volume filter and ATR trailing stop (2.0x) to reduce trades to target 12-37/year. 1d EMA50 provides structural bias that works in both bull/bear markets by identifying primary trend. Discrete sizing (0.25) minimizes fee churn.
 """
 
 import numpy as np
