@@ -1,58 +1,69 @@
 #!/usr/bin/env python3
 """
-exp_6758_1d_donchian20_1w_ema_vol_v1
-Hypothesis: 1d Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
-In bull markets (price > weekly EMA50): long breakouts only. In bear markets (price < weekly EMA50): short breakouts only.
-Weekly EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
-Designed for 1d timeframe to capture major swings with ~7-25 trades/year (30-100 total over 4 years).
-Works in both bull and bear markets by aligning with weekly trend direction.
+exp_6759_6h_ichimoku_kijun_sen_1d_trend_v1
+Hypothesis: 6h Ichimoku Kijun-Sen (base line) crossover with 1d trend filter.
+In bull markets (price > 1d EMA200): long when price crosses above Kijun-Sen.
+In bear markets (price < 1d EMA200): short when price crosses below Kijun-Sen.
+Uses 6h Tenkan/Kijun cross for timing and 1d EMA200 for structural trend.
+Designed to capture medium-term swings in both bull and bear markets with ~12-37 trades/year.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6758_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_6759_6h_ichimoku_kijun_sen_1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5  # Reduced from 2.0 to increase trade frequency
-SIGNAL_SIZE = 0.30        # Increased from 0.25 to improve profitability
+TK_PERIOD = 9      # Tenkan-sen period
+KJ_PERIOD = 26     # Kijun-sen period
+SS_PERIOD = 52     # Senkou Span B period
+DISPLACEMENT = 26  # Kumo displacement
+EMA_PERIOD = 200   # 1d EMA for trend filter
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0 # Reduced from 2.5 to allow quicker stoploss
-MAX_HOLD_BARS = 40        # Increased from 30 to allow longer trends
-EMA_PERIOD = 50
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 50  # ~12.5 days (6h bars)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1w for weekly EMA
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop - using 1d for EMA200 trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA50
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate 1d EMA200
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align to LTF (1d)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align to LTF (6h)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate LTF indicators
-    close = prices['close'].values
+    # Calculate LTF Ichimoku components
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    period9_high = pd.Series(high).rolling(window=TK_PERIOD, min_periods=TK_PERIOD).max().values
+    period9_low = pd.Series(low).rolling(window=TK_PERIOD, min_periods=TK_PERIOD).min().values
+    tenkan_sen = (period9_high + period9_low) / 2
     
-    # Volume MA for confirmation
-    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    period26_high = pd.Series(high).rolling(window=KJ_PERIOD, min_periods=KJ_PERIOD).max().values
+    period26_low = pd.Series(low).rolling(window=KJ_PERIOD, min_periods=KJ_PERIOD).min().values
+    kijun_sen = (period26_high + period26_low) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    period52_high = pd.Series(high).rolling(window=SS_PERIOD, min_periods=SS_PERIOD).max().values
+    period52_low = pd.Series(low).rolling(window=SS_PERIOD, min_periods=SS_PERIOD).min().values
+    senkou_span_b = (period52_high + period52_low) / 2
     
     # ATR for stoploss
     tr1 = pd.Series(high - low)
@@ -67,13 +78,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(TK_PERIOD, KJ_PERIOD, SS_PERIOD, EMA_PERIOD, ATR_PERIOD) + DISPLACEMENT
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1w_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -98,25 +109,30 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        # Determine trend direction from 1d EMA200
+        bullish_trend = close[i] > ema_1d_aligned[i]
+        bearish_trend = close[i] < ema_1d_aligned[i]
         
-        # Determine trend direction from weekly EMA50
-        weekly_uptrend = close[i] > ema_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_1w_aligned[i]
+        # Ichimoku signals: Tenkan/Kijun cross
+        # Avoid look-ahead: use previous bar values for cross detection
+        tenkan_prev = tenkan_sen[i-1]
+        kijun_prev = kijun_sen[i-1]
+        tenkan_curr = tenkan_sen[i]
+        kijun_curr = kijun_sen[i]
         
-        # Breakout signals aligned with weekly trend
-        long_breakout = weekly_uptrend and (close[i] > highest_high[i]) and vol_confirmed
-        short_breakout = weekly_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
+        # Bullish cross: Tenkan crosses above Kijun
+        bullish_cross = (tenkan_prev <= kijun_prev) and (tenkan_curr > kijun_curr)
+        # Bearish cross: Tenkan crosses below Kijun
+        bearish_cross = (tenkan_prev >= kijun_prev) and (tenkan_curr < kijun_curr)
         
         # Enter new positions only if flat
         if position == 0:
-            if long_breakout:
+            if bullish_trend and bullish_cross:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif short_breakout:
+            elif bearish_trend and bearish_cross:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -128,5 +144,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
