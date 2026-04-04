@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #6182: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with daily EMA trend capture strong momentum moves 
+Experiment #6185: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with daily EMA50 trend capture strong momentum moves 
 while avoiding counter-trend traps. Volume >2.0x average confirms institutional participation. 
 ATR trailing stop manages risk. Discrete sizing (0.30) balances return and fee drag. 
-Target: 75-200 trades over 4 years (19-50/year) for 12h timeframe.
-Timeframe: 12h. HTF: 1d for EMA trend filter.
+Target: 50-150 trades over 4 years (12-37/year) on 12h timeframe.
+Timeframe: 12h. HTF: 1d for EMA50 trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6182_12h_donchian20_1d_ema_vol_v1"
+name = "exp_6185_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
