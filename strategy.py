@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4720: 4h Donchian(20) Breakout + 1d EMA50 Trend + Volume Spike
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts in direction of 1d EMA50 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) trailing stop (2.5x) to limit downside. EMA50 is faster than HMA21, potentially capturing more trends while remaining smooth. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Should work in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts in direction of 1d EMA50 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) stoploss (2.5x) to limit downside. EMA50 is more responsive than HMA21 for trend detection, reducing whipsaw in ranging markets. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 """
 
 import numpy as np
