@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #4675: 6h Williams %R + 1w EMA Filter + Volume Spike
-HYPOTHESIS: Williams %R(14) identifies overbought/oversold conditions on 6h, filtered by 1w EMA trend direction.
-Volume spike (>2.0x MA20) confirms momentum. Works in bull (buy pullbacks in uptrend) and bear (sell rallies in downtrend).
-Target: 12-37 trades/year on 6h timeframe.
+Experiment #4676: 12h Donchian(20) Breakout + 1d Camarilla Pivot Continuation
+HYPOTHESIS: 12h price breaking Donchian(20) channels (from prior 20 1d bars) with volume confirmation captures momentum.
+Breakouts above 1d Camarilla H4 (R3) or below L4 (S3) with volume confirm continuation. Works in bull (breakouts) and bear (breakdowns).
+Target: 12-37 trades/year on 12h timeframe. Uses discrete position sizing (0.25) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4675_6h_williamsr_1w_ema_volume_v1"
-timeframe = "6h"
+name = "exp_4676_12h_donchian20_camarilla_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,35 +21,54 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1w data for EMA filter
-    df_1w = get_htf_data(prices, '1w')
+    # Precompute HTF: 1d data for Donchian and Camarilla
+    df_1d = get_htf_data(prices, '1d')
     
-    # === 1w Indicators: EMA(50) for trend filter ===
-    if len(df_1w) >= 50:
-        ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # === 1d Indicators: Donchian(20) from prior 20 days ===
+    if len(df_1d) >= 20:
+        # Use prior 20 days' high/low (shifted by 1)
+        ph = np.concatenate([[np.nan] * 20, df_1d['high'].values[:-20]])  # prior 20 days high
+        pl = np.concatenate([[np.nan] * 20, df_1d['low'].values[:-20]])   # prior 20 days low
+        
+        # Rolling max/min of prior 20 days
+        donchian_high = pd.Series(ph).rolling(window=20, min_periods=20).max().values
+        donchian_low = pd.Series(pl).rolling(window=20, min_periods=20).min().values
     else:
-        ema_1w = np.full(len(df_1w), np.nan)
+        donchian_high = np.full(len(df_1d), np.nan)
+        donchian_low = np.full(len(df_1d), np.nan)
     
-    # Align HTF indicators to 6h timeframe
-    if len(ema_1w) > 0:
-        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # === 1d Indicators: Camarilla Pivot Levels (from prior 1d OHLC) ===
+    if len(df_1d) >= 1:
+        # Prior day's OHLC (shifted by 1 to avoid look-ahead)
+        ph_1d = np.concatenate([[np.nan], df_1d['high'].values[:-1]])
+        pl_1d = np.concatenate([[np.nan], df_1d['low'].values[:-1]])
+        pc_1d = np.concatenate([[np.nan], df_1d['close'].values[:-1]])
+        
+        # Camarilla levels: based on prior day's range
+        rng = ph_1d - pl_1d
+        camarilla_h4 = pc_1d + 1.1 * rng / 4  # R3
+        camarilla_l4 = pc_1d - 1.1 * rng / 4  # S3
     else:
-        ema_1w_aligned = np.full(n, np.nan)
+        camarilla_h4 = camarilla_l4 = np.full(len(df_1d), np.nan)
     
-    # === 6h Indicators: Williams %R(14) ===
-    lookback = 14
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero (when high == low)
-    williams_r[highest_high == lowest_low] = -50.0
+    # Align HTF indicators to 12h timeframe
+    if len(donchian_high) > 0:
+        dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+        dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+        camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+        camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    else:
+        dh_aligned = np.full(n, np.nan)
+        dl_aligned = np.full(n, np.nan)
+        camarilla_h4_aligned = np.full(n, np.nan)
+        camarilla_l4_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Volume MA(20) for spike confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -58,7 +77,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.25  # 25% position size (discrete level)
     
     # Position tracking state variables
     in_position = False
@@ -67,11 +86,11 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback, 20, 14)  # Williams %R, Volume MA, ATR warmup
+    warmup = max(20, 14)  # Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(williams_r[i]) or np.isnan(ema_1w_aligned[i]) or 
+        if (np.isnan(dh_aligned[i]) or np.isnan(dl_aligned[i]) or 
             np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -102,29 +121,40 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation for entries (>2.0x)
-        vol_spike = vol_ratio[i] > 2.0
+        # Volume filter: confirmation for breakouts (>1.5x)
+        vol_breakout = vol_ratio[i] > 1.5
         
-        # Williams %R conditions: oversold (< -80) or overbought (> -20)
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
+        # Breakout conditions: price breaks Donchian high/low with volume confirmation
+        breakout_long = price > dh_aligned[i] and vol_breakout
+        breakout_short = price < dl_aligned[i] and vol_breakout
         
-        # Trend filter: 1w EMA direction
-        price_vs_ema = price > ema_1w_aligned[i]
+        # Continuation breakout: price breaks Camarilla H4/L4 (R3/S3) with volume confirmation
+        continuation_long = price > camarilla_h4_aligned[i] and vol_breakout
+        continuation_short = price < camarilla_l4_aligned[i] and vol_breakout
         
-        # Long: oversold in uptrend (price > 1w EMA) with volume spike
-        long_signal = oversold and price_vs_ema and vol_spike
-        # Short: overbought in downtrend (price < 1w EMA) with volume spike
-        short_signal = overbought and (not price_vs_ema) and vol_spike
-        
-        if long_signal:
+        # Priority: continuation breakouts > Donchian breakouts (stronger signal)
+        if continuation_long:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif short_signal:
+        elif continuation_short:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = -SIZE
+        elif breakout_long:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = SIZE
+        elif breakout_short:
             in_position = True
             position_side = -1
             entry_price = close[i]
