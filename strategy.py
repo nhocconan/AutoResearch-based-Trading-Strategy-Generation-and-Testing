@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4256: 12h Donchian(20) breakout + daily pivot direction + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts capture swing momentum when aligned with daily pivot trend (price above/below daily pivot) and confirmed by volume (>1.8x average). Daily pivot provides structural support/resistance from higher timeframe, reducing false breakouts. Works in bull via breakout continuation above daily pivot, in bear via shorting breakdowns below daily pivot. Uses 12h timeframe to minimize fee drag (target: 50-150 total trades over 4 years).
+Experiment #4257: 4h Donchian(20) breakout + 1d HMA(50) trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 4h capture swing momentum when aligned with 1d HMA50 trend (price > HMA50 for longs, < HMA50 for shorts) and confirmed by volume (>2.0x average). Uses 1d HMA for stronger trend filter (less whipsaw) while targeting 75-200 trades over 4 years. ATR-based trailing stop (2.5x) manages risk. Position size 0.25 targets 19-50 trades/year. Works in bull via breakout continuation, in bear via shorting breakdowns.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4256_12h_donchian20_1d_pivot_vol_v1"
-timeframe = "12h"
+name = "exp_4257_4h_donchian20_1d_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,17 +23,21 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1d daily pivot (standard floor pivot) ===
+    # === Precompute HTF: 1d HMA50 for trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 1:
-        # Standard daily pivot: (high + low + close) / 3
-        daily_pivot_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-        # Align to 12h timeframe
-        daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot_1d)
+    if len(df_1d) >= 50:
+        # Calculate HMA(50): WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+        half = 50 // 2
+        sqrt_n = int(np.sqrt(50))
+        wma_half = pd.Series(df_1d['close'].values).rolling(window=half, min_periods=half).mean().values
+        wma_full = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
+        raw_hma = 2 * wma_half - wma_full
+        hma_1d = pd.Series(raw_hma).rolling(window=sqrt_n, min_periods=sqrt_n).mean().values
+        hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     else:
-        daily_pivot_aligned = np.full(n, np.nan)
+        hma_1d_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel (20) ===
+    # === 4h Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -41,12 +45,12 @@ def generate_signals(prices):
     
     donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
-    # === 12h Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -64,12 +68,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
+    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, 1d HMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(daily_pivot_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(hma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -105,23 +109,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = vol_ratio[i] > 2.0
         
         if volume_confirm:
             # Donchian breakout conditions (using previous bar's levels)
             breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
             breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
             
-            # Daily pivot trend filter
-            price_above_pivot = price > daily_pivot_aligned[i]
-            price_below_pivot = price < daily_pivot_aligned[i]
+            # 1d HMA50 trend filter
+            price_above_hma = price > hma_1d_aligned[i]
+            price_below_hma = price < hma_1d_aligned[i]
             
-            # Long conditions: Donchian breakout up + price above daily pivot
-            long_entry = breakout_up and price_above_pivot
+            # Long conditions: Donchian breakout up + price above HMA50
+            long_entry = breakout_up and price_above_hma
             
-            # Short conditions: Donchian breakout down + price below daily pivot
-            short_entry = breakout_dn and price_below_pivot
+            # Short conditions: Donchian breakout down + price below HMA50
+            short_entry = breakout_dn and price_below_hma
             
             if long_entry:
                 in_position = True
