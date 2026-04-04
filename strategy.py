@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4510: 1d Donchian(20) Breakout + 1w Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: Daily Donchian(20) breakouts aligned with weekly pivot direction (price above weekly pivot = long bias, below = short bias) and confirmed by volume (>2.0x average) capture medium-term momentum with reduced noise. Weekly pivot provides structural support/resistance from higher timeframe to avoid counter-trend trades, while volume confirmation ensures breakout conviction. Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year) with position size 0.25. Works in both bull and bear markets by only trading in direction of weekly pivot bias.
+HYPOTHESIS: 1d Donchian(20) breakouts aligned with 1w weekly pivot direction (price above weekly pivot = long bias, below = short bias) and confirmed by volume (>2.0x average) capture medium-to-long term momentum with reduced noise. Weekly pivot provides structural support/resistance from higher timeframe to avoid counter-trend trades, while volume confirmation ensures breakout conviction. Designed for 1d timeframe to target 30-100 total trades over 4 years (7-25/year) with position size 0.25. Works in both bull and bear markets by only trading in direction of weekly pivot bias.
 """
 
 import numpy as np
@@ -27,7 +27,7 @@ def generate_signals(prices):
         low_1w = pd.Series(df_1w['low'].values)
         close_1w = pd.Series(df_1w['close'].values)
         
-        # Weekly aggregates: prior week's H/L/C (shifted by 1 to get prior completed week)
+        # Weekly aggregates: prior week's H/L/C (shifted by 1 to get completed week)
         week_high = high_1w.rolling(window=1, min_periods=1).max().shift(1)  # Prior week's high
         week_low = low_1w.rolling(window=1, min_periods=1).min().shift(1)    # Prior week's low
         week_close = close_1w.rolling(window=1, min_periods=1).last().shift(1) # Prior week's close
