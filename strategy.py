@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #5040: 4h Donchian(20) Breakout + 1d Volume Spike + ATR Stoploss
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts with 1d volume confirmation capture strong momentum. 1d volume > 2x average confirms institutional participation. ATR(14) trailing stop (2.5x) manages risk. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Works in both bull (breakouts) and bear (breakdowns) markets by taking long on upper band break and short on lower band break.
+Experiment #5041: 4h Donchian(20) Breakout + 1d/1w HTF Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 1d EMA50 trend and 1w EMA200 regime filter capture strong momentum with controlled frequency. 1d EMA50 provides intermediate trend direction, 1w EMA200 avoids counter-trend trades in major bear/bull regimes. Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend) by requiring trend alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5040_4h_donchian20_1d_vol_atr_v1"
+name = "exp_5041_4h_donchian20_1d_1w_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,19 +19,29 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for volume confirmation
+    # Precompute HTF: 1d and 1w data for trend filters
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # === 1d Indicators: Volume MA (20) ===
-    vol_1d = df_1d['volume'].values.astype(np.float64)
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # === 1d Indicators: EMA50 for intermediate trend ===
+    if len(df_1d) >= 50:
+        ema_1d_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    else:
+        ema_1d_50_aligned = np.full(n, np.nan)
+    
+    # === 1w Indicators: EMA200 for major trend regime ===
+    if len(df_1w) >= 200:
+        ema_1w_200 = pd.Series(df_1w['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+        ema_1w_200_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_200)
+    else:
+        ema_1w_200_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation (2x spike) ===
+    # === 4h Indicators: Volume confirmation (1.5x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -54,12 +64,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, Volume MA, ATR warmup
+    warmup = max(20, 20, 50, 200, 14)  # Donchian, Volume MA, EMA50, EMA200, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_1d_50_aligned[i]) or np.isnan(ema_1w_200_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -70,8 +81,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -79,8 +90,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -89,13 +100,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filters: 4h volume > 2x average AND 1d volume > 2x average
-        vol_confirm_4h = vol_ratio[i] > 2.0
-        vol_confirm_1d = volume[i] > 2.0 * vol_ma_1d_aligned[i]  # Use current 4h volume vs 1d MA
+        # Volume filter: confirmation (>1.5x)
+        vol_confirm = vol_ratio[i] > 1.5
         
-        # Donchian breakout conditions
-        breakout_long = (price >= high_roll[i]) and vol_confirm_4h and vol_confirm_1d
-        breakout_short = (price <= low_roll[i]) and vol_confirm_4h and vol_confirm_1d
+        # Trend filters: 1d EMA50 > 1w EMA200 = bullish bias, < = bearish bias
+        bullish_bias = ema_1d_50_aligned[i] > ema_1w_200_aligned[i]
+        bearish_bias = ema_1d_50_aligned[i] < ema_1w_200_aligned[i]
+        
+        # Donchian breakout conditions with trend alignment
+        # Long: Donchian breakout above high AND bullish bias
+        # Short: Donchian breakdown below low AND bearish bias
+        breakout_long = (price >= high_roll[i]) and bullish_bias and vol_confirm
+        breakout_short = (price <= low_roll[i]) and bearish_bias and vol_confirm
         
         # Final entry conditions
         if breakout_long:
