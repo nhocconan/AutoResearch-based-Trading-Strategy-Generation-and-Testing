@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4624: 1d Donchian(20) Breakout + Weekly Trend + Volume Confirmation
-HYPOTHESIS: Daily price breaking 20-day Donchian channels with weekly EMA(21) trend alignment and volume confirmation (>1.3x average) captures strong momentum moves. Uses discrete sizing (0.25) and ATR(14) trailing stop (2.0x) for risk management. Target: 15-30 trades/year on 1d timeframe.
+Experiment #4625: 12h Donchian(20) Breakout + Volume Confirmation + ATR Stoploss
+HYPOTHESIS: 12h price breaking Donchian(20) channels from prior 1d with volume confirmation (>1.5x avg) captures strong momentum breakouts in both bull and bear markets. Uses 1d HTF for Donchian calculation to avoid look-ahead. Discrete sizing (0.25) and ATR trailing stop (2.0x) manage risk. Target: 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4624_1d_donchian20_weekly_trend_vol_v1"
-timeframe = "1d"
+name = "exp_4625_12h_donchian20_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,35 +19,36 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1w data for weekly EMA trend
-    df_1w = get_htf_data(prices, '1w')
+    # Precompute HTF: 1d data for Donchian channels
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA(21) for trend filter
-    if len(df_1w) >= 1:
-        weekly_close = df_1w['close'].values
-        weekly_ema = pd.Series(weekly_close).ewm(span=21, min_periods=21, adjust=False).mean().values
+    # Calculate Donchian(20) from prior 1d OHLC (shifted by 1 to avoid look-ahead)
+    if len(df_1d) >= 20:
+        # Use prior 20 days' high/low (shifted by 1)
+        ph = np.concatenate([[np.nan] * 20, df_1d['high'].values[:-20]])  # prior 20 days high
+        pl = np.concatenate([[np.nan] * 20, df_1d['low'].values[:-20]])   # prior 20 days low
+        
+        # Rolling max/min of prior 20 days
+        donchian_high = pd.Series(ph).rolling(window=20, min_periods=20).max().values
+        donchian_low = pd.Series(pl).rolling(window=20, min_periods=20).min().values
     else:
-        weekly_ema = np.array([])
+        donchian_high = np.full(n, np.nan)
+        donchian_low = np.full(n, np.nan)
     
-    # Align weekly EMA to daily timeframe
-    if len(weekly_ema) > 0:
-        weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    # Align Donchian levels to 12h timeframe
+    if len(donchian_high) > 0:
+        dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+        dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     else:
-        weekly_ema_aligned = np.full(n, np.nan)
+        dh_aligned = np.full(n, np.nan)
+        dl_aligned = np.full(n, np.nan)
     
-    # === Daily Indicators: Donchian(20) channels ===
-    # Donchian upper = max(high, lookback=20), lower = min(low, lookback=20)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # === Daily Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === Daily Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -65,12 +66,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 21, 20)  # Donchian, weekly EMA, volume MA, ATR warmup
+    warmup = max(20, 14)  # Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
-            np.isnan(weekly_ema_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(dh_aligned[i]) or np.isnan(dl_aligned[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -100,16 +101,12 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>1.3x average volume)
-        vol_confirm = vol_ratio[i] > 1.3
+        # Volume filter: confirmation for breakouts (>1.5x)
+        vol_breakout = vol_ratio[i] > 1.5
         
-        # Trend filter: price above/below weekly EMA
-        price_above_weekly = price > weekly_ema_aligned[i]
-        price_below_weekly = price < weekly_ema_aligned[i]
-        
-        # Breakout conditions: price breaks Donchian channels with volume and trend confirmation
-        breakout_long = price > donchian_upper[i] and vol_confirm and price_above_weekly
-        breakout_short = price < donchian_lower[i] and vol_confirm and price_below_weekly
+        # Breakout conditions: price breaks Donchian high/low with volume confirmation
+        breakout_long = price > dh_aligned[i] and vol_breakout
+        breakout_short = price < dl_aligned[i] and vol_breakout
         
         if breakout_long:
             in_position = True
