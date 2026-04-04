@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4682: 12h Donchian(20) Breakout + 1d EMA Trend Filter + Volume Confirmation
-HYPOTHESIS: 12h price breaking Donchian(20) channels (from prior 20 12h bars) with volume confirmation (>1.5x) and aligned with 1d EMA50 trend captures momentum in both bull and bear markets. 1d EMA50 acts as a dynamic trend filter: only take longs when price > EMA50, shorts when price < EMA50. This avoids counter-trend whipsaws. Target: 12-37 trades/year on 12h timeframe.
+Experiment #4683: 4h Donchian(20) Breakout + 12h EMA Trend + Volume Confirmation
+HYPOTHESIS: 4h price breaking Donchian(20) channels with volume confirmation (>1.5x avg volume) and aligned with 12h EMA50 trend captures momentum while minimizing whipsaws. 12h EMA50 acts as a smoother trend filter than 1d, reducing false signals in ranging markets. Target: 25-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4682_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_4683_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,22 +19,22 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for EMA50 trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Precompute HTF: 12h data for EMA50 trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # === 1d Indicators: EMA50 for trend filter ===
-    if len(df_1d) >= 50:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # === 12h Indicators: EMA50 for trend filter ===
+    if len(df_12h) >= 50:
+        ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     else:
-        ema_1d = np.full(len(df_1d), np.nan)
+        ema_12h = np.full(len(df_12h), np.nan)
     
-    # Align HTF EMA50 to 12h timeframe
-    if len(ema_1d) > 0:
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align HTF EMA50 to 4h timeframe
+    if len(ema_12h) > 0:
+        ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        ema_12h_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian(20) from prior 20 bars ===
+    # === 4h Indicators: Donchian(20) from prior 20 bars ===
     # Use prior 20 bars' high/low (shifted by 1 to avoid look-ahead)
     ph = np.concatenate([[np.nan] * 20, high[:-20]])  # prior 20 bars high
     pl = np.concatenate([[np.nan] * 20, low[:-20]])   # prior 20 bars low
@@ -43,12 +43,12 @@ def generate_signals(prices):
     donchian_high = pd.Series(ph).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(pl).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -71,7 +71,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -108,9 +108,9 @@ def generate_signals(prices):
         breakout_long = price > donchian_high[i] and vol_breakout
         breakout_short = price < donchian_low[i] and vol_breakout
         
-        # 1d EMA50 trend filter: only trade in direction of higher timeframe trend
-        trend_filter_long = price > ema_1d_aligned[i]
-        trend_filter_short = price < ema_1d_aligned[i]
+        # 12h EMA50 trend filter: only trade in direction of higher timeframe trend
+        trend_filter_long = price > ema_12h_aligned[i]
+        trend_filter_short = price < ema_12h_aligned[i]
         
         # Final entry conditions: breakout + volume + trend filter
         if breakout_long and trend_filter_long:
