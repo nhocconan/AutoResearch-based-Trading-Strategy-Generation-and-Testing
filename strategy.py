@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3738: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 1d Donchian breakouts capture medium-term momentum, with 1w HMA(21) providing higher timeframe trend bias to filter false breakouts. Volume spike (>2.0x) confirms breakout authenticity. ATR-based trailing stop (2.5x) manages risk. This combination avoids whipsaw in ranging markets and works in both bull (breakouts with trend) and bear (breakouts against trend filtered by HMA) regimes. Position size 0.25 manages drawdown from 2022 crash while allowing profit accumulation. Target: 30-100 trades over 4 years on 1d timeframe.
+HYPOTHESIS: 1d Donchian breakouts capture intermediate-term momentum, with 1w HMA21 providing structural trend bias to filter false breakouts. Volume spike (>2.0x) confirms breakout authenticity. ATR-based trailing stop (2.5x) manages risk. This combination avoids whipsaw in ranging markets and works in both bull (breakouts with trend) and bear (breakouts against trend filtered by HMA) regimes. Position size 0.25 manages drawdown from 2022 crash while allowing profit accumulation. Target: 30-100 trades over 4 years.
 """
 
 import numpy as np
@@ -23,24 +23,17 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate HMA(21) on 1w data: HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    # Calculate HMA(21) on 1w data
     def calculate_hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
         half_period = period // 2
         sqrt_period = int(np.sqrt(period))
-        # WMA function
-        def wma(values, window):
-            weights = np.arange(1, window + 1, dtype=np.float64)
-            return np.convolve(values, weights, 'valid') / weights.sum()
-        wma_half = wma(arr, half_period)
-        wma_full = wma(arr, period)
+        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False, min_periods=half_period).mean().values
+        wma_full = pd.Series(arr).ewm(span=period, adjust=False, min_periods=period).mean().values
         raw_hma = 2 * wma_half - wma_full
-        hma = wma(raw_hma, sqrt_period)
-        # Pad with NaN to match original length
-        result = np.full_like(arr, np.nan)
-        result[half_period + sqrt_period - 1:] = hma
-        return result
+        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False, min_periods=sqrt_period).mean().values
+        return hma
     
     hma_21 = calculate_hma(close_1w, 21)
     
@@ -75,7 +68,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20, 14)  # sufficient for all indicators
+    warmup = max(lookback_dc + 1, 20, 14, 21)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
