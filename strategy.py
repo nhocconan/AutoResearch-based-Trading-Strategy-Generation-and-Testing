@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #3021: 4h Donchian Breakout + 1d HMA Trend + Volume Spike
+Experiment #3021: 4h Donchian Breakout + 1d HMA Trend + Volume Spike + Chop Filter
 HYPOTHESIS: Donchian(20) breakouts on 4h capture medium-term trends. 1d HMA(21) provides
 trend filter: only take longs when price > HMA, shorts when price < HMA. Volume spike
-(>2.0x 20-period average) confirms breakout strength. This combination filters false
-breakouts in choppy markets while capturing strong trends. 4h timeframe balances
-trade frequency and fee drag. Target: 75-200 total trades over 4 years.
+(>2.0x 20-period average) confirms breakout strength. Choppiness Index > 61.8 avoids
+ranging markets. This combination filters false breakouts while capturing strong trends.
+4h timeframe balances trade frequency and fee drag. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3021_4h_donchian20_1d_hma_vol_v1"
+name = "exp_3021_4h_donchian20_1d_hma_vol_chop_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -42,6 +42,30 @@ def generate_signals(prices):
     hma_1d = calculate_hma(close_1d, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
+    # === HTF: 1d data for Choppiness Index (regime filter) ===
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    def calculate_choppiness(high_arr, low_arr, close_arr, period):
+        if len(close_arr) < period:
+            return np.full_like(close_arr, np.nan)
+        atr = np.zeros(len(close_arr))
+        for i in range(1, len(close_arr)):
+            atr[i] = max(
+                high_arr[i] - low_arr[i],
+                abs(high_arr[i] - close_arr[i-1]),
+                abs(low_arr[i] - close_arr[i-1])
+            )
+        atr_sum = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
+        highest_high = pd.Series(high_arr).rolling(window=period, min_periods=period).max().values
+        lowest_low = pd.Series(low_arr).rolling(window=period, min_periods=period).min().values
+        ratio = atr_sum / (highest_high - lowest_low + 1e-10)
+        chop = 100 * np.log10(ratio) / np.log10(period)
+        return chop
+    
+    chop_1d = calculate_choppiness(high_1d, low_1d, close_1d, 14)
+    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    
     # === 4h Indicators: Donchian channels (20-period) ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
@@ -68,7 +92,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(hma_1d_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(hma_1d_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -110,10 +135,11 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
+        # Require volume spike (> 2.0x average) AND chop > 61.8 (ranging market filter)
         volume_spike = vol_ratio[i] > 2.0
+        chop_filter = chop_1d_aligned[i] > 61.8  # Only trade in ranging markets
         
-        if volume_spike:
+        if volume_spike and chop_filter:
             # Get 1d HMA trend
             price_vs_hma = price - hma_1d_aligned[i]
             
@@ -139,5 +165,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
