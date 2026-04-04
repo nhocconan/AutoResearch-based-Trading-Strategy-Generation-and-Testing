@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5059: 6h Donchian(20) Breakout + 12h HTF Trend Filter + Volume Spike
-HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts aligned with 12h EMA(50) trend direction capture strong momentum with lower frequency. 12h EMA acts as regime filter: only take longs when price > EMA50, shorts when price < EMA50. Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. Designed for 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend).
+Experiment #5060: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation + ATR Stoploss
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 1d EMA(50) trend capture strong momentum with controlled frequency. 1d EMA acts as regime filter: price above EMA(50) favors longs, below favors shorts. Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5059_6h_donchian20_12h_ema_vol_v1"
-timeframe = "6h"
+name = "exp_5060_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,24 +19,27 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 12h data for EMA(50) trend filter
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 50:
-        ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # Precompute HTF: 1d data for EMA(50) trend filter
+    df_1d = get_htf_data(prices, '1d')
+    
+    # === 1d Indicators: EMA(50) for trend regime ===
+    if len(df_1d) >= 50:
+        close_1d = df_1d['close'].values.astype(np.float64)
+        ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     else:
         ema_50_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian(20) channels ===
+    # === 4h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation (1.5x spike) ===
+    # === 4h Indicators: Volume confirmation (1.5x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -92,11 +95,14 @@ def generate_signals(prices):
         # Volume filter: confirmation (>1.5x)
         vol_confirm = vol_ratio[i] > 1.5
         
-        # Donchian breakout conditions with 12h EMA trend filter
-        # Long: Donchian breakout above high AND price > 12h EMA50 (uptrend)
-        # Short: Donchian breakdown below low AND price < 12h EMA50 (downtrend)
-        breakout_long = (price >= high_roll[i]) and (price > ema_50_aligned[i]) and vol_confirm
-        breakout_short = (price <= low_roll[i]) and (price < ema_50_aligned[i]) and vol_confirm
+        # Trend filter: price vs 1d EMA(50)
+        price_vs_ema = price - ema_50_aligned[i]
+        
+        # Donchian breakout conditions with EMA trend alignment
+        # Long: Donchian breakout above AND price above EMA(50) (trend-following)
+        # Short: Donchian breakdown below AND price below EMA(50) (trend-following)
+        breakout_long = (price >= high_roll[i]) and (price_vs_ema > 0) and vol_confirm
+        breakout_short = (price <= low_roll[i]) and (price_vs_ema < 0) and vol_confirm
         
         # Final entry conditions
         if breakout_long:
