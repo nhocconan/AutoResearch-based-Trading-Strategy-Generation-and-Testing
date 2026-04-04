@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4964: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: On daily timeframe, Donchian(20) breakouts in direction of weekly HMA trend with volume confirmation (>1.5x average) capture strong momentum moves. Uses ATR(14) trailing stop (2.0x) to limit downside. Designed for 7-25 trades/year on 1d timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
+HYPOTHESIS: On daily timeframe, Donchian(20) breakouts aligned with weekly HMA trend and volume confirmation (>1.5x average) capture strong momentum moves in both bull and bear markets. Weekly trend filter prevents counter-trend entries. Designed for 7-25 trades/year on 1d timeframe to minimize fee drag while maintaining statistical significance. ATR-based trailing stop (2x) manages risk.
 """
 
 import numpy as np
@@ -28,27 +28,33 @@ def generate_signals(prices):
         half_len = len(df_1w) // 2
         sqrt_len = int(np.sqrt(len(df_1w)))
         
-        # WMA function
+        # WMA function using convolution for efficiency
         def wma(values, window):
+            if len(values) < window:
+                return np.full(len(values), np.nan)
             weights = np.arange(1, window + 1)
             return np.convolve(values, weights, 'valid') / weights.sum()
         
         close_1w = df_1w['close'].values
-        wma_half = np.array([wma(close_1w[i:i+half_len], half_len)[-1] 
-                            if i+half_len <= len(close_1w) else np.nan 
-                            for i in range(len(close_1w))])
-        wma_full = np.array([wma(close_1w[i:i+len(close_1w)], len(close_1w))[-1] 
-                            if i+len(close_1w) <= len(close_1w) else np.nan 
-                            for i in range(len(close_1w))])
-        wma_sqrt = np.array([wma(close_1w[i:i+sqrt_len], sqrt_len)[-1] 
-                            if i+sqrt_len <= len(close_1w) else np.nan 
-                            for i in range(len(close_1w))])
+        wma_half = np.full(len(close_1w), np.nan)
+        wma_full = np.full(len(close_1w), np.nan)
+        wma_sqrt = np.full(len(close_1w), np.nan)
+        
+        # Calculate WMA for different windows where possible
+        for i in range(len(close_1w)):
+            if i + half_len <= len(close_1w):
+                wma_half[i + half_len - 1] = wma(close_1w[i:i+half_len], half_len)[-1]
+            if i + len(close_1w) <= len(close_1w):
+                wma_full[i + len(close_1w) - 1] = wma(close_1w[i:i+len(close_1w)], len(close_1w))[-1]
+            if i + sqrt_len <= len(close_1w):
+                wma_sqrt[i + sqrt_len - 1] = wma(close_1w[i:i+sqrt_len], sqrt_len)[-1]
         
         # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
         hma_raw = 2 * wma_half - wma_full
-        hma_1w = np.array([wma(hma_raw[i:i+sqrt_len], sqrt_len)[-1] 
-                          if i+sqrt_len <= len(hma_raw) else np.nan 
-                          for i in range(len(hma_raw))])
+        hma_1w = np.full(len(hma_raw), np.nan)
+        for i in range(len(hma_raw)):
+            if i + sqrt_len <= len(hma_raw):
+                hma_1w[i + sqrt_len - 1] = wma(hma_raw[i:i+sqrt_len], sqrt_len)[-1]
     else:
         hma_1w = np.full(len(df_1w), np.nan)
     
@@ -101,7 +107,7 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
+                # Exit if price drops 2*ATR below highest since entry (trailing stop)
                 if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
@@ -110,7 +116,7 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
+                # Exit if price rises 2*ATR above lowest since entry (trailing stop)
                 if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
