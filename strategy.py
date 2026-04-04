@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5254: 1h Donchian Breakout + Volume Spike + Regime Filter (4h/1d)
-HYPOTHESIS: On 1h timeframe, price breaking Donchian(20) channels from 4h timeframe with volume spike (>1.5x) in the direction of 1d trend (price > 1d EMA50 = bullish, < 1d EMA50 = bearish) captures institutional breakouts while avoiding false moves. Uses discrete position sizing (0.20) and session filter (08-20 UTC) to reduce overtrading. Designed for 15-37 trades/year on 1h timeframe (60-150 total over 4 years) to minimize fee drag. Works in bull markets (breakouts continue uptrend) and bear markets (breakouts continue downtrend) by aligning with higher timeframe direction.
+Experiment #5257: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume confirmation + ATR stoploss
+HYPOTHESIS: On 4h timeframe, price breaking Donchian(20) channels from the prior completed 4h bar with volume spike (>1.5x) in the direction of 1d trend (price > 1d EMA50 = bullish, < 1d EMA50 = bearish) captures institutional breakouts while avoiding false moves. Uses discrete position sizing (0.25) and ATR-based trailing stop (2.0*ATR). Designed for 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag. Works in bull markets (breakouts continue uptrend) and bear markets (breakouts continue downtrend) by aligning with higher timeframe direction.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5254_1h_donchian_breakout_vol_regime_v1"
-timeframe = "1h"
+name = "exp_5257_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,12 +43,12 @@ def generate_signals(prices):
     else:
         ema_50_aligned = np.full(n, np.nan)
     
-    # === 1h Indicators: Volume confirmation (1.5x spike) ===
+    # === 4h Indicators: Volume confirmation (1.5x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -57,7 +57,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
