@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3977: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 trend (price above EMA50 = bullish bias, below = bearish) capture multi-week swings with optimal frequency. Volume > 2.0x MA(20) confirms breakout strength. ATR(14) trailing stop (2.5x) manages risk. Discrete sizing (0.25) reduces fee drag. Target: 75-200 trades over 4 years (19-50/year). Works in bull/bear via 1d EMA50 regime filter.
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 trend (price above EMA50 = bullish bias, below = bearish) capture multi-week swings with controlled frequency. Volume > 2.0x MA(20) confirms breakout strength. ATR(14) trailing stop (2.5x) manages risk. Discrete sizing (0.25) reduces fee drag. Target: 75-200 trades over 4 years (19-50/year). Works in bull/bear via 1d EMA50 regime filter.
 """
 
 import numpy as np
