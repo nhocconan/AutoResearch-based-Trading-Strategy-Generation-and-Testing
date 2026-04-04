@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #5802: 12h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(50) trend capture strong continuation moves.
-Volume confirmation filters false breakouts. ATR-based trailing stop manages risk.
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 50-150 trades over 4 years.
-Designed for BOTH bull (breakouts with trend) and bear (avoids false signals via EMA regime filter).
+Experiment #5802: 12h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(50) trend capture strong continuation moves with lower trade frequency than 4h, reducing fee drag. Uses 1d timeframe for trend regime (price above/below EMA50) to adapt to bull/bear markets. Volume confirmation filters false breakouts. ATR-based stoploss manages risk. Targets 50-150 trades over 4 years with discrete sizing 0.25 to minimize fee drag. Works in both bull (breakouts with trend) and bear (breakouts against trend filtered by EMA regime).
 """
 
 import numpy as np
