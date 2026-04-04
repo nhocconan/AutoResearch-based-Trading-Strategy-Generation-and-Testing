@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3676: 12h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts capture swing momentum while 1d weekly pivot levels (from prior week) provide institutional support/resistance structure. Volume spike confirms breakout authenticity. Weekly pivot direction (price above/below weekly pivot) filters for trend alignment. This avoids counter-trend trades and works in both bull (breakouts with volume above pivot) and bear (failed breakouts below pivot reverse quickly) markets. Position size 0.25 balances return and drawdown. Target: 75-200 total trades over 4 years (19-50/year) by using strict entry conditions requiring Donchian breakout, weekly pivot alignment, and volume confirmation.
+Experiment #3678: 1d Donchian(20) breakout + 1w weekly pivot direction + volume confirmation
+HYPOTHESIS: Daily timeframe with Donchian breakouts captures intermediate-term swings while 1w weekly pivot levels provide institutional support/resistance structure. Volume spike confirms breakout authenticity. Weekly pivot direction filters for trend alignment to avoid counter-trend trades. This structure works in both bull markets (breakouts with volume above pivot) and bear markets (failed breakouts below pivot reverse quickly). Position size 0.25 balances return and drawdown. Target: 30-100 total trades over 4 years (7-25/year) by using strict entry conditions requiring Donchian breakout, weekly pivot alignment, and volume confirmation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3676_12h_donchian20_1d_pivot_vol_v1"
-timeframe = "12h"
+name = "exp_3678_1d_donchian20_1w_pivot_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,19 +19,16 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for weekly pivot levels (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === HTF: 1w data for weekly pivot levels (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
     # Calculate weekly pivot levels from prior week's OHLC
-    # Weekly high = max of last 5 daily highs
-    weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().values
-    # Weekly low = min of last 5 daily lows
-    weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().values
-    # Weekly close = last daily close
-    weekly_close = close_1d
+    weekly_high = pd.Series(high_1w).rolling(window=1, min_periods=1).max().values  # Current week's high
+    weekly_low = pd.Series(low_1w).rolling(window=1, min_periods=1).min().values    # Current week's low
+    weekly_close = close_1w                                                         # Current week's close
     # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
     weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     # Weekly R1 = 2 * pivot - weekly_low
@@ -39,22 +36,22 @@ def generate_signals(prices):
     # Weekly S1 = 2 * pivot - weekly_high
     weekly_s1 = 2 * weekly_pivot - weekly_high
     
-    # Align weekly pivot levels to 12h timeframe (shifted by 1 for completed weekly bar)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
+    # Align weekly pivot levels to 1d timeframe (shifted by 1 for completed weekly bar)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1w, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1w, weekly_s1)
     
-    # === 12h Indicators: Donchian Channel(20) for breakout ===
+    # === 1d Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 1d Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for volatility and stoploss ===
+    # === 1d Indicators: ATR(14) for volatility and stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -72,7 +69,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback_dc + 1, 20, 14)  # sufficient for all indicators
+    warmup = max(lookback_dc + 1, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
