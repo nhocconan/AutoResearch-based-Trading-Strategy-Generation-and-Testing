@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #5957: 4h Donchian(20) breakout + 1d volume confirmation + chop regime filter
-HYPOTHESIS: Donchian breakouts on 4h with 1d volume confirmation (>1.5x average) and 
-choppiness regime filter (CHOP < 61.8 = trending) capture sustained moves in both bull and bear markets.
-Volume confirms breakout strength, chop filter avoids whipsaws in ranging markets.
+Experiment #5959: 6h Donchian(20) breakout + 12h pivot direction + volume confirmation
+HYPOTHESIS: Donchian breakouts on 6h aligned with 12h pivot (price vs 12h pivot) capture sustained moves.
+12h pivot provides structural support/resistance from higher timeframe. Volume >1.5x average confirms breakout strength.
 ATR trailing stop manages risk. Target: 75-200 trades over 4 years (19-50/year) to minimize fee drift.
+Uses 12h as HTF for better alignment with 6h primary timeframe vs 1d.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5957_4h_donchian20_1d_vol_chop_v1"
-timeframe = "4h"
+name = "exp_5959_6h_donchian20_12h_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,58 +25,35 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for volume average ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 20:
-        # Calculate 20-day average volume from daily data
-        vol_1d = pd.Series(df_1d['volume'].values)
-        avg_vol_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
-        avg_vol_1d_values = avg_vol_1d
-        avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d_values)
+    # === HTF: 12h data for 12h pivot ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) >= 1:
+        # Calculate 12h pivot from prior 12h bar's OHLC
+        high_12h = pd.Series(df_12h['high'].values)
+        low_12h = pd.Series(df_12h['low'].values)
+        close_12h = pd.Series(df_12h['close'].values)
+        
+        # Prior 12h bar's OHLC
+        prior_high = high_12h.shift(1)
+        prior_low = low_12h.shift(1)
+        prior_close = close_12h.shift(1)
+        
+        # 12h pivot point: (H + L + C) / 3
+        pivot_12h = (prior_high + prior_low + prior_close) / 3.0
+        pivot_12h_values = pivot_12h.values
+        pivot_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h_values)
     else:
-        avg_vol_1d_aligned = np.full(n, 1.0)  # fallback to avoid division by zero
+        pivot_12h_aligned = np.full(n, np.nan)
     
-    # === HTF: 1w data for chop regime filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 14:
-        # Calculate Choppiness Index (CHOP) on weekly data
-        high_1w = pd.Series(df_1w['high'].values)
-        low_1w = pd.Series(df_1w['low'].values)
-        close_1w = pd.Series(df_1w['close'].values)
-        
-        # True Range
-        tr1 = high_1w - low_1w
-        tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-        tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-        tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr_1w[0] = tr1[0]
-        atr_1w = pd.Series(tr_1w).rolling(window=14, min_periods=14).sum().values
-        
-        # Highest high and lowest low over 14 periods
-        hh_1w = high_1w.rolling(window=14, min_periods=14).max().values
-        ll_1w = low_1w.rolling(window=14, min_periods=14).min().values
-        
-        # Choppiness Index: 100 * log10(atr_1w / (hh_1w - ll_1w)) / log10(14)
-        # Avoid division by zero
-        range_1w = hh_1w - ll_1w
-        chop_1w = np.where(
-            (range_1w > 0) & (atr_1w > 0),
-            100 * np.log10(atr_1w / range_1w) / np.log10(14),
-            50.0  # neutral when range is zero
-        )
-        chop_1w_values = chop_1w
-        chop_1w_aligned = align_htf_to_ltf(prices, df_1w, chop_1w_values)
-    else:
-        chop_1w_aligned = np.full(n, 50.0)  # neutral chop when insufficient data
-    
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === 6h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation (using 1d average) ===
-    volume_ratio = volume / np.where(avg_vol_1d_aligned > 0, avg_vol_1d_aligned, 1)
+    # === 6h Indicators: Volume confirmation ===
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 4h Indicators: ATR(14) for trailing stop ===
+    # === 6h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -95,7 +72,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 20, 14) + 1  # Donchian, volume avg, ATR, 1d vol, 1w chop + 1
+    warmup = max(20, 20, 14, 1) + 1  # Donchian, volume avg, ATR, pivot shift + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -107,7 +84,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(chop_1w_aligned[i])):
+            np.isnan(pivot_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -141,13 +118,16 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
-        chop_filter = chop_1w_aligned[i] < 61.8  # trending regime (chop < 61.8)
+        
+        # Pivot filter: price above/below 12h pivot
+        above_pivot = price > pivot_12h_aligned[i]
+        below_pivot = price < pivot_12h_aligned[i]
         
         # Entry conditions: 
-        # Long: breakout up with volume AND chop filter
-        # Short: breakout down with volume AND chop filter
-        long_setup = breakout_up and volume_confirmed and chop_filter
-        short_setup = breakout_down and volume_confirmed and chop_filter
+        # Long: breakout up with volume AND above 12h pivot
+        # Short: breakout down with volume AND below 12h pivot
+        long_setup = breakout_up and volume_confirmed and above_pivot
+        short_setup = breakout_down and volume_confirmed and below_pivot
         
         if long_setup:
             in_position = True
