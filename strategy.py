@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3588: 12h Williams %R Extreme + 1w EMA Trend + Volume Spike
-HYPOTHESIS: 12h Williams %R identifies oversold/overbought conditions during pullbacks in the 1w EMA trend. Volume spike confirms momentum resumption. Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend). Position size 0.25. Target: 75-150 total trades over 4 years (19-37/year). Uses 1w for trend filter and 12h for entry timing and risk management.
+Experiment #3590: 1d Donchian(20) Breakout + 1w EMA Trend + Volume Confirmation
+HYPOTHESIS: 1d Donchian breakouts capture major trend moves. 1w EMA filter ensures we trade only in the direction of the weekly trend. Volume confirmation (>1.5x average) adds momentum validation. ATR-based trailing stop (2.5x) manages risk. Works in bull markets (breakout longs) and bear markets (breakout shorts). Target: 50-100 total trades over 4 years (12-25/year). Uses 1w for trend filter and 1d for entry/exit.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3588_12h_williamsr_extreme_1w_ema_vol_v1"
-timeframe = "12h"
+name = "exp_3590_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,18 +27,17 @@ def generate_signals(prices):
     ema_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # === 12h Indicators: Williams %R(14) for overbought/oversold ===
-    lookback_williams = 14
-    highest_high = pd.Series(high).rolling(window=lookback_williams, min_periods=lookback_williams).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback_williams, min_periods=lookback_williams).min().values
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # === 1d Indicators: Donchian Channel(20) ===
+    lookback_donchian = 20
+    highest_high = pd.Series(high).rolling(window=lookback_donchian, min_periods=lookback_donchian).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback_donchian, min_periods=lookback_donchian).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 1d Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 1d Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -56,13 +55,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback_williams + 1, 21, 20, 14)  # sufficient for all indicators
+    warmup = max(50, lookback_donchian + 1, 21, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(williams_r[i]) or np.isnan(ema_1w_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -78,11 +76,6 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if Williams %R becomes overbought (> -20) - take profit in strong uptrend
-                elif williams_r[i] > -20:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
@@ -92,25 +85,20 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if Williams %R becomes oversold (< -80) - take profit in strong downtrend
-                elif williams_r[i] < -80:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
                 else:
                     signals[i] = -SIZE
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) for confirmation
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 1.5x average) for momentum
+        volume_confirm = vol_ratio[i] > 1.5
         
-        if volume_spike:
+        if volume_confirm:
             # Determine trend bias from 1w EMA
-            bullish_bias = ema_1w_aligned[i] > close_1w[-1] if len(close_1w) > 0 else ema_1w_aligned[i] > price  # fallback
+            bullish_bias = ema_1w_aligned[i] > close_1w[-1] if len(close_1w) > 0 else ema_1w_aligned[i] > price
             
-            # Long entry: Williams %R oversold (< -80) in bullish 1w trend
-            if (williams_r[i] < -80 and 
+            # Long entry: Price breaks above Donchian upper band in bullish 1w trend
+            if (price > highest_high[i] and 
                 bullish_bias):
                 in_position = True
                 position_side = 1
@@ -118,8 +106,8 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Williams %R overbought (> -20) in bearish 1w trend
-            elif (williams_r[i] > -20 and 
+            # Short entry: Price breaks below Donchian lower band in bearish 1w trend
+            elif (price < lowest_low[i] and 
                   not bullish_bias):
                 in_position = True
                 position_side = -1
