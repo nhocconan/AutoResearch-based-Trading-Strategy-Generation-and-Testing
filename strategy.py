@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #3838: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: 1d Donchian breakouts capture daily swings with 1w HMA (>50) confirming weekly trend direction. 
-Volume spike (>2.0x) ensures institutional participation. Works in bull markets (breakouts above weekly HMA) 
-and bear markets (breakouts below weekly HMA). Discrete position sizing (0.25) minimizes fee drag. 
-Target: 75-150 trades over 4 years.
+Experiment #3838: 1d Donchian(20) breakout + 1w HMA(21) trend filter + volume confirmation
+HYPOTHESIS: Daily Donchian breakouts capture multi-day swings with weekly HMA filtering the primary trend (bullish when price>HMA, bearish when price<HMA). Volume (>1.5x MA20) confirms institutional participation. Works in bull markets (breakouts above HMA) and bear markets (breakdowns below HMA). Discrete position sizing (0.25) minimizes fee drag. Target: 30-100 trades over 4 years.
 """
 
 import numpy as np
@@ -22,7 +19,7 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
+    # === HTF: 1w data for HMA(21) trend filter (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
@@ -32,15 +29,14 @@ def generate_signals(prices):
             return np.full_like(arr, np.nan)
         half = period // 2
         sqrt = int(np.sqrt(period))
-        wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean().values
-        wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean().values
+        wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean()
+        wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean()
         raw = 2 * wma2 - wma1
-        hma_vals = pd.Series(raw).ewm(span=sqrt, adjust=False).mean().values
-        return hma_vals
+        hma_val = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
+        return hma_val.values
     
-    hma_21 = hma(close_1w, 21)
-    # Align 1w HMA to 1d timeframe (shifted by 1 for completed 1w bar)
-    hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
+    hma_1w = hma(close_1w, 21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
     # === 1d Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -63,12 +59,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20)  # sufficient for all indicators
+    warmup = max(lookback_dc + 1, 21, 20)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(hma_21_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(hma_1w_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -92,6 +88,11 @@ def generate_signals(prices):
                         in_position = False
                         position_side = 0
                         signals[i] = 0.0
+                    # Exit if price reaches 1w HMA (mean reversion exit)
+                    elif price <= hma_1w_aligned[i]:
+                        in_position = False
+                        position_side = 0
+                        signals[i] = 0.0
                     else:
                         signals[i] = SIZE
                 else:
@@ -110,6 +111,11 @@ def generate_signals(prices):
                         in_position = False
                         position_side = 0
                         signals[i] = 0.0
+                    # Exit if price reaches 1w HMA (mean reversion exit)
+                    elif price >= hma_1w_aligned[i]:
+                        in_position = False
+                        position_side = 0
+                        signals[i] = 0.0
                     else:
                         signals[i] = -SIZE
                 else:
@@ -117,22 +123,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Long entry: Price breaks above Donchian upper band AND above weekly HMA (bullish breakout with trend confirmation)
+            # Long entry: Price breaks above Donchian upper band AND above 1w HMA (bullish breakout with volume confirmation)
             if (price > highest_high[i-1] and  # Breakout above previous period's high
-                price > hma_21_aligned[i]):    # Above weekly HMA (bullish trend)
+                price > hma_1w_aligned[i]):    # Above 1w HMA (bullish regime)
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Price breaks below Donchian lower band AND below weekly HMA (bearish breakdown with trend confirmation)
+            # Short entry: Price breaks below Donchian lower band AND below 1w HMA (bearish breakdown with volume confirmation)
             elif (price < lowest_low[i-1] and    # Breakout below previous period's low
-                  price < hma_21_aligned[i]):    # Below weekly HMA (bearish trend)
+                  price < hma_1w_aligned[i]):    # Below 1w HMA (bearish regime)
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
