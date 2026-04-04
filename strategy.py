@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #6310: 1d Donchian(20) breakout + weekly volume confirmation + ATR stoploss
-HYPOTHESIS: Daily Donchian breakouts with weekly volume confirmation capture institutional 
-momentum while avoiding whipsaws. Weekly volume filter ensures breakouts have sustained 
-participation, not just spike volume. ATR-based trailing stop manages risk. Designed for 
-both bull markets (breakouts above channel) and bear markets (breakdowns below channel). 
-Target: 30-100 trades over 4 years (7-25/year) with discrete sizing (0.25) to minimize 
-fee drag.
+Experiment #6311: 6h Donchian(20) breakout + 1d pivot direction + volume confirmation
+HYPOTHESIS: Tight Donchian breakouts on 6h with daily pivot filter (from 1d data) and volume 
+confirmation capture institutional momentum. Daily pivot provides intraday structure bias 
+that works in both bull (breakouts above daily pivot in uptrend) and bear (breakdowns below 
+daily pivot in downtrend) markets. Volume filter ensures breakouts have participation. 
+Uses discrete sizing (0.25) to minimize fee churn. Target: 75-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6310_1d_donchian20_1w_vol_v1"
-timeframe = "1d"
+name = "exp_6311_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,25 +26,35 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for weekly volume confirmation ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 20:
-        # Calculate weekly average volume (20-period for stability)
-        weekly_avg_vol = pd.Series(df_1w['volume'].values).rolling(window=20, min_periods=20).mean().values
-        # Align to daily timeframe
-        weekly_avg_vol_aligned = align_htf_to_ltf(prices, df_1w, weekly_avg_vol)
+    # === HTF: 1d data for daily pivot calculation ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 5:
+        # Calculate daily pivot points (using prior day's OHLC)
+        # Pivot = (H + L + C) / 3
+        # R1 = 2*P - L, S1 = 2*P - H
+        # R2 = P + (H - L), S2 = P - (H - L)
+        # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+        # We'll use daily bias: price > daily pivot = bullish bias, price < daily pivot = bearish bias
+        daily_high = df_1d['high'].values
+        daily_low = df_1d['low'].values
+        daily_close = df_1d['close'].values
+        
+        # Calculate pivot for each day
+        daily_pivot = (daily_high + daily_low + daily_close) / 3.0
+        # Align to 6h timeframe
+        daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
     else:
-        weekly_avg_vol_aligned = np.full(n, np.nan)
+        daily_pivot_aligned = np.full(n, np.nan)
     
-    # === Daily Indicators: Donchian Channel (20-period) ===
+    # === 6h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === Daily Indicators: Volume confirmation ===
+    # === 6h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === Daily Indicators: ATR(14) for trailing stop ===
+    # === 6h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -64,7 +73,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 20) + 1  # Donchian, volume avg, ATR, weekly volume + 1
+    warmup = max(20, 20, 14, 5) + 1  # Donchian, volume avg, ATR, daily data + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (22:00-23:59 UTC) ---
@@ -76,7 +85,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(weekly_avg_vol_aligned[i])):
+            np.isnan(daily_pivot_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -90,8 +99,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks below Donchian low (failed breakout)
-                # 3. Daily volume drops below weekly average (loss of momentum)
-                if price <= stop_price or price <= donchian_low[i] or volume_ratio[i] < (weekly_avg_vol_aligned[i] / np.where(avg_volume[i] > 0, avg_volume[i], 1)):
+                # 3. Price crosses below daily pivot (longer-term reversal)
+                if price <= stop_price or price <= donchian_low[i] or price < daily_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -103,8 +112,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks above Donchian high (failed breakout)
-                # 3. Daily volume drops below weekly average (loss of momentum)
-                if price >= stop_price or price >= donchian_high[i] or volume_ratio[i] < (weekly_avg_vol_aligned[i] / np.where(avg_volume[i] > 0, avg_volume[i], 1)):
+                # 3. Price crosses above daily pivot (longer-term reversal)
+                if price >= stop_price or price >= donchian_high[i] or price > daily_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -115,14 +124,13 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 2.0  # Strong daily volume
-        weekly_volume_support = weekly_avg_vol_aligned[i] > 0 and volume_ratio[i] > (weekly_avg_vol_aligned[i] / np.where(avg_volume[i] > 0, avg_volume[i], 1)) * 0.5
+        volume_confirmed = volume_ratio[i] > 2.0  # Strong volume filter
         
-        # Entry logic: Donchian breakout with daily volume confirmation AND weekly volume support
-        # LONG: breakout above Donchian high + strong daily volume + weekly volume support
-        # SHORT: breakout below Donchian low + strong daily volume + weekly volume support
-        long_entry = breakout_up and volume_confirmed and weekly_volume_support
-        short_entry = breakout_down and volume_confirmed and weekly_volume_support
+        # Entry logic: Donchian breakout with volume AND aligned with daily pivot
+        # LONG: breakout above Donchian high + volume + price > daily pivot
+        # SHORT: breakout below Donchian low + volume + price < daily pivot
+        long_entry = breakout_up and volume_confirmed and price > daily_pivot_aligned[i]
+        short_entry = breakout_down and volume_confirmed and price < daily_pivot_aligned[i]
         
         if long_entry:
             in_position = True
