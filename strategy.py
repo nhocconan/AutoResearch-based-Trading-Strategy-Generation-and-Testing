@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #4655: 6h Camarilla Pivot Fade + Weekly Trend Filter + Volume Confirmation
-HYPOTHESIS: Fade at 1d Camarilla H3/L3 (R3/S3) levels in ranging markets, filtered by weekly trend (price vs 20-week EMA) to avoid counter-trend trades. Volume confirmation (>1.5x MA20) ensures breakout validity. Works in bull (fade at support in uptrend) and bear (fade at resistance in downtrend). Target: 12-37 trades/year on 6h timeframe.
+Experiment #4656: 12h Donchian(20) Breakout + 1d Camarilla Pivot Fade + Volume Confirmation
+HYPOTHESIS: 12h price breaking Donchian(20) channels (from prior 20 1d bars) with volume confirmation captures momentum. 
+Fade at 1d Camarilla R3/S3 levels for mean reversion in ranging markets. Works in bull (breakouts) and bear (fades at pivot resistance/support).
+Target: 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4655_6h_camarilla_weekly_v1"
-timeframe = "6h"
+name = "exp_4656_12h_donchian20_camarilla_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,9 +21,21 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d for Camarilla, 1w for trend filter
+    # Precompute HTF: 1d data for Donchian and Camarilla
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    
+    # === 1d Indicators: Donchian(20) from prior 20 days ===
+    if len(df_1d) >= 20:
+        # Use prior 20 days' high/low (shifted by 1)
+        ph = np.concatenate([[np.nan] * 20, df_1d['high'].values[:-20]])  # prior 20 days high
+        pl = np.concatenate([[np.nan] * 20, df_1d['low'].values[:-20]])   # prior 20 days low
+        
+        # Rolling max/min of prior 20 days
+        donchian_high = pd.Series(ph).rolling(window=20, min_periods=20).max().values
+        donchian_low = pd.Series(pl).rolling(window=20, min_periods=20).min().values
+    else:
+        donchian_high = np.full(len(df_1d), np.nan)
+        donchian_low = np.full(len(df_1d), np.nan)
     
     # === 1d Indicators: Camarilla Pivot Levels (from prior 1d OHLC) ===
     if len(df_1d) >= 1:
@@ -32,36 +46,35 @@ def generate_signals(prices):
         
         # Camarilla levels: based on prior day's range
         rng = ph_1d - pl_1d
-        camarilla_h3 = pc_1d + 1.1 * rng / 4  # R3
-        camarilla_l3 = pc_1d - 1.1 * rng / 4  # S3
+        camarilla_h3 = pc_1d + 1.1 * rng / 6  # R2
+        camarilla_h4 = pc_1d + 1.1 * rng / 4  # R3
+        camarilla_l3 = pc_1d - 1.1 * rng / 6  # S2
+        camarilla_l4 = pc_1d - 1.1 * rng / 4  # S3
     else:
-        camarilla_h3 = camarilla_l3 = np.full(len(df_1d), np.nan)
+        camarilla_h3 = camarilla_h4 = camarilla_l3 = camarilla_l4 = np.full(len(df_1d), np.nan)
     
-    # === 1w Indicators: 20-period EMA for trend filter ===
-    if len(df_1w) >= 20:
-        ema_20w = pd.Series(df_1w['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
-    else:
-        ema_20w = np.full(len(df_1w), np.nan)
-    
-    # Align HTF indicators to 6h timeframe
-    if len(camarilla_h3) > 0:
+    # Align HTF indicators to 12h timeframe
+    if len(donchian_high) > 0:
+        dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+        dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
         camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+        camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
         camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+        camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     else:
+        dh_aligned = np.full(n, np.nan)
+        dl_aligned = np.full(n, np.nan)
         camarilla_h3_aligned = np.full(n, np.nan)
+        camarilla_h4_aligned = np.full(n, np.nan)
         camarilla_l3_aligned = np.full(n, np.nan)
+        camarilla_l4_aligned = np.full(n, np.nan)
     
-    if len(ema_20w) > 0:
-        ema_20w_aligned = align_htf_to_ltf(prices, df_1w, ema_20w)
-    else:
-        ema_20w_aligned = np.full(n, np.nan)
-    
-    # === 6h Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -83,8 +96,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(ema_20w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(dh_aligned[i]) or np.isnan(dl_aligned[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -114,20 +127,33 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation for breakouts/fades (>1.5x)
-        vol_confirm = vol_ratio[i] > 1.5
+        # Volume filter: confirmation for breakouts (>1.5x)
+        vol_breakout = vol_ratio[i] > 1.5
         
-        # Trend filter: weekly EMA20 direction
-        weekly_uptrend = price > ema_20w_aligned[i]
-        weekly_downtrend = price < ema_20w_aligned[i]
+        # Breakout conditions: price breaks Donchian high/low with volume confirmation
+        breakout_long = price > dh_aligned[i] and vol_breakout
+        breakout_short = price < dl_aligned[i] and vol_breakout
         
-        # Fade conditions: price reaches Camarilla H3/L3 (R3/S3) with volume confirmation
-        # In uptrend: fade at S3 (long) only
-        # In downtrend: fade at R3 (short) only
-        fade_long = (price <= camarilla_l3_aligned[i]) and vol_confirm and weekly_uptrend
-        fade_short = (price >= camarilla_h3_aligned[i]) and vol_confirm and weekly_downtrend
+        # Fade conditions: price reaches Camarilla H4/L4 (R3/S3) with volume confirmation
+        fade_long = price <= camarilla_l4_aligned[i] and vol_breakout  # Mean reversion long at S3
+        fade_short = price >= camarilla_h4_aligned[i] and vol_breakout  # Mean reversion short at R3
         
-        if fade_long:
+        # Priority: breakouts take precedence over fades (stronger signal)
+        if breakout_long:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = SIZE
+        elif breakout_short:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = -SIZE
+        elif fade_long:
             in_position = True
             position_side = 1
             entry_price = close[i]
