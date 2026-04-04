@@ -2,7 +2,7 @@
 """
 Experiment #3433: 4h Donchian Breakout + 12h HMA Trend + Volume Spike
 HYPOTHESIS: 4h Donchian(20) breakouts capture medium-term trends with ideal trade frequency for 4h timeframe.
-12h HMA(21) trend filter ensures alignment with intermediate-term momentum. Volume spike (>2.0x 20-period average) confirms breakout strength.
+12h HMA(50) trend filter ensures alignment with higher timeframe momentum. Volume spike (>2.0x 20-period average) confirms breakout strength.
 ATR-based trailing stop (2.5x) manages risk. Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
 Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets by using price channels and volatility filters.
 """
@@ -26,7 +26,7 @@ def generate_signals(prices):
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
-    # Calculate HMA(21) on 12h close
+    # Calculate HMA(50) on 12h close
     def hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -38,7 +38,7 @@ def generate_signals(prices):
         hma_vals = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
         return hma_vals
     
-    hma_12h = hma(close_12h, 21)
+    hma_12h = hma(close_12h, 50)
     hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
     # === 4h Indicators: Donchian channels (20-period) ===
@@ -69,7 +69,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 20, 14, 21)  # sufficient for all indicators
+    warmup = max(50, lookback, 20, 14, 50)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -143,3 +143,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
