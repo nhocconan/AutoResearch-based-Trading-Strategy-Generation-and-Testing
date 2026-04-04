@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #5197: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Spike
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 1d EMA(50) trend capture momentum bursts with institutional participation confirmed by volume > 2.0x average. Uses discrete position sizing (0.25) to minimize fee churn. Designed for 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to work in both bull (breakouts with uptrend) and bear (breakdowns with downtrend) markets.
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 1d EMA(50) trend capture momentum with lower overtrading risk. Volume > 2.0x average confirms participation. Designed for 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
