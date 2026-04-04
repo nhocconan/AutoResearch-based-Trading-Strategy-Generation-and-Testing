@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #2520: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: Donchian channel breakouts with daily trend alignment and volume spikes capture 
-institutional participation during trend acceleration. Works in bull markets (breakouts with volume) 
-and bear markets (breakdowns with volume). Uses discrete position sizing (0.25) to limit fee drag 
-and ensure statistical significance with 75-200 total trades over 4 years.
+Experiment #2520: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation
+HYPOTHESIS: Donchian breakouts with 1d HMA trend alignment and volume spikes capture institutional 
+participation during trend acceleration. HMA provides smoother trend than EMA, reducing whipsaw in 
+choppy markets. Discrete position sizing (0.30) limits fee drag. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2520_4h_donchian20_1d_ema_vol_v1"
+name = "exp_2520_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,13 +21,34 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
+    # === HTF: 1d data for HMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(50)
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_1d, 1, -1)
+    # Calculate 1d HMA(21): WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+    def wma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        weights = np.arange(1, period + 1)
+        return np.convolve(arr, weights / weights.sum(), mode='valid')
+    
+    half_len = 21 // 2
+    sqrt_len = int(np.sqrt(21))
+    
+    wma_half = np.full_like(close_1d, np.nan)
+    wma_full = np.full_like(close_1d, np.nan)
+    
+    if len(close_1d) >= half_len:
+        wma_half[half_len-1:] = wma(close_1d, half_len)
+    if len(close_1d) >= 21:
+        wma_full[20:] = wma(close_1d, 21)
+    
+    raw_hma = 2 * wma_half - wma_full
+    hma_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= sqrt_len:
+        hma_1d[sqrt_len-1:] = wma(raw_hma[sqrt_len-1:], sqrt_len)
+    
+    trend_1d = np.where(close_1d > hma_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     # === 4h Indicators: Donchian(20) channels, Volume MA(20) ===
@@ -43,7 +63,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.30  # 30% position size
     
     # Position tracking state variables
     in_position = False
@@ -105,8 +125,8 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike and trend_bias != 0:
             # Long entry: price breaks above Donchian high with uptrend
@@ -131,5 +151,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</exp_2520_4h_donchian20_1d_ema_vol_v1>
