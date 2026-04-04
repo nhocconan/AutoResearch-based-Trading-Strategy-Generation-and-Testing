@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #4173: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h Hull Moving Average trend capture medium-term momentum while reducing whipsaw. The 12h HMA provides smoother trend direction than EMA/SMA, and volume confirmation (>1.4x) ensures breakout validity. ATR-based trailing stop (2.5x) manages risk. Designed to work in both bull and bear markets by following the 12h trend. Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
+Experiment #4174: 1h RSI(2) mean reversion + 4h/1d trend filter + volume spike
+HYPOTHESIS: In 1h timeframe, extreme RSI(2) readings (<10 for long, >90 for short) 
+provide high-probability mean reversion opportunities when aligned with 4h/1d trend 
+(EMA50) and confirmed by volume spikes (>2x average). Uses 0.20 position size to 
+limit drawdown and targets 60-150 total trades over 4 years (15-37/year). 
+Session filter (08-20 UTC) reduces noise. Works in both bull/bear via trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4173_4h_donchian20_12h_hma_vol_v1"
-timeframe = "4h"
+name = "exp_4174_1h_rsi2_4h1d_ema_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,61 +21,48 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
+    open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 12h data for HMA trend ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 21:
-        # Calculate Hull Moving Average (HMA) on 12h close
-        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        close_12h = df_12h['close'].values
-        half_len = len(close_12h) // 2
-        sqrt_len = int(np.sqrt(len(close_12h)))
-        
-        def wma(values, window):
-            if len(values) < window:
-                return np.full_like(values, np.nan)
-            weights = np.arange(1, window + 1)
-            return np.convolve(values, weights / weights.sum(), mode='valid')
-        
-        # Handle edge cases for WMA calculation
-        wma_half = np.full_like(close_12h, np.nan)
-        wma_full = np.full_like(close_12h, np.nan)
-        
-        if half_len > 0 and len(close_12h) >= half_len:
-            wma_half_vals = wma(close_12h, half_len)
-            start_idx = half_len - 1
-            wma_half[start_idx:start_idx + len(wma_half_vals)] = wma_half_vals
-        
-        if len(close_12h) >= 20:  # Using 20 as period for WMA
-            wma_full_vals = wma(close_12h, 20)
-            start_idx = 19
-            wma_full[start_idx:start_idx + len(wma_full_vals)] = wma_full_vals
-        
-        raw_hma = 2 * wma_half - wma_full
-        hma_12h = np.full_like(close_12h, np.nan)
-        if sqrt_len > 0 and len(raw_hma) >= sqrt_len:
-            wma_hma_vals = wma(raw_hma[~np.isnan(raw_hma)], sqrt_len) if np.sum(~np.isnan(raw_hma)) >= sqrt_len else np.array([])
-            if len(wma_hma_vals) > 0:
-                start_idx = np.where(~np.isnan(raw_hma))[0][sqrt_len - 1] if np.sum(~np.isnan(raw_hma)) >= sqrt_len else 0
-                end_idx = start_idx + len(wma_hma_vals)
-                hma_12h[start_idx:end_idx] = wma_hma_vals
-        
-        hma_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    # === Precompute session filter (08-20 UTC) ===
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # === HTF: 4h EMA(50) for trend filter ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) >= 50:
+        ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     else:
-        hma_aligned = np.full(n, np.nan)
+        ema_4h_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel(20) for breakout ===
-    lookback_dc = 20
-    highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
+    # === HTF: 1d EMA(50) for stronger trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    else:
+        ema_1d_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 1h Indicators: RSI(2) for mean reversion ===
+    def calculate_rsi(prices, period=2):
+        delta = np.diff(prices, prepend=prices[0])
+        gain = np.where(delta > 0, delta, 0.0)
+        loss = np.where(delta < 0, -delta, 0.0)
+        avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+        avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+        rsi = 100 - (100 / (1 + rs))
+        return rsi
+    
+    rsi = calculate_rsi(close, 2)
+    
+    # === 1h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 1h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -80,7 +71,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.20  # 20% position size
     
     # Position tracking state variables
     in_position = False
@@ -89,13 +80,17 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 5, 20 + 5, 14 + 5)  # DC lookback, vol MA buffer, HMA buffer, ATR buffer
+    warmup = max(2 + 5, 20 + 5, 50 + 5, 50 + 5, 14 + 5)  # RSI, vol MA, 4h EMA, 1d EMA, ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(hma_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
+            np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i])):
+            signals[i] = 0.0
+            continue
+        
+        # --- Session Filter ---
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
@@ -106,8 +101,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -115,8 +110,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -125,23 +120,24 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.4x average) to filter noise
-        volume_spike = vol_ratio[i] > 1.4
+        # Require volume spike (> 2.0x average) to filter noise
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Donchian breakout logic
-            breakout_up = price > highest_high[i-1]
-            breakout_down = price < lowest_low[i-1]
+            # RSI(2) extreme conditions
+            rsi_oversold = rsi[i] < 10
+            rsi_overbought = rsi[i] > 90
             
-            # 12h HMA trend filter: price above HMA = bullish bias, below HMA = bearish bias
-            above_hma = price > hma_aligned[i]
-            below_hma = price < hma_aligned[i]
+            # Trend filters: price above both 4h and 1d EMA = bullish bias
+            # price below both 4h and 1d EMA = bearish bias
+            bullish_trend = price > ema_4h_aligned[i] and price > ema_1d_aligned[i]
+            bearish_trend = price < ema_4h_aligned[i] and price < ema_1d_aligned[i]
             
-            # Long conditions: Donchian breakout up + price above 12h HMA
-            long_entry = breakout_up and above_hma
+            # Long conditions: RSI oversold + bullish trend + volume spike
+            long_entry = rsi_oversold and bullish_trend
             
-            # Short conditions: Donchian breakout down + price below 12h HMA
-            short_entry = breakout_down and below_hma
+            # Short conditions: RSI overbought + bearish trend + volume spike
+            short_entry = rsi_overbought and bearish_trend
             
             if long_entry:
                 in_position = True
