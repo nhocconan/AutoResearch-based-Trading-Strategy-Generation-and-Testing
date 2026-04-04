@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4146: 4h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation + ATR trailing stop
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend capture strong momentum moves with minimal lag. Volume confirmation filters false breakouts. ATR trailing stop manages risk. Works in both bull/bear as EMA adapts to trend. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #4147: 6h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation + ATR trailing stop
+HYPOTHESIS: 6h Donchian breakouts aligned with 1d EMA(50) trend direction capture strong momentum moves with minimal lag. 1d EMA provides smoother trend filter than shorter EMAs, reducing whipsaw in ranging markets. Volume confirmation (>1.8x average) filters false breakouts. ATR trailing stop (2.5x) manages risk. Designed for 75-200 total trades over 4 years (19-50/year) to avoid fee drag while maintaining statistical significance. Works in both bull (breakouts with trend) and bear (breakdowns against trend) markets by using EMA as dynamic trend filter rather than fixed bias.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4146_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_4147_6h_donchian20_1d_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,17 +27,17 @@ def generate_signals(prices):
     else:
         ema_1d_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel(20) for breakout ===
+    # === 6h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -55,7 +55,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 5, 20 + 5, 14 + 5)  # DC lookback, vol MA buffer, EMA buffer, ATR buffer
+    warmup = max(lookback_dc + 1, 20 + 5, 50 + 5, 14 + 5)  # DC lookback, vol MA buffer, EMA buffer, ATR buffer
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
