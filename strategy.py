@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #3493: 4h Donchian Breakout + 12h HMA Trend + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h HMA(21) trend and volume confirmation capture medium-term momentum with controlled trade frequency. 
-The 12h HMA provides a smoother trend filter than EMA, reducing whipsaws in choppy markets. Volume confirmation ensures breakout strength. 
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h HMA(21) trend direction and volume confirmation capture medium-term momentum with low overtrading. 
+12h HMA provides smooth trend filter to avoid counter-trend entries. Volume confirms breakout strength. 
 Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-Works in bull (continuation from HMA uptrend) and bear (continuation from HMA downtrend) via price channels.
+Uses 12h for trend filter and 4h for entry timing and risk management.
+Works in bull (continuation from uptrend) and bear (continuation from downtrend) via price channels.
 """
 
 import numpy as np
@@ -27,21 +28,18 @@ def generate_signals(prices):
     close_12h = df_12h['close'].values
     
     # Calculate HMA(21) on 12h close
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-    def wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, 'valid') / weights.sum()
+    def hma(series, period):
+        if len(series) < period:
+            return np.full_like(series, np.nan, dtype=np.float64)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma2 = pd.Series(series).ewm(span=half_period, adjust=False).mean()
+        wma1 = pd.Series(series).ewm(span=period, adjust=False).mean()
+        raw_hma = 2 * wma2 - wma1
+        hma_values = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
+        return hma_values.values
     
-    n_12h = len(close_12h)
-    half = 21 // 2
-    sqrt_n = int(np.sqrt(21))
-    
-    wma_half = np.array([wma(close_12h[i:i+21], half) if i+21 <= n_12h else np.nan for i in range(n_12h)])
-    wma_full = np.array([wma(close_12h[i:i+21], 21) if i+21 <= n_12h else np.nan for i in range(n_12h)])
-    hma_raw = 2 * wma_half - wma_full
-    hma_12h = np.array([wma(hma_raw[i:i+21], sqrt_n) if i+21 <= n_12h else np.nan for i in range(n_12h)])
-    
-    # Align HMA to 4h timeframe
+    hma_12h = hma(close_12h, 21)
     hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
     # === 4h Indicators: Donchian channels (20-period) for entry timing ===
@@ -117,11 +115,11 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.5x average) for confirmation
-        volume_spike = vol_ratio[i] > 1.5
+        # Require volume spike (> 1.8x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Determine trend direction from 12h HMA
+            # Determine trend from 12h HMA
             hma_trend = hma_12h_aligned[i]
             
             # Long entry: price breaks above 4h Donchian high with uptrend (price > HMA)
