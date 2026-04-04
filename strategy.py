@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #5891: 6h Donchian(20) breakout + 1d Camarilla pivot levels + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 1d Camarilla R4/S4 breakout levels (continuation) 
-or R3/S3 fade levels (mean reversion in chop) capture high-probability moves. 
-Volume confirmation filters weak breakouts. Works in bull/bear via dual regime logic.
-Target: 75-150 total trades over 4 years.
+HYPOTHESIS: 6h Donchian breakouts aligned with 1d Camarilla pivot levels (R3/S3 for fade, R4/S4 for continuation) 
+capture institutional order flow. Volume confirmation filters weak breakouts. 
+Works in bull markets (breakouts above R4 with volume) and bear markets 
+(breakdowns below S4 with volume). Targets 75-150 trades over 4 years.
 """
 
 import numpy as np
@@ -28,29 +28,41 @@ def generate_signals(prices):
     # === HTF: 1d data for Camarilla pivot levels ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 2:
-        # Calculate Camarilla levels from previous day's OHLC
-        # Camarilla: based on previous day's range
-        prev_close = df_1d['close'].shift(1).values
-        prev_high = df_1d['high'].shift(1).values
-        prev_low = df_1d['low'].shift(1).values
-        prev_range = prev_high - prev_low
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
+        close_1d = df_1d['close'].values
         
-        # Camarilla levels
-        r3 = prev_close + (prev_range * 1.1 / 4)
-        r4 = prev_close + (prev_range * 1.1 / 2)
-        s3 = prev_close - (prev_range * 1.1 / 4)
-        s4 = prev_close - (prev_range * 1.1 / 2)
+        # Calculate Camarilla levels for previous day
+        camarilla_r4 = np.zeros(len(close_1d))
+        camarilla_r3 = np.zeros(len(close_1d))
+        camarilla_s3 = np.zeros(len(close_1d))
+        camarilla_s4 = np.zeros(len(close_1d))
         
-        # Align to LTF (6h) with shift(1) for completed bars only
-        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+        for i in range(1, len(close_1d)):
+            # Previous day's range
+            prev_high = high_1d[i-1]
+            prev_low = low_1d[i-1]
+            prev_close = close_1d[i-1]
+            range_val = prev_high - prev_low
+            
+            if range_val > 0:
+                camarilla_r4[i] = prev_close + range_val * 1.1 / 2
+                camarilla_r3[i] = prev_close + range_val * 1.1 / 4
+                camarilla_s3[i] = prev_close - range_val * 1.1 / 4
+                camarilla_s4[i] = prev_close - range_val * 1.1 / 2
+            else:
+                camarilla_r4[i] = camarilla_r3[i] = camarilla_s3[i] = camarilla_s4[i] = prev_close
+        
+        # Align to 6h timeframe
+        camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+        camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+        camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+        camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     else:
-        r3_aligned = np.full(n, np.nan)
-        r4_aligned = np.full(n, np.nan)
-        s3_aligned = np.full(n, np.nan)
-        s4_aligned = np.full(n, np.nan)
+        camarilla_r4_aligned = np.full(n, np.nan)
+        camarilla_r3_aligned = np.full(n, np.nan)
+        camarilla_s3_aligned = np.full(n, np.nan)
+        camarilla_s4_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -79,7 +91,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 20)  # Donchian, volume avg, ATR
+    warmup = max(20, 20, 20, 14)  # Donchian, volume avg, ATR
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -91,8 +103,8 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
+            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_s4_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -128,30 +140,24 @@ def generate_signals(prices):
         volume_confirmed = volume_ratio[i] > 1.5
         
         # Camarilla-based logic:
-        # Regime detection: if price > R4 or < S4 = strong breakout regime (continuation)
-        # if price between R3-S3 = chop regime (mean reversion at R3/S3)
-        strong_breakout_long = price > r4_aligned[i]
-        strong_breakout_short = price < s4_aligned[i]
-        chop_long = price < r3_aligned[i] and price > s3_aligned[i]  # inside R3-S3
-        chop_short = chop_long  # same region
+        # Long: breakout above R4 (continuation) OR bounce from S3 (fade)
+        # Short: breakdown below S4 (continuation) OR bounce from R3 (fade)
+        long_continuation = breakout_up and price > camarilla_r4_aligned[i-1]
+        long_fade = price < camarilla_s3_aligned[i-1] and price > donchian_low[i-1]  # Oversold bounce
+        short_continuation = breakout_down and price < camarilla_s4_aligned[i-1]
+        short_fade = price > camarilla_r3_aligned[i-1] and price < donchian_high[i-1]  # Overbought bounce
         
-        # Entry conditions:
-        # Strong breakout regime: continuation trades
-        long_setup = breakout_up and volume_confirmed and strong_breakout_long
-        short_setup = breakout_down and volume_confirmed and strong_breakout_short
+        long_setup = (long_continuation or long_fade) and volume_confirmed
+        short_setup = (short_continuation or short_fade) and volume_confirmed
         
-        # Chop regime: mean reversion at R3/S3 levels
-        long_setup_chop = breakout_down and volume_confirmed and chop_long and price <= s3_aligned[i]
-        short_setup_chop = breakout_up and volume_confirmed and chop_short and price >= r3_aligned[i]
-        
-        if long_setup or long_setup_chop:
+        if long_setup:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif short_setup or short_setup_chop:
+        elif short_setup:
             in_position = True
             position_side = -1
             entry_price = close[i]
