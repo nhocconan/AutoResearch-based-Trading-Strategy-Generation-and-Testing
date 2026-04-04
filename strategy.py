@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #6411: 6h Donchian(20) breakout + 1d weekly pivot + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts with volume confirmation (>2.0x avg) and 1d weekly pivot levels (R2/S2 for continuation, R1/S1 for mean reversion) capture institutional order flow. In ranging markets, price tends to reverse at R1/S1 (weekly pivot support/resistance). In trending markets, breaks of R2/S2 indicate strong momentum with continuation bias. Volume confirmation filters false breakouts. Discrete sizing (0.25) balances profit potential and drawdown control. Target: 75-200 trades over 4 years. Works in bull via R2 breakouts with volume, in bear via S2 breakdowns with volume, and ranges via R1/S1 reversals.
+Experiment #6412: 12h Donchian(20) breakout + 1d Camarilla pivot levels + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts with volume confirmation (>2.0x avg) and 1d Camarilla pivot levels capture institutional order flow. In ranging markets, price tends to reverse at R3/S3 (Camarilla fade zones). In trending markets, breaks of R4/S4 indicate strong momentum with continuation bias. Volume confirmation filters false breakouts. Discrete sizing (0.25) balances profit potential and drawdown control. Target: 75-200 trades over 4 years. Works in bull via R4 breakouts with volume, in bear via S4 breakdowns with volume, and ranges via R3/S3 reversals.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6411_6h_donchian20_1d_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_6412_12h_donchian20_1d_camarilla_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,50 +22,55 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for weekly pivot levels (using prior week's OHLC) ===
+    # === HTF: 1d data for Camarilla pivot levels ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 5:  # Need at least 5 days for prior week
-        # Calculate weekly OHLC from daily data (prior completed week)
-        # Week: Monday to Sunday, use last 7 days but shift by 1 to get prior week
-        weekly_high = pd.Series(df_1d['high']).rolling(window=7, min_periods=7).max().shift(1).values
-        weekly_low = pd.Series(df_1d['low']).rolling(window=7, min_periods=7).min().shift(1).values
-        weekly_close = pd.Series(df_1d['close']).rolling(window=7, min_periods=7).last().shift(1).values
-        
-        # Weekly pivot formulas (similar to Camarilla but different multipliers)
+    if len(df_1d) >= 2:
+        # Calculate Camarilla levels from previous day's OHLC
+        # Camarilla formulas: 
+        # H4 = Close + 1.5 * (High - Low)
+        # L4 = Close - 1.5 * (High - Low)
+        # H3 = Close + 1.0 * (High - Low)
+        # L3 = Close - 1.0 * (High - Low)
+        # H2 = Close + 0.5 * (High - Low)
+        # L2 = Close - 0.5 * (High - Low)
+        # H1 = Close + 0.25 * (High - Low)
+        # L1 = Close - 0.25 * (High - Low)
         # Pivot = (High + Low + Close) / 3
-        # R1 = (2 * Pivot) - Low
-        # S1 = (2 * Pivot) - High
-        # R2 = Pivot + (High - Low)
-        # S2 = Pivot - (High - Low)
-        # R3 = High + 2*(Pivot - Low)
-        # S3 = Low - 2*(High - Pivot)
         
-        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-        weekly_r1 = (2 * weekly_pivot) - weekly_low
-        weekly_s1 = (2 * weekly_pivot) - weekly_high
-        weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-        weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+        prev_high = df_1d['high'].shift(1).values
+        prev_low = df_1d['low'].shift(1).values
+        prev_close = df_1d['close'].shift(1).values
         
-        # Align to 6h timeframe (shifted by 1 week for lookback safety)
-        r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1)
-        s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1)
-        r2_aligned = align_htf_to_ltf(prices, df_1d, weekly_r2)
-        s2_aligned = align_htf_to_ltf(prices, df_1d, weekly_s2)
+        # Calculate levels
+        camarilla_h4 = prev_close + 1.5 * (prev_high - prev_low)
+        camarilla_l4 = prev_close - 1.5 * (prev_high - prev_low)
+        camarilla_h3 = prev_close + 1.0 * (prev_high - prev_low)
+        camarilla_l3 = prev_close - 1.0 * (prev_high - prev_low)
+        camarilla_h2 = prev_close + 0.5 * (prev_high - prev_low)
+        camarilla_l2 = prev_close - 0.5 * (prev_high - prev_low)
+        camarilla_h1 = prev_close + 0.25 * (prev_high - prev_low)
+        camarilla_l1 = prev_close - 0.25 * (prev_high - prev_low)
+        
+        # Align to 12h timeframe (shifted by 1 day for lookback safety)
+        h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+        l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+        h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+        l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     else:
-        r1_aligned = np.full(n, np.nan)
-        s1_aligned = np.full(n, np.nan)
-        r2_aligned = np.full(n, np.nan)
-        s2_aligned = np.full(n, np.nan)
+        h4_aligned = np.full(n, np.nan)
+        l4_aligned = np.full(n, np.nan)
+        h3_aligned = np.full(n, np.nan)
+        l3_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20-period) ===
+    # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation ===
+    # === 12h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 6h Indicators: ATR(14) for trailing stop ===
+    # === 12h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -96,8 +101,8 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
+            np.isnan(h4_aligned[i]) or np.isnan(l4_aligned[i]) or
+            np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -111,9 +116,9 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks below Donchian low (failed breakout)
-                # 3. Price retraces to S1 (profit taking in range)
-                # 4. Price breaks below S2 (failed continuation)
-                if price <= stop_price or price <= donchian_low[i] or price <= s1_aligned[i] or price < s2_aligned[i]:
+                # 3. Price retraces to L3 (profit taking in range)
+                # 4. Price breaks below L4 (failed continuation)
+                if price <= stop_price or price <= donchian_low[i] or price <= l3_aligned[i] or price < l4_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -125,9 +130,9 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks above Donchian high (failed breakout)
-                # 3. Price retraces to R1 (profit taking in range)
-                # 4. Price breaks above R2 (failed continuation)
-                if price >= stop_price or price >= donchian_high[i] or price >= r1_aligned[i] or price > r2_aligned[i]:
+                # 3. Price retraces to H3 (profit taking in range)
+                # 4. Price breaks above H4 (failed continuation)
+                if price >= stop_price or price >= donchian_high[i] or price >= h3_aligned[i] or price > h4_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -140,19 +145,19 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 2.0  # Volume filter
         
-        # Entry logic based on weekly pivot levels:
+        # Entry logic based on Camarilla levels:
         # Long: 
-        #   - Breakout above R2 with volume (strong continuation)
-        #   - OR bounce from S1 with volume (mean reversion in range)
+        #   - Breakout above H4 with volume (strong continuation)
+        #   - OR bounce from L3 with volume (mean reversion in range)
         # Short:
-        #   - Breakdown below S2 with volume (strong continuation)
-        #   - OR rejection at R1 with volume (mean reversion in range)
+        #   - Breakdown below L4 with volume (strong continuation)
+        #   - OR rejection at H3 with volume (mean reversion in range)
         
-        long_breakout = breakout_up and volume_confirmed and (price > r2_aligned[i])
-        long_reversal = (price > s1_aligned[i]) and (close[i-1] <= s1_aligned[i-1]) and volume_confirmed  # Cross above S1
+        long_breakout = breakout_up and volume_confirmed and (price > h4_aligned[i])
+        long_reversal = (price > l3_aligned[i]) and (close[i-1] <= l3_aligned[i-1]) and volume_confirmed  # Cross above L3
         
-        short_breakout = breakout_down and volume_confirmed and (price < s2_aligned[i])
-        short_reversal = (price < r1_aligned[i]) and (close[i-1] >= r1_aligned[i-1]) and volume_confirmed  # Cross below R1
+        short_breakout = breakout_down and volume_confirmed and (price < l4_aligned[i])
+        short_reversal = (price < h3_aligned[i]) and (close[i-1] >= h3_aligned[i-1]) and volume_confirmed  # Cross below H3
         
         if long_breakout or long_reversal:
             in_position = True
