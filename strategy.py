@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4573: 4h Donchian(20) Breakout + 12h HTF Trend + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12-hour EMA(30) trend (bullish when price > EMA, bearish when price < EMA) and volume confirmation (>1.8x average) capture medium-term momentum with higher timeframe trend filter. Uses 4h primary timeframe to balance trade frequency and statistical validity (target: 75-200 total trades over 4 years). Works in both bull and bear markets by only trading breakouts in direction of higher timeframe EMA trend.
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12-hour EMA(50) trend (bullish when price > EMA, bearish when price < EMA) and volume confirmation (>1.8x average) capture medium-term momentum with higher timeframe trend filter. Uses 4h primary timeframe to balance trade frequency and statistical validity (target: 75-200 total trades over 4 years). Works in both bull and bear markets by only trading breakouts in direction of higher timeframe EMA trend.
 """
 
 import numpy as np
@@ -22,9 +22,9 @@ def generate_signals(prices):
     # Precompute HTF: 12h data for EMA trend filter
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate EMA(30) for 12h
-    if len(df_12h) >= 30:
-        ema_12h = pd.Series(df_12h['close'].values).ewm(span=30, min_periods=30, adjust=False).mean().values
+    # Calculate EMA(50) for 12h
+    if len(df_12h) >= 50:
+        ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     else:
         ema_12h = np.array([])
     
@@ -63,7 +63,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 30)  # Donchian, vol MA, ATR, EMA warmup
+    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, EMA warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
