@@ -25,30 +25,35 @@ def generate_signals(prices):
     # === 1d Indicators: HMA21 for trend filter ===
     if len(df_1d) >= 21:
         # Hull Moving Average calculation
-        half_len = len(df_1d) // 2
-        sqrt_len = int(np.sqrt(len(df_1d)))
+        half_len = max(1, len(df_1d) // 2)
+        sqrt_len = max(1, int(np.sqrt(len(df_1d))))
         
-        # WMA function
+        # WMA function using pandas for better performance
         def wma(values, window):
+            if len(values) < window:
+                return np.full(len(values), np.nan)
             weights = np.arange(1, window + 1)
             return np.convolve(values, weights, 'valid') / weights.sum()
         
         close_1d = df_1d['close'].values
-        wma_half = np.array([wma(close_1d[i:i+half_len], half_len)[-1] 
-                            if i+half_len <= len(close_1d) else np.nan 
-                            for i in range(len(close_1d))])
-        wma_full = np.array([wma(close_1d[i:i+len(close_1d)], len(close_1d))[-1] 
-                            if i+len(close_1d) <= len(close_1d) else np.nan 
-                            for i in range(len(close_1d))])
-        wma_sqrt = np.array([wma(close_1d[i:i+sqrt_len], sqrt_len)[-1] 
-                            if i+sqrt_len <= len(close_1d) else np.nan 
-                            for i in range(len(close_1d))])
+        wma_half = np.full(len(close_1d), np.nan)
+        wma_full = np.full(len(close_1d), np.nan)
+        wma_sqrt = np.full(len(close_1d), np.nan)
+        
+        for i in range(len(close_1d)):
+            if i + half_len <= len(close_1d):
+                wma_half[i + half_len - 1] = wma(close_1d[i:i+half_len], half_len)[-1]
+            if i + len(close_1d) <= len(close_1d):
+                wma_full[i + len(close_1d) - 1] = wma(close_1d[i:i+len(close_1d)], len(close_1d))[-1]
+            if i + sqrt_len <= len(close_1d):
+                wma_sqrt[i + sqrt_len - 1] = wma(close_1d[i:i+sqrt_len], sqrt_len)[-1]
         
         # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
         hma_raw = 2 * wma_half - wma_full
-        hma_1d = np.array([wma(hma_raw[i:i+sqrt_len], sqrt_len)[-1] 
-                          if i+sqrt_len <= len(hma_raw) else np.nan 
-                          for i in range(len(hma_raw))])
+        hma_1d = np.full(len(hma_raw), np.nan)
+        for i in range(len(hma_raw)):
+            if i + sqrt_len <= len(hma_raw):
+                hma_1d[i + sqrt_len - 1] = wma(hma_raw[i:i+sqrt_len], sqrt_len)[-1]
     else:
         hma_1d = np.full(len(df_1d), np.nan)
     
