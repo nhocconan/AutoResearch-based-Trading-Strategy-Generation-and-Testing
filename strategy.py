@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #6367: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts with volume confirmation (>1.8x avg) and weekly pivot trend filter capture institutional momentum. 
-Weekly pivot (calculated from prior week) provides structural bias: price above weekly pivot = bullish bias (long breakouts), 
-price below weekly pivot = bearish bias (short breakdowns). Volume confirmation filters false breakouts. 
-Discrete sizing (0.25) minimizes fee churn. Target: 75-200 trades over 4 years.
+Experiment #6367: 6h Donchian(20) breakout + 1d Weekly Pivot direction + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts with volume confirmation (>1.8x avg) and 1d weekly pivot bias capture institutional momentum.
+In bull markets, price > weekly pivot acts as support for long breakouts; in bear markets, price < weekly pivot acts as resistance for short breakdowns.
+Volume confirmation filters false breakouts. Discrete sizing (0.25) minimizes fee churn. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6367_6h_donchian20_1w_pivot_vol_v1"
+name = "exp_6367_6h_donchian20_1d_weekly_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -28,12 +27,13 @@ def generate_signals(prices):
     # === HTF: 1d data for weekly pivot calculation ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 5:
-        # Calculate weekly pivot from prior week's OHLC
-        # Weekly pivot = (Prior Week High + Prior Week Low + Prior Week Close) / 3
-        weekly_high = pd.Series(df_1d['high'].values).rolling(window=5, min_periods=5).max().values
-        weekly_low = pd.Series(df_1d['low'].values).rolling(window=5, min_periods=5).min().values
-        weekly_close = pd.Series(df_1d['close'].values).rolling(window=5, min_periods=5).last().values
-        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+        # Calculate weekly pivot points from daily OHLC
+        # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
+        # We approximate using rolling window of 5 days (1 trading week)
+        dh = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().values
+        dl = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().values
+        dc = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().values
+        weekly_pivot = (dh + dl + dc) / 3.0
         weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     else:
         weekly_pivot_aligned = np.full(n, np.nan)
@@ -65,7 +65,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 5) + 1  # Donchian, volume avg, ATR, weekly pivot lookback + 1
+    warmup = max(20, 20, 14, 5) + 1  # Donchian, volume avg, ATR, weekly pivot + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (22:00-23:59 UTC) ---
@@ -118,7 +118,7 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.8  # Volume filter
         
-        # Entry logic based on weekly pivot trend filter:
+        # Entry logic based on weekly pivot bias:
         # Long: breakout up + volume + price > weekly pivot (bullish bias)
         # Short: breakout down + volume + price < weekly pivot (bearish bias)
         
