@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4274: 1h Donchian(20) breakout + 4h EMA50 trend + volume confirmation + session filter (08-20 UTC)
-HYPOTHESIS: Donchian breakouts on 1h timeframe capture swing momentum when aligned with 4h EMA50 trend (price > EMA50 for longs, < EMA50 for shorts) and confirmed by volume (>2.0x average). Uses 4h EMA for smoother trend filter (less whipsaw than EMA on 1h) while maintaining sufficient trade frequency. ATR-based trailing stop (2.5x) for risk management. Position size 0.20 targets 60-150 total trades over 4 years (15-37/year). Works in bull via breakout continuation, in bear via shorting breakdowns. Novelty: Uses 4h HTF (as specified in experiment) to reduce noise while keeping trade count optimal.
+Experiment #4274: 1h Donchian(20) breakout + 4h EMA(50) trend + volume confirmation + session filter
+HYPOTHESIS: Donchian breakouts on 1h timeframe capture swing momentum when aligned with 4h EMA50 trend (price > EMA50 for longs, < EMA50 for shorts) and confirmed by volume (>1.8x average). Uses 4h EMA for smoother trend filter (less whipsaw than shorter EMAs) while maintaining sufficient trade frequency. Session filter (08-20 UTC) reduces noise trades. Position size 0.20 targets 60-150 total trades over 4 years (15-37/year). Works in bull via breakout continuation, in bear via shorting breakdowns. Novelty: Uses 1h primary timeframe with 4h HTF as specified to balance trade frequency and signal quality.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4274_1h_donchian20_4h_ema_vol_v1"
+name = "exp_4274_1h_donchian20_4h_ema_vol_session_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -103,8 +103,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 2.0x average) to filter noise
-        volume_confirm = vol_ratio[i] > 2.0
+        # Require volume confirmation (> 1.8x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.8
         
         if volume_confirm:
             # Donchian breakout conditions (using previous bar's levels)
