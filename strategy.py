@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #2983: 4h Donchian Breakout + 1d HMA Trend + Volume Spike
-HYPOTHESIS: Donchian(20) breakouts on 4h capture medium-term trends. 1d HMA(50) provides
-trend filter: only take longs when price > HMA, shorts when price < HMA. Volume spike
-(>2.0x 20-period average) confirms breakout strength. This combination filters false
-breakouts in choppy markets while capturing strong trends. 4h timeframe balances
-trade frequency and fee drag. Target: 75-200 total trades over 4 years.
+Experiment #2985: 12h Donchian Breakout + 1d HMA Trend + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 12h capture medium-term trends with lower trade frequency. 
+1d HMA(21) provides trend filter: only take longs when price > HMA, shorts when price < HMA. 
+Volume spike (>2.0x 20-period average) confirms breakout strength. Target: 75-150 total trades over 4 years.
+Works in bull (breakouts with trend) and bear (mean reversion from extremes in chop) via volume confirmation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2983_4h_donchian20_1d_hma_vol_v1"
-timeframe = "4h"
+name = "exp_2985_12h_donchian20_1d_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,7 +26,7 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate HMA(50) on 1d close
+    # Calculate HMA(21) on 1d close
     def calculate_hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -39,15 +38,15 @@ def generate_signals(prices):
         hma = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
         return hma.values
     
-    hma_1d = calculate_hma(close_1d, 50)
+    hma_1d = calculate_hma(close_1d, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # === 4h Indicators: Donchian channels (20-period) ===
+    # === 12h Indicators: Donchian channels (20-period) ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -63,7 +62,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(100, lookback, 20)  # sufficient for all indicators
+    warmup = max(50, lookback, 20)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -139,3 +138,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
