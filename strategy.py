@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #6307: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h timeframe with weekly pivot filter (price above/below weekly pivot) 
-and volume confirmation capture institutional momentum while avoiding false breakouts in ranging markets. 
-Weekly pivot provides structural support/resistance from higher timeframe, working in both bull 
-(breakouts above weekly pivot in uptrend) and bear (breakdowns below weekly pivot in downtrend) markets. 
-Volume filter ensures breakouts have participation. Target: 75-200 trades over 4 years.
+HYPOTHESIS: Tight Donchian breakouts on 6h with weekly pivot filter (from 1w data) and volume 
+confirmation capture institutional momentum. Weekly pivot provides longer-term structure bias 
+that works in both bull (breakouts above weekly pivot in uptrend) and bear (breakdowns below 
+weekly pivot in downtrend) markets. Volume filter ensures breakouts have participation. 
+Uses discrete sizing (0.25) to minimize fee churn. Target: 75-150 trades over 4 years.
 """
 
 import numpy as np
@@ -26,14 +26,22 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for weekly pivot levels ===
+    # === HTF: 1w data for weekly pivot calculation ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 1:
-        # Weekly pivot: (weekly high + weekly low + weekly close) / 3
+    if len(df_1w) >= 5:
+        # Calculate weekly pivot points (using prior week's OHLC)
+        # Pivot = (H + L + C) / 3
+        # R1 = 2*P - L, S1 = 2*P - H
+        # R2 = P + (H - L), S2 = P - (H - L)
+        # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+        # We'll use weekly bias: price > weekly pivot = bullish bias, price < weekly pivot = bearish bias
         weekly_high = df_1w['high'].values
         weekly_low = df_1w['low'].values
         weekly_close = df_1w['close'].values
+        
+        # Calculate pivot for each week
         weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+        # Align to 6h timeframe
         weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     else:
         weekly_pivot_aligned = np.full(n, np.nan)
@@ -65,7 +73,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14) + 1  # Donchian, volume avg, ATR + 1
+    warmup = max(20, 20, 14, 5) + 1  # Donchian, volume avg, ATR, weekly data + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (22:00-23:59 UTC) ---
@@ -91,7 +99,7 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks below Donchian low (failed breakout)
-                # 3. Price crosses below weekly pivot (higher timeframe reversal)
+                # 3. Price crosses below weekly pivot (longer-term reversal)
                 if price <= stop_price or price <= donchian_low[i] or price < weekly_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
@@ -104,7 +112,7 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks above Donchian high (failed breakout)
-                # 3. Price crosses above weekly pivot (higher timeframe reversal)
+                # 3. Price crosses above weekly pivot (longer-term reversal)
                 if price >= stop_price or price >= donchian_high[i] or price > weekly_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
@@ -142,5 +150,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
