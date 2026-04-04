@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3640: 4h Donchian(20) + 1d EMA Trend + Volume Spike
-HYPOTHESIS: 4h Donchian breakouts with 1d EMA trend filter and volume confirmation capture medium-term momentum. Primary timeframe 4h reduces trade frequency to avoid fee drag. Works in bull markets (breakouts with trend) and bear markets (fade false breakouts against trend). Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #3641: 4h Donchian(20) breakout + 1d EMA(50) trend + Volume Spike + ATR trailing stop
+HYPOTHESIS: 4h Donchian breakouts capture medium-term momentum while 1d EMA(50) filters for higher-timeframe trend alignment. Volume spike confirms breakout strength. ATR-based trailing stop limits drawdown. Target: 75-200 total trades over 4 years (19-50/year). Works in bull markets (breakouts with trend) and bear markets (fade false breakouts against trend).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3640_4h_donchian20_1d_ema_vol_v1"
+name = "exp_3641_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -58,7 +58,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback_dc + 1, 50, 20, 14)  # sufficient for all indicators
+    warmup = max(lookback_dc, 50, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Session Filter: Only trade 08-20 UTC ---
@@ -69,7 +69,8 @@ def generate_signals(prices):
         
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -114,8 +115,8 @@ def generate_signals(prices):
         
         if volume_spike:
             # Determine trend bias from 1d EMA
-            bullish_bias = ema_1d_aligned[i] > close_1d[-1] if len(close_1d) > 0 else price > close_1d[-1]
-            bearish_bias = ema_1d_aligned[i] < close_1d[-1] if len(close_1d) > 0 else price < close_1d[-1]
+            bullish_bias = ema_1d_aligned[i] > close_1d[-1] if len(close_1d) > 0 else price
+            bearish_bias = ema_1d_aligned[i] < close_1d[-1] if len(close_1d) > 0 else price
             
             # Long entry: Price breaks above Donchian upper band in bullish trend
             if (price > highest_high[i-1] and  # Breakout above previous period's high
