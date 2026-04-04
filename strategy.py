@@ -2,8 +2,8 @@
 """
 exp_6523_4h_donchian20_1d_ema_vol_v1
 Hypothesis: 4h Donchian(20) breakout with 1d EMA200 as trend filter and volume confirmation.
-In bull markets: long when price > 1d EMA200 and breaks above Donchian high with volume > 1.5x MA.
-In bear markets: short when price < 1d EMA200 and breaks below Donchian low with volume > 1.5x MA.
+In bull markets (price > 1d EMA200): long when price breaks above Donchian high with volume > 1.5x MA.
+In bear markets (price < 1d EMA200): short when price breaks below Donchian low with volume > 1.5x MA.
 Uses ATR-based stoploss (signal→0 when price moves 2*ATR against position).
 Designed for low-frequency, high-conviction trades targeting 75-200 total trades over 4 years.
 """
@@ -54,12 +54,11 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
     # ATR for stoploss
-    tr1 = pd.Series(high - low).values
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first bar: no previous close
-    atr = pd.Series(tr).rolling(window=ATR_PERIOD, min_periods=ATR_PERIOD).mean().values
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
