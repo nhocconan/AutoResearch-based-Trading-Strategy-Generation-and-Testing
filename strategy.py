@@ -2,19 +2,20 @@
 """
 Experiment #5385: 12h Donchian(20) breakout + 1d volume confirmation + ATR stoploss
 HYPOTHESIS: On 12h timeframe, price breaking above/below the 20-period Donchian channel 
-with volume > 1.8x average captures strong momentum moves. Using 1d HTF for trend filter 
-would be redundant as 12h is already high enough; instead, we use volume confirmation 
-to avoid false breakouts. Discrete position sizing (0.25) and ATR-based stoploss (2.0x ATR) 
-control risk. Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag 
-while maintaining statistical significance. Works in bull markets via breakouts and in 
-bear markets via breakdowns, as volume confirmation filters low-conviction moves.
+with volume > 2.0x average volume captures strong momentum moves. Uses 1d HTF only for 
+volume averaging to reduce noise. Discrete position sizing (0.25) and ATR-based stoploss 
+(2.0x ATR) control risk. Target: 12-37 trades/year (50-150 total over 4 years) to 
+minimize fee drag while maintaining statistical significance. Works in bull markets via 
+breakouts and in bear markets via breakdowns. The 12h primary timeframe naturally 
+reduces trade frequency vs lower timeframes, addressing overtrading failures in this 
+session.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5385_12h_donchian20_vol_v1"
+name = "exp_5385_12h_donchian20_1d_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -28,16 +29,22 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
+    # === HTF: 1d data for volume averaging (to reduce noise) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 20:
+        # Calculate average volume over 20 periods on 1d
+        vol_1d = pd.Series(df_1d['volume'].values)
+        avg_vol_1d = vol_1d.rolling(window=20, min_periods=20).mean().values
+        # Align to LTF (12h) with shift(1) for completed bars only
+        avg_vol_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_vol_1d) if len(avg_vol_1d) > 0 else np.full(n, np.nan)
+    else:
+        avg_vol_1d_aligned = np.full(n, np.nan)
+    
     # === 12h Indicators: Donchian Channel (20-period) ===
     # Upper band: 20-period high
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     # Lower band: 20-period low
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 12h Indicators: Volume confirmation ===
-    # Average volume over 20 periods
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)  # Avoid division by zero
     
     # === 12h Indicators: ATR(14) for stoploss ===
     # True Range
@@ -72,7 +79,8 @@ def generate_signals(prices):
         
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(volume[i]) or np.isnan(atr[i]) or 
+            np.isnan(avg_vol_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -114,8 +122,8 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]  # Break above previous period's high
         breakout_down = price < donchian_low[i-1]  # Break below previous period's low
         
-        # Volume confirmation: current volume > 1.8x average volume
-        volume_confirmed = volume_ratio[i] > 1.8
+        # Volume confirmation: current volume > 2.0x average volume (from 1d for stability)
+        volume_confirmed = volume[i] > 2.0 * avg_vol_1d_aligned[i]
         
         # Entry conditions
         if breakout_up and volume_confirmed:
