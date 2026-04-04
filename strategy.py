@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #3784: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: 1d Donchian breakouts aligned with 1w HMA trend capture major swing moves with institutional participation confirmed by volume spikes (>1.8x). Works in bull markets (breakouts above trend) and bear markets (breakdowns below trend). Discrete position sizing (0.25) minimizes fee drag. Target: 30-100 trades over 4 years.
+Experiment #3784: 1d Donchian(20) breakout + 1w HMA trend + 1d volume confirmation
+HYPOTHESIS: 1d Donchian breakouts capture swing moves aligned with 1w HMA trend, with 1d volume spike (>1.5x) confirming participation. Works in bull markets (breakouts above VHN) and bear markets (breakdowns below VHN). Discrete position sizing (0.25) minimizes fee drag. Target: 30-100 trades over 4 years.
 """
 
 import numpy as np
@@ -98,13 +98,13 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average)
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
             # Long entry: Price breaks above Donchian upper band AND above 1w HMA (bullish breakout with trend)
             if (price > highest_high[i-1] and  # Breakout above previous period's high
-                price > hma_1w_aligned[i]):    # Above 1w HMA trend
+                price > hma_1w_aligned[i]):   # Above 1w HMA trend
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
@@ -113,7 +113,7 @@ def generate_signals(prices):
                 signals[i] = SIZE
             # Short entry: Price breaks below Donchian lower band AND below 1w HMA (bearish breakdown against trend)
             elif (price < lowest_low[i-1] and    # Breakout below previous period's low
-                  price < hma_1w_aligned[i]):    # Below 1w HMA trend
+                  price < hma_1w_aligned[i]):   # Below 1w HMA trend
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
