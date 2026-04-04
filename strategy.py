@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4358: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian(20) breakouts aligned with weekly HMA(21) trend (price > weekly HMA = long bias, < weekly HMA = short bias) and confirmed by volume spikes (>1.8x average) capture institutional momentum with controlled trade frequency. Weekly HMA provides smooth higher timeframe trend filter, reducing false breakouts in choppy markets. Works in bull via upward breakouts with long bias, in bear via downward breakouts with short bias. Targets 30-100 total trades over 4 years (7-25/year) with position size 0.25.
+Experiment #4358: 1d Donchian(20) Breakout + Weekly Volume Spike + Chop Regime Filter
+HYPOTHESIS: Donchian(20) breakouts on daily timeframe aligned with weekly volume confirmation (>2.0x average) and choppy market filter (Choppiness Index > 61.8 = range) capture institutional accumulation/distribution in ranging markets. Weekly volume confirms participation, chop filter ensures mean-reversion context. Works in bull via upward breakouts in accumulation ranges, in bear via downward breakouts in distribution ranges. Targets 30-100 total trades over 4 years (7-25/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4358_1d_donchian20_1w_hma_vol_v1"
+name = "exp_4358_1d_donchian20_1w_vol_chop_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -23,50 +23,43 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1w HMA(21) for trend bias ===
+    # === Precompute HTF: 1w OHLC for volume and chop ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 21:
-        # Calculate HMA(21): HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-        def wma(arr, period):
-            if len(arr) < period:
-                return np.full_like(arr, np.nan)
-            weights = np.arange(1, period + 1)
-            return np.convolve(arr, weights/weights.sum(), mode='valid')
+    if len(df_1w) >= 1:
+        weekly_high = df_1w['high'].values
+        weekly_low = df_1w['low'].values
+        weekly_close = df_1w['close'].values
+        weekly_volume = df_1w['volume'].values
         
-        close_1w = df_1w['close'].values
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
+        # Weekly volume MA(4) for confirmation
+        weekly_vol_ma = pd.Series(weekly_volume).rolling(window=4, min_periods=4).mean().values
         
-        wma_half = wma(close_1w, half_len)
-        wma_full = wma(close_1w, 21)
-        wma_sqrt = wma(close_1w, sqrt_len)
+        # Weekly True Range for Choppiness Index
+        tr1 = weekly_high[1:] - weekly_low[1:]
+        tr2 = np.abs(weekly_high[1:] - weekly_close[:-1])
+        tr3 = np.abs(weekly_low[1:] - weekly_close[:-1])
+        weekly_tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        weekly_atr = pd.Series(weekly_tr).ewm(span=14, min_periods=14, adjust=False).mean().values
         
-        # Handle array alignment for HMA calculation
-        if len(wma_half) >= half_len and len(wma_full) >= 21 and len(wma_sqrt) >= sqrt_len:
-            # 2*WMA(n/2) - WMA(n)
-            diff = 2 * wma_half[-len(wma_full):] - wma_full
-            # WMA(sqrt(n)) of the diff
-            hma_values = wma(diff, sqrt_len)
-            # Pad to match original length
-            hma_1w = np.full(len(close_1w), np.nan)
-            hma_1w[half_len - 1 + 21 - sqrt_len:] = hma_values
-        else:
-            hma_1w = np.full(len(close_1w), np.nan)
-            
-        hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+        # Weekly Chop: (sum(ATR14) / (max(high,n) - min(low,n))) * 100
+        weekly_sum_atr14 = pd.Series(weekly_atr).rolling(window=14, min_periods=14).sum().values
+        weekly_maxh = pd.Series(weekly_high).rolling(window=14, min_periods=14).max().values
+        weekly_minl = pd.Series(weekly_low).rolling(window=14, min_periods=14).min().values
+        weekly_chop = np.where((weekly_maxh - weekly_minl) != 0,
+                               (weekly_sum_atr14 / (weekly_maxh - weekly_minl)) * 100, 100)
+        
+        # Align HTF arrays to LTF
+        weekly_vol_ma_aligned = align_htf_to_ltf(prices, df_1w, weekly_vol_ma)
+        weekly_chop_aligned = align_htf_to_ltf(prices, df_1w, weekly_chop)
     else:
-        hma_1w_aligned = np.full(n, np.nan)
+        weekly_vol_ma_aligned = np.full(n, np.nan)
+        weekly_chop_aligned = np.full(n, np.nan)
     
     # === 1d Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # === 1d Indicators: Volume MA(20) for confirmation ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === 1d Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
@@ -86,12 +79,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
+    warmup = max(20, 14, 4, 14)  # Donchian, ATR, vol MA, chop
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(hma_1w_aligned[i])):
+        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(atr[i]) or
+            np.isnan(weekly_vol_ma_aligned[i]) or np.isnan(weekly_chop_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -127,22 +120,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require weekly volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = weekly_volume[i] > 2.0 * weekly_vol_ma_aligned[i] if not np.isnan(weekly_vol_ma_aligned[i]) else False
         
-        # Weekly HMA bias: price > HMA = long bias, price < HMA = short bias
-        long_bias = price > hma_1w_aligned[i]
-        short_bias = price < hma_1w_aligned[i]
+        # Chop regime filter: CHOP > 61.8 = ranging market (mean revert context)
+        chop_regime = weekly_chop_aligned[i] > 61.8
         
         # Donchian breakout conditions
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
         breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
         
-        # Long conditions: upward breakout + long bias + volume
-        long_entry = breakout_up and long_bias and volume_confirm
+        # Long conditions: upward breakout + volume + chop regime
+        long_entry = breakout_up and volume_confirm and chop_regime
         
-        # Short conditions: downward breakout + short bias + volume
-        short_entry = breakout_down and short_bias and volume_confirm
+        # Short conditions: downward breakout + volume + chop regime
+        short_entry = breakout_down and volume_confirm and chop_regime
         
         if long_entry:
             in_position = True
