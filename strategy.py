@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #3484: 1d Donchian Breakout + 1w HMA Trend + Volume Spike
-HYPOTHESIS: Daily Donchian(20) breakouts with weekly HMA(21) trend filter and volume confirmation capture intermediate-term momentum in both bull and bear markets. Weekly trend ensures alignment with higher timeframe structure, reducing false breakouts. Volume spike (>2.0x average) confirms institutional participation. Position size 0.25. Target: 50-100 total trades over 4 years (12-25/year).
+Experiment #3484: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Spike
+HYPOTHESIS: Daily Donchian breakouts with weekly HMA trend filter and volume confirmation capture medium-term momentum in both bull and bear markets.
+Weekly HMA provides smoother trend direction less prone to whipsaw. Volume spike confirms breakout strength.
+Position size 0.25. Target: 50-100 total trades over 4 years (12-25/year). Uses weekly trend for signal direction, daily only for entry timing.
 """
 
 import numpy as np
@@ -24,7 +26,7 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     
     # Calculate HMA(21) on weekly close
-    def hma(arr, period):
+    def calculate_hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
         half_period = period // 2
@@ -32,13 +34,13 @@ def generate_signals(prices):
         wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean()
         wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean()
         raw_hma = 2 * wma_half - wma_full
-        hma_result = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
-        return hma_result.values
+        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean()
+        return hma.values
     
-    hma_1w = hma(close_1w, 21)
+    hma_1w = calculate_hma(close_1w, 21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # === 1d Indicators: Donchian channels (20-period) ===
+    # === 1d Indicators: Donchian channels (20-period) for entry timing ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
@@ -48,7 +50,7 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -115,7 +117,7 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Weekly HMA trend filter: only long above weekly HMA, short below
+            # 1w HMA trend filter: only long above weekly HMA, short below weekly HMA
             price_vs_hma = price - hma_1w_aligned[i]
             
             # Long entry: price breaks above 1d Donchian high with bullish weekly trend
