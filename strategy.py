@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-exp_6593_4h_donchian20_12h_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-Uses 4h primary timeframe (target: 75-200 total trades over 4 years). 12h EMA50 provides
-trend direction that adapts faster than 1d while filtering noise. Volume confirmation ensures
-breakouts have conviction. Discrete sizing (0.25) minimizes fee churn. Includes ATR-based
-stoploss and time-based exit. Designed to work in both bull (breakouts with trend) and bear
-(breakdowns against trend) markets via symmetric long/short logic.
+exp_6594_1h_donchian20_4h_ema_vol_v1
+Hypothesis: 1h Donchian(20) breakout with 4h EMA50 trend filter and volume confirmation.
+Uses 1h primary timeframe with 4h EMA50 for trend direction to reduce whipsaw.
+Volume confirmation ensures breakouts have conviction. Session filter (08-20 UTC)
+reduces noise trades. Discrete sizing (0.20) minimizes fee churn. Target: 60-150
+total trades over 4 years (15-37/year) to avoid fee drag. Symmetric long/short logic
+works in both bull (breakouts with trend) and bear (breakdowns against trend) markets.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6593_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_6594_1h_donchian20_4h_ema_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
@@ -22,25 +22,28 @@ DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0  # Volume threshold for confirmation
-SIGNAL_SIZE = 0.25      # 25% position size
+SIGNAL_SIZE = 0.20      # 20% position size
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5  # Stoploss at 2.5 * ATR
-MAX_HOLD_BARS = 30      # Max hold: ~30 * 4h = 5 days
+MAX_HOLD_BARS = 24      # Max hold: ~24 * 1h = 1 day
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 12h for EMA50
-    df_12h = get_htf_data(prices, '12h')
+    # Load HTF data ONCE before loop - using 4h for EMA50
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False).mean().values
+    # Calculate 4h EMA50
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=EMA_PERIOD, adjust=False).mean().values
     
-    # Align to LTF (4h) with shift(1) for completed bars only
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align to LTF (1h) with shift(1) for completed bars only
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Pre-compute session hours for 08-20 UTC filter
+    hours = prices.index.hour  # prices.index is DatetimeIndex
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -73,8 +76,17 @@ def generate_signals(prices):
     for i in range(start, n):
         bars_since_entry += 1
         
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            if position == 0:
+                signals[i] = 0.0
+            else:
+                signals[i] = position * SIGNAL_SIZE  # hold existing position
+            continue
+        
         # Skip if HTF data not available
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -99,23 +111,23 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Determine trend bias from 12h EMA50
+        # Determine trend bias from 4h EMA50
         # Price above EMA50: bullish bias (favor longs)
         # Price below EMA50: bearish bias (favor shorts)
-        bullish_bias = close[i] > ema_12h_aligned[i]
-        bearish_bias = close[i] < ema_12h_aligned[i]
+        bullish_bias = close[i] > ema_4h_aligned[i]
+        bearish_bias = close[i] < ema_4h_aligned[i]
         
         # Long conditions: 
         # 1. Break above Donchian HIGH (breakout)
         # 2. Volume confirmation
-        # 3. Bullish bias from 12h EMA50
+        # 3. Bullish bias from 4h EMA50
         long_breakout = close[i] > donchian_high[i-1]
         long_volume = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Short conditions:
         # 1. Break below Donchian LOW (breakdown)
         # 2. Volume confirmation
-        # 3. Bearish bias from 12h EMA50
+        # 3. Bearish bias from 4h EMA50
         short_breakout = close[i] < donchian_low[i-1]
         short_volume = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
@@ -138,3 +150,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
