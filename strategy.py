@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #6059: 6h Donchian(20) breakout + 12h pivot direction + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 12h Camarilla pivot structure (R3/S3 for mean reversion, R4/S4 for breakout) capture institutional participation. Volume >1.5x average confirms participation. Works in bull markets (breakouts above R4 with volume) and bear markets (breakdowns below S4 with volume). Target: 75-150 total trades over 4 years (19-37/year). Discrete sizing (0.25) minimizes fee drag.
+Experiment #6061: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA trend capture swing moves with institutional participation. Volume >1.5x average confirms breakout validity. Works in bull markets (breakouts above rising EMAs) and bear markets (breakdowns below falling EMAs). Target: 75-200 trades over 4 years (19-50/year). Discrete sizing (0.25) minimizes fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6059_6h_donchian20_12h_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_6061_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,39 +22,23 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 12h data for Camarilla pivot levels ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 2:
-        # Calculate Camarilla pivot levels from previous 12h bar
-        pivot = (df_12h['high'].values + df_12h['low'].values + df_12h['close'].values) / 3.0
-        range_ = df_12h['high'].values - df_12h['low'].values
-        r3 = pivot + (range_ * 1.1 / 2.0)
-        s3 = pivot - (range_ * 1.1 / 2.0)
-        r4 = pivot + (range_ * 1.1)
-        s4 = pivot - (range_ * 1.1)
-        
-        # Align to 6h timeframe (shifted by 1 for completed bars only)
-        pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
-        r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-        s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-        r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
-        s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
+    # === HTF: 1d data for EMA trend ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        pivot_aligned = np.full(n, np.nan)
-        r3_aligned = np.full(n, np.nan)
-        s3_aligned = np.full(n, np.nan)
-        r4_aligned = np.full(n, np.nan)
-        s4_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation ===
+    # === 4h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 6h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -73,7 +57,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 2, 14, 1) + 1  # Donchian, volume avg, pivot calc, ATR + 1
+    warmup = max(20, 20, 50, 14, 1) + 1  # Donchian, volume avg, EMA, ATR + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -85,8 +69,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -121,16 +104,15 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5  # Volume filter for stronger signals
         
-        # Multi-timeframe pivot filter: 
-        # Long: breakout above R4 (strong bullish) OR rejection at S3 with bullish bias
-        # Short: breakdown below S4 (strong bearish) OR rejection at R3 with bearish bias
-        long_breakout = breakout_up and price > r4_aligned[i]
-        long_rejection = not breakout_up and price > s3_aligned[i] and price < r3_aligned[i] and close[i] > open[i]
-        long_entry = (long_breakout or long_rejection) and volume_confirmed
+        # Multi-timeframe trend filter: price must be aligned with 1d EMA
+        bullish_trend = price > ema_1d_aligned[i]
+        bearish_trend = price < ema_1d_aligned[i]
         
-        short_breakout = breakout_down and price < s4_aligned[i]
-        short_rejection = not breakout_down and price < r3_aligned[i] and price > s3_aligned[i] and close[i] < open[i]
-        short_entry = (short_breakout or short_rejection) and volume_confirmed
+        # Entry conditions:
+        # Long: breakout up with volume AND bullish trend on daily timeframe
+        # Short: breakout down with volume AND bearish trend on daily timeframe
+        long_entry = breakout_up and volume_confirmed and bullish_trend
+        short_entry = breakout_down and volume_confirmed and bearish_trend
         
         if long_entry:
             in_position = True
