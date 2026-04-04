@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4413: 4h Donchian(20) Breakout + 12h HMA Trend + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h HMA(21) trend direction and confirmed by volume (>1.5x average) capture institutional momentum with minimal false signals. 12h HMA provides smooth trend bias from higher timeframe, reducing whipsaws. Volume filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
+Experiment #4413: 4h Donchian(20) Breakout + 12h EMA Trend + Volume Confirmation
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h EMA50 trend direction and confirmed by volume (>2.0x average) capture institutional momentum with minimal false signals. The 12h EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4413_4h_donchian20_12h_hma_vol_v1"
+name = "exp_4413_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,27 +23,14 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 12h HMA(21) for trend bias ===
+    # === Precompute HTF: 12h EMA50 for trend bias ===
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 21:
+    if len(df_12h) >= 50:
         close_12h = pd.Series(df_12h['close'].values)
-        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-        half_len = int(21 / 2)
-        sqrt_len = int(np.sqrt(21))
-        wma_half = close_12h.rolling(window=half_len, min_periods=half_len).apply(
-            lambda x: np.average(x, weights=np.arange(1, half_len + 1)), raw=True
-        ).values
-        wma_full = close_12h.rolling(window=21, min_periods=21).apply(
-            lambda x: np.average(x, weights=np.arange(1, 22)), raw=True
-        ).values
-        hma_12h = pd.Series(2 * wma_half - wma_full).rolling(
-            window=sqrt_len, min_periods=sqrt_len
-        ).apply(
-            lambda x: np.average(x, weights=np.arange(1, sqrt_len + 1)), raw=True
-        ).values
-        hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+        ema_12h = close_12h.ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     else:
-        hma_12h_aligned = np.full(n, np.nan)
+        ema_12h_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
@@ -74,12 +61,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21)  # Donchian, vol MA, ATR, HMA
+    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, EMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(hma_12h_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -115,12 +102,12 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = vol_ratio[i] > 2.0
         
-        # 12h HMA bias: price > HMA = long bias, price < HMA = short bias
-        long_bias = price > hma_12h_aligned[i]
-        short_bias = price < hma_12h_aligned[i]
+        # 12h EMA bias: price > EMA = long bias, price < EMA = short bias
+        long_bias = price > ema_12h_aligned[i]
+        short_bias = price < ema_12h_aligned[i]
         
         # Donchian breakout conditions
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
@@ -150,3 +137,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
