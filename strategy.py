@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 Experiment #4245: 12h Donchian(20) breakout + 1d EMA200 trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 12h timeframe capture swing momentum when aligned with 1d EMA200 trend (price > EMA200 for longs, < EMA200 for shorts) and confirmed by volume (>2.0x average). Uses 1d EMA for direction, 12h only for entry/exit timing. ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 50-150 total trades over 4 years (12-37/year). Works in bull via breakout continuation, in bear via shorting breakdowns. Novelty: Uses 1d HTF to reduce whipsaw while maintaining sufficient trade frequency for 12h.
+HYPOTHESIS: Donchian breakouts on 12h timeframe capture medium-term momentum when aligned with 1d EMA200 trend (price > EMA200 for longs, < EMA200 for shorts) and confirmed by volume (>2.0x average). Uses 1d EMA200 for direction, 12h only for entry/exit timing. ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 50-150 total trades over 4 years (12-37/year). Works in bull via breakout continuation, in bear via shorting breakdowns. Novelty: Uses 1d HTF (EMA200) to reduce whipsaw in choppy markets while maintaining sufficient trade frequency for 12h.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4245_12h_donchian20_1d_ema_vol_v1"
+name = "exp_4245_12h_donchian20_1d_ema200_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
