@@ -2,10 +2,10 @@
 """
 Experiment #2736: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
 HYPOTHESIS: 12h Donchian breakouts with 1d EMA trend alignment and volume spikes capture
-institutional participation with lower frequency than 4h/6h strategies. Uses 1d for signal
-direction, 12h only for entry timing. Target: 75-150 total trades over 4 years.
-Works in bull markets via trend-following breakouts and in bear markets via short
-breakouts with trend filter. Volume confirmation reduces false breakouts.
+institutional participation with lower frequency than 6h/4h strategies. Uses 1d for signal
+direction, 12h only for entry timing. Target: 50-150 total trades over 4 years.
+Works in bull markets via trend-following breakouts and in bear markets via shorting
+breakdowns with trend filter. Volume confirmation reduces false breakouts.
 """
 
 import numpy as np
@@ -132,3 +132,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
