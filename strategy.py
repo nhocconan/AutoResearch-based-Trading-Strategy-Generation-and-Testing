@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #3565: 12h Donchian Breakout + 1d EMA Trend + Volume Confirmation
-HYPOTHESIS: 12h Donchian(20) breakouts aligned with 1d EMA(50) trend and volume spikes capture medium-term momentum.
-The 1d EMA provides the primary trend filter to avoid counter-trend trades, while Donchian breakouts on 12h
-offer precise entry timing. Volume confirmation ensures breakout strength. Works in bull (breakouts above EMA)
-and bear (breakouts below EMA) by only trading in direction of 1d trend. Position size 0.25.
-Target: 50-150 total trades over 4 years (12-37/year).
+HYPOTHESIS: 12h Donchian(20) breakouts with 1d EMA(50) trend filter and volume confirmation capture medium-term momentum in both bull and bear markets. 
+The 1d EMA provides the primary trend direction, while 12h Donchian breakouts offer precise entry timing with volume confirmation reducing false signals.
+Position size 0.25. Target: 75-150 total trades over 4 years (19-38/year).
+Uses 1d for trend filter and 12h only for entry timing and risk management.
 """
 
 import numpy as np
@@ -27,10 +26,8 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1d
+    # Calculate 1d EMA(50) for trend filter
     ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    
-    # Align EMA to 12h timeframe
     ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # === 12h Indicators: Donchian channels (20-period) for entry timing ===
@@ -43,7 +40,7 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for volatility and stoploss ===
+    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -61,7 +58,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_12h, 50, 20, 14)  # sufficient for all indicators
+    warmup = max(50, lookback_12h, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -82,6 +79,11 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
+                # Exit if price breaks below 12h Donchian low (structure break)
+                elif price < lowest_low_12h[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
@@ -91,30 +93,35 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
+                # Exit if price breaks above 12h Donchian high (structure break)
+                elif price > highest_high_12h[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
                 else:
                     signals[i] = -SIZE
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) for confirmation
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume spike (> 1.5x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Determine trend bias from 1d EMA
+            # Determine trend bias from 1d EMA(50)
             price_vs_ema = price - ema_50_1d_aligned[i]
             
-            # Long entry: price breaks above 12h Donchian high with bullish trend (above EMA)
+            # Long entry: price breaks above 12h Donchian high with bullish bias (above EMA)
             if (price > highest_high_12h[i] and 
-                price_vs_ema > 0):  # Above 1d EMA = bullish trend
+                price_vs_ema > 0):  # Above 1d EMA = bullish bias
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below 12h Donchian low with bearish trend (below EMA)
+            # Short entry: price breaks below 12h Donchian low with bearish bias (below EMA)
             elif (price < lowest_low_12h[i] and 
-                  price_vs_ema < 0):  # Below 1d EMA = bearish trend
+                  price_vs_ema < 0):  # Below 1d EMA = bearish bias
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
