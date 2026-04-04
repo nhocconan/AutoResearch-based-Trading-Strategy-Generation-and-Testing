@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Experiment #2282: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
+Experiment #2285: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
 HYPOTHESIS: Donchian channel breakouts on 12h timeframe capture swing momentum with daily trend filter.
-- Primary: 12h Donchian(20) breakout with volume > 2.0x 20-bar average (strict to limit trades)
+- Primary: 12h Donchian(20) breakout with volume > 1.8x 20-bar average (strict to limit trades)
 - HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
 - Target: 50-150 total trades over 4 years (12-37/year) - optimized for 12h timeframe
@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2282_12h_donchian20_1d_hma_vol_v1"
+name = "exp_2285_12h_donchian20_1d_hma_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -140,8 +140,8 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 2.0x average - strict to limit trades)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average - strict to limit trades)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
             # Long entry: price breaks above upper Donchian AND 1d trend up
@@ -166,5 +166,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
