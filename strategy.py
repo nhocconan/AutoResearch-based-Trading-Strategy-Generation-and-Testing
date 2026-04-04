@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #5990: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on daily timeframe aligned with weekly HMA trend (price above/below weekly HMA = bullish/bearish)
-capture sustained moves with lower noise. Weekly HMA provides smooth trend filter more resilient to daily whipsaws.
-Volume >1.5x average confirms breakout strength. ATR trailing stop manages risk. Target 30-100 trades over 4 years.
-Works in both bull/bear: weekly HMA trend prevents counter-trend entries, volume confirmation avoids false breakouts.
+Experiment #5991: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+HYPOTHESIS: Donchian breakouts on 6h aligned with weekly pivot bias (price above/below weekly pivot = bullish/bearish)
+capture sustained moves with lower noise. Weekly pivot provides structural bias more resilient to intraday noise than daily.
+Volume >1.5x average confirms breakout strength. ATR trailing stop manages risk. Target 75-200 trades over 4 years.
+Works in both bull/bear: weekly pivot bias prevents counter-trend entries, volume confirmation avoids false breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5990_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_5991_6h_donchian20_1d_weekly_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,43 +25,32 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for HMA(21) trend ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 21:
-        # Calculate HMA(21) on weekly close
-        close_1w = df_1w['close'].values
-        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
+    # === HTF: 1d data for weekly pivot levels (using prior week's OHLC) ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 5:  # Need at least 5 days for weekly calculation
+        # Calculate weekly OHLC from daily data
+        # We'll compute weekly pivot using the prior week's high, low, close
+        weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(1).values
+        weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(1).values
+        weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().shift(1).values
         
-        def wma(values, window):
-            weights = np.arange(1, window + 1)
-            return np.convolve(values, weights, 'valid') / weights.sum()
+        # Weekly pivot point: (weekly_high + weekly_low + weekly_close) / 3
+        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
         
-        wma_half = np.array([wma(close_1w[i:i+half_len], half_len) 
-                            if i+half_len <= len(close_1w) else np.nan 
-                            for i in range(len(close_1w))])
-        wma_full = np.array([wma(close_1w[i:i+21], 21) 
-                            if i+21 <= len(close_1w) else np.nan 
-                            for i in range(len(close_1w))])
-        hma_21_raw = 2 * wma_half - wma_full
-        hma_21 = np.array([wma(hma_21_raw[i:i+sqrt_len], sqrt_len) 
-                          if i+sqrt_len <= len(hma_21_raw) else np.nan 
-                          for i in range(len(hma_21_raw))])
-        # Align to daily timeframe with shift(1) for completed weekly bars only
-        hma_21w_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
+        # Align to 6h timeframe with shift(1) for completed weekly bars only
+        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     else:
-        hma_21w_aligned = np.full(n, np.nan)
+        weekly_pivot_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: Donchian Channel (20-period) ===
+    # === 6h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume confirmation ===
+    # === 6h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 1d Indicators: ATR(14) for trailing stop ===
+    # === 6h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -80,7 +69,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21) + 1  # Donchian, volume avg, ATR, weekly lookback + 1
+    warmup = max(20, 20, 14, 5) + 1  # Donchian, volume avg, ATR, weekly lookback + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -92,7 +81,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(hma_21w_aligned[i])):
+            np.isnan(weekly_pivot_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -127,15 +116,15 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # Weekly HMA trend: price above/below weekly HMA
-        above_hma = price > hma_21w_aligned[i]
-        below_hma = price < hma_21w_aligned[i]
+        # Weekly pivot bias: price above/below weekly pivot
+        above_pivot = price > weekly_pivot_aligned[i]
+        below_pivot = price < weekly_pivot_aligned[i]
         
         # Entry conditions: 
-        # Long: breakout up with volume AND above weekly HMA
-        # Short: breakout down with volume AND below weekly HMA
-        long_setup = breakout_up and volume_confirmed and above_hma
-        short_setup = breakout_down and volume_confirmed and below_hma
+        # Long: breakout up with volume AND above weekly pivot
+        # Short: breakout down with volume AND below weekly pivot
+        long_setup = breakout_up and volume_confirmed and above_pivot
+        short_setup = breakout_down and volume_confirmed and below_pivot
         
         if long_setup:
             in_position = True
