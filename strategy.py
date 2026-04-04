@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #5458: 1d Donchian(20) breakout + 1w EMA(21) trend + volume confirmation
+Experiment #5458: 1d Donchian(20) breakout + 1w EMA(20) trend + volume confirmation
 HYPOTHESIS: On daily timeframe, price breaking above/below the 20-period Donchian channel with 
-volume > 2.0x average and aligned with the 1-week EMA(21) direction (price above/below weekly EMA) 
-captures strong momentum moves with higher timeframe trend confirmation. Daily timeframe reduces 
-trade frequency to optimal range (7-25/year) minimizing fee drag while maintaining statistical 
-significance. Works in bull markets via breakouts above rising weekly EMA and in bear markets via 
-short breakdowns below falling weekly EMA. ATR-based stoploss (2.0x ATR) controls risk.
+volume > 2.0x average and aligned with the weekly EMA(20) direction (price above/below EMA20) 
+captures strong momentum moves with higher timeframe trend confirmation. Daily timeframe 
+reduces noise and overtrading while Donchian breakouts catch trends. Discrete position 
+sizing (0.25) and ATR-based stoploss (2.0x ATR) control risk. Target: 75-250 total trades 
+over 4 years (19-62/year) to minimize fee drag while maintaining statistical significance. 
+Works in bull markets via breakouts above rising weekly EMA20 and in bear markets via short 
+breakdowns below falling weekly EMA20.
 """
 
 import numpy as np
@@ -27,12 +29,12 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for EMA(21) ===
+    # === HTF: 1w data for EMA(20) ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 1:
         close_1w = df_1w['close'].values
-        # Calculate EMA(21) on 1w close
-        ema_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
+        # Calculate EMA(20) on 1w close
+        ema_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
         # Align to LTF (1d) with shift(1) for completed bars only
         ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w) if len(ema_1w) > 0 else np.full(n, np.nan)
     else:
@@ -69,7 +71,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 20, 14, 21)  # Donchian, volume avg, ATR warmup, EMA21
+    warmup = max(20, 20, 20, 14, 20)  # Donchian, volume avg, ATR warmup, EMA20
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -90,9 +92,9 @@ def generate_signals(prices):
         price = close[i]
         
         # --- EMA trend bias (using prior EMA only) ---
-        # Long bias: price above weekly EMA21
+        # Long bias: price above EMA20
         ema_bias_up = price > ema_1w_aligned[i]
-        # Short bias: price below weekly EMA21
+        # Short bias: price below EMA20
         ema_bias_down = price < ema_1w_aligned[i]
         
         # --- Exit Logic: Close position on stoploss or EMA reversal ---
@@ -105,7 +107,7 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks below Donchian lower band (failed breakout)
-                # 3. Price crosses below weekly EMA21 (trend reversal)
+                # 3. Price crosses below EMA20 (trend reversal)
                 if price <= stop_price or price <= donchian_low[i] or price < ema_1w_aligned[i]:
                     in_position = False
                     position_side = 0
@@ -119,7 +121,7 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks above Donchian upper band (failed breakout)
-                # 3. Price crosses above weekly EMA21 (trend reversal)
+                # 3. Price crosses above EMA20 (trend reversal)
                 if price >= stop_price or price >= donchian_high[i] or price > ema_1w_aligned[i]:
                     in_position = False
                     position_side = 0
