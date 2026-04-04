@@ -1,50 +1,48 @@
 #!/usr/bin/env python3
 """
-exp_6554_1h_donchian20_4h_ema1d_vol_v1
-Hypothesis: 1h Donchian(20) breakout with 4h EMA50 as trend filter and 1d EMA200 as long-term bias,
-plus volume confirmation (2.0x 20-period MA). Uses 4h/1d for signal direction, 1h only for entry timing.
-Session filter (08-20 UTC) reduces noise. Discrete sizing (0.20) minimizes fee drag.
-Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+exp_6555_6h_donchian20_1w_pivot_vol_v1
+Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation.
+Weekly pivot provides long-term trend bias (bullish/bearish) that works across market regimes.
+Volume spike (2.0x 20-period MA) confirms breakout authenticity.
+Designed for 75-150 total trades over 4 years with discrete sizing (0.25) to minimize fee drag.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6554_1h_donchian20_4h_ema1d_vol_v1"
-timeframe = "1h"
+name = "exp_6555_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_4H_PERIOD = 50      # 4h EMA50 for medium-term trend
-EMA_1D_PERIOD = 200     # 1d EMA200 for long-term bias
+PIVOT_LOOKBACK = 5  # days for weekly pivot calculation
 VOL_MA_PERIOD = 20
 VOL_THRESHOLD = 2.0     # volume must be 2.0x its 20-period MA
-SIGNAL_SIZE = 0.20      # 20% position size
+SIGNAL_SIZE = 0.25      # 25% position size
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Pre-compute session hours (08-20 UTC) - open_time is already datetime64[ms]
-    hours = prices.index.hour  # prices.index is DatetimeIndex
-    in_session = (hours >= 8) & (hours <= 20)
+    # Load HTF data ONCE before loop - using 1w for weekly pivot
+    df_1w = get_htf_data(prices, '1w')
     
-    # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA50
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=EMA_4H_PERIOD, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    pivot_point = (high_1w + low_1w + close_1w) / 3.0
+    r1 = 2 * pivot_point - low_1w
+    s1 = 2 * pivot_point - high_1w
     
-    # Calculate 1d EMA200
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_1D_PERIOD, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align to LTF (6h) with shift(1) for completed bars only
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_point)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -64,35 +62,31 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, EMA_4H_PERIOD, EMA_1D_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
             continue
             
-        # Session filter: only trade 08-20 UTC
-        if not in_session[i]:
-            signals[i] = 0.0
-            position = 0
-            continue
+        # Determine weekly trend bias
+        weekly_bullish = close[i] > pivot_aligned[i]   # price above weekly pivot = bullish bias
+        weekly_bearish = close[i] < pivot_aligned[i]   # price below weekly pivot = bearish bias
         
-        # Long conditions: price > 4h EMA50 (bullish bias) AND price > 1d EMA200 (long-term bull) 
-        # + breaks above Donchian HIGH + volume spike
-        long_bias = close[i] > ema_4h_aligned[i] and close[i] > ema_1d_aligned[i]
-        long_breakout = close[i] > donchian_high[i-1]
+        # Long conditions: weekly bullish bias + breaks above Donchian HIGH + volume spike
+        long_bias = weekly_bullish
+        long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
         long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Short conditions: price < 4h EMA50 (bearish bias) AND price < 1d EMA200 (long-term bear)
-        # + breaks below Donchian LOW + volume spike
-        short_bias = close[i] < ema_4h_aligned[i] and close[i] < ema_1d_aligned[i]
-        short_breakout = close[i] < donchian_low[i-1]
+        # Short conditions: weekly bearish bias + breaks below Donchian LOW + volume spike
+        short_bias = weekly_bearish
+        short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Exit conditions: EMA reversal or Donchian midpoint reversal
+        # Exit conditions: weekly pivot reversal or Donchian midpoint reversal
         if position == 1:  # long position
-            # Exit if price drops back below 4h EMA50 or 1d EMA200 (trend change)
-            exit_long = close[i] < ema_4h_aligned[i] or close[i] < ema_1d_aligned[i]
+            # Exit if price drops back below weekly pivot (trend change)
+            exit_long = close[i] < pivot_aligned[i]
             # Or if price drops below Donchian midpoint
             exit_long = exit_long or close[i] < (donchian_high[i-1] + donchian_low[i-1]) / 2
             if exit_long:
@@ -100,8 +94,8 @@ def generate_signals(prices):
                 position = 0
                 continue
         elif position == -1:  # short position
-            # Exit if price rises back above 4h EMA50 or 1d EMA200 (trend change)
-            exit_short = close[i] > ema_4h_aligned[i] or close[i] > ema_1d_aligned[i]
+            # Exit if price rises back above weekly pivot (trend change)
+            exit_short = close[i] > pivot_aligned[i]
             # Or if price rises above Donchian midpoint
             exit_short = exit_short or close[i] > (donchian_high[i-1] + donchian_low[i-1]) / 2
             if exit_short:
