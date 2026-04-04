@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #2968: 12h Donchian Breakout + Weekly Pivot Direction + Volume Spike
-HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture medium-term trends.
-Weekly pivot (from 1d data) provides directional bias: only take long breakouts
-when weekly pivot shows bullish bias (price > weekly pivot), and short breakouts
-when bearish (price < weekly pivot). Volume spike (>2.0x 20-period average)
-confirms breakout strength. This combination filters false breakouts in choppy
-markets while capturing strong trends in both bull and bear regimes. 12h timeframe
-reduces trade frequency to minimize fee drag. Target: 50-150 total trades over 4 years.
+Experiment #2969: 4h Donchian Breakout + 1d/1w HTF Trend + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture medium-term trends with controlled frequency.
+HTF trend from 1d EMA50 vs EMA200 provides directional bias: only take longs when 1d EMA50 > EMA200, shorts when EMA50 < EMA200.
+Weekly trend from 1w close > open adds additional filter for strong momentum alignment.
+Volume spike (>1.8x 20-period average) confirms breakout strength. This combination filters false breakouts
+while maintaining sufficient trade frequency (target: 75-200 total trades over 4 years) for statistical validity.
+ATR-based trailing stop (2.5x) manages risk. Position size 0.25 balances return and drawdown.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2968_12h_donchian20_1w_pivot_vol_v1"
-timeframe = "12h"
+name = "exp_2969_4h_donchian20_1d_1w_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,31 +24,44 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for weekly pivot calculation (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot from daily OHLC (simplified: use last 5 days)
-    # Pivot = (High + Low + Close) / 3 for each day, then average last 5 days
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Rolling mean of last 5 daily pivots for weekly bias
-    weekly_pivot = pd.Series(pivot_1d).rolling(window=5, min_periods=5).mean().values
+    # Calculate 1d EMAs for trend bias
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
+    # 1d trend: bullish when EMA50 > EMA200
+    trend_1d_bullish = ema50_1d > ema200_1d
     
-    # Align to 12h timeframe (shifted by 1 for completed bars only)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    # Align 1d trend to 4h timeframe (shifted by 1 for completed bars only)
+    trend_1d_bullish_aligned = align_htf_to_ltf(prices, df_1d, trend_1d_bullish.astype(np.float64))
     
-    # === 12h Indicators: Donchian channels (20-period) ===
+    # === HTF: 1w data for weekly trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    open_1w = df_1w['open'].values
+    # Weekly trend: bullish when weekly close > open
+    trend_1w_bullish = close_1w > open_1w
+    
+    # Align 1w trend to 4h timeframe (shifted by 1 for completed bars only)
+    trend_1w_bullish_aligned = align_htf_to_ltf(prices, df_1w, trend_1w_bullish.astype(np.float64))
+    
+    # === 4h Indicators: Donchian channels (20-period) ===
     lookback = 20
-    # Rolling max/min for Donchian channels
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    
+    # === 4h Indicators: ATR(14) for volatility and stoploss ===
+    tr1 = np.maximum(high[1:] - low[1:], np.abs(high[1:] - close[:-1]))
+    tr2 = np.maximum(tr1, np.abs(low[1:] - close[:-1]))
+    tr = np.concatenate([[np.nan], tr2])
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -62,12 +74,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 20)  # sufficient for all indicators
+    warmup = max(50, lookback, 20, 200)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(trend_1d_bullish_aligned[i]) or np.isnan(trend_1w_bullish_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -79,9 +92,7 @@ def generate_signals(prices):
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
                 # Exit if price drops 2.5*ATR below highest since entry
-                # Use 12h ATR(14) approximation from price range
-                atr_estimate = (high[i] - low[i]) * 0.5
-                if price < highest_since_entry - 2.5 * atr_estimate:
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -95,8 +106,7 @@ def generate_signals(prices):
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 # Exit if price rises 2.5*ATR above lowest since entry
-                atr_estimate = (high[i] - low[i]) * 0.5
-                if price > lowest_since_entry + 2.5 * atr_estimate:
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -110,23 +120,24 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
+        # Require volume spike (> 1.8x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Get weekly pivot bias
-            price_vs_pivot = price - weekly_pivot_aligned[i]
+            # Get HTF trend biases
+            trend_1d_bull = bool(trend_1d_bullish_aligned[i] > 0.5)
+            trend_1w_bull = bool(trend_1w_bullish_aligned[i] > 0.5)
             
-            # Long entry: price breaks above Donchian high with bullish weekly bias
-            if price > highest_high[i] and price_vs_pivot > 0:
+            # Long entry: price breaks above Donchian high with bullish HTF bias
+            if price > highest_high[i] and trend_1d_bull and trend_1w_bull:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with bearish weekly bias
-            elif price < lowest_low[i] and price_vs_pivot < 0:
+            # Short entry: price breaks below Donchian low with bearish HTF bias
+            elif price < lowest_low[i] and (not trend_1d_bull) and (not trend_1w_bull):
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -139,5 +150,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
