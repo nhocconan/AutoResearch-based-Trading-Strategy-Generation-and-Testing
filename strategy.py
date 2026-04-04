@@ -2,12 +2,11 @@
 """
 Experiment #2280: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
 HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture swing momentum with daily trend filter.
-- Primary: 4h Donchian(20) breakout with volume > 2.0x 20-bar average (strict to limit trades)
+- Primary: 4h Donchian(20) breakout with volume > 1.8x 20-bar average (strict to limit trades)
 - HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
 - Exit: ATR(14) trailing stop (2*ATR) or opposite Donchian channel touch
 - Target: 75-200 total trades over 4 years (19-50/year) - optimized for 4h timeframe
 - Designed to work in both bull (trend following) and bear (mean reversion at extremes) markets
-- Added minimum holding period of 3 bars to prevent whipsaw
 """
 
 import numpy as np
@@ -91,7 +90,6 @@ def generate_signals(prices):
     entry_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
-    bars_since_entry = 0
     
     warmup = 50  # sufficient for all indicators
     
@@ -107,8 +105,6 @@ def generate_signals(prices):
         
         # --- Exit Logic ---
         if in_position:
-            bars_since_entry += 1
-            
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
@@ -138,20 +134,14 @@ def generate_signals(prices):
                     signals[i] = 0.0
                 else:
                     signals[i] = -SIZE
-            
-            # Minimum holding period: prevent immediate reversal
-            if bars_since_entry < 3:
-                signals[i] = 0.0
-                in_position = False
-                position_side = 0
             continue
         
         # --- New Position Entry Logic ---
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 2.0x average - strict to limit trades)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average - strict to limit trades)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
             # Long entry: price breaks above upper Donchian AND 1d trend up
@@ -161,7 +151,6 @@ def generate_signals(prices):
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                bars_since_entry = 0
                 signals[i] = SIZE
             # Short entry: price breaks below lower Donchian AND 1d trend down
             elif trend_bias < 0 and price < donchian_lower[i]:
@@ -170,7 +159,6 @@ def generate_signals(prices):
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
-                bars_since_entry = 0
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
