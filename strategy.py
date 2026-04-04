@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3969: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 trend capture multi-week swings with controlled frequency. 
-Volume > 2.0x MA(20) confirms breakout strength. ATR(14) trailing stop (2.5x) manages risk. 
-Discrete sizing (0.25) reduces fee drag. Target: 75-200 trades over 4 years (19-50/year). 
-Works in bull/bear via 1d EMA50 regime filter: long only when price > EMA50, short only when price < EMA50.
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 trend (price above EMA50 = bullish bias, below = bearish) capture multi-week swings with controlled frequency. Volume > 2.0x MA(20) confirms breakout strength. ATR(14) trailing stop (2.5x) manages risk. Discrete sizing (0.25) reduces fee drag. Target: 75-200 trades over 4 years (19-50/year). Works in bull/bear via 1d EMA50 regime filter.
 """
 
 import numpy as np
@@ -22,7 +19,7 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d EMA50 for trend filter ===
+    # === HTF: 1d EMA50 for trend regime ===
     df_1d = get_htf_data(prices, '1d')
     ema_1d_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
@@ -55,7 +52,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20, 50)  # DC lookback, vol MA, EMA warmup
+    warmup = max(lookback_dc + 1, 20, 50)  # DC lookback, vol MA, EMA50
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -104,7 +101,7 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Determine trend from 1d EMA50: bullish if price above EMA50, bearish if below
+            # Determine trend: bullish if price above 1d EMA50, bearish if below
             bullish = price > ema_1d_50_aligned[i]
             bearish = price < ema_1d_50_aligned[i]
             
