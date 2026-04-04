@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #3598: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts capture intermediate-term trends. 1w EMA filter ensures we only trade in the direction of the weekly trend, reducing whipsaw. Volume confirmation adds conviction. ATR-based stoploss manages risk. Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend). Position size 0.25. Target: 30-100 total trades over 4 years (7-25/year).
+Experiment #3598: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Daily Donchian breakouts capture medium-term trends. 1w EMA filter ensures we only trade in the direction of the weekly trend, reducing whipsaw. Volume spike confirms breakout strength. ATR-based stoploss limits drawdown. Works in bull markets (breakouts to upside in uptrend) and bear markets (breakouts to downside in downtrend). Position size 0.25. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -27,17 +27,17 @@ def generate_signals(prices):
     ema_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # === 1d Indicators: Donchian channels (20-period) ===
-    lookback_donchian = 20
-    highest_high = pd.Series(high).rolling(window=lookback_donchian, min_periods=lookback_donchian).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback_donchian, min_periods=lookback_donchian).min().values
+    # === 1d Indicators: Donchian Channel (20) ===
+    lookback_dc = 20
+    highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
     # === 1d Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for volatility and stoploss ===
+    # === 1d Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -55,7 +55,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_donchian + 1, 21, 20, 14)  # sufficient for all indicators
+    warmup = max(50, lookback_dc + 1, 21, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -90,14 +90,14 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.5x average) for confirmation
-        volume_spike = vol_ratio[i] > 1.5
+        # Require volume spike (> 1.8x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
             # Determine trend bias from 1w EMA
-            bullish_bias = ema_1w_aligned[i] > close_1w[-1] if len(close_1w) > 0 else ema_1w_aligned[i] > price
+            bullish_bias = ema_1w_aligned[i] > close_1w[0] if len(close_1w) > 0 else ema_1w_aligned[i] > price
             
-            # Long entry: price breaks above Donchian high in bullish 1w trend
+            # Long entry: price breaks above Donchian upper band in bullish 1w trend
             if (price > highest_high[i] and 
                 bullish_bias):
                 in_position = True
@@ -106,7 +106,7 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low in bearish 1w trend
+            # Short entry: price breaks below Donchian lower band in bearish 1w trend
             elif (price < lowest_low[i] and 
                   not bullish_bias):
                 in_position = True
