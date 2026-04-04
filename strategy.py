@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #5197: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Spike
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 1d EMA(50) trend capture momentum with lower overtrading risk. Volume > 2.0x average confirms participation. Designed for 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
+Experiment #5200: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Spike
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 1d EMA(50) trend capture momentum bursts with lower overtrading risk than 1h. Volume > 2.0x average confirms institutional participation. Designed for 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5197_4h_donchian20_1d_ema_vol_v1"
+name = "exp_5200_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -120,5 +120,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
