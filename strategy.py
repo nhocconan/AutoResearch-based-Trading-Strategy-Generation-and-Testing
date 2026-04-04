@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #5005: 12h Donchian(20) Breakout + 1d HMA21 Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts in direction of 1d HMA21 trend with volume confirmation (>2x average) capture strong momentum moves with fewer trades than lower timeframes. Uses ATR(14) trailing stop (2.5x) to limit downside. Target: 12-37 trades/year to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts in direction of 1d HMA21 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) trailing stop (2.5x) to limit downside. Designed for 12-37 trades/year on 12h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 """
 
 import numpy as np
@@ -146,5 +146,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
