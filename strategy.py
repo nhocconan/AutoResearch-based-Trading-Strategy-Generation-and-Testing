@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3050: 1d Donchian Breakout + Weekly HMA Trend + Volume Spike
-HYPOTHESIS: 1d Donchian(20) breakouts capture daily trends with low trade frequency. 
-Weekly HMA(21) trend filter ensures alignment with higher timeframe momentum. 
-Volume spike (>2.0x 20-period average) confirms breakout strength. ATR-based 
-stoploss (2.5x) manages risk. Target: 30-100 total trades over 4 years (7-25/year). 
-Designed for 1d timeframe to minimize fee drag while capturing medium-term moves.
-Works in bull markets via trend continuation and bear markets via mean reversion 
-from extreme Donchian levels.
+Experiment #3050: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Spike
+HYPOTHESIS: Daily Donchian breakouts capture medium-term trends with low trade frequency. 
+Weekly HMA(21) trend filter ensures we only trade with the higher timeframe momentum, 
+reducing whipsaws in ranging markets. Volume confirmation (>1.5x 20-period average) 
+validates breakout strength. ATR-based trailing stop (2.0x) manages risk. 
+Target: 30-100 total trades over 4 years (7-25/year). Designed to work in both bull 
+(trend continuation) and bear (mean reversion from extremes) markets by using price 
+channels and volatility filters. The 1w trend filter adds robustness against counter-trend 
+breakouts that fail in strong opposing trends.
 """
 
 import numpy as np
@@ -29,20 +30,20 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate HMA(21) on weekly close
+    # Calculate Weekly HMA(21)
     def hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
         half_period = period // 2
         sqrt_period = int(np.sqrt(period))
-        wma2 = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
-        wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean().values
-        raw_hma = 2 * wma2 - wma1
-        hma_vals = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
+        wma_half = pd.Series(arr).rolling(window=half_period, min_periods=half_period).mean().values
+        wma_full = pd.Series(arr).rolling(window=period, min_periods=period).mean().values
+        raw_hma = 2 * wma_half - wma_full
+        hma_vals = pd.Series(raw_hma).rolling(window=sqrt_period, min_periods=sqrt_period).mean().values
         return hma_vals
     
-    hma_21_1w = hma(close_1w, 21)
-    hma_21_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_21_1w)
+    hma_1w = hma(close_1w, 21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)  # shift(1) for completed week
     
     # === 1d Indicators: Donchian channels (20-period) ===
     lookback = 20
@@ -54,7 +55,7 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for volatility and stoploss ===
+    # === 1d Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -72,12 +73,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 20, 14)  # sufficient for all indicators
+    warmup = max(50, lookback, 20, 14, 21)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(hma_21_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(hma_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -88,8 +89,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2.0*ATR below highest since entry
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -102,8 +103,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2.0*ATR above lowest since entry
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -117,12 +118,12 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
+        # Require volume spike (> 1.5x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Weekly HMA trend filter: long when price > weekly HMA, short when price < weekly HMA
-            price_vs_hma = price - hma_21_1w_aligned[i]
+            # Weekly HMA trend filter: only long above HMA, short below HMA
+            price_vs_hma = price - hma_1w_aligned[i]
             
             # Long entry: price breaks above Donchian high with bullish weekly trend
             if price > highest_high[i] and price_vs_hma > 0:
