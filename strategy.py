@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #4840: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
+Experiment #4841: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
 HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts in direction of 1d HMA21 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) stoploss (2.5x) to limit downside. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4840_4h_donchian20_1d_hma_vol_v1"
+name = "exp_4841_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,38 +25,30 @@ def generate_signals(prices):
     # === 1d Indicators: HMA21 for trend filter ===
     if len(df_1d) >= 21:
         # Hull Moving Average calculation
-        half_len = max(1, len(df_1d) // 2)
-        sqrt_len = max(1, int(np.sqrt(len(df_1d))))
+        half_len = len(df_1d) // 2
+        sqrt_len = int(np.sqrt(len(df_1d)))
         
-        # WMA function using pandas for efficiency
+        # WMA function
         def wma(values, window):
-            if len(values) < window:
-                return np.full(len(values), np.nan)
             weights = np.arange(1, window + 1)
             return np.convolve(values, weights, 'valid') / weights.sum()
         
         close_1d = df_1d['close'].values
-        # Calculate WMA for half length
-        wma_half_vals = np.full(len(close_1d), np.nan)
-        for i in range(len(close_1d) - half_len + 1):
-            wma_half_vals[i + half_len - 1] = wma(close_1d[i:i+half_len], half_len)[-1]
-        
-        # Calculate WMA for full length
-        wma_full_vals = np.full(len(close_1d), np.nan)
-        for i in range(len(close_1d) - len(close_1d) + 1):
-            wma_full_vals[i + len(close_1d) - 1] = wma(close_1d[i:i+len(close_1d)], len(close_1d))[-1]
-        
-        # Calculate WMA for sqrt length
-        wma_sqrt_vals = np.full(len(close_1d), np.nan)
-        for i in range(len(close_1d) - sqrt_len + 1):
-            wma_sqrt_vals[i + sqrt_len - 1] = wma(close_1d[i:i+sqrt_len], sqrt_len)[-1]
+        wma_half = np.array([wma(close_1d[i:i+half_len], half_len)[-1] 
+                            if i+half_len <= len(close_1d) else np.nan 
+                            for i in range(len(close_1d))])
+        wma_full = np.array([wma(close_1d[i:i+len(close_1d)], len(close_1d))[-1] 
+                            if i+len(close_1d) <= len(close_1d) else np.nan 
+                            for i in range(len(close_1d))])
+        wma_sqrt = np.array([wma(close_1d[i:i+sqrt_len], sqrt_len)[-1] 
+                            if i+sqrt_len <= len(close_1d) else np.nan 
+                            for i in range(len(close_1d))])
         
         # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        hma_raw = 2 * wma_half_vals - wma_full_vals
-        hma_1d = np.full(len(close_1d), np.nan)
-        for i in range(len(hma_raw) - sqrt_len + 1):
-            if not np.isnan(hma_raw[i:i+sqrt_len]).any():
-                hma_1d[i + sqrt_len - 1] = wma(hma_raw[i:i+sqrt_len], sqrt_len)[-1]
+        hma_raw = 2 * wma_half - wma_full
+        hma_1d = np.array([wma(hma_raw[i:i+sqrt_len], sqrt_len)[-1] 
+                          if i+sqrt_len <= len(hma_raw) else np.nan 
+                          for i in range(len(hma_raw))])
     else:
         hma_1d = np.full(len(df_1d), np.nan)
     
@@ -67,28 +59,19 @@ def generate_signals(prices):
         hma_1d_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian(20) channels ===
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    high_roll = high_series.rolling(window=20, min_periods=20).max().values
-    low_roll = low_series.rolling(window=20, min_periods=20).min().values
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # === 4h Indicators: Volume confirmation (2x spike) ===
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === 4h Indicators: ATR(14) for stoploss ===
-    high_shift = np.roll(high, 1)
-    low_shift = np.roll(low, 1)
-    close_shift = np.roll(close, 1)
-    high_shift[0] = np.nan
-    low_shift[0] = np.nan
-    close_shift[0] = np.nan
-    tr1 = high - low
-    tr2 = np.abs(high - close_shift)
-    tr3 = np.abs(low - close_shift)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Signals Initialization ===
