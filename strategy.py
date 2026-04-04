@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5806: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation + ATR stoploss
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend capture strong continuation moves. Volume confirmation filters false breakouts. ATR-based trailing stop manages risk. Uses discrete position sizing (0.25) to minimize fee churn. Targets 75-200 trades over 4 years. Works in bull markets (breakouts with trend) and avoids false signals in bear via EMA regime filter.
+Experiment #5808: 12h Donchian(20) breakout + 1w EMA(50) trend + volume confirmation + ATR stoploss
+HYPOTHESIS: 12h Donchian breakouts aligned with weekly EMA(50) trend capture strong continuation moves with lower frequency than 4h strategies, reducing fee drag. Volume confirmation filters false breakouts. Weekly EMA provides robust trend filter that works in both bull (breakouts with trend) and bear (avoids counter-trend breakouts). Targets 50-150 trades over 4 years (12-37/year) to minimize fee impact while maintaining statistical significance.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5806_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_5808_12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,26 +22,26 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for EMA(50) trend ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
-        # Calculate EMA(50) on 1d close
-        ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # === HTF: 1w data for EMA(50) trend ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 50:
+        # Calculate EMA(50) on 1w close
+        ema_50 = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     else:
-        ema_50 = np.full(len(df_1d), np.nan)
+        ema_50 = np.full(len(df_1w), np.nan)
     
-    # Align 1d EMA(50) to 4h timeframe (shifted by 1 for completed 1d bars only)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Align 1w EMA(50) to 12h timeframe (shifted by 1 for completed 1w bars only)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation ===
+    # === 12h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 4h Indicators: ATR(14) for trailing stop ===
+    # === 12h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -106,11 +106,11 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
-        # Regime filter: price above/below 1d EMA(50) for trend alignment
+        # Regime filter: price above/below 1w EMA(50) for trend alignment
         regime_long = price > ema_50_aligned[i]
         regime_short = price < ema_50_aligned[i]
         
-        # Entry conditions: breakout in direction of 1d EMA trend with volume confirmation
+        # Entry conditions: breakout in direction of 1w EMA trend with volume confirmation
         long_setup = breakout_up and regime_long and volume_confirmed
         short_setup = breakout_down and regime_short and volume_confirmed
         
