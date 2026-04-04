@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #5880: 4h Donchian(20) breakout + 1d EMA200 trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA200 trend capture strong momentum moves.
+Experiment #5882: 12h Donchian(20) breakout + 1d EMA200 trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA200 trend capture strong momentum moves with lower trade frequency.
 Volume confirmation filters weak breakouts. ATR-based trailing stop manages risk.
 Works in bull markets (breakouts above EMA200 with volume) and bear markets
-(breakdowns below EMA200 with volume). Targets 75-200 trades over 4 years.
+(breakdowns below EMA200 with volume). Targets 50-150 trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5880_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_5882_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,15 +34,15 @@ def generate_signals(prices):
     else:
         ema200_1d_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation ===
+    # === 12h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 4h Indicators: ATR(14) for trailing stop ===
+    # === 12h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
