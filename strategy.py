@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3819: 6h Elder Ray + 12h ADX Regime Filter + Volume Spike
-HYPOTHESIS: Combines Elder Ray (bull/bear power) with 12h ADX regime filter to trade with momentum in trending markets (ADX>25) and mean-revert in ranging markets (ADX<20). Volume spike (>1.5x 20-bar MA) confirms institutional participation. Designed for 6h timeframe to balance trade frequency and signal quality. Works in both bull (long bias when bull power > 0) and bear (short bias when bear power < 0) markets. Target: 75-150 trades over 4 years.
+Experiment #3820: 4h Donchian(20) breakout + 1d volume confirmation + chop regime filter
+HYPOTHESIS: 4h Donchian breakouts capture swing moves with 1d volume (>1.3x) confirming participation. Choppiness Index (14) > 61.8 filters range markets. Works in bull/bear via discrete sizing (0.25) and ATR trailing stop. Target: 100-180 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3819_6h_elder_ray_12h_adx_vol_v1"
-timeframe = "6h"
+name = "exp_3820_4h_donchian20_1d_vol_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,54 +19,61 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for ADX regime filter (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === HTF: 1d data for volume profile VHN (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate 12h ADX(14)
-    def true_range(high, low, prev_close):
-        return np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
+    # Calculate 1d volume profile high-volume node (VHN) - price level with max volume
+    nbins = 50
+    vhn_1d = np.full(len(close_1d), np.nan)
     
-    prev_close_12h = np.roll(close_12h, 1)
-    prev_close_12h[0] = close_12h[0]
-    tr_12h = true_range(high_12h, low_12h, prev_close_12h)
-    atr_12h = pd.Series(tr_12h).rolling(window=14, min_periods=14).mean().values
+    for i in range(len(close_1d)):
+        if i < 1:
+            continue
+        # Create volume histogram for this 1d bar
+        hist, bin_edges = np.histogram(
+            [high_1d[i], low_1d[i], close_1d[i]],
+            bins=nbins,
+            range=(low_1d[i], high_1d[i]),
+            weights=[volume_1d[i], volume_1d[i], volume_1d[i]]
+        )
+        if np.sum(hist) > 0:
+            max_bin_idx = np.argmax(hist)
+            vhn_1d[i] = (bin_edges[max_bin_idx] + bin_edges[max_bin_idx + 1]) / 2
     
-    # +DM and -DM
-    up_move = np.diff(high_12h, prepend=high_12h[0])
-    down_move = np.diff(low_12h, prepend=low_12h[0]) * -1  # positive values
+    # Align 1d VHN to 4h timeframe (shifted by 1 for completed 1d bar)
+    vhn_1d_aligned = align_htf_to_ltf(prices, df_1d, vhn_1d)
     
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # === 4h Indicators: Donchian Channel(20) for breakout ===
+    lookback_dc = 20
+    highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # Smoothed +DM, -DM, TR
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values
-    atr_smooth = pd.Series(tr_12h).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # +DI and -DI
-    plus_di = 100 * plus_dm_smooth / np.where(atr_smooth == 0, 1, atr_smooth)
-    minus_di = 100 * minus_dm_smooth / np.where(atr_smooth == 0, 1, atr_smooth)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) == 0, 1, (plus_di + minus_di))
-    adx_12h = pd.Series(dx).ewm(alpha=1/14, adjust=False).mean().values
-    
-    # Align 12h ADX to 6h timeframe (shifted by 1 for completed 12h bar)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # === 6h Indicators: Elder Ray (Bull/Bear Power) ===
-    # EMA(13) as proxy for fair value
-    ema_13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
-    bull_power = high - ema_13  # Bull Power: High - EMA13
-    bear_power = low - ema_13   # Bear Power: Low - EMA13 (typically negative)
-    
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    
+    # === 4h Indicators: Choppiness Index(14) for regime filter ===
+    def true_range(high, low, prev_close):
+        return np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
+    
+    prev_close = np.roll(close, 1)
+    prev_close[0] = close[0]
+    tr = true_range(high, low, prev_close)
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    highest_high_14 = pd.Series(high).rolling(window=14, min_periods=14).max().values
+    lowest_low_14 = pd.Series(low).rolling(window=14, min_periods=14).min().values
+    
+    chop = np.full(n, np.nan)
+    sum_tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    denominator = atr_14 * 14
+    mask = (denominator != 0) & ~np.isnan(denominator) & ~np.isnan(sum_tr_14)
+    chop[mask] = 100 * np.log10(sum_tr_14[mask] / denominator[mask]) / np.log10(14)
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -76,14 +83,16 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
-    stop_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    warmup = max(20, 14)  # sufficient for volume MA and EMA
+    warmup = max(lookback_dc + 1, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(adx_12h_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(vhn_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -91,20 +100,30 @@ def generate_signals(prices):
         
         # --- Exit Logic ---
         if in_position:
-            # Fixed stoploss: 2.5 * ATR(14) from entry
-            atr_14 = pd.Series(
-                np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-            ).rolling(window=14, min_periods=14).mean().values[i]
-            
+            # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
-                if price < stop_price:  # Stoploss hit
+                highest_since_entry = max(highest_since_entry, high[i])
+                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.0 * atr_14[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price breaks below Donchian lower band (trend reversal)
+                elif price < lowest_low[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
-                if price > stop_price:  # Stoploss hit
+                lowest_since_entry = min(lowest_since_entry, low[i])
+                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.0 * atr_14[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price breaks above Donchian upper band (trend reversal)
+                elif price > highest_high[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -113,59 +132,30 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Require volume spike (> 1.3x average) AND chop > 61.8 (range regime)
+        volume_spike = vol_ratio[i] > 1.3
+        chop_filter = chop[i] > 61.8
         
-        if volume_spike:
-            adx = adx_12h_aligned[i]
-            
-            if adx > 25:  # Trending regime - trade with momentum
-                # Long: Bull Power > 0 (strong buying pressure)
-                if bull_power[i] > 0:
-                    in_position = True
-                    position_side = 1
-                    entry_price = close[i]
-                    atr_14 = pd.Series(
-                        np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-                    ).rolling(window=14, min_periods=14).mean().values[i]
-                    stop_price = entry_price - 2.5 * atr_14
-                    signals[i] = SIZE
-                # Short: Bear Power < 0 (strong selling pressure)
-                elif bear_power[i] < 0:
-                    in_position = True
-                    position_side = -1
-                    entry_price = close[i]
-                    atr_14 = pd.Series(
-                        np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-                    ).rolling(window=14, min_periods=14).mean().values[i]
-                    stop_price = entry_price + 2.5 * atr_14
-                    signals[i] = -SIZE
-                else:
-                    signals[i] = 0.0
-            elif adx < 20:  # Ranging regime - mean revert at extremes
-                # Long: Bear Power < 0 and price near low (oversold)
-                if bear_power[i] < 0 and low[i] < ema_13[i] - 0.5 * np.std(close[max(0, i-50):i+1]):
-                    in_position = True
-                    position_side = 1
-                    entry_price = close[i]
-                    atr_14 = pd.Series(
-                        np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-                    ).rolling(window=14, min_periods=14).mean().values[i]
-                    stop_price = entry_price - 2.5 * atr_14
-                    signals[i] = SIZE
-                # Short: Bull Power > 0 and price near high (overbought)
-                elif bull_power[i] > 0 and high[i] > ema_13[i] + 0.5 * np.std(close[max(0, i-50):i+1]):
-                    in_position = True
-                    position_side = -1
-                    entry_price = close[i]
-                    atr_14 = pd.Series(
-                        np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
-                    ).rolling(window=14, min_periods=14).mean().values[i]
-                    stop_price = entry_price + 2.5 * atr_14
-                    signals[i] = -SIZE
-                else:
-                    signals[i] = 0.0
-            else:  # Transition regime (20 <= ADX <= 25) - no trade
+        if volume_spike and chop_filter:
+            # Long entry: Price breaks above Donchian upper band AND above 1d VHN (bullish breakout with volume confirmation)
+            if (price > highest_high[i-1] and  # Breakout above previous period's high
+                price > vhn_1d_aligned[i]):    # Above 1d VHN (institutional interest level)
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                signals[i] = SIZE
+            # Short entry: Price breaks below Donchian lower band AND below 1d VHN (bearish breakdown with volume confirmation)
+            elif (price < lowest_low[i-1] and    # Breakout below previous period's low
+                  price < vhn_1d_aligned[i]):    # Below 1d VHN (institutional interest level)
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                signals[i] = -SIZE
+            else:
                 signals[i] = 0.0
         else:
             signals[i] = 0.0
