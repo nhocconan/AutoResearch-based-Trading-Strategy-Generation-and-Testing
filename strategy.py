@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #2630: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation + ATR trailing stop
-HYPOTHESIS: 1d Donchian breakouts with 1w trend alignment and volume spikes capture 
-strong momentum moves while avoiding whipsaws. Uses 1w for signal direction, 1d only for 
-entry timing and risk management. Target: 50-120 total trades over 4 years (12-30/year).
-Designed to work in both bull (trend continuation) and bear (mean reversion after spikes) 
-regimes via volume confirmation and ATR-based stops.
+Experiment #2630: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
+HYPOTHESIS: 1d Donchian breakouts with 1w EMA trend alignment and volume spikes capture 
+strong momentum moves while avoiding whipsaws. Weekly trend filter ensures we only 
+trade with the higher timeframe momentum. Volume confirmation ensures institutional 
+participation. Designed to work in both bull and bear markets by following the 
+weekly trend direction. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -27,8 +27,8 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate 1w EMA(20)
-    ema_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Calculate 1w EMA(50)
+    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
     trend_1w = np.where(close_1w > ema_1w, 1, -1)
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
@@ -53,13 +53,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 20  # sufficient for Donchian and volume MA
+    warmup = 50  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(trend_1w_aligned[i]) or
-            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(trend_1w_aligned[i]) or np.isnan(highest_20[i]) or 
+            np.isnan(lowest_20[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -70,10 +69,9 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Calculate ATR estimate from Donchian width
-                donchian_width = highest_20[i] - lowest_20[i]
-                atr_estimate = donchian_width * 0.15  # approximate ATR
                 # Exit if price drops 2.5*ATR below highest since entry
+                donchian_width = highest_20[i] - lowest_20[i]
+                atr_estimate = donchian_width * 0.15  # approximate ATR from channel width
                 if price < highest_since_entry - 2.5 * atr_estimate:
                     in_position = False
                     position_side = 0
@@ -87,10 +85,9 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Calculate ATR estimate from Donchian width
-                donchian_width = highest_20[i] - lowest_20[i]
-                atr_estimate = donchian_width * 0.15  # approximate ATR
                 # Exit if price rises 2.5*ATR above lowest since entry
+                donchian_width = highest_20[i] - lowest_20[i]
+                atr_estimate = donchian_width * 0.15
                 if price > lowest_since_entry + 2.5 * atr_estimate:
                     in_position = False
                     position_side = 0
@@ -106,10 +103,9 @@ def generate_signals(prices):
         
         # --- New Position Entry Logic ---
         # Require 1w trend alignment for bias filter
-        trend_bias_1w = trend_1w_aligned[i]
+        trend_bias = trend_1w_aligned[i]
         
-        # Only trade when 1w trend is defined
-        if trend_bias_1w == 0:
+        if trend_bias == 0:
             signals[i] = 0.0
             continue
         
@@ -118,7 +114,7 @@ def generate_signals(prices):
         
         if volume_spike:
             # Long entry: price breaks above Donchian high with uptrend on 1w
-            if trend_bias_1w > 0 and price > highest_20[i]:
+            if trend_bias > 0 and price > highest_20[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
@@ -126,7 +122,7 @@ def generate_signals(prices):
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
             # Short entry: price breaks below Donchian low with downtrend on 1w
-            elif trend_bias_1w < 0 and price < lowest_20[i]:
+            elif trend_bias < 0 and price < lowest_20[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
