@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
 exp_6740_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with daily EMA(50) trend filter and volume confirmation.
-In bull markets: breakout above upper channel with price > EMA50 and volume spike -> long.
-In bear markets: breakout below lower channel with price < EMA50 and volume spike -> short.
-Daily EMA provides higher timeframe trend context. Volume confirms breakout legitimacy.
-Designed for 4h timeframe to capture medium-term swings with ~19-50 trades/year (75-200 total over 4 years).
-Works in both bull and bear markets by adapting to daily EMA trend filter.
+Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
+In bull markets: breakout continuation above 1d EMA. In bear markets: fade at Donchian extremes when price < 1d EMA.
+Volume confirms breakout legitimacy. Designed for 4h timeframe to capture medium-term swings with ~19-50 trades/year (75-200 total over 4 years).
+Works in both bull and bear markets by adapting to daily EMA context - trend following in bull, mean reversion in bear.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -21,22 +19,24 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0
+VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for daily EMA
+    # Load HTF data ONCE before loop - using 1d for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA
+    # Calculate 1d EMA for trend filter
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    
+    # Align to LTF (4h)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -78,30 +78,30 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 continue
-        
+                
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-            continue
+        # Determine market regime based on 1d EMA
+        # Bull market: price > 1d EMA -> trend following
+        # Bear market: price < 1d EMA -> mean reversion
+        bull_market = close[i] > ema_1d_aligned[i] if not np.isnan(ema_1d_aligned[i]) else False
         
-        # Determine trend from daily EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Trend following signals (bull market)
+        long_trend = bull_market and (close[i] > highest_high[i]) and vol_confirmed
+        short_trend = bull_market and (close[i] < lowest_low[i]) and vol_confirmed
         
-        # Breakout signals with trend filter and volume confirmation
-        long_breakout = (close[i] > highest_high[i]) and uptrend and vol_confirmed
-        short_breakout = (close[i] < lowest_low[i]) and downtrend and vol_confirmed
+        # Mean reversion signals (bear market)
+        long_mean_revert = (not bull_market) and (close[i] < lowest_low[i]) and vol_confirmed
+        short_mean_revert = (not bull_market) and (close[i] > highest_high[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if long_breakout:
+            if long_trend or long_mean_revert:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-            elif short_breakout:
+            elif short_trend or short_mean_revert:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
