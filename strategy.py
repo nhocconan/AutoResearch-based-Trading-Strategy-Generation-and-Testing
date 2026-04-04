@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4227: 6h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts capture swing momentum when aligned with 1d Camarilla pivot levels (R3/S3 for fade, R4/S4 for continuation) and confirmed by volume (>1.8x average). Uses 1d pivot for structure, 6h for timing. ATR trailing stop (2.0x) manages risk. Position size 0.25 targets 50-150 total trades over 4 years (12-37/year). Works in bull via breakout continuation at R4/S4, in bear via fading at R3/S3 or shorting breakdowns.
+Experiment #4228: 12h Donchian(20) breakout + 1w EMA trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 12h timeframe capture swing momentum when aligned with 1w EMA50 trend (price > EMA50 for longs, < EMA50 for shorts) and confirmed by volume (>2.0x average). Uses 1w EMA for direction, 12h only for entry/exit timing. ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 50-150 total trades over 4 years (12-37/year). Works in bull via breakout continuation, in bear via shorting breakdowns. Target timeframe: 12h.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4227_6h_donchian20_1d_camarilla_vol_v1"
-timeframe = "6h"
+name = "exp_4228_12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,30 +23,15 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1d OHLC for Camarilla pivot ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 1:
-        typical_price = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-        pivot = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-        range_hl = df_1d['high'].values - df_1d['low'].values
-        r3 = pivot + 1.1 * range_hl / 2
-        s3 = pivot - 1.1 * range_hl / 2
-        r4 = pivot + 1.1 * range_hl
-        s4 = pivot - 1.1 * range_hl
-        # Align to 6h timeframe
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # === Precompute HTF: 1w EMA50 for trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 50:
+        ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     else:
-        pivot_aligned = np.full(n, np.nan)
-        r3_aligned = np.full(n, np.nan)
-        s3_aligned = np.full(n, np.nan)
-        r4_aligned = np.full(n, np.nan)
-        s4_aligned = np.full(n, np.nan)
+        ema_1w_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -54,12 +39,12 @@ def generate_signals(prices):
     
     donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
-    # === 6h Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -77,13 +62,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
+    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, 1w EMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -100,8 +84,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -109,8 +93,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -119,42 +103,32 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = vol_ratio[i] > 2.0
         
         if volume_confirm:
             # Donchian breakout conditions (using previous bar's levels)
             breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
             breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
             
-            # Price relative to Camarilla levels
-            price_above_r4 = price > r4_aligned[i]
-            price_below_s4 = price < s4_aligned[i]
-            price_between_r3_s4 = (price > r3_aligned[i]) and (price < r4_aligned[i])
-            price_between_s3_r4 = (price > s3_aligned[i]) and (price < s4_aligned[i])
-            price_below_s3 = price < s3_aligned[i]
-            price_above_r3 = price > r3_aligned[i]
+            # 1w EMA50 trend filter
+            price_above_ema = price > ema_1w_aligned[i]
+            price_below_ema = price < ema_1w_aligned[i]
             
-            # Long conditions:
-            # 1. Breakout above R4 (strong continuation)
-            # 2. Fade from S3 (mean reversion in lower range)
-            long_continuation = breakout_up and price_above_r4
-            long_fade = breakout_up and price_between_s3_r4  # Pullback to S3 area then break up
+            # Long conditions: Donchian breakout up + price above EMA50
+            long_entry = breakout_up and price_above_ema
             
-            # Short conditions:
-            # 1. Breakout below S4 (strong continuation)
-            # 2. Fade from R3 (mean reversion in upper range)
-            short_continuation = breakout_dn and price_below_s4
-            short_fade = breakout_dn and price_between_r3_s4  # Pullback to R3 area then break down
+            # Short conditions: Donchian breakout down + price below EMA50
+            short_entry = breakout_dn and price_below_ema
             
-            if long_continuation or long_fade:
+            if long_entry:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            elif short_continuation or short_fade:
+            elif short_entry:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
