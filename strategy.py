@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3531: 6h Camarilla Pivot + 1d Trend Filter + Volume Spike
-HYPOTHESIS: 6h mean reversion at Camarilla pivot levels (R3/S3, R4/S4) calculated from 1d data,
-filtered by 1d EMA(50) trend direction, with volume spike confirmation. Works in bull (buy S3/S4 in uptrend)
-and bear (sell R3/R4 in downtrend) by fading extremes in the direction of higher timeframe trend.
-Position size 0.25. Target: 100-200 total trades over 4 years (25-50/year).
-Uses 1d for pivot calculation and trend filter, 6h only for entry timing.
+Experiment #3531: 6h Williams %R + 1d ADX Trend + Volume Spike
+HYPOTHESIS: 6h Williams %R extremes combined with 1d ADX trend filter and volume confirmation capture momentum reversals in both bull and bear markets. Williams %R identifies oversold/overbought conditions, 1d ADX ensures we trade with the higher timeframe trend, and volume confirms breakout strength. Position size 0.25 targets 80-180 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3531_6h_camarilla_pivot_1d_trend_vol_v1"
+name = "exp_3531_6h_williamsr_1d_adx_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,44 +19,57 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivots and EMA trend (Call ONCE before loop) ===
+    # === HTF: 1d data for ADX trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels from prior 1d bar (HLC of previous day)
-    # H, L, C are from previous 1d bar (already completed)
-    prev_high = np.concatenate([[np.nan], high_1d[:-1]])
-    prev_low = np.concatenate([[np.nan], low_1d[:-1]])
-    prev_close = np.concatenate([[np.nan], close_1d[:-1]])
+    # Calculate ADX(14) on 1d data
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        
+        # Directional Movement
+        dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                          np.maximum(high[1:] - high[:-1], 0), 0)
+        dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                           np.maximum(low[:-1] - low[1:], 0), 0)
+        
+        # Smooth TR, DM+ and DM- using Wilder's smoothing (EMA with alpha=1/period)
+        tr_period = period
+        atr = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False).mean().values
+        dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/tr_period, adjust=False).mean().values
+        dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/tr_period, adjust=False).mean().values
+        
+        # Directional Indicators
+        di_plus = 100 * dm_plus_smooth / atr
+        di_minus = 100 * dm_minus_smooth / atr
+        
+        # DX and ADX
+        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+        adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False).mean().values
+        
+        return adx
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_hl = prev_high - prev_low
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
-    # Camarilla levels
-    r4 = pivot + (range_hl * 1.1 / 2)
-    r3 = pivot + (range_hl * 1.1 / 4)
-    s3 = pivot - (range_hl * 1.1 / 4)
-    s4 = pivot - (range_hl * 1.1 / 2)
-    
-    # Align all pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # 1d EMA(50) for trend filter
-    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # === 6h Indicators: Williams %R(14) for momentum extremes ===
+    lookback_willr = 14
+    highest_high = pd.Series(high).rolling(window=lookback_willr, min_periods=lookback_willr).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback_willr, min_periods=lookback_willr).min().values
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
     
     # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -75,13 +84,15 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    warmup = max(50, 20, 14)  # sufficient for all indicators
+    warmup = max(50, lookback_willr + 1, 20, 14)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(ema_aligned[i]) or
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(williams_r[i]) or np.isnan(adx_1d_aligned[i]) or 
             np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -90,16 +101,30 @@ def generate_signals(prices):
         
         # --- Exit Logic ---
         if in_position:
-            # Exit if price moves 2.5*ATR against position
+            # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
-                if price < entry_price - 2.5 * atr[i]:
+                highest_since_entry = max(highest_since_entry, high[i])
+                # Exit if price drops 2.5*ATR below highest since entry
+                if price < highest_since_entry - 2.5 * atr[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if Williams %R returns to neutral zone (above -50)
+                elif williams_r[i] > -50:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
-                if price > entry_price + 2.5 * atr[i]:
+                lowest_since_entry = min(lowest_since_entry, low[i])
+                # Exit if price rises 2.5*ATR above lowest since entry
+                if price > lowest_since_entry + 2.5 * atr[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if Williams %R returns to neutral zone (below -50)
+                elif williams_r[i] < -50:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -108,32 +133,29 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) for confirmation
+        # Require volume spike (> 1.8x average) and strong trend (ADX > 25)
         volume_spike = vol_ratio[i] > 1.8
+        strong_trend = adx_1d_aligned[i] > 25
         
-        if volume_spike:
-            # Determine 1d trend: price above/below EMA(50)
-            uptrend = price > ema_aligned[i]
-            
-            # Mean reversion at Camarilla levels in direction of trend
-            if uptrend:
-                # In uptrend, look for longs at support (S3, S4)
-                if price <= s3_aligned[i] or price <= s4_aligned[i]:
-                    in_position = True
-                    position_side = 1
-                    entry_price = price
-                    signals[i] = SIZE
-                else:
-                    signals[i] = 0.0
+        if volume_spike and strong_trend:
+            # Long entry: Williams %R oversold (< -80) in uptrend
+            if williams_r[i] < -80:
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                signals[i] = SIZE
+            # Short entry: Williams %R overbought (> -20) in downtrend
+            elif williams_r[i] > -20:
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                signals[i] = -SIZE
             else:
-                # In downtrend, look for shorts at resistance (R3, R4)
-                if price >= r3_aligned[i] or price >= r4_aligned[i]:
-                    in_position = True
-                    position_side = -1
-                    entry_price = price
-                    signals[i] = -SIZE
-                else:
-                    signals[i] = 0.0
+                signals[i] = 0.0
         else:
             signals[i] = 0.0
     
