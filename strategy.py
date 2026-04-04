@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 """
-exp_6461_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Works in bull/bear because breakouts capture strong moves while EMA filter avoids counter-trend trades.
-Volume confirmation reduces false breakouts. Target: 75-200 trades over 4 years.
+exp_6459_6h_donchian20_1d_pivot_vol_v1
+Hypothesis: 6h Donchian(20) breakout with 1d weekly pivot direction filter and volume confirmation.
+- Weekly pivot (from 1d data) determines bias: long above weekly pivot, short below.
+- Donchian breakout provides entry timing in direction of weekly bias.
+- Volume confirmation (volume > 1.5x 20-period average) ensures momentum behind breakout.
+- Designed to work in both bull (breakouts continue) and bear (breakdowns continue) markets.
+- Target: 50-150 trades over 4 years (12-37/year) with discrete sizing to minimize fees.
 """
-from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6461_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_6459_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
-
-# Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
-VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 1.5  # volume must be 1.5x its 20-period MA
-SIGNAL_SIZE = 0.25   # 25% position size
 
 def generate_signals(prices):
     n = len(prices)
@@ -27,83 +23,516 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    # Calculate 1d EMA(50) on close
-    close_1d = pd.Series(df_1d['close'].values)
-    ema_1d = close_1d.ewm(span=EMA_PERIOD, min_periods=EMA_PERIOD, adjust=False).mean().values
-    # Align to LTF (4h) with shift(1) for completed bars only
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate LTF indicators
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # Calculate weekly pivot points from 1d data (using prior week's OHLC)
+    # Weekly high = max(high) over last 7 days, weekly low = min(low) over last 7 days, weekly close = close 7 days ago
+    weekly_high = df_1d['high'].rolling(window=7, min_periods=7).max().shift(1)  # prior week
+    weekly_low = df_1d['low'].rolling(window=7, min_periods=7).min().shift(1)
+    weekly_close = df_1d['close'].shift(7)  # close from 7 days ago
     
-    # Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     
-    # Volume MA for confirmation
-    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
+    # Align weekly pivot to 6h timeframe (with shift(1) for completed bars only)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot.values)
+    
+    # Calculate Donchian channels on 6h data
+    lookback = 20
+    donchian_high = prices['high'].rolling(window=lookback, min_periods=lookback).max().shift(1)
+    donchian_low = prices['low'].rolling(window=lookback, min_periods=lookback).min().shift(1)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean()
+    volume_ok = prices['volume'] > (1.5 * vol_ma)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    
+    # Track position state for stoploss and reversal prevention
+    position_side = 0  # 0=flat, 1=long, -1=short
     entry_price = 0.0
     
-    # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD) + 1
+    # Start from sufficient lookback
+    start_idx = max(lookback, 20, 7) + 1
     
-    for i in range(start, n):
-        # Skip if EMA not available (first EMA_PERIOD bars)
-        if np.isnan(ema_1d_aligned[i]):
-            continue
-            
-        # Long conditions: price breaks above Donchian HIGH + above 1d EMA + volume spike
-        long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
-        long_trend = close[i] > ema_1d_aligned[i]      # price above 1d EMA
-        long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
-        
-        # Short conditions: price breaks below Donchian LOW + below 1d EMA + volume spike
-        short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
-        short_trend = close[i] < ema_1d_aligned[i]     # price below 1d EMA
-        short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
-        
-        # Exit conditions: ATR-based stoploss (using 2*ATR approximation via price channels)
-        # Simple approach: exit when price reverses halfway through the channel
-        channel_width = donchian_high[i-1] - donchian_low[i-1]
-        if position == 1:  # long position
-            # Exit if price drops below midpoint of channel
-            exit_long = close[i] < (donchian_high[i-1] + donchian_low[i-1]) / 2
-            # Or if price breaks below Donchian low (strong reversal)
-            exit_long = exit_long or close[i] < donchian_low[i-1]
-            if exit_long:
+    for i in range(start_idx, n):
+        # Skip if volume confirmation not met
+        if not volume_ok.iloc[i]:
+            # If in position, check stoploss
+            if position_side == 1 and prices['close'].iloc[i] < entry_price - 2.5 * atr_14.iloc[i]:
                 signals[i] = 0.0
-                position = 0
-                continue
-        elif position == -1:  # short position
-            # Exit if price rises above midpoint of channel
-            exit_short = close[i] > (donchian_high[i-1] + donchian_low[i-1]) / 2
-            # Or if price breaks above Donchian high (strong reversal)
-            exit_short = exit_short or close[i] > donchian_high[i-1]
-            if exit_short:
+                position_side = 0
+            elif position_side == -1 and prices['close'].iloc[i] > entry_price + 2.5 * atr_14.iloc[i]:
                 signals[i] = 0.0
-                position = 0
-                continue
-        
-        # Enter new positions only if flat
-        if position == 0:
-            if long_breakout and long_trend and long_volume:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-            elif short_breakout and short_trend and short_volume:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
+                position_side = 0
             else:
-                signals[i] = 0.0
+                signals[i] = signals[i-1]  # hold current signal
+            continue
+        
+        # Get current values
+        price_close = prices['close'].iloc[i]
+        price_high = prices['high'].iloc[i]
+        price_low = prices['low'].iloc[i]
+        wp = weekly_pivot_aligned[i]
+        dh = donchian_high.iloc[i]
+        dl = donchian_low.iloc[i]
+        
+        # Long condition: price breaks above Donchian high AND above weekly pivot
+        if position_side != 1:  # not already long
+            if price_high > dh and price_close > wp:
+                signals[i] = 0.30  # 30% long
+                position_side = 1
+                entry_price = price_close
+            # Short condition: price breaks below Donchian low AND below weekly pivot
+            elif price_low < dl and price_close < wp:
+                signals[i] = -0.30  # 30% short
+                position_side = -1
+                entry_price = price_close
+            else:
+                # Hold current signal or flatten based on stoploss
+                if position_side == 1:
+                    if price_close < entry_price - 2.5 * atr_14.iloc[i]:
+                        signals[i] = 0.0
+                        position_side = 0
+                    else:
+                        signals[i] = signals[i-1]
+                elif position_side == -1:
+                    if price_close > entry_price + 2.5 * atr_14.iloc[i]:
+                        signals[i] = 0.0
+                        position_side = 0
+                    else:
+                        signals[i] = signals[i-1]
+                else:
+                    signals[i] = 0.0
         else:
-            # Hold current position
-            signals[i] = position * SIGNAL_SIZE
+            # Already in position, manage stoploss
+            if position_side == 1:
+                if price_close < entry_price - 2.5 * atr_14.iloc[i]:
+                    signals[i] = 0.0
+                    position_side = 0
+                else:
+                    signals[i] = signals[i-1]
+            elif position_side == -1:
+                if price_close > entry_price + 2.5 * atr_14.iloc[i]:
+                    signals[i] = 0.0
+                    position_side = 0
+                else:
+                    signals[i] = signals[i-1]
+    
+    # Calculate ATR(14) for stoploss (need to compute before loop but after prices load)
+    # This is a simplification - in practice we'd compute ATR before the loop
+    # For now, compute a basic ATR here (should be pre-computed in final version)
+    high_low = prices['high'] - prices['low']
+    high_close = np.abs(prices['high'] - prices['close'].shift())
+    low_close = np.abs(prices['low'] - prices['close'].shift())
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Re-run loop with actual ATR calculation (above logic needs atr_14)
+    # Re-implement with proper ATR pre-computation
+    
+    # Pre-compute ATR
+    high_low = prices['high'] - prices['low']
+    high_close = np.abs(prices['high'] - prices['close'].shift())
+    low_close = np.abs(prices['low'] - prices['close'].shift())
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Reset signals
+    signals = np.zeros(n)
+    position_side = 0
+    entry_price = 0.0
+    
+    for i in range(start_idx, n):
+        # Skip if volume confirmation not met
+        if not volume_ok.iloc[i]:
+            # If in position, check stoploss
+            if position_side == 1 and prices['close'].iloc[i] < entry_price - 2.5 * atr_14[i]:
+                signals[i] = 0.0
+                position_side = 0
+            elif position_side == -1 and prices['close'].iloc[i] > entry_price + 2.5 * atr_14[i]:
+                signals[i] = 0.0
+                position_side = 0
+            else:
+                signals[i] = signals[i-1]  # hold current signal
+            continue
+        
+        # Get current values
+        price_close = prices['close'].iloc[i]
+        price_high = prices['high'].iloc[i]
+        price_low = prices['low'].iloc[i]
+        wp = weekly_pivot_aligned[i]
+        dh = donchian_high.iloc[i]
+        dl = donchian_low.iloc[i]
+        
+        # Long condition: price breaks above Donchian high AND above weekly pivot
+        if position_side != 1:  # not already long
+            if price_high > dh and price_close > wp:
+                signals[i] = 0.30  # 30% long
+                position_side = 1
+                entry_price = price_close
+            # Short condition: price breaks below Donchian low AND below weekly pivot
+            elif price_low < dl and price_close < wp:
+                signals[i] = -0.30  # 30% short
+                position_side = -1
+                entry_price = price_close
+            else:
+                # Hold current signal or flatten based on stoploss
+                if position_side == 1:
+                    if price_close < entry_price - 2.5 * atr_14[i]:
+                        signals[i] = 0.0
+                        position_side = 0
+                    else:
+                        signals[i] = signals[i-1]
+                elif position_side == -1:
+                    if price_close > entry_price + 2.5 * atr_14[i]:
+                        signals[i] = 0.0
+                        position_side = 0
+                    else:
+                        signals[i] = signals[i-1]
+                else:
+                    signals[i] = 0.0
+        else:
+            # Already in position, manage stoploss
+            if position_side == 1:
+                if price_close < entry_price - 2.5 * atr_14[i]:
+                    signals[i] = 0.0
+                    position_side = 0
+                else:
+                    signals[i] = signals[i-1]
+            elif position_side == -1:
+                if price_close > entry_price + 2.5 * atr_14[i]:
+                    signals[i] = 0.0
+                    position_side = 0
+                else:
+                    signals[i] = signals[i-1]
+    
+    return signals
+
+# Pre-compute indicators that don't depend on loop state
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate weekly pivot points from 1d data (using prior week's OHLC)
+    weekly_high = df_1d['high'].rolling(window=7, min_periods=7).max().shift(1)
+    weekly_low = df_1d['low'].rolling(window=7, min_periods=7).min().shift(1)
+    weekly_close = df_1d['close'].shift(7)
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot.values)
+    
+    # Calculate Donchian channels on 6h data
+    lookback = 20
+    donchian_high = prices['high'].rolling(window=lookback, min_periods=lookback).max().shift(1)
+    donchian_low = prices['low'].rolling(window=lookback, min_periods=lookback).min().shift(1)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean()
+    volume_ok = prices['volume'] > (1.5 * vol_ma)
+    
+    # Pre-compute ATR(14) for stoploss
+    high_low = prices['high'] - prices['low']
+    high_close = np.abs(prices['high'] - prices['close'].shift())
+    low_close = np.abs(prices['low'] - prices['close'].shift())
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    signals = np.zeros(n)
+    position_side = 0  # 0=flat, 1=long, -1=short
+    entry_price = 0.0
+    
+    start_idx = max(lookback, 20, 7) + 1
+    
+    for i in range(start_idx, n):
+        # Skip if volume confirmation not met
+        if not volume_ok.iloc[i]:
+            # If in position, check stoploss
+            if position_side == 1 and prices['close'].iloc[i] < entry_price - 2.5 * atr_14[i]:
+                signals[i] = 0.0
+                position_side = 0
+            elif position_side == -1 and prices['close'].iloc[i] > entry_price + 2.5 * atr_14[i]:
+                signals[i] = 0.0
+                position_side = 0
+            else:
+                signals[i] = signals[i-1]  # hold current signal
+            continue
+        
+        # Get current values
+        price_close = prices['close'].iloc[i]
+        price_high = prices['high'].iloc[i]
+        price_low = prices['low'].iloc[i]
+        wp = weekly_pivot_aligned[i]
+        dh = donchian_high.iloc[i]
+        dl = donchian_low.iloc[i]
+        
+        # Long condition: price breaks above Donchian high AND above weekly pivot
+        if position_side != 1:  # not already long
+            if price_high > dh and price_close > wp:
+                signals[i] = 0.30  # 30% long
+                position_side = 1
+                entry_price = price_close
+            # Short condition: price breaks below Donchian low AND below weekly pivot
+            elif price_low < dl and price_close < wp:
+                signals[i] = -0.30  # 30% short
+                position_side = -1
+                entry_price = price_close
+            else:
+                # Hold current signal or flatten based on stoploss
+                if position_side == 1:
+                    if price_close < entry_price - 2.5 * atr_14[i]:
+                        signals[i] = 0.0
+                        position_side = 0
+                    else:
+                        signals[i] = signals[i-1]
+                elif position_side == -1:
+                    if price_close > entry_price + 2.5 * atr_14[i]:
+                        signals[i] = 0.0
+                        position_side = 0
+                    else:
+                        signals[i] = signals[i-1]
+                else:
+                    signals[i] = 0.0
+        else:
+            # Already in position, manage stoploss
+            if position_side == 1:
+                if price_close < entry_price - 2.5 * atr_14[i]:
+                    signals[i] = 0.0
+                    position_side = 0
+                else:
+                    signals[i] = signals[i-1]
+            elif position_side == -1:
+                if price_close > entry_price + 2.5 * atr_14[i]:
+                    signals[i] = 0.0
+                    position_side = 0
+                else:
+                    signals[i] = signals[i-1]
+    
+    return signals
+
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "exp_6459_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate weekly pivot points from 1d data (using prior week's OHLC)
+    weekly_high = df_1d['high'].rolling(window=7, min_periods=7).max().shift(1)
+    weekly_low = df_1d['low'].rolling(window=7, min_periods=7).min().shift(1)
+    weekly_close = df_1d['close'].shift(7)
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot.values)
+    
+    # Calculate Donchian channels on 6h data
+    lookback = 20
+    donchian_high = prices['high'].rolling(window=lookback, min_periods=lookback).max().shift(1)
+    donchian_low = prices['low'].rolling(window=lookback, min_periods=lookback).min().shift(1)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean()
+    volume_ok = prices['volume'] > (1.5 * vol_ma)
+    
+    # Pre-compute ATR(14) for stoploss
+    high_low = prices['high'] - prices['low']
+    high_close = np.abs(prices['high'] - prices['close'].shift())
+    low_close = np.abs(prices['low'] - prices['close'].shift())
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    signals = np.zeros(n)
+    position_side = 0  # 0=flat, 1=long, -1=short
+    entry_price = 0.0
+    
+    start_idx = max(lookback, 20, 7) + 1
+    
+    for i in range(start_idx, n):
+        # Skip if volume confirmation not met
+        if not volume_ok.iloc[i]:
+            # If in position, check stoploss
+            if position_side == 1 and prices['close'].iloc[i] < entry_price - 2.5 * atr_14[i]:
+                signals[i] = 0.0
+                position_side = 0
+            elif position_side == -1 and prices['close'].iloc[i] > entry_price + 2.5 * atr_14[i]:
+                signals[i] = 0.0
+                position_side = 0
+            else:
+                signals[i] = signals[i-1]  # hold current signal
+            continue
+        
+        # Get current values
+        price_close = prices['close'].iloc[i]
+        price_high = prices['high'].iloc[i]
+        price_low = prices['low'].iloc[i]
+        wp = weekly_pivot_aligned[i]
+        dh = donchian_high.iloc[i]
+        dl = donchian_low.iloc[i]
+        
+        # Long condition: price breaks above Donchian high AND above weekly pivot
+        if position_side != 1:  # not already long
+            if price_high > dh and price_close > wp:
+                signals[i] = 0.30  # 30% long
+                position_side = 1
+                entry_price = price_close
+            # Short condition: price breaks below Donchian low AND below weekly pivot
+            elif price_low < dl and price_close < wp:
+                signals[i] = -0.30  # 30% short
+                position_side = -1
+                entry_price = price_close
+            else:
+                # Hold current signal or flatten based on stoploss
+                if position_side == 1:
+                    if price_close < entry_price - 2.5 * atr_14[i]:
+                        signals[i] = 0.0
+                        position_side = 0
+                    else:
+                        signals[i] = signals[i-1]
+                elif position_side == -1:
+                    if price_close > entry_price + 2.5 * atr_14[i]:
+                        signals[i] = 0.0
+                        position_side = 0
+                    else:
+                        signals[i] = signals[i-1]
+                else:
+                    signals[i] = 0.0
+        else:
+            # Already in position, manage stoploss
+            if position_side == 1:
+                if price_close < entry_price - 2.5 * atr_14[i]:
+                    signals[i] = 0.0
+                    position_side = 0
+                else:
+                    signals[i] = signals[i-1]
+            elif position_side == -1:
+                if price_close > entry_price + 2.5 * atr_14[i]:
+                    signals[i] = 0.0
+                    position_side = 0
+                else:
+                    signals[i] = signals[i-1]
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "exp_6459_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate weekly pivot points from 1d data (using prior week's OHLC)
+    weekly_high = df_1d['high'].rolling(window=7, min_periods=7).max().shift(1)
+    weekly_low = df_1d['low'].rolling(window=7, min_periods=7).min().shift(1)
+    weekly_close = df_1d['close'].shift(7)
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot.values)
+    
+    # Calculate Donchian channels on 6h data
+    lookback = 20
+    donchian_high = prices['high'].rolling(window=lookback, min_periods=lookback).max().shift(1)
+    donchian_low = prices['low'].rolling(window=lookback, min_periods=lookback).min().shift(1)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    vol_ma = prices['volume'].rolling(window=20, min_periods=20).mean()
+    volume_ok = prices['volume'] > (1.5 * vol_ma)
+    
+    # Pre-compute ATR(14) for stoploss
+    high_low = prices['high'] - prices['low']
+    high_close = np.abs(prices['high'] - prices['close'].shift())
+    low_close = np.abs(prices['low'] - prices['close'].shift())
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr_14 = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    signals = np.zeros(n)
+    position_side = 0  # 0=flat, 1=long, -1=short
+    entry_price = 0.0
+    
+    start_idx = max(lookback, 20, 7) + 1
+    
+    for i in range(start_idx, n):
+        # Skip if volume confirmation not met
+        if not volume_ok.iloc[i]:
+            # If in position, check stoploss
+            if position_side == 1 and prices['close'].iloc[i] < entry_price - 2.5 * atr_14[i]:
+                signals[i] = 0.0
+                position_side = 0
+            elif position_side == -1 and prices['close'].iloc[i] > entry_price + 2.5 * atr_14[i]:
+                signals[i] = 0.0
+                position_side = 0
+            else:
+                signals[i] = signals[i-1]  # hold current signal
+            continue
+        
+        # Get current values
+        price_close = prices['close'].iloc[i]
+        price_high = prices['high'].iloc[i]
+        price_low = prices['low'].iloc[i]
+        wp = weekly_pivot_aligned[i]
+        dh = donchian_high.iloc[i]
+        dl = donchian_low.iloc[i]
+        
+        # Long condition: price breaks above Donchian high AND above weekly pivot
+        if position_side != 1:  # not already long
+            if price_high > dh and price_close > wp:
+                signals[i] = 0.30  # 30% long
+                position_side = 1
+                entry_price = price_close
+            # Short condition: price breaks below Donchian low AND below weekly pivot
+            elif price_low < dl and price_close < wp:
+                signals[i] = -0.30  # 30% short
+                position_side = -1
+                entry_price = price_close
+            else:
+                # Hold current signal or flatten based on stoploss
+                if position_side == 1:
+                    if price_close < entry_price - 2.5 * atr_14[i]:
+                        signals[i] = 0.0
+                        position_side = 0
+                    else:
+                        signals[i] = signals[i-1]
+                elif position_side == -1:
+                    if price_close > entry_price + 2.5 * atr_14[i]:
+                        signals[i] = 0.0
+                        position_side = 0
+                    else:
+                        signals[i] = signals[i-1]
+                else:
+                    signals[i] = 0.0
+        else:
+            # Already in position, manage stoploss
+            if position_side == 1:
+                if price_close < entry_price - 2.5 * atr_14[i]:
+                    signals[i] = 0.0
+                    position_side = 0
+                else:
+                    signals[i] = signals[i-1]
+            elif position_side == -1:
+                if price_close > entry_price + 2.5 * atr_14[i]:
+                    signals[i] = 0.0
+                    position_side = 0
+                else:
+                    signals[i] = signals[i-1]
     
     return signals
