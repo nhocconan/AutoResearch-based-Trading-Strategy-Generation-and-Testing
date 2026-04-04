@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #3559: 6h Donchian Breakout + 12h Volume + 1d ATR Regime Filter
-HYPOTHESIS: 6h Donchian(20) breakouts with 12h volume confirmation and 1d ATR regime filter capture medium-term momentum while avoiding choppy markets. Volume confirms breakout strength, ATR regime filter avoids false breakouts in low volatility environments. Position size 0.25. Target: 80-180 total trades over 4 years (20-45/year).
+Experiment #3559: 6h Donchian Breakout + 12h Trend Filter + Volume Spike
+HYPOTHESIS: 6h Donchian(20) breakouts with 12h EMA(50) trend filter and volume confirmation capture medium-term momentum. 
+12h EMA(50) provides smoother trend direction than 6h alone, reducing whipsaw. Volume confirms breakout strength. 
+Position size 0.25. Target: 80-180 total trades over 4 years (20-45/year).
+Uses 12h for trend filter, 6h only for entry timing and risk management.
+Works in bull (continuation above EMA50) and bear (continuation below EMA50) via price channels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3559_6h_donchian20_12h_vol_1d_atr_v1"
+name = "exp_3559_6h_donchian20_12h_ema50_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -19,50 +23,32 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for volume confirmation (Call ONCE before loop) ===
+    # === HTF: 12h data for EMA50 trend filter (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
-    vol_12h = df_12h['volume'].values
+    close_12h = df_12h['close'].values
     
-    # Volume MA(10) on 12h for spike detection
-    vol_ma_12h = pd.Series(vol_12h).rolling(window=10, min_periods=10).mean().values
-    vol_ratio_12h = np.ones(len(vol_12h))
-    vol_ratio_12h[10:] = vol_12h[10:] / vol_ma_12h[10:]
+    # Calculate EMA(50) on 12h
+    ema_50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align 12h volume ratio to 6h timeframe
-    vol_ratio_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ratio_12h)
+    # Align EMA50 to 6h timeframe
+    ema_50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # === HTF: 1d data for ATR regime filter ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # True Range calculation for 1d
-    tr1 = high_1d[1:] - low_1d[1:]
-    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-    
-    # ATR ratio: current ATR / 50-period MA ATR (volatility regime)
-    atr_ma_50 = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
-    atr_ratio_1d = np.ones(len(atr_1d))
-    atr_ratio_1d[50:] = atr_1d[50:] / atr_ma_50[50:]
-    
-    # Align 1d ATR ratio to 6h timeframe
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
-    
-    # === 6h Indicators: Donchian channels (20-period) ===
+    # === 6h Indicators: Donchian channels (20-period) for entry timing ===
     lookback_6h = 20
     highest_high_6h = pd.Series(high).rolling(window=lookback_6h, min_periods=lookback_6h).max().values
     lowest_low_6h = pd.Series(low).rolling(window=lookback_6h, min_periods=lookback_6h).min().values
     
-    # === 6h Indicators: ATR(14) for stop loss ===
-    tr1_6h = high[1:] - low[1:]
-    tr2_6h = np.abs(high[1:] - close[:-1])
-    tr3_6h = np.abs(low[1:] - close[:-1])
-    tr_6h = np.concatenate([[np.nan], np.maximum(tr1_6h, np.maximum(tr2_6h, tr3_6h))])
-    atr_6h = pd.Series(tr_6h).rolling(window=14, min_periods=14).mean().values
+    # === 6h Indicators: Volume MA(20) for spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.ones(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    
+    # === 6h Indicators: ATR(14) for volatility and trailing stop ===
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -75,12 +61,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_6h, 10, 50, 14) + 1  # sufficient for all indicators
+    warmup = max(50, lookback_6h, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high_6h[i]) or np.isnan(lowest_low_6h[i]) or
-            np.isnan(vol_ratio_12h_aligned[i]) or np.isnan(atr_ratio_1d_aligned[i]) or np.isnan(atr_6h[i])):
+            np.isnan(ema_50_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -92,7 +78,12 @@ def generate_signals(prices):
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
                 # Exit if price drops 2.5*ATR below highest since entry
-                if price < highest_since_entry - 2.5 * atr_6h[i]:
+                if price < highest_since_entry - 2.5 * atr[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price breaks below 6h Donchian low (trend reversal)
+                elif price < lowest_low_6h[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -101,7 +92,12 @@ def generate_signals(prices):
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 # Exit if price rises 2.5*ATR above lowest since entry
-                if price > lowest_since_entry + 2.5 * atr_6h[i]:
+                if price > lowest_since_entry + 2.5 * atr[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price breaks above 6h Donchian high (trend reversal)
+                elif price > highest_high_6h[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -110,23 +106,25 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average on 12h) for confirmation
-        volume_spike = vol_ratio_12h_aligned[i] > 1.8
+        # Require volume spike (> 1.8x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.8
         
-        # Require high volatility regime (ATR ratio > 1.2) to avoid choppy markets
-        high_vol_regime = atr_ratio_1d_aligned[i] > 1.2
-        
-        if volume_spike and high_vol_regime:
-            # Long entry: price breaks above 6h Donchian high
-            if price > highest_high_6h[i]:
+        if volume_spike:
+            # Determine trend bias from 12h EMA50
+            price_vs_ema = price - ema_50_12h_aligned[i]
+            
+            # Long entry: price breaks above 6h Donchian high with bullish bias (above EMA50)
+            if (price > highest_high_6h[i] and 
+                price_vs_ema > 0):  # Above EMA50 = bullish bias
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below 6h Donchian low
-            elif price < lowest_low_6h[i]:
+            # Short entry: price breaks below 6h Donchian low with bearish bias (below EMA50)
+            elif (price < lowest_low_6h[i] and 
+                  price_vs_ema < 0):  # Below EMA50 = bearish bias
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
