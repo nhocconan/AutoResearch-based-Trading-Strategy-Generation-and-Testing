@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4990: 1d Donchian(20) Breakout + 1w HMA21 Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: On daily timeframe, Donchian(20) breakouts in direction of weekly HMA21 trend with volume confirmation (>1.5x average) capture strong momentum moves in both bull and bear markets. Uses ATR(14) trailing stop (2.0x) to limit downside. Designed for 7-25 trades/year on 1d timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
+Experiment #4990: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts in direction of 1w HMA50 trend with volume confirmation (>1.5x average) capture strong momentum moves. Uses ATR(14) trailing stop (2.0x) to limit downside. Designed for 7-25 trades/year on 1d timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 """
 
 import numpy as np
@@ -19,11 +19,11 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1w data for HMA21 trend filter
+    # Precompute HTF: 1w data for HMA50 trend filter
     df_1w = get_htf_data(prices, '1w')
     
-    # === 1w Indicators: HMA21 for trend filter ===
-    if len(df_1w) >= 21:
+    # === 1w Indicators: HMA50 for trend filter ===
+    if len(df_1w) >= 50:
         # Hull Moving Average calculation
         half_len = len(df_1w) // 2
         sqrt_len = int(np.sqrt(len(df_1w)))
@@ -52,7 +52,7 @@ def generate_signals(prices):
     else:
         hma_1w = np.full(len(df_1w), np.nan)
     
-    # Align HTF HMA21 to 1d timeframe
+    # Align HTF HMA50 to 1d timeframe
     if len(hma_1w) > 0:
         hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     else:
@@ -146,3 +146,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
