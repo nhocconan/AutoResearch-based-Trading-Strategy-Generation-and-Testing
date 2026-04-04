@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4697: 4h Donchian(20) Breakout + 1d Volume Spike + Chop Regime Filter
-HYPOTHESIS: 4h price breaking Donchian(20) channels with volume confirmation (>2.0x avg volume) and aligned with 1d chop regime (CHOP > 61.8 = range, < 38.2 = trending) captures momentum in trending markets and mean-reversion in ranging markets. Uses discrete position sizing (0.25) to minimize fee drag while maintaining statistical significance. Works in both bull (breakouts with volume) and bear (short breakdowns with volume) markets by adapting to regime.
+Experiment #4698: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Confirmation
+HYPOTHESIS: Daily price breaking Donchian(20) channels with volume confirmation (>1.8x avg volume) and aligned with weekly HMA21 trend captures momentum while minimizing whipsaws. The weekly HMA21 provides a reliable higher timeframe trend filter that reduces false signals in choppy markets. This strategy targets 15-25 trades/year on 1d timeframe to avoid fee drag while maintaining statistical significance. Works in both bull (breakouts with volume) and bear (short breakdowns with volume) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4697_4h_donchian20_1d_vol_chop_v1"
-timeframe = "4h"
+name = "exp_4698_1d_donchian20_1w_hma_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,41 +19,28 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for chop regime filter
-    df_1d = get_htf_data(prices, '1d')
+    # Precompute HTF: 1w data for HMA21 trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # === 1d Indicators: Chopiness Index (CHOP) for regime detection ===
-    if len(df_1d) >= 14:
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        close_1d = df_1d['close'].values
-        
-        # True Range
-        tr1 = high_1d[1:] - low_1d[1:]
-        tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-        tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-        tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-        
-        # Sum of TR over 14 periods
-        tr_sum = pd.Series(tr_1d).rolling(window=14, min_periods=14).sum().values
-        
-        # Highest high and lowest low over 14 periods
-        hh_1d = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-        ll_1d = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-        
-        # Chopiness Index: CHOP = 100 * log10(sum(tr14) / (hh14 - ll14)) / log10(14)
-        # Avoid division by zero
-        range_1d = hh_1d - ll_1d
-        chop_1d = np.full(len(close_1d), np.nan)
-        mask = (range_1d > 0) & ~np.isnan(tr_sum)
-        chop_1d[mask] = 100 * np.log10(tr_sum[mask] / range_1d[mask]) / np.log10(14)
-        
-        # Align HTF CHOP to 4h timeframe
-        chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    # === 1w Indicators: HMA21 for trend filter ===
+    if len(df_1w) >= 21:
+        # Calculate HMA(21): WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+        half = 21 // 2
+        sqrt_n = int(np.sqrt(21))
+        wma_half = pd.Series(df_1w['close'].values).ewm(span=half, adjust=False).mean().values
+        wma_full = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False).mean().values
+        raw_hma = 2 * wma_half - wma_full
+        hma_1w = pd.Series(raw_hma).ewm(span=sqrt_n, adjust=False).mean().values
     else:
-        chop_1d_aligned = np.full(n, np.nan)
+        hma_1w = np.full(len(df_1w), np.nan)
     
-    # === 4h Indicators: Donchian(20) from prior 20 bars ===
+    # Align HTF HMA21 to 1d timeframe
+    if len(hma_1w) > 0:
+        hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    else:
+        hma_1w_aligned = np.full(n, np.nan)
+    
+    # === 1d Indicators: Donchian(20) from prior 20 bars ===
     # Use prior 20 bars' high/low (shifted by 1 to avoid look-ahead)
     ph = np.concatenate([[np.nan] * 20, high[:-20]])  # prior 20 bars high
     pl = np.concatenate([[np.nan] * 20, low[:-20]])   # prior 20 bars low
@@ -62,12 +49,12 @@ def generate_signals(prices):
     donchian_high = pd.Series(ph).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(pl).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 1d Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -85,12 +72,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 14)  # Donchian, Volume MA warmup
+    warmup = max(20, 14)  # Donchian, Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(chop_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(hma_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -120,63 +107,33 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation for breakouts (>2.0x)
-        vol_breakout = vol_ratio[i] > 2.0
+        # Volume filter: confirmation for breakouts (>1.8x)
+        vol_breakout = vol_ratio[i] > 1.8
         
         # Donchian breakout conditions
         breakout_long = price > donchian_high[i] and vol_breakout
         breakout_short = price < donchian_low[i] and vol_breakout
         
-        # 1d Chop regime filter: 
-        # CHOP > 61.8 = ranging market (mean revert at Donchian bands)
-        # CHOP < 38.2 = trending market (breakout continuation)
-        chop_value = chop_1d_aligned[i]
-        chop_trending = chop_value < 38.2   # Trending regime - favor breakouts
-        chop_ranging = chop_value > 61.8    # Ranging regime - favor mean reversion
+        # 1w HMA21 trend filter: only trade in direction of higher timeframe trend
+        trend_filter_long = price > hma_1w_aligned[i]
+        trend_filter_short = price < hma_1w_aligned[i]
         
-        # Final entry conditions: breakout + volume + regime filter
-        # In trending markets: trade breakouts
-        # In ranging markets: trade mean reversion (fade Donchian touches)
-        if chop_trending:
-            # Trending market: breakout continuation
-            if breakout_long:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = SIZE
-            elif breakout_short:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = -SIZE
-            else:
-                signals[i] = 0.0
-        elif chop_ranging:
-            # Ranging market: mean reversion at Donchian bands
-            # Long when price touches lower band and starts reversing up
-            # Short when price touches upper band and starts reversing down
-            if price <= donchian_low[i] * 1.001 and close[i] > open[i]:  # Touch lower band + bullish candle
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = SIZE
-            elif price >= donchian_high[i] * 0.999 and close[i] < open[i]:  # Touch upper band + bearish candle
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = -SIZE
-            else:
-                signals[i] = 0.0
+        # Final entry conditions: breakout + volume + trend filter
+        if breakout_long and trend_filter_long:
+            in_position = True
+            position_side = 1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = SIZE
+        elif breakout_short and trend_filter_short:
+            in_position = True
+            position_side = -1
+            entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
+            signals[i] = -SIZE
         else:
-            # Neutral chop (38.2-61.8): no clear regime, stay flat
             signals[i] = 0.0
     
     return signals
