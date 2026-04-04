@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #3414: 1h Donchian Breakout + 4h/1d Trend + Volume Spike + Session Filter
-HYPOTHESIS: 1h Donchian(20) breakouts with 4h/1d trend alignment and volume confirmation capture medium-term swings with controlled trade frequency. Session filter (08-20 UTC) reduces noise. Position size 0.20 targets 60-150 total trades over 4 years (15-37/year). Works in bull markets via trend continuation and bear markets via mean reversion from extremes when price re-enters the channel.
+Experiment #3415: 6h Elder Ray + Regime Filter (ADX)
+HYPOTHESIS: Elder Ray (Bull/Bear Power) captures institutional buying/selling pressure, 
+while ADX regime filter (ADX>25) ensures we only trade in trending markets. 
+This combination works in bull markets (buy on Bull Power > 0) and bear markets 
+(sell on Bear Power < 0) by fading extended moves in ranging conditions (ADX<20).
+Primary timeframe 6h balances trade frequency and signal quality.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3414_1h_donchian20_4h_1d_trend_vol_session_v1"
-timeframe = "1h"
+name = "exp_3415_6h_elderray_adx_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,75 +23,67 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h data for EMA trend filter (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    # Calculate EMA(21) on 4h close
-    ema_4h = pd.Series(close_4h).ewm(span=21, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # === HTF: 1w data for EMA200 trend filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # === HTF: 1d data for HMA trend filter (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    # Calculate HMA(50) on 1d close
-    def hma(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        half_period = period // 2
-        sqrt_period = int(np.sqrt(period))
-        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
-        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
-        raw_hma = 2 * wma_half - wma_full
-        hma_vals = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
-        return hma_vals
-    hma_1d = hma(close_1d, 50)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # Calculate EMA(200) on 1w close
+    ema_200_1w = pd.Series(close_1w).ewm(span=200, adjust=False).mean().values
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # === 1h Indicators: Donchian channels (20-period) ===
-    lookback = 20
-    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    # === 6h Indicators: EMA13 for Elder Ray (standard setting) ===
+    ema13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
     
-    # === 1h Indicators: Volume MA(20) for spike detection ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    # === 6h Indicators: Elder Ray Components ===
+    # Bull Power = High - EMA13
+    bull_power = high - ema13
+    # Bear Power = Low - EMA13  
+    bear_power = low - ema13
     
-    # === 1h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 6h Indicators: ADX(14) for regime detection ===
+    # True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # === Session filter: 08-20 UTC (precompute for efficiency) ===
-    # prices.index is already DatetimeIndex with timezone-naive UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Directional Movement
+    plus_dm = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), 
+                       np.maximum(high[1:] - high[:-1], 0), 0)
+    minus_dm = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), 
+                        np.maximum(low[:-1] - low[1:], 0), 0)
+    plus_dm = np.concatenate([[0], plus_dm])
+    minus_dm = np.concatenate([[0], minus_dm])
+    
+    # Smoothed TR, +DM, -DM
+    tr_period = 14
+    atr = pd.Series(tr).ewm(alpha=1/tr_period, adjust=False).mean().values
+    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/tr_period, adjust=False).mean().values
+    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/tr_period, adjust=False).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_smooth / np.where(atr != 0, atr, np.nan)
+    minus_di = 100 * minus_dm_smooth / np.where(atr != 0, atr, np.nan)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / np.where((plus_di + minus_di) != 0, (plus_di + minus_di), np.nan)
+    adx = pd.Series(dx).ewm(alpha=1/tr_period, adjust=False).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size
+    SIZE = 0.25  # 25% position size
     
-    # Position tracking state variables
+    # Position tracking
     in_position = False
     position_side = 0
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 20, 14, 50)  # sufficient for all indicators
+    warmup = max(200, 13, 14)  # sufficient for EMA200w, EMA13, ADX14
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_4h_aligned[i]) or np.isnan(hma_1d_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
-            signals[i] = 0.0
-            continue
-        
-        # --- Session Filter ---
-        if not in_session[i]:
+        if (np.isnan(ema_200_1w_aligned[i]) or np.isnan(ema13[i]) or 
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(adx[i])):
             signals[i] = 0.0
             continue
         
@@ -95,30 +91,18 @@ def generate_signals(prices):
         
         # --- Exit Logic ---
         if in_position:
-            # Update highest/lowest since entry for trailing stop
-            if position_side > 0:  # Long
-                highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry
-                if price < highest_since_entry - 2.5 * atr[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                # Exit if price re-enters Donchian channel (mean reversion)
-                elif price <= highest_high[i]:
+            # Exit conditions: regime change or power reversal
+            if position_side > 0:  # Long position
+                # Exit if Bear Power becomes positive (selling pressure) OR regime turns ranging
+                if bear_power[i] > 0 or adx[i] < 20:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
-            else:  # Short
-                lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry
-                if price > lowest_since_entry + 2.5 * atr[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
-                # Exit if price re-enters Donchian channel (mean reversion)
-                elif price >= lowest_low[i]:
+            else:  # Short position
+                # Exit if Bull Power becomes negative (buying pressure) OR regime turns ranging
+                if bull_power[i] < 0 or adx[i] < 20:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -127,33 +111,25 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
-        
-        if volume_spike:
-            # Trend alignment: 4h EMA for short-term, 1d HMA for medium-term
-            price_vs_ema_4h = price - ema_4h_aligned[i]
-            price_vs_hma_1d = price - hma_1d_aligned[i]
+        # Regime filter: only trade when ADX > 25 (trending market)
+        if adx[i] > 25:
+            # 1w EMA200 trend filter: align with weekly trend
+            weekly_bias = price > ema_200_1w_aligned[i]
             
-            # Long entry: price breaks above Donchian high with bullish alignment
-            if price > highest_high[i] and price_vs_ema_4h > 0 and price_vs_hma_1d > 0:
+            # Long entry: Bull Power > 0 (buying pressure) + weekly uptrend bias
+            if bull_power[i] > 0 and weekly_bias:
                 in_position = True
                 position_side = 1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with bearish alignment
-            elif price < lowest_low[i] and price_vs_ema_4h < 0 and price_vs_hma_1d < 0:
+            # Short entry: Bear Power < 0 (selling pressure) + weekly downtrend bias
+            elif bear_power[i] < 0 and not weekly_bias:
                 in_position = True
                 position_side = -1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
         else:
+            # In ranging markets (ADX < 25), stay flat to avoid whipsaw
             signals[i] = 0.0
     
     return signals
