@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #5261: 4h Donchian(20) Breakout + Volume Spike + 1d EMA50 Regime Filter
-HYPOTHESIS: On 4h timeframe, price breaking Donchian(20) channels with volume confirmation (>1.5x) in the direction of 1d trend (price > 1d EMA50 = bullish, < 1d EMA50 = bearish) captures institutional breakouts while avoiding false moves. Uses discrete position sizing (0.25) and ATR trailing stop (2.0x) to manage risk. Designed for 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag. Works in bull markets (breakouts continue uptrend) and bear markets (breakouts continue downtrend) by aligning with higher timeframe direction.
+Experiment #5261: 4h Donchian Breakout + Volume Spike + Regime Filter (1d/1w)
+HYPOTHESIS: On 4h timeframe, price breaking Donchian(20) channels from 4h timeframe with volume spike (>1.5x) in the direction of 1d trend (price > 1d EMA50 = bullish, < 1d EMA50 = bearish) captures institutional breakouts while avoiding false moves. Uses discrete position sizing (0.25) and session filter (08-20 UTC) to reduce overtrading. Designed for 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag. Works in bull markets (breakouts continue uptrend) and bear markets (breakouts continue downtrend) by aligning with higher timeframe direction. Uses HTF=1d for EMA50 regime filter and HTF=1w for Donchian channel confirmation (long-term structure).
 """
 
 import numpy as np
@@ -23,6 +23,18 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
+    # === HTF: 4h data for Donchian channels (structure) ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) >= 20:
+        # Donchian(20) on prior completed 4h bar (shift(1) in align)
+        donch_high = pd.Series(df_4h['high']).rolling(window=20, min_periods=20).max().shift(1).values
+        donch_low = pd.Series(df_4h['low']).rolling(window=20, min_periods=20).min().shift(1).values
+        donch_high_aligned = align_htf_to_ltf(prices, df_4h, donch_high)
+        donch_low_aligned = align_htf_to_ltf(prices, df_4h, donch_low)
+    else:
+        donch_high_aligned = np.full(n, np.nan)
+        donch_low_aligned = np.full(n, np.nan)
+    
     # === HTF: 1d data for regime filter (EMA50) ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 50:
@@ -31,9 +43,13 @@ def generate_signals(prices):
     else:
         ema_50_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian(20) channels ===
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # === HTF: 1w data for long-term structure confirmation ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 50:
+        ema_50_1w = pd.Series(df_1w['close']).ewm(span=50, min_periods=50, adjust=False).mean().shift(1).values
+        ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    else:
+        ema_50_1w_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Volume confirmation (1.5x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -58,17 +74,18 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50)  # Donchian, Vol MA, ATR, EMA warmup
+    warmup = max(20, 20, 14, 50, 50)  # Donchian, Vol MA, ATR, EMA1d, EMA1w warmup
     
     for i in range(warmup, n):
-        # --- Session Filter: 08-20 UTC (optional, can be removed if too restrictive) ---
+        # --- Session Filter: 08-20 UTC ---
         if not (8 <= hours[i] <= 20):
             signals[i] = 0.0
             continue
         
         # --- Data Validity Check ---
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(donch_high_aligned[i]) or np.isnan(donch_low_aligned[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(ema_50_1w_aligned[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -101,13 +118,13 @@ def generate_signals(prices):
         # Volume filter: confirmation (>1.5x)
         vol_confirm = vol_ratio[i] > 1.5
         
-        # Regime filter: bullish if price > 1d EMA50, bearish if price < 1d EMA50
-        regime_bullish = price > ema_50_aligned[i]
-        regime_bearish = price < ema_50_aligned[i]
+        # Regime filter: bullish if price > 1d EMA50 AND price > 1w EMA50, bearish if price < 1d EMA50 AND price < 1w EMA50
+        regime_bullish = (price > ema_50_aligned[i]) and (price > ema_50_1w_aligned[i])
+        regime_bearish = (price < ema_50_aligned[i]) and (price < ema_50_1w_aligned[i])
         
         # Donchian breakout in regime direction
-        breakout_long = (price >= donch_high[i]) and regime_bullish and vol_confirm
-        breakout_short = (price <= donch_low[i]) and regime_bearish and vol_confirm
+        breakout_long = (price >= donch_high_aligned[i]) and regime_bullish and vol_confirm
+        breakout_short = (price <= donch_low_aligned[i]) and regime_bearish and vol_confirm
         
         # Final entry conditions
         if breakout_long:
@@ -128,5 +145,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
