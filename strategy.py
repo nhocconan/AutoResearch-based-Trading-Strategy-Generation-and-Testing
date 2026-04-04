@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4222: 12h Donchian(20) breakout + 1d EMA50 trend filter + volume confirmation
-HYPOTHESIS: Donchian breakouts on 12h timeframe capture medium-term momentum when aligned with 1d EMA50 trend filter (price > EMA50 for longs, < EMA50 for shorts) and confirmed by volume (>1.8x average). Uses 1d for signal direction, 12h only for entry timing. ATR-based trailing stop (2.0x) for risk management. Position size 0.25 targets 50-150 total trades over 4 years (12-37/year). Works in both bull and bear by requiring volume confirmation and trend alignment to filter false breakouts.
+Experiment #4222: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 12h timeframe capture swing momentum when aligned with 1d EMA50 trend (price > EMA50 for longs, < EMA50 for shorts) and confirmed by volume (>1.8x average). Uses 1d EMA for direction, 12h only for entry/exit timing. ATR-based trailing stop (2.0x) for risk management. Position size 0.25 targets 50-150 total trades over 4 years (12-37/year). Works in bull via breakout continuation, in bear via shorting breakdowns.
 """
 
 import numpy as np
