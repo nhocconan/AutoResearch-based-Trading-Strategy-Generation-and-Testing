@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #2840: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+Experiment #2841: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA trend and volume spikes capture
-strong momentum moves while minimizing whipsaws. Daily trend filter provides robust bias
-for both bull and bear markets. 4h timeframe balances trade frequency and fee drag.
-Target: 75-200 total trades over 4 years (19-50/year).
+strong momentum moves while avoiding whipsaws. Daily trend filter provides robust bias
+for both bull and bear markets, reducing counter-trend entries. 4h timeframe balances
+trade frequency and fee drag. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2840_4h_donchian20_1d_ema_vol_v1"
+name = "exp_2841_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
