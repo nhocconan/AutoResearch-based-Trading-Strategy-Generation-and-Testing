@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4128: 12h Donchian(20) breakout + 1w EMA10 filter + volume confirmation + ATR trailing stop
-HYPOTHESIS: 12h Donchian breakouts aligned with 1w EMA10 trend capture major swing moves while avoiding counter-trend noise. Volume confirmation filters false breakouts. ATR trailing stop manages risk. Designed for both bull and bear markets by using 1w EMA10 as dynamic trend filter. Target: 50-150 total trades over 4 years (12-37/year).
+Experiment #4128: 12h Donchian(20) breakout + 1w EMA50 filter + volume confirmation + ATR trailing stop
+HYPOTHESIS: 12h Donchian breakouts aligned with 1w EMA50 trend capture major swing moves while avoiding counter-trend noise. Volume confirmation filters false breakouts. ATR trailing stop manages risk. Designed for both bull and bear markets by using 1w EMA50 as dynamic trend filter. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -19,11 +19,11 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w EMA10 for trend filter ===
+    # === HTF: 1w EMA50 for trend filter ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 1:
         close_1w = df_1w['close'].values
-        ema_1w = pd.Series(close_1w).ewm(span=10, min_periods=10, adjust=False).mean().values
+        ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
         ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     else:
         ema_1w_aligned = np.full(n, np.nan)
@@ -56,7 +56,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 10, 10 + 10)  # DC lookback, vol MA buffer, EMA buffer
+    warmup = max(lookback_dc + 1, 20 + 10, 50 + 10)  # DC lookback, vol MA buffer, EMA buffer
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -100,14 +100,14 @@ def generate_signals(prices):
             breakout_up = price > highest_high[i-1]
             breakout_down = price < lowest_low[i-1]
             
-            # 1w EMA10 trend filter
+            # 1w EMA50 trend filter
             price_above_1w_ema = price > ema_1w_aligned[i]
             price_below_1w_ema = price < ema_1w_aligned[i]
             
-            # Long conditions: Donchian breakout up + price above 1w EMA10
+            # Long conditions: Donchian breakout up + price above 1w EMA50
             long_entry = breakout_up and price_above_1w_ema
             
-            # Short conditions: Donchian breakout down + price below 1w EMA10
+            # Short conditions: Donchian breakout down + price below 1w EMA50
             short_entry = breakout_down and price_below_1w_ema
             
             if long_entry:
