@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #6123: 4h Donchian(20) breakout + 12h EMA21 trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA21 trend capture structural moves with minimal whipsaw.
-Volume >1.5x average confirms strong participation. ATR trailing stop manages risk.
-Discrete sizing (0.30) minimizes fee churn. Target: 75-200 trades over 4 years.
-Timeframe: 4h. HTF: 12h for EMA21 trend filter.
+Experiment #6123: 4h Donchian(20) breakout + 12h EMA trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA50 trend capture structural moves.
+Volume >1.4x average confirms participation. ATR trailing stop manages risk.
+Discrete sizing (0.25) reduces fee churn. Target: 100-180 trades over 4 years.
+Timeframe: 4h. HTF: 12h for EMA50 trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6123_4h_donchian20_12h_ema21_vol_v1"
+name = "exp_6123_4h_donchian20_12h_ema50_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,14 +25,14 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 12h data for EMA21 trend filter ===
+    # === HTF: 12h data for EMA50 trend filter ===
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 21:
-        # Calculate 12h EMA21
-        daily_ema21 = pd.Series(df_12h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
-        daily_ema21_aligned = align_htf_to_ltf(prices, df_12h, daily_ema21)
+    if len(df_12h) >= 50:
+        # Calculate 12h EMA50
+        daily_ema50 = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
+        daily_ema50_aligned = align_htf_to_ltf(prices, df_12h, daily_ema50)
     else:
-        daily_ema21_aligned = np.full(n, np.nan)
+        daily_ema50_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -52,7 +52,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size (discrete level)
+    SIZE = 0.25  # 25% position size (discrete level)
     
     # Position tracking state variables
     in_position = False
@@ -61,7 +61,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 21, 14) + 1  # Donchian, volume avg, EMA21, ATR + 1
+    warmup = max(20, 20, 50, 14) + 1  # Donchian, volume avg, EMA50, ATR + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -73,7 +73,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(daily_ema21_aligned[i])):
+            np.isnan(daily_ema50_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -106,15 +106,15 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.5  # Volume filter for stronger signals
+        volume_confirmed = volume_ratio[i] > 1.4  # Volume filter for stronger signals
         
-        # Multi-timeframe trend filter: price relative to 12h EMA21
-        bullish_bias = price > daily_ema21_aligned[i]  # Above 12h EMA21 = bullish
-        bearish_bias = price < daily_ema21_aligned[i]  # Below 12h EMA21 = bearish
+        # Multi-timeframe trend filter: price relative to 12h EMA50
+        bullish_bias = price > daily_ema50_aligned[i]  # Above 12h EMA50 = bullish
+        bearish_bias = price < daily_ema50_aligned[i]  # Below 12h EMA50 = bearish
         
         # Entry conditions:
-        # Long: breakout up with volume AND bullish bias above 12h EMA21
-        # Short: breakout down with volume AND bearish bias below 12h EMA21
+        # Long: breakout up with volume AND bullish bias above 12h EMA50
+        # Short: breakout down with volume AND bearish bias below 12h EMA50
         long_entry = breakout_up and volume_confirmed and bullish_bias
         short_entry = breakout_down and volume_confirmed and bearish_bias
         
