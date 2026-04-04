@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4144: 1d Donchian(20) breakout + 1w EMA(50) trend filter + volume confirmation + ATR trailing stop
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA(50) trend capture strong momentum with minimal whipsaw. Volume confirmation filters false breakouts. Weekly timeframe ensures trend filter adapts to long-term bull/bear regimes. ATR trailing stop manages risk. Target: 30-100 total trades over 4 years (7-25/year).
+Experiment #4144: 1d Donchian(20) breakout + 1w EMA(20) trend filter + volume confirmation + ATR trailing stop
+HYPOTHESIS: 1d Donchian breakouts aligned with 1w EMA(20) trend direction capture strong momentum moves with lower lag than shorter timeframes. Volume confirmation filters false breakouts. ATR trailing stop manages risk. Works in both bull/bear as EMA adapts to trend. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -19,10 +19,10 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w EMA(50) for trend filter ===
+    # === HTF: 1w EMA(20) for trend filter ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 50:
-        ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    if len(df_1w) >= 20:
+        ema_1w = pd.Series(df_1w['close'].values).ewm(span=20, min_periods=20, adjust=False).mean().values
         ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     else:
         ema_1w_aligned = np.full(n, np.nan)
@@ -55,7 +55,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 5, 20 + 5, 14 + 5, 50 + 5)  # DC, vol MA, ATR, EMA buffers
+    warmup = max(lookback_dc + 1, 20 + 5, 20 + 5, 14 + 5)  # DC lookback, vol MA buffer, EMA buffer, ATR buffer
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
