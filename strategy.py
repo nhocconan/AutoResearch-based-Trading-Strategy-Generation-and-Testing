@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Experiment #5990: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 1d aligned with 1-week HMA trend (price above/below HMA = bullish/bearish)
-capture sustained moves with lower noise. Weekly HMA provides structural bias more resilient to daily noise.
+HYPOTHESIS: Donchian breakouts on daily timeframe aligned with weekly HMA trend (price above/below weekly HMA = bullish/bearish)
+capture sustained moves with lower noise. Weekly HMA provides smooth trend filter more resilient to daily whipsaws.
 Volume >1.5x average confirms breakout strength. ATR trailing stop manages risk. Target 30-100 trades over 4 years.
 Works in both bull/bear: weekly HMA trend prevents counter-trend entries, volume confirmation avoids false breakouts.
 """
@@ -25,15 +25,33 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for HMA trend ===
+    # === HTF: 1w data for HMA(21) trend ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 21:  # Need at least 21 periods for HMA
+    if len(df_1w) >= 21:
         # Calculate HMA(21) on weekly close
-        hma_21 = calculate_hma(df_1w['close'].values, 21)
-        # Align to 1d timeframe with shift(1) for completed weekly bars only
-        hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
+        close_1w = df_1w['close'].values
+        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+        half_len = 21 // 2
+        sqrt_len = int(np.sqrt(21))
+        
+        def wma(values, window):
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, 'valid') / weights.sum()
+        
+        wma_half = np.array([wma(close_1w[i:i+half_len], half_len) 
+                            if i+half_len <= len(close_1w) else np.nan 
+                            for i in range(len(close_1w))])
+        wma_full = np.array([wma(close_1w[i:i+21], 21) 
+                            if i+21 <= len(close_1w) else np.nan 
+                            for i in range(len(close_1w))])
+        hma_21_raw = 2 * wma_half - wma_full
+        hma_21 = np.array([wma(hma_21_raw[i:i+sqrt_len], sqrt_len) 
+                          if i+sqrt_len <= len(hma_21_raw) else np.nan 
+                          for i in range(len(hma_21_raw))])
+        # Align to daily timeframe with shift(1) for completed weekly bars only
+        hma_21w_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
     else:
-        hma_21_aligned = np.full(n, np.nan)
+        hma_21w_aligned = np.full(n, np.nan)
     
     # === 1d Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -62,7 +80,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21) + 1  # Donchian, volume avg, ATR, HMA lookback + 1
+    warmup = max(20, 20, 14, 21) + 1  # Donchian, volume avg, ATR, weekly lookback + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -74,7 +92,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(hma_21_aligned[i])):
+            np.isnan(hma_21w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -109,9 +127,9 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # Weekly HMA trend bias: price above/below weekly HMA
-        above_hma = price > hma_21_aligned[i]
-        below_hma = price < hma_21_aligned[i]
+        # Weekly HMA trend: price above/below weekly HMA
+        above_hma = price > hma_21w_aligned[i]
+        below_hma = price < hma_21w_aligned[i]
         
         # Entry conditions: 
         # Long: breakout up with volume AND above weekly HMA
@@ -137,31 +155,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-def calculate_hma(values, period):
-    """Calculate Hull Moving Average"""
-    if len(values) < period:
-        return np.full_like(values, np.nan)
-    
-    half_period = period // 2
-    sqrt_period = int(np.sqrt(period))
-    
-    # WMA of half period
-    wma_half = np.zeros_like(values)
-    for i in range(half_period, len(values)):
-        wma_half[i] = np.nansum(values[i-half_period+1:i+1] * np.arange(1, half_period+1)) / (half_period * (half_period + 1) / 2)
-    
-    # WMA of full period
-    wma_full = np.zeros_like(values)
-    for i in range(period, len(values)):
-        wma_full[i] = np.nansum(values[i-period+1:i+1] * np.arange(1, period+1)) / (period * (period + 1) / 2)
-    
-    # Raw HMA: 2 * WMA(half) - WMA(full)
-    raw_hma = 2 * wma_half - wma_full
-    
-    # Final HMA: WMA of raw_hma with sqrt_period
-    hma = np.zeros_like(values)
-    for i in range(sqrt_period, len(values)):
-        hma[i] = np.nansum(raw_hma[i-sqrt_period+1:i+1] * np.arange(1, sqrt_period+1)) / (sqrt_period * (sqrt_period + 1) / 2)
-    
-    return hma
