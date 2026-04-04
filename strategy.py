@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #5540: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts with volume > 1.5x average and aligned with 
-1d HMA(21) direction capture high-probability trend continuation moves across bull/bear regimes. 
-The 1d HMA provides smooth trend filtering that adapts to changing market conditions, while 
-volume confirmation filters false breakouts. Target: 19-50 trades/year (75-200 total over 4 years).
+Experiment #5541: 4h Donchian(20) breakout + 1d EMA50 + volume confirmation
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts with volume > 1.8x average and aligned with 
+1d EMA50 direction capture high-probability trend continuation moves. The 1d EMA50 provides robust 
+trend filtering that works across bull/bear regimes, while strict volume confirmation (>1.8x) 
+filters false breakouts. Target: 19-50 trades/year (75-200 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5540_4h_donchian20_1d_hma_vol_v1"
+name = "exp_5541_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,34 +25,12 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for HMA(21) trend ===
+    # === HTF: 1d data for EMA50 ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 21:
-        # Calculate HMA(21) on 1d data
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        
-        # WMA function
-        def wma(arr, period):
-            if len(arr) < period:
-                return np.full_like(arr, np.nan)
-            weights = np.arange(1, period + 1)
-            return np.convolve(arr, weights / weights.sum(), mode='valid')
-        
-        # HMA = WMA(2 * WMA(n/2) - WMA(n), sqrt(n))
-        wma_half = wma(close, half_len)
-        wma_full = wma(close, 21)
-        # Handle array lengths
-        raw_hma = 2 * wma_half - wma_full
-        hma_1d = wma(raw_hma[~np.isnan(raw_hma)], sqrt_len) if len(raw_hma[~np.isnan(raw_hma)]) >= sqrt_len else np.array([])
-        # Pad to original length
-        hma_padded = np.full(len(close), np.nan)
-        start_idx = 21 - 1  # WMA(21) loses 20 points
-        hma_padded[start_idx:start_idx+len(hma_1d)] = hma_1d
-        hma_1d_values = hma_padded
-        
-        # Trend direction: 1 = uptrend (price > HMA), -1 = downtrend (price < HMA)
-        trend_1d = np.where(close > hma_1d_values, 1, -1)
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        # Trend direction: 1 = uptrend (price above EMA50), -1 = downtrend (price below EMA50)
+        trend_1d = np.where(df_1d['close'].values >= ema_1d, 1, -1)
         # Align to LTF (4h) with shift(1) for completed bars only
         trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     else:
@@ -85,7 +63,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 21, 14)  # Donchian, volume avg, HMA, ATR warmup
+    warmup = max(20, 20, 50, 14)  # Donchian, volume avg, EMA warmup, ATR warmup
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -129,9 +107,9 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.5
+        volume_confirmed = volume_ratio[i] > 1.8
         
-        # Only trade in direction of 1d HMA trend
+        # Only trade in direction of 1d EMA50 trend
         long_entry = breakout_up and volume_confirmed and (i < len(trend_1d_aligned) and trend_1d_aligned[i] == 1)
         short_entry = breakout_down and volume_confirmed and (i < len(trend_1d_aligned) and trend_1d_aligned[i] == -1)
         
