@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #6420: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts with volume confirmation (>2.0x avg) and 1d EMA50 trend filter capture institutional order flow while avoiding counter-trend trades. In bull markets, long breakouts above Donchian high with price > 1d EMA50. In bear markets, short breakdowns below Donchian low with price < 1d EMA50. Volume confirmation filters false breakouts. Discrete sizing (0.25) balances profit potential and drawdown control. Target: 75-200 trades over 4 years. Works in bull via upward breakouts with volume and uptrend, in bear via downward breakdowns with volume and downtrend.
+Experiment #6421: 4h Donchian(20) breakout + 1d trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts with volume confirmation (>2.0x avg) and 1d trend filter (price vs EMA50) capture institutional order flow. Long when price breaks above Donchian high with volume and price > 1d EMA50 (uptrend). Short when price breaks below Donchian low with volume and price < 1d EMA50 (downtrend). Uses trailing stop at 2.5*ATR from extreme. Session filter avoids low liquidity hours (22:00-23:59 UTC). Discrete sizing at 0.25 to minimize fee churn. Target: 75-200 trades over 4 years. Works in bull via upward breakouts with volume and uptrend, in bear via downward breakdowns with volume and downtrend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6420_4h_donchian20_1d_ema_vol_v1"
+name = "exp_6421_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
