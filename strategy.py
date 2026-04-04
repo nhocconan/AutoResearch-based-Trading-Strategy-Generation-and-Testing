@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Experiment #2924: 1d Donchian Breakout + Weekly Pivot Direction + Volume Spike
-HYPOTHESIS: Donchian(20) breakouts on 1d timeframe capture medium to long-term trends.
+HYPOTHESIS: Donchian(20) breakouts on 1d timeframe capture medium-term trends.
 Weekly pivot (from 1w data) provides directional bias: only take long breakouts
 when weekly pivot shows bullish bias (price > weekly pivot), and short breakouts
 when bearish (price < weekly pivot). Volume spike (>2.0x 20-period average)
 confirms breakout strength. This combination filters false breakouts in choppy
 markets while capturing strong trends in both bull and bear regimes. 1d timeframe
-minimizes fee drag and captures sustained moves. Target: 30-100 total trades over 4 years.
+minimizes fee drag with target 30-100 trades over 4 years.
 """
 
 import numpy as np
@@ -31,8 +31,7 @@ def generate_signals(prices):
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot from weekly OHLC
-    # Pivot = (High + Low + Close) / 3 for each week
+    # Calculate weekly pivot from weekly OHLC: Pivot = (High + Low + Close) / 3
     pivot_1w = (high_1w + low_1w + close_1w) / 3.0
     
     # Align to 1d timeframe (shifted by 1 for completed bars only)
@@ -137,3 +136,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
