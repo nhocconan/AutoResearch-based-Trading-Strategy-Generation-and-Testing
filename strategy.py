@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #2780: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+Experiment #2781: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA trend and volume spikes capture
 strong momentum moves while avoiding whipsaws. Uses 1d for trend filter (more reliable than 12h),
 4h for entry timing and exits. Target: 75-200 total trades over 4 years. Works in bull via
 breakouts and bear via short breakdowns with trend filter preventing counter-trend entries.
+This version increases trade frequency by lowering volume threshold to 1.3x and tightening
+ATR multiplier to 1.5x for faster exits, while maintaining discrete position sizing.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2780_4h_donchian20_1d_ema_vol_v1"
+name = "exp_2781_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -69,10 +71,10 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2*ATR below highest since entry (using Donchian width as ATR proxy)
+                # Exit if price drops 1.5*ATR below highest since entry (using Donchian width as ATR proxy)
                 donchian_width = highest_20[i] - lowest_20[i]
                 atr_estimate = donchian_width * 0.15  # approximate ATR from channel width
-                if price < highest_since_entry - 2.0 * atr_estimate:
+                if price < highest_since_entry - 1.5 * atr_estimate:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -85,10 +87,10 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2*ATR above lowest since entry
+                # Exit if price rises 1.5*ATR above lowest since entry
                 donchian_width = highest_20[i] - lowest_20[i]
                 atr_estimate = donchian_width * 0.15
-                if price > lowest_since_entry + 2.0 * atr_estimate:
+                if price > lowest_since_entry + 1.5 * atr_estimate:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -105,8 +107,8 @@ def generate_signals(prices):
         # Require 1d trend alignment for bias filter
         trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.5x average)
-        volume_spike = vol_ratio[i] > 1.5
+        # Volume confirmation: require volume spike (> 1.3x average) - lowered from 1.5x
+        volume_spike = vol_ratio[i] > 1.3
         
         if volume_spike:
             # Long entry: price breaks above Donchian high with uptrend on 1d
@@ -131,5 +133,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
