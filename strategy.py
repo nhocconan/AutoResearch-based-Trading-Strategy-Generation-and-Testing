@@ -3,7 +3,7 @@
 Experiment #5517: 4h Donchian(20) breakout + 1d EMA200 trend + volume confirmation + ATR stoploss
 HYPOTHESIS: On 4h timeframe, price breaking above/below the 20-period Donchian channel with 
 volume > 2.0x average and aligned with daily EMA200 trend captures strong momentum moves 
-while avoiding false breakouts. The daily EMA200 provides long-term trend filter, reducing 
+while avoiding false breakouts. Daily EMA200 provides strong long-term trend filter, reducing 
 whipsaws in both bull and bear markets. Discrete position sizing (0.25) and ATR-based stoploss 
 (2.0x ATR) control risk. Target: 19-50 trades/year (75-200 total over 4 years) to minimize fee 
 drag while maintaining statistical significance.
