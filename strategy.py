@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #6283: 4h Donchian(20) breakout + 12h EMA(34) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA trend capture institutional momentum while adapting to bull/bear regimes.
+Experiment #6283: 4h Donchian(20) breakout + 12h EMA(21) trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA trend capture institutional momentum with better trend stability than 1d EMA. 
 Volume >2.0x average confirms participation. Uses discrete sizing (0.25) to manage fee drag.
-12h EMA provides smoother trend filter than 1d, reducing whipsaws in sideways markets.
-Target: 75-200 trades over 4 years (19-50/year). Works in bull markets (breakout with trend) 
-and avoids false signals in ranging/choppy markets via EMA filter.
+Designed to work in both bull (breakouts with trend) and bear (avoids false signals via EMA filter) markets.
+Target: 75-200 trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -26,10 +25,10 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 12h data for EMA(34) trend ===
+    # === HTF: 12h data for EMA(21) trend ===
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 34:  # Need enough for EMA calculation
-        ema_12h = pd.Series(df_12h['close'].values).ewm(span=34, adjust=False, min_periods=34).mean().values
+    if len(df_12h) >= 21:  # Need enough for EMA calculation
+        ema_12h = pd.Series(df_12h['close'].values).ewm(span=21, adjust=False, min_periods=21).mean().values
         ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     else:
         ema_12h_aligned = np.full(n, np.nan)
@@ -61,7 +60,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 34) + 1  # Donchian, volume avg, ATR, EMA + 1
+    warmup = max(20, 20, 14, 21) + 1  # Donchian, volume avg, ATR, EMA + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (22:00-23:59 UTC) ---
