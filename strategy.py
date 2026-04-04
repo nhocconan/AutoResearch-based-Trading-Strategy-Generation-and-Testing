@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #5784: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA trend capture strong continuation moves.
-Uses weekly timeframe for structure to reduce whipsaws in both bull and bear markets.
-Volume confirmation ensures breakout legitimacy. Discrete sizing 0.25 minimizes fee churn.
-Targets 30-100 trades over 4 years (7-25/year) to avoid fee drag while maintaining statistical significance.
+Experiment #5784: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
+HYPOTHESIS: 1d Donchian breakouts aligned with 1w HMA(21) trend capture strong continuation moves with volume confirmation. Uses 1w timeframe for structure to reduce whipsaws, targeting 75-200 trades over 4 years. Works in bull/bear markets by requiring breakout alignment with higher timeframe trend direction. Discrete sizing 0.25 minimizes fee churn.
 """
 
 import numpy as np
@@ -25,32 +22,39 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for HMA trend ===
+    # === HTF: 1w data for HMA(21) trend ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 21:
         # Calculate HMA(21) on weekly close
         close_1w = df_1w['close'].values
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
+        half_length = 21 // 2
+        sqrt_length = int(np.sqrt(21))
         
-        # WMA helper
-        def wma(values, window):
-            weights = np.arange(1, window + 1)
+        # WMA function
+        def wma(values, period):
+            if len(values) < period:
+                return np.full_like(values, np.nan)
+            weights = np.arange(1, period + 1)
             return np.convolve(values, weights, mode='valid') / weights.sum()
         
         # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        wma_half = wma(close_1w, half_len)
+        wma_half = wma(close_1w, half_length)
         wma_full = wma(close_1w, 21)
-        hma_2wma = 2 * wma_half - wma_full
-        hma_1w = wma(hma_2wma, sqrt_len)
+        # Pad to align lengths
+        wma_half_padded = np.full_like(close_1w, np.nan)
+        wma_half_padded[half_length-1:] = wma_half
+        wma_full_padded = np.full_like(close_1w, np.nan)
+        wma_full_padded[20:] = wma_full
         
-        # Pad to match original length
-        hma_1w_padded = np.full(len(close_1w), np.nan)
-        hma_1w_padded[half_len - 1:] = hma_1w
+        raw_hma = 2 * wma_half_padded - wma_full_padded
+        hma_1w = wma(raw_hma, sqrt_length)
+        # Pad HMA result
+        hma_1w_padded = np.full_like(close_1w, np.nan)
+        hma_1w_padded[sqrt_length-1:] = hma_1w[:len(close_1w)-sqrt_length+1]
     else:
         hma_1w_padded = np.full(len(df_1w), np.nan)
     
-    # Align 1w HMA to 1d timeframe (shifted by 1 for completed weekly bars only)
+    # Align 1w HMA to 1d timeframe (shifted by 1 for completed 1w bars only)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w_padded)
     
     # === 1d Indicators: Donchian Channel (20-period) ===
@@ -103,8 +107,8 @@ def generate_signals(prices):
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
                 stop_price = highest_since_entry - 2.5 * atr[i]
-                # Exit: stoploss OR price breaks below Donchian low (failed breakout)
-                if price <= stop_price or price <= donchian_low[i]:
+                # Exit: stoploss OR price breaks below Donchian low (failed breakout) OR trend reversal
+                if price <= stop_price or price <= donchian_low[i] or close[i] < hma_1w_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -113,8 +117,8 @@ def generate_signals(prices):
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 stop_price = lowest_since_entry + 2.5 * atr[i]
-                # Exit: stoploss OR price breaks above Donchian high (failed breakout)
-                if price >= stop_price or price >= donchian_high[i]:
+                # Exit: stoploss OR price breaks above Donchian high (failed breakout) OR trend reversal
+                if price >= stop_price or price >= donchian_high[i] or close[i] > hma_1w_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -126,13 +130,13 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
-        # Trend filter: price relative to weekly HMA
-        above_hma = price > hma_1w_aligned[i]
-        below_hma = price < hma_1w_aligned[i]
+        # Trend alignment: price above/below HMA for trend confirmation
+        trend_up = close[i] > hma_1w_aligned[i]
+        trend_down = close[i] < hma_1w_aligned[i]
         
-        # Entry conditions: breakout in direction of weekly trend with volume confirmation
-        long_setup = breakout_up and above_hma and volume_confirmed
-        short_setup = breakout_down and below_hma and volume_confirmed
+        # Entry conditions: breakout in direction of higher timeframe trend with volume confirmation
+        long_setup = breakout_up and trend_up and volume_confirmed
+        short_setup = breakout_down and trend_down and volume_confirmed
         
         if long_setup:
             in_position = True
@@ -152,3 +156,4 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+</truncated>
