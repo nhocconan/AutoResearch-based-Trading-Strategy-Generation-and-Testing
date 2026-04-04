@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4158: 1d Donchian(20) breakout + 1w EMA(21) trend filter + volume confirmation + ATR trailing stop
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA trend capture major momentum moves with minimal noise. Weekly trend filter reduces false signals in choppy markets. Volume confirmation ensures breakout strength. ATR trailing stop manages risk. Works in bull/bear as weekly EMA adapts to long-term trend. Target: 30-100 trades over 4 years (7-25/year).
+Experiment #4158: 1d Donchian(20) breakout + 1w HMA(9) trend filter + volume confirmation + ATR trailing stop
+HYPOTHESIS: 1d Donchian breakouts aligned with weekly HMA(9) trend capture strong momentum moves with weekly trend filtering. Volume confirmation filters false breakouts. ATR trailing stop manages risk. Works in both bull/bear as HMA adapts to trend. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4158_1d_donchian20_1w_ema_vol_v1"
+name = "exp_4158_1d_donchian20_1w_hma_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -19,13 +19,19 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w EMA(21) for trend filter ===
+    # === HTF: 1w HMA(9) for trend filter ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 21:
-        ema_1w = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False).mean().values
-        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    if len(df_1w) >= 9:
+        # Calculate HMA(9): WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+        half_len = 9 // 2
+        sqrt_len = int(np.sqrt(9))
+        wma_half = pd.Series(df_1w['close'].values).ewm(span=half_len, adjust=False).mean().values
+        wma_full = pd.Series(df_1w['close'].values).ewm(span=9, adjust=False).mean().values
+        raw_hma = 2 * wma_half - wma_full
+        hma_1w = pd.Series(raw_hma).ewm(span=sqrt_len, adjust=False).mean().values
+        hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     else:
-        ema_1w_aligned = np.full(n, np.nan)
+        hma_1w_aligned = np.full(n, np.nan)
     
     # === 1d Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -55,13 +61,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 5, 20 + 5, 14 + 5)  # DC lookback, vol MA buffer, EMA buffer, ATR buffer
+    warmup = max(lookback_dc + 1, 20 + 5, 20 + 5, 14 + 5)  # DC lookback, vol MA buffer, HMA buffer, ATR buffer
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_1w_aligned[i])):
+            np.isnan(hma_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -99,15 +105,15 @@ def generate_signals(prices):
             breakout_up = price > highest_high[i-1]
             breakout_down = price < lowest_low[i-1]
             
-            # EMA trend filter
-            above_ema = price > ema_1w_aligned[i]
-            below_ema = price < ema_1w_aligned[i]
+            # HMA trend filter
+            above_hma = price > hma_1w_aligned[i]
+            below_hma = price < hma_1w_aligned[i]
             
-            # Long conditions: Donchian breakout up + above 1w EMA (trend alignment)
-            long_entry = breakout_up and above_ema
+            # Long conditions: Donchian breakout up + above 1w HMA (trend alignment)
+            long_entry = breakout_up and above_hma
             
-            # Short conditions: Donchian breakout down + below 1w EMA (trend alignment)
-            short_entry = breakout_down and below_ema
+            # Short conditions: Donchian breakout down + below 1w HMA (trend alignment)
+            short_entry = breakout_down and below_hma
             
             if long_entry:
                 in_position = True
