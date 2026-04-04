@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #3023: 4h Donchian Breakout + 12h HMA Trend + Volume Spike
+Experiment #3023: 4h Donchian Breakout + 12h HMA Trend + Volume Spike (Revised)
 HYPOTHESIS: Donchian(20) breakouts on 4h capture medium-term trends. 12h HMA(21) provides
 trend filter: only take longs when price > HMA, shorts when price < HMA. Volume spike
-(>2.0x 20-period average) confirms breakout strength. This combination filters false
-breakouts in choppy markets while capturing strong trends. 4h timeframe balances
-trade frequency and fee drag. Target: 75-200 total trades over 4 years.
+(>2.0x 20-period average) confirms breakout strength. Entry only when ALL conditions
+align to reduce trade frequency. ATR-based trailing stop manages risk. Target: 75-200
+total trades over 4 years. Works in bull/bear via trend filter and strict entry.
 """
 
 import numpy as np
@@ -52,6 +52,14 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
+    # === ATR(14) for volatility-based stoploss ===
+    tr1 = pd.Series(high - low).values
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
+    tr2[0] = tr3[0] = 0.0  # first bar has no previous close
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
     # === Signals Initialization ===
     signals = np.zeros(n)
     SIZE = 0.25  # 25% position size
@@ -63,12 +71,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 20)  # sufficient for all indicators
+    warmup = max(50, lookback, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(hma_12h_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(hma_12h_aligned[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -80,8 +89,7 @@ def generate_signals(prices):
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
                 # Exit if price drops 2.5*ATR below highest since entry
-                atr_estimate = (high[i] - low[i]) * 0.5
-                if price < highest_since_entry - 2.5 * atr_estimate:
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -95,8 +103,7 @@ def generate_signals(prices):
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 # Exit if price rises 2.5*ATR above lowest since entry
-                atr_estimate = (high[i] - low[i]) * 0.5
-                if price > lowest_since_entry + 2.5 * atr_estimate:
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
