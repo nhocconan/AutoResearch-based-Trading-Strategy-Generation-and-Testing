@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #2640: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts with 1d trend alignment and volume spikes capture
-institutional participation while minimizing overtrading. Uses 1d for signal direction,
-4h only for entry timing and risk management. Target: 75-200 total trades over 4 years.
+Experiment #2641: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts with 1d trend alignment and volume spikes capture 
+institutional participation while minimizing trades. Using only 1d HTF reduces complexity
+and overtrading. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2640_4h_donchian20_1d_ema_vol_v1"
+name = "exp_2641_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -134,3 +134,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
