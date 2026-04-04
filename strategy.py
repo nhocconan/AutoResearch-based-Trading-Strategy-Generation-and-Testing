@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #2695: 6h Donchian(20) breakout + weekly pivot direction + 1d volume confirmation
-HYPOTHESIS: Weekly pivot points from 1w data provide institutional reference levels for 6h trends.
-6h Donchian breakouts aligned with weekly pivot direction (above/below weekly pivot) and 1d volume spikes
-capture institutional participation while minimizing fee drag. Uses 1w/1d for signal direction,
-6h only for entry timing. Target: 75-150 total trades over 4 years = 19-37/year.
+Experiment #2696: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts with 1d EMA trend alignment and volume spikes capture
+institutional participation with lower frequency than 4h/6h strategies. Uses 1d for signal
+direction, 12h only for entry timing. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2695_6h_donchian20_1w_pivot_1d_vol_v1"
-timeframe = "6h"
+name = "exp_2696_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,41 +21,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for weekly pivot levels (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot points (standard floor trader pivots)
-    # P = (H + L + C) / 3
-    # R1 = 2*P - L
-    # S1 = 2*P - H
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    
-    # === HTF: 1d data for volume confirmation (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d Volume MA(20)
-    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    vol_ratio_1d = np.ones(len(volume_1d))
-    vol_ratio_1d[20:] = volume_1d[20:] / vol_ma_1d[20:]
-    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
+    # Calculate 1d EMA(50)
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 6h Indicators: Donchian(20) channels ===
+    # === 12h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === Session filter: 08-20 UTC ===
-    hours = prices.index.hour  # open_time is already datetime64[ms]
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume MA for spike detection
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.ones(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -69,18 +51,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 60  # sufficient for all indicators (20+20+20)
+    warmup = 50  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ratio_1d_aligned[i]) or
-            np.isnan(highest_20[i]) or np.isnan(lowest_20[i])):
-            signals[i] = 0.0
-            continue
-        
-        # --- Session Filter ---
-        if not in_session[i]:
+        if (np.isnan(trend_1d_aligned[i]) or
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -124,28 +101,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Determine weekly pivot bias: above pivot = bullish, below pivot = bearish
-        if price > pivot_aligned[i]:
-            pivot_bias = 1   # bullish bias
-        elif price < s1_aligned[i]:
-            pivot_bias = -1  # bearish bias (below S1)
-        else:
-            pivot_bias = 0   # neutral/no bias (between S1 and pivot)
+        # Require 1d trend alignment for bias filter
+        trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.8x average on 1d)
-        volume_spike = vol_ratio_1d_aligned[i] > 1.8
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
-        if volume_spike and pivot_bias != 0:
-            # Long entry: price breaks above Donchian high with bullish pivot bias
-            if pivot_bias > 0 and price > highest_20[i]:
+        if volume_spike:
+            # Long entry: price breaks above Donchian high with uptrend on 1d
+            if trend_bias > 0 and price > highest_20[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with bearish pivot bias
-            elif pivot_bias < 0 and price < lowest_20[i]:
+            # Short entry: price breaks below Donchian low with downtrend on 1d
+            elif trend_bias < 0 and price < lowest_20[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
