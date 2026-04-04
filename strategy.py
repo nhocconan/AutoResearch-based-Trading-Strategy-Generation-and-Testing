@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #2758: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA trend and volume spikes capture
-institutional moves while avoiding whipsaws. Uses 1w for trend filter, 1d for entry timing and exits.
-Target: 30-100 total trades over 4 years. Works in bull via breakouts and bear via short breakdowns
-with trend filter preventing counter-trend entries.
+Experiment #2760: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend and volume spikes capture
+institutional moves while avoiding whipsaws. Uses 1d for trend filter, 4h for entry timing.
+Target: 75-200 total trades over 4 years (19-50/year). Works in bull via breakouts and
+bear via short breakdowns with 1d trend filter preventing counter-trend entries.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2758_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_2760_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,24 +22,16 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w HMA(21)
-    def hma(series, period):
-        half = period // 2
-        sqrt = int(np.sqrt(period))
-        wma2 = pd.Series(series).ewm(span=half, adjust=False).mean()
-        wma1 = pd.Series(series).ewm(span=period, adjust=False).mean()
-        raw = 2 * wma2 - wma1
-        return raw.ewm(span=sqrt, adjust=False).mean().values
+    # Calculate 1d EMA(50)
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    hma_21 = hma(close_1w, 21)
-    trend_1w = np.where(close_1w > hma_21, 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
-    
-    # === 1d Indicators: Donchian(20) channels, Volume MA(20) ===
+    # === 4h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -64,7 +56,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(trend_1w_aligned[i]) or
+        if (np.isnan(trend_1d_aligned[i]) or
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
@@ -110,14 +102,14 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1w trend alignment for bias filter
-        trend_bias = trend_1w_aligned[i]
+        # Require 1d trend alignment for bias filter
+        trend_bias = trend_1d_aligned[i]
         
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Long entry: price breaks above Donchian high with uptrend on 1w
+            # Long entry: price breaks above Donchian high with uptrend on 1d
             if trend_bias > 0 and price > highest_20[i]:
                 in_position = True
                 position_side = 1
@@ -125,7 +117,7 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with downtrend on 1w
+            # Short entry: price breaks below Donchian low with downtrend on 1d
             elif trend_bias < 0 and price < lowest_20[i]:
                 in_position = True
                 position_side = -1
