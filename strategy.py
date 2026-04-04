@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #6085: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d HMA(21) trend capture swing moves in both bull and bear markets. 
-The 1d HMA provides smooth trend direction: price above HMA = bullish, below = bearish. 
-Volume >1.5x average confirms breakout validity. ATR-based trailing stop limits drawdown. 
-Target: 75-150 trades over 4 years (19-37/year). Discrete sizing (0.25) minimizes fee drag.
+Experiment #6086: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 direction capture swing moves with proper structure. 
+1d EMA50 provides clean trend bias: price above EMA50 = bullish, below = bearish. 
+Volume >1.5x average confirms institutional participation. Works in bull markets (breakouts above rising EMA50) 
+and bear markets (breakdowns below falling EMA50) by only taking trades in trend direction. 
+Target: 75-200 trades over 4 years (19-50/year). Discrete sizing (0.25) minimizes fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6085_12h_donchian20_1d_hma_vol_v1"
-timeframe = "12h"
+name = "exp_6086_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,38 +26,23 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for HMA(21) trend ===
+    # === HTF: 1d data for EMA50 trend ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 21:
-        # Calculate HMA(21) on 1d close: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        half_len = 10  # 21/2 rounded down
-        sqrt_len = 4   # int(sqrt(21)) 
-        # WMA(10)
-        wma_half = pd.Series(df_1d['close'].values).rolling(window=half_len, min_periods=half_len).apply(
-            lambda x: np.average(x, weights=np.arange(1, half_len+1)), raw=True
-        ).values
-        # WMA(21)
-        wma_full = pd.Series(df_1d['close'].values).rolling(window=21, min_periods=21).apply(
-            lambda x: np.average(x, weights=np.arange(1, 22)), raw=True
-        ).values
-        # HMA = WMA(2*WMA(10) - WMA(21), 4)
-        hma_raw = 2 * wma_half - wma_full
-        hma_1d = pd.Series(hma_raw).rolling(window=sqrt_len, min_periods=sqrt_len).apply(
-            lambda x: np.average(x, weights=np.arange(1, sqrt_len+1)), raw=True
-        ).values
-        hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        hma_1d_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation ===
+    # === 4h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 12h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -75,7 +61,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 21, 14) + 1  # Donchian, volume avg, HMA, ATR + 1
+    warmup = max(20, 20, 50, 14) + 1  # Donchian, volume avg, EMA50, ATR + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -87,7 +73,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(hma_1d_aligned[i])):
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -122,13 +108,13 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5  # Volume filter for stronger signals
         
-        # Multi-timeframe trend filter: price must be aligned with 1d HMA
-        bullish_trend = price > hma_1d_aligned[i]
-        bearish_trend = price < hma_1d_aligned[i]
+        # Multi-timeframe trend filter: price must be aligned with 1d EMA50
+        bullish_trend = price > ema_1d_aligned[i]
+        bearish_trend = price < ema_1d_aligned[i]
         
         # Entry conditions:
-        # Long: breakout up with volume AND bullish trend on 1d HMA
-        # Short: breakout down with volume AND bearish trend on 1d HMA
+        # Long: breakout up with volume AND bullish trend on 1d EMA50
+        # Short: breakout down with volume AND bearish trend on 1d EMA50
         long_entry = breakout_up and volume_confirmed and bullish_trend
         short_entry = breakout_down and volume_confirmed and bearish_trend
         
