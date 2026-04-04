@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #5971: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h aligned with weekly pivot bias (price above/below weekly pivot = bullish/bearish)
+Experiment #5972: 12h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+HYPOTHESIS: Donchian breakouts on 12h aligned with weekly pivot bias (price above/below weekly pivot = bullish/bearish)
 capture sustained moves with lower noise. Weekly pivot provides structural bias more resilient to intraday noise than daily.
-Volume >1.5x average confirms breakout strength. ATR trailing stop manages risk. Target 75-200 trades over 4 years.
+Volume >1.5x average confirms breakout strength. ATR trailing stop manages risk. Target 50-150 trades over 4 years.
 Works in both bull/bear: weekly pivot bias prevents counter-trend entries, volume confirmation avoids false breakouts.
 """
 
@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5971_6h_donchian20_1d_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_5972_12h_donchian20_1d_weekly_pivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,20 +37,20 @@ def generate_signals(prices):
         # Weekly pivot point: (weekly_high + weekly_low + weekly_close) / 3
         weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
         
-        # Align to 6h timeframe with shift(1) for completed weekly bars only
+        # Align to 12h timeframe with shift(1) for completed weekly bars only
         weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     else:
         weekly_pivot_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20-period) ===
+    # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation ===
+    # === 12h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 6h Indicators: ATR(14) for trailing stop ===
+    # === 12h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
