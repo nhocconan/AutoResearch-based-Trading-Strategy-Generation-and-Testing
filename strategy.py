@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #5951: 6h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h aligned with 1d Camarilla pivot levels (R3/S3 for fade, R4/S4 for breakout) capture institutional interest.
+Experiment #5952: 12h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: Donchian breakouts on 12h aligned with 1d Camarilla pivot levels (H4/L4 for breakout, H3/L3 for mean reversion) capture institutional interest.
 Volume >1.5x average confirms participation. ATR trailing stop manages risk. Target: 75-200 trades over 4 years (19-50/year).
+Works in both bull/bear via breakout/mean-reversion duality and volatility-adjusted stops.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5951_6h_donchian20_1d_camarilla_vol_v1"
-timeframe = "6h"
+name = "exp_5952_12h_donchian20_1d_camarilla_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -55,15 +56,15 @@ def generate_signals(prices):
     else:
         h4_aligned = l4_aligned = h3_aligned = l3_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20-period) ===
+    # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation ===
+    # === 12h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 6h Indicators: ATR(14) for trailing stop ===
+    # === 12h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
