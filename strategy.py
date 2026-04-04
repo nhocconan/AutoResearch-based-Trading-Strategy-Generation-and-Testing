@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #3090: 1d Donchian Breakout + 1w HMA Trend + Volume Spike
-HYPOTHESIS: Daily Donchian(20) breakouts capture medium-term trends with controlled trade frequency. 
+HYPOTHESIS: Daily Donchian(20) breakouts capture medium-term trends with low trade frequency. 
 Weekly HMA(21) trend filter ensures alignment with higher timeframe momentum. Volume spike (>2.0x 
-20-period average) confirms breakout strength. ATR-based trailing stop (2.5x) manages risk. 
+20-period average) confirms breakout strength. ATR-based stoploss (2.5x) manages risk. 
 Position size 0.25. Target: 30-100 total trades over 4 years (7-25/year). Designed to work in 
 both bull (trend continuation) and bear (mean reversion from extremes) markets by using price 
-channels and volatility filters.
+channels and volatility filters. Weekly timeframe avoids noise and ensures fewer false signals.
 """
 
 import numpy as np
@@ -53,7 +53,7 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for volatility and trailing stop ===
+    # === 1d Indicators: ATR(14) for volatility and stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -84,7 +84,7 @@ def generate_signals(prices):
         
         # --- Exit Logic ---
         if in_position:
-            # Update highest/lowest since entry for trailing stop
+            # Update highest/lowest since entry for stoploss
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
                 # Exit if price drops 2.5*ATR below highest since entry
