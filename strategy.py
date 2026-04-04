@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #3020: 4h Donchian Breakout + 1d HMA Trend + Volume Spike
+Experiment #3021: 4h Donchian Breakout + 1d HMA Trend + Volume Spike
 HYPOTHESIS: Donchian(20) breakouts on 4h capture medium-term trends. 1d HMA(21) provides
 trend filter: only take longs when price > HMA, shorts when price < HMA. Volume spike
 (>2.0x 20-period average) confirms breakout strength. This combination filters false
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3020_4h_donchian20_1d_hma_vol_v1"
+name = "exp_3021_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -139,3 +139,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
