@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4258: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 1d timeframe capture swing momentum when aligned with 1w HMA21 trend (price > HMA21 for longs, < HMA21 for shorts) and confirmed by volume (>2.0x average). Uses 1w HMA for smoother trend filter (less whipsaw than EMA) while maintaining sufficient trade frequency. ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 30-100 total trades over 4 years (7-25/year). Works in bull via breakout continuation, in bear via shorting breakdowns. Novelty: Uses 1w HTF (as specified in experiment) to reduce noise while keeping trade count optimal.
+HYPOTHESIS: Donchian breakouts on 1d timeframe capture swing momentum when aligned with 1w HMA21 trend (price > HMA21 for longs, < HMA21 for shorts) and confirmed by volume (>2.0x average). Uses 1w HMA for smoother trend filter (less whipsaw than EMA) while maintaining optimal trade frequency. ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 30-100 total trades over 4 years (7-25/year). Works in bull via breakout continuation, in bear via shorting breakdowns. Novelty: Uses 1w HTF (as specified in experiment) to reduce noise while keeping trade count optimal for daily timeframe.
 """
 
 import numpy as np
