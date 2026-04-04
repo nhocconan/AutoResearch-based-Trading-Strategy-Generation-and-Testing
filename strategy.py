@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #3051: 6h Donchian Breakout + Daily Pivot Direction + Volume Confirmation
-HYPOTHESIS: 6h Donchian(20) breakouts capture medium-term trends with controlled trade frequency. 
-Daily pivot direction (price vs 1d Camarilla pivot) filters for institutional bias: only take longs when 
-price > daily pivot (bullish bias), shorts when price < daily pivot (bearish bias). Volume spike (>2.0x 
-20-period average) confirms breakout strength. ATR-based trailing stop (2.5x) manages risk. Designed to 
-work in both bull (trend continuation) and bear (mean reversion from extremes) markets by using price 
-channels and volatility filters. Target: 50-150 total trades over 4 years (12-37/year).
+Experiment #3052: 12h Donchian Breakout + Daily Pivot Direction + Volume Spike (Optimized)
+HYPOTHESIS: 12h Donchian(20) breakouts with daily pivot bias and volume confirmation capture medium-term trends. 
+Optimized for lower trade frequency: increased volume threshold to 2.5x, added minimum 6-bar holding period, 
+and tightened ATR trailing stop to 2.0x. Target: 50-150 total trades over 4 years (12-37/year). 
+Works in bull markets (trend continuation) and bear markets (mean reversion from extremes) via price channels.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3051_6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_3052_12h_donchian20_1d_pivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,29 +29,27 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate Daily Camarilla Pivot (based on previous day)
-    # Pivot = (H + L + C) / 3
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Camarilla levels: R4 = P + 1.5*(H-L), S4 = P - 1.5*(H-L)
     range_1d = high_1d - low_1d
     r4_1d = pivot_1d + 1.5 * range_1d
     s4_1d = pivot_1d - 1.5 * range_1d
     
-    # Align 1d levels to 6h timeframe (shifted by 1 bar for completed day only)
+    # Align 1d levels to 12h timeframe (shifted by 1 bar for completed day only)
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
     s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # === 6h Indicators: Donchian channels (20-period) ===
+    # === 12h Indicators: Donchian channels (20-period) ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -70,6 +66,7 @@ def generate_signals(prices):
     entry_price = 0.0
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
+    bars_since_entry = 0
     
     warmup = max(50, lookback, 20, 14)  # sufficient for all indicators
     
@@ -85,40 +82,56 @@ def generate_signals(prices):
         
         # --- Exit Logic ---
         if in_position:
+            bars_since_entry += 1
+            
+            # Minimum holding period: 6 bars (3 days)
+            if bars_since_entry < 6:
+                if position_side > 0:  # Long
+                    highest_since_entry = max(highest_since_entry, high[i])
+                    signals[i] = SIZE
+                else:  # Short
+                    lowest_since_entry = min(lowest_since_entry, low[i])
+                    signals[i] = -SIZE
+                continue
+            
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2.0*ATR below highest since entry
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
+                    bars_since_entry = 0
                     signals[i] = 0.0
                 # Exit if price re-enters Donchian channel (mean reversion)
                 elif price <= highest_high[i]:
                     in_position = False
                     position_side = 0
+                    bars_since_entry = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2.0*ATR above lowest since entry
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
+                    bars_since_entry = 0
                     signals[i] = 0.0
                 # Exit if price re-enters Donchian channel (mean reversion)
                 elif price >= lowest_low[i]:
                     in_position = False
                     position_side = 0
+                    bars_since_entry = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = -SIZE
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
+        # Require volume spike (> 2.5x average) for confirmation
+        volume_spike = vol_ratio[i] > 2.5
         
         if volume_spike:
             # Daily pivot bias: only long above pivot, short below pivot
@@ -131,6 +144,7 @@ def generate_signals(prices):
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
+                bars_since_entry = 0
                 signals[i] = SIZE
             # Short entry: price breaks below Donchian low with bearish daily bias
             elif price < lowest_low[i] and price_vs_pivot < 0:
@@ -139,6 +153,7 @@ def generate_signals(prices):
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
+                bars_since_entry = 0
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
@@ -146,3 +161,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
