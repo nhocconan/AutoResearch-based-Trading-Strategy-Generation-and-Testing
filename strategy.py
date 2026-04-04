@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #2525: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: Donchian channel breakouts on 12h timeframe with daily trend alignment 
-and volume spikes capture institutional participation during trend acceleration. 
-This strategy targets 50-150 total trades over 4 years (12-37/year) by using 
-strict entry conditions: Donchian breakout + volume spike (>2.0x) + 1d EMA trend filter. 
+HYPOTHESIS: Donchian channel breakouts on 12h timeframe aligned with 1d EMA trend and volume spikes capture institutional participation. 
+The 12h timeframe reduces trade frequency to avoid fee drag while still capturing significant moves. 
 Works in bull markets (breakouts with volume) and bear markets (breakdowns with volume). 
-Uses discrete position sizing (0.25) to limit fee drag and ensure statistical significance.
+Uses discrete position sizing (0.25) to limit fee churn and ensure 50-150 total trades over 4 years.
 """
 
 import numpy as np
