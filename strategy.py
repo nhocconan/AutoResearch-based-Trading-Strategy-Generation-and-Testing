@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3815: 6h Donchian(20) breakout + 1w pivot direction + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts capture medium-term swings. Weekly pivot direction (from 1w close vs prior 1w close) filters for trend alignment. Volume > 1.5x 20-period MA confirms institutional participation. Works in bull markets (breakouts above resistance in uptrend) and bear markets (breakdowns below support in downtrend). Discrete position sizing (0.25) minimizes fee drag. Target: 75-150 trades over 4 years.
+HYPOTHESIS: 6h Donchian breakouts capture medium-term swings with weekly pivot context filtering direction (only long above weekly pivot, short below). Volume confirmation (>1.5x average) ensures institutional participation. Works in bull markets (breakouts above resistance/pivot) and bear markets (breakdowns below support/pivot). Discrete position sizing (0.25) minimizes fee drag. Target: 75-150 trades over 4 years.
 """
 
 import numpy as np
@@ -19,22 +19,21 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for pivot direction (Call ONCE before loop) ===
+    # === HTF: 1w data for pivot points (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate 1w pivot direction: 1 = up (close > prior close), -1 = down (close < prior close)
-    pivot_dir_1w = np.zeros(len(close_1w))
-    for i in range(1, len(close_1w)):
-        if close_1w[i] > close_1w[i-1]:
-            pivot_dir_1w[i] = 1
-        elif close_1w[i] < close_1w[i-1]:
-            pivot_dir_1w[i] = -1
-        else:
-            pivot_dir_1w[i] = pivot_dir_1w[i-1]  # carry forward previous direction
+    # Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
     
-    # Align 1w pivot direction to 6h timeframe (shifted by 1 for completed 1w bar)
-    pivot_dir_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_dir_1w)
+    # Align 1w pivot to 6h timeframe (shifted by 1 for completed weekly bar)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
     # === 6h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -62,7 +61,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(pivot_dir_1w_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or
+            np.isnan(s1_1w_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -73,9 +73,20 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (using Donchian width as proxy)
-                dc_width = highest_high[i] - lowest_low[i]
-                if dc_width > 0 and price < highest_since_entry - 2.0 * dc_width:
+                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
+                # Calculate ATR(14) for trailing stop
+                if i >= 14:
+                    tr = np.maximum(high[i] - low[i], 
+                                   np.maximum(np.abs(high[i] - close[i-1]), 
+                                              np.abs(low[i] - close[i-1])))
+                    atr_14 = pd.Series([np.maximum(high[j] - low[j], 
+                                                   np.maximum(np.abs(high[j] - close[j-1]), 
+                                                              np.abs(low[j] - close[j-1])) 
+                                      for j in range(max(0, i-13), i+1)]).rolling(
+                                      window=14, min_periods=14).mean().iloc[-1]
+                else:
+                    atr_14 = 0.0
+                if price < highest_since_entry - 2.0 * atr_14:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -88,9 +99,20 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (using Donchian width as proxy)
-                dc_width = highest_high[i] - lowest_low[i]
-                if dc_width > 0 and price > lowest_since_entry + 2.0 * dc_width:
+                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
+                if i >= 14:
+                    tr = np.maximum(high[i] - low[i], 
+                                   np.maximum(np.abs(high[i] - close[i-1]), 
+                                              np.abs(low[i] - close[i-1])))
+                    atr_14 = pd.Series([np.maximum(high[j] - low[j], 
+                                                   np.maximum(np.abs(high[j] - close[j-1]), 
+                                                              np.abs(low[j] - close[j-1])) 
+                                      for j in range(max(0, i-13), i+1)]).rolling(
+                                      window=14, min_periods=14).mean().iloc[-1
+                    ]
+                else:
+                    atr_14 = 0.0
+                if price > lowest_since_entry + 2.0 * atr_14:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -104,24 +126,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.5x average) AND pivot alignment
+        # Require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
-        pivot_up = pivot_dir_1w_aligned[i] > 0
-        pivot_down = pivot_dir_1w_aligned[i] < 0
         
         if volume_spike:
-            # Long entry: Price breaks above Donchian upper band AND weekly pivot up
+            # Long entry: Price breaks above Donchian upper band AND above weekly pivot (bullish breakout with weekly bias)
             if (price > highest_high[i-1] and  # Breakout above previous period's high
-                pivot_up):                     # Weekly trend is up
+                price > pivot_1w_aligned[i]):    # Above weekly pivot (bullish weekly bias)
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Price breaks below Donchian lower band AND weekly pivot down
+            # Short entry: Price breaks below Donchian lower band AND below weekly pivot (bearish breakdown with weekly bias)
             elif (price < lowest_low[i-1] and    # Breakout below previous period's low
-                  pivot_down):                   # Weekly trend is down
+                  price < pivot_1w_aligned[i]):    # Below weekly pivot (bearish weekly bias)
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
