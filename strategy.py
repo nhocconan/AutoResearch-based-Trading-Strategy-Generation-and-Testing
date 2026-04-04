@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5031: 6h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Spike + ATR Stoploss
-HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts aligned with weekly pivot levels (from 1d HTF) capture strong momentum with lower frequency. Weekly pivot acts as regime filter: R3/S3 for mean reversion, R4/S4 for breakout confirmation. Volume > 2x average confirms institutional participation. ATR(14) trailing stop (2.5x) manages risk. Designed for 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Weekly pivot provides structural support/resistance that works in both bull (breakouts through R4) and bear (breakdowns through S4) markets.
+Experiment #5032: 12h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with 1d EMA(50) trend capture strong momentum with lower frequency. EMA acts as regime filter: price above EMA for longs, below for shorts. Volume > 2x average confirms institutional participation. ATR(14) trailing stop (2.5x) manages risk. Designed for 12-37 trades/year on 12h timeframe to minimize fee drag while maintaining statistical significance. EMA provides clear trend bias that works in both bull (breakouts above EMA) and bear (breakdowns below EMA) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5031_6h_donchian20_1d_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_5032_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,65 +19,28 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for weekly pivot levels
+    # Precompute HTF: 1d data for EMA trend
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d Indicators: Weekly Pivot Points (using prior week's OHLC) ===
-    if len(df_1d) >= 5:  # Need at least a week of data
-        # Calculate weekly OHLC from daily data
-        # We'll use rolling window of 5 days to approximate weekly OHLC
-        # For true weekly pivot, we need prior week's H, L, C
-        high_5d = pd.Series(high).rolling(window=5, min_periods=5).max().values
-        low_5d = pd.Series(low).rolling(window=5, min_periods=5).min().values
-        close_5d = pd.Series(close).rolling(window=5, min_periods=5).last().values
-        
-        # Weekly Pivot Point = (Prior Week H + L + C) / 3
-        pp = (high_5d + low_5d + close_5d) / 3.0
-        
-        # Weekly Support/Resistance Levels
-        # R1 = (2 * PP) - Prior Week L
-        # S1 = (2 * PP) - Prior Week H
-        # R2 = PP + (Prior Week H - Prior Week L)
-        # S2 = PP - (Prior Week H - Prior Week L)
-        # R3 = Prior Week H + 2*(PP - Prior Week L)
-        # S3 = Prior Week L - 2*(Prior Week H - PP)
-        # R4 = PP + 3*(Prior Week H - Prior Week L)
-        # S4 = PP - 3*(Prior Week H - Prior Week L)
-        rng = high_5d - low_5d
-        r1 = (2 * pp) - low_5d
-        s1 = (2 * pp) - high_5d
-        r2 = pp + rng
-        s2 = pp - rng
-        r3 = high_5d + 2 * (pp - low_5d)
-        s3 = low_5d - 2 * (high_5d - pp)
-        r4 = pp + 3 * rng
-        s4 = pp - 3 * rng
-        
-        # For breakout confirmation, we'll use R4/S4 levels
-        # For mean reversion fade, we'll use R3/S3 levels
-        # Align to 6h timeframe
-        pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # === 1d Indicators: EMA(50) for trend filter ===
+    if len(df_1d) >= 50:
+        ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     else:
-        pp_aligned = np.full(n, np.nan)
-        r3_aligned = np.full(n, np.nan)
-        s3_aligned = np.full(n, np.nan)
-        r4_aligned = np.full(n, np.nan)
-        s4_aligned = np.full(n, np.nan)
+        ema_50 = np.full(len(df_1d), np.nan)
     
-    # === 6h Indicators: Donchian(20) channels ===
+    # Align EMA to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    
+    # === 12h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation (2x spike) ===
+    # === 12h Indicators: Volume confirmation (2x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -100,8 +63,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -134,18 +96,11 @@ def generate_signals(prices):
         # Volume filter: confirmation (>2.0x)
         vol_confirm = vol_ratio[i] > 2.0
         
-        # Donchian breakout conditions with weekly pivot alignment
-        # Long: Donchian breakout above R4 (strong breakout) OR above R3 with volume (mean reversion fail)
-        # Short: Donchian breakdown below S4 (strong breakdown) OR below S3 with volume (mean reversion fail)
-        breakout_long = ((price >= high_roll[i]) and 
-                        ((price >= r4_aligned[i]) or  # Strong breakout through weekly R4
-                         ((price >= r3_aligned[i]) and vol_confirm)) and  # Fade failure at R3 with volume
-                        vol_confirm)
-        
-        breakout_short = ((price <= low_roll[i]) and 
-                         ((price <= s4_aligned[i]) or  # Strong breakdown through weekly S4
-                          ((price <= s3_aligned[i]) and vol_confirm)) and  # Fade failure at S3 with volume
-                         vol_confirm)
+        # Donchian breakout conditions with EMA trend filter
+        # Long: Donchian breakout above high AND price above EMA(50)
+        # Short: Donchian breakdown below low AND price below EMA(50)
+        breakout_long = (price >= high_roll[i]) and (price > ema_50_aligned[i]) and vol_confirm
+        breakout_short = (price <= low_roll[i]) and (price < ema_50_aligned[i]) and vol_confirm
         
         # Final entry conditions
         if breakout_long:
