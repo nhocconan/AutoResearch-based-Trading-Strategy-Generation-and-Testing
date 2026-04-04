@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #2820: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR stoploss
+Experiment #2820: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA trend and volume spikes capture
 strong momentum moves while avoiding whipsaws. Daily trend filter provides robust bias
 for both bull and bear markets, reducing counter-trend entries. 4h timeframe balances
-trend capture with reasonable trade frequency. Target: 75-200 total trades over 4 years.
+trade frequency and signal quality. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -41,13 +41,6 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === ATR(14) for stoploss ===
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
     SIZE = 0.25  # 25% position size
@@ -65,7 +58,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(trend_1d_aligned[i]) or
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -76,8 +69,10 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2*ATR below highest since entry
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2*ATR below highest since entry (using Donchian width as ATR proxy)
+                donchian_width = highest_20[i] - lowest_20[i]
+                atr_estimate = donchian_width * 0.15  # approximate ATR from channel width
+                if price < highest_since_entry - 2.0 * atr_estimate:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -91,7 +86,9 @@ def generate_signals(prices):
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 # Exit if price rises 2*ATR above lowest since entry
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                donchian_width = highest_20[i] - lowest_20[i]
+                atr_estimate = donchian_width * 0.15
+                if price > lowest_since_entry + 2.0 * atr_estimate:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
