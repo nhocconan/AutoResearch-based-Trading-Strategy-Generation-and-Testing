@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #5584: 1d Donchian(20) breakout + 1w EMA50 trend + volume confirmation
-HYPOTHESIS: On daily timeframe, Donchian(20) breakouts with volume > 1.8x average and aligned 
-with 1-week EMA50 trend capture high-probability trend moves. The weekly EMA50 provides the 
+Experiment #5585: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts with volume > 1.8x average and aligned 
+with 1d EMA50 trend capture high-probability trend moves. The 1d EMA50 provides the 
 higher timeframe trend filter, reducing false breakouts in choppy markets. ATR-based 
 trailing stop (2.0x ATR) limits drawdown. Discrete position sizing (0.25) minimizes fee 
 churn. Works in bull (breakouts with EMA50 support) and bear (breakouts with EMA50 
-resistance). Target: 7-25 trades/year (30-100 total over 4 years).
+resistance). Target: 12-37 trades/year (50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5584_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_5585_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,23 +27,23 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for EMA50 trend ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 50:
-        ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # === HTF: 1d data for EMA50 trend ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        ema_1w_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: Donchian Channel (20-period) ===
+    # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume confirmation ===
+    # === 12h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 1d Indicators: ATR(14) for trailing stop ===
+    # === 12h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -74,7 +74,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_1w_aligned[i])):
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -109,11 +109,11 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.8
         
-        # Determine bias from 1w EMA50
+        # Determine bias from 1d EMA50
         # Long: breakout above Donchian high with volume AND price > EMA50 (uptrend)
         # Short: breakout below Donchian low with volume AND price < EMA50 (downtrend)
-        long_breakout = breakout_up and volume_confirmed and (price > ema_1w_aligned[i])
-        short_breakout = breakout_down and volume_confirmed and (price < ema_1w_aligned[i])
+        long_breakout = breakout_up and volume_confirmed and (price > ema_1d_aligned[i])
+        short_breakout = breakout_down and volume_confirmed and (price < ema_1d_aligned[i])
         
         if long_breakout:
             in_position = True
@@ -133,5 +133,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
