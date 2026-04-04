@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #6286: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend capture strong momentum moves while avoiding counter-trend whipsaws. Volume >2.0x average confirms institutional participation. Uses discrete sizing (0.30) for balance between return and fee drag. The 1d EMA provides a robust trend filter that adapts to both bull and bear markets by defining the primary trend direction. Target: 75-200 trades over 4 years (19-50/year).
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend capture institutional momentum while adapting to bull/bear regimes.
+Volume >2.0x average confirms participation. Uses discrete sizing (0.25) to manage fee drag.
+1d EMA provides a robust trend filter, reducing whipsaws in sideways markets and improving generalization to bear markets.
+Target: 75-200 trades over 4 years (19-50/year). Works in bull markets (breakout with trend) 
+and avoids false signals in ranging/choppy markets via EMA filter.
 """
 
 import numpy as np
@@ -48,7 +52,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size (discrete level)
+    SIZE = 0.25  # 25% position size (discrete level)
     
     # Position tracking state variables
     in_position = False
