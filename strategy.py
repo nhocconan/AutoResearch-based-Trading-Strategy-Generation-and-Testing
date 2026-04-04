@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4087: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h aligned with weekly pivot direction (from 1d HTF) and volume confirmation capture institutional breakout moves while minimizing false signals. Weekly pivot provides structural bias that works in both bull/bear markets by identifying key support/resistance levels from the prior week. Target: 50-150 total trades over 4 years (12-37/year).
+Experiment #4088: 12h Donchian(20) breakout + 1w HMA(21) trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 12h aligned with 1w HMA(21) trend direction and volume confirmation capture continuation moves while minimizing trades. The 1w HMA(21) provides a long-term trend filter that works in both bull and bear markets by only allowing breakouts in the direction of the long-term trend. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4087_6h_donchian20_1d_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_4088_12h_donchian20_1w_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,44 +19,30 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for weekly pivot calculation ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 5:  # Need at least a week of daily data
-        # Calculate weekly pivot from prior week's daily OHLC
-        # We'll use the most recent completed week (shifted by 1 to avoid look-ahead)
-        weekly_high = pd.Series(df_1d['high'].values).rolling(window=5, min_periods=5).max().shift(1).values
-        weekly_low = pd.Series(df_1d['low'].values).rolling(window=5, min_periods=5).min().shift(1).values
-        weekly_close = pd.Series(df_1d['close'].values).rolling(window=5, min_periods=5).last().shift(1).values
-        
-        # Standard weekly pivot point calculation
-        pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-        r1 = 2 * pivot - weekly_low
-        s1 = 2 * pivot - weekly_high
-        r2 = pivot + (weekly_high - weekly_low)
-        s2 = pivot - (weekly_high - weekly_low)
-        r3 = r2 + (weekly_high - weekly_low)
-        s3 = s2 - (weekly_high - weekly_low)
-        
-        # Align to 6h timeframe (shift(1) in align_htf_to_ltf ensures we use prior week's data)
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # === HTF: 1w HMA(21) for trend direction ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 1:
+        half_length = 21 // 2
+        sqrt_length = int(np.sqrt(21))
+        wma1 = pd.Series(close).ewm(span=half_length, adjust=False).mean()
+        wma2 = pd.Series(close).ewm(span=sqrt_length, adjust=False).mean()
+        raw_hma = 2 * wma1 - wma2
+        hma_21 = pd.Series(raw_hma).ewm(span=sqrt_length, adjust=False).mean().values
+        hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
     else:
-        pivot_aligned = np.full(n, np.nan)
-        r3_aligned = np.full(n, np.nan)
-        s3_aligned = np.full(n, np.nan)
+        hma_21_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel(20) for breakout ===
+    # === 12h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 6h Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(20) for volatility and stoploss ===
+    # === 12h Indicators: ATR(20) for volatility and stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -80,7 +66,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
+            np.isnan(hma_21_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -114,20 +100,19 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Determine market bias relative to weekly pivot levels
-            price_above_r3 = price > r3_aligned[i]      # Strong bullish bias
-            price_below_s3 = price < s3_aligned[i]      # Strong bearish bias
-            price_in_middle = (price >= s3_aligned[i]) and (price <= r3_aligned[i])  # Neutral
+            # HTF 1w HMA(21) trend bias: 
+            price_above_hma = price > hma_21_aligned[i]
+            price_below_hma = price < hma_21_aligned[i]
             
             # Breakout logic: 
             breakout_up = price > highest_high[i-1]
             breakout_down = price < lowest_low[i-1]
             
-            # Long conditions: price above weekly R3 (bullish bias) + upper Donchian breakout
-            long_entry = breakout_up and price_above_r3
+            # Long conditions: above 1w HMA(21) + upper Donchian breakout
+            long_entry = breakout_up and price_above_hma
             
-            # Short conditions: price below weekly S3 (bearish bias) + lower Donchian breakout
-            short_entry = breakout_down and price_below_s3
+            # Short conditions: below 1w HMA(21) + lower Donchian breakout
+            short_entry = breakout_down and price_below_hma
             
             if long_entry:
                 in_position = True
