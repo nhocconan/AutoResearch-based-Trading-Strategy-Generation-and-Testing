@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #6170: 1d Donchian(20) breakout + 1w EMA50 trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA50 trend capture structural moves with lower noise.
-Price above weekly EMA50 = bullish bias (favor longs), below = bearish bias (favor shorts).
-Volume >1.8x average confirms strong participation. ATR(14) trailing stop manages risk.
+Experiment #6170: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation + ATR(14) stoploss
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA trend capture structural moves with lower noise.
+Price above weekly HMA21 = bullish bias (favor longs), below = bearish bias (favor shorts).
+Volume >2.0x average confirms strong participation. ATR trailing stop manages risk.
 Discrete sizing (0.25) minimizes fee churn. Target: 30-100 trades over 4 years.
-Timeframe: 1d. HTF: 1w for EMA50 trend filter.
+Timeframe: 1d. HTF: 1w for HMA21 trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6170_1d_donchian20_1w_ema50_vol_v1"
+name = "exp_6170_1d_donchian20_1w_hma_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -26,13 +26,19 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for EMA50 trend ===
+    # === HTF: 1w data for HMA21 trend ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 50:
-        ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False).mean().values
-        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    if len(df_1w) >= 21:
+        # Calculate HMA(21) on weekly close
+        half_length = 21 // 2
+        sqrt_length = int(np.sqrt(21))
+        wma_half = pd.Series(df_1w['close'].values).ewm(span=half_length, adjust=False).mean().values
+        wma_full = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False).mean().values
+        hma_1w = 2 * wma_half - wma_full
+        hma_1w = pd.Series(hma_1w).ewm(span=sqrt_length, adjust=False).mean().values
+        hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     else:
-        ema_1w_aligned = np.full(n, np.nan)
+        hma_1w_aligned = np.full(n, np.nan)
     
     # === 1d Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -61,7 +67,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50) + 1  # Donchian, volume avg, ATR, EMA50 + 1
+    warmup = max(20, 20, 14, 21) + 1  # Donchian, volume avg, ATR, HMA warmup + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -73,7 +79,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_1w_aligned[i])):
+            np.isnan(hma_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -106,15 +112,15 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.8  # Volume filter for stronger signals
+        volume_confirmed = volume_ratio[i] > 2.0  # Volume filter for stronger signals
         
-        # Multi-timeframe trend filter: price relative to 1w EMA50
-        bullish_bias = price > ema_1w_aligned[i]  # Above EMA50 = bullish
-        bearish_bias = price < ema_1w_aligned[i]  # Below EMA50 = bearish
+        # Multi-timeframe trend filter: price relative to weekly HMA21
+        bullish_bias = price > hma_1w_aligned[i]  # Above HMA21 = bullish
+        bearish_bias = price < hma_1w_aligned[i]  # Below HMA21 = bearish
         
         # Entry conditions:
-        # Long: breakout up with volume AND bullish bias above EMA50
-        # Short: breakout down with volume AND bearish bias below EMA50
+        # Long: breakout up with volume AND bullish bias above HMA21
+        # Short: breakout down with volume AND bearish bias below HMA21
         long_entry = breakout_up and volume_confirmed and bullish_bias
         short_entry = breakout_down and volume_confirmed and bearish_bias
         
