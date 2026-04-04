@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4099: 6h Donchian(20) breakout + 12h HTF trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h aligned with 12h EMA(50) trend direction and volume confirmation capture continuation moves while minimizing trades. The 12h EMA(50) provides an intermediate-term trend filter that works in both bull and bear markets by only allowing breakouts in the direction of the intermediate trend. Target: 75-200 total trades over 4 years (19-50/year).
+HYPOTHESIS: Donchian breakouts on 6h aligned with 12h EMA(50) trend direction and volume confirmation capture continuation moves while minimizing trades. The 12h EMA(50) provides an intermediate-term trend filter that works in both bull and bear markets by only allowing breakouts in the direction of the intermediate trend. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
