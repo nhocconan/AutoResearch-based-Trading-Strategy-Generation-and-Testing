@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 exp_6802_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with daily EMA trend filter and volume confirmation.
+Hypothesis: 12h Donchian(20) breakout with daily EMA50 trend filter and volume confirmation.
 In bull markets (price > daily EMA50): long breakouts only. In bear markets (price < daily EMA50): short breakouts only.
 Daily EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
 Designed for 12h timeframe to capture major swings with ~12-37 trades/year (50-150 total over 4 years).
