@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4561: 4h Donchian(20) Breakout + 1d HTF Trend + Volume Confirmation (Refined)
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with 1-day EMA(50) trend and volume confirmation (>2.0x average) capture medium-term momentum. Uses tighter volume threshold (2.0 vs 1.8) to reduce overtrading from previous version (exp_4560 had 135 trades/symbol, Sharpe=0.224). Target: 75-150 total trades over 4 years. Works in both bull and bear markets by only trading breakouts in direction of higher timeframe EMA trend.
+Experiment #4561: 4h Donchian(20) Breakout + 1d HTF Trend + Volume Confirmation
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 1-day EMA(50) trend (bullish when price > EMA, bearish when price < EMA) and volume confirmation (>1.8x average) capture medium-term momentum with higher timeframe trend filter. Uses 4h primary timeframe to balance trade frequency and statistical validity (target: 75-200 total trades over 4 years). Works in both bull and bear markets by only trading breakouts in direction of higher timeframe EMA trend.
 """
 
 import numpy as np
@@ -98,8 +98,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 2.0x average) to reduce overtrading
-        volume_confirm = vol_ratio[i] > 2.0
+        # Require volume confirmation (> 1.8x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.8
         
         # Higher timeframe trend filter: bullish when price > EMA, bearish when price < EMA
         htf_bullish = price > ema_1d_aligned[i]
@@ -133,4 +133,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-</x>
