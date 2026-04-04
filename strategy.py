@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #6092: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA50 direction capture multi-day swings with proper structure. 
+Experiment #6092: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA50 trend capture swing moves with proper structure. 
 1d EMA50 provides clean trend bias: price above EMA50 = bullish, below = bearish. 
 Volume >1.5x average confirms institutional participation. Works in bull markets (breakouts above rising EMA50) 
 and bear markets (breakdowns below falling EMA50) by only taking trades in trend direction. 
