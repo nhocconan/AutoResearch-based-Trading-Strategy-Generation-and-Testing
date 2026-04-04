@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #5933: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h Hull Moving Average trend capture strong momentum moves.
-Volume confirmation filters weak breakouts. ATR-based trailing stop manages risk.
-Target: 75-200 total trades over 4 years (19-50/year). Works in bull/bear via trend filter.
+Experiment #5934: 1h Donchian(20) breakout + 4h/1d EMA filter + volume confirmation
+HYPOTHESIS: 1h Donchian breakouts aligned with 4h/1d EMA trend (price > EMA for long, < EMA for short) 
+capture high-probability moves. Volume confirmation filters weak breakouts. Session filter (08-20 UTC) 
+reduces noise. Using higher timeframes for direction reduces overtrading on 1h.
+Target: 60-150 total trades over 4 years (15-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5933_4h_donchian20_12h_hma_vol_v1"
-timeframe = "4h"
+name = "exp_5934_1h_donchian20_4h1d_ema_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,33 +25,31 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 12h data for HMA trend ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 21:
-        close_12h = pd.Series(df_12h['close'].values)
-        # Hull Moving Average (HMA) = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        def wma(series, period):
-            weights = np.arange(1, period + 1)
-            return series.rolling(period).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
-        half_n = 21 // 2
-        sqrt_n = int(np.sqrt(21))
-        wma_half = wma(close_12h, half_n)
-        wma_full = wma(close_12h, 21)
-        raw_hma = 2 * wma_half - wma_full
-        hma_12h = wma(raw_hma, sqrt_n)
-        hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h.values)
+    # === HTF: 4h data for EMA trend filter ===
+    df_4h = get_htf_data(prices, '4h')
+    if len(df_4h) >= 21:
+        ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False).mean().values
+        ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     else:
-        hma_12h_aligned = np.full(n, np.nan)
+        ema_4h_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === HTF: 1d data for EMA trend filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 21:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    else:
+        ema_1d_aligned = np.full(n, np.nan)
+    
+    # === 1h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation ===
+    # === 1h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 4h Indicators: ATR(14) for trailing stop ===
+    # === 1h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -60,7 +59,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size (discrete level)
+    SIZE = 0.20  # 20% position size (discrete level)
     
     # Position tracking state variables
     in_position = False
@@ -69,19 +68,19 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21)  # Donchian, volume avg, ATR, HMA lookback
+    warmup = max(20, 20, 14, 21)  # Donchian, volume avg, ATR, EMA warmup
     
     for i in range(warmup, n):
-        # --- Session Filter: Avoid low liquidity periods ---
+        # --- Session Filter: Trade only during active liquidity hours (08-20 UTC) ---
         hour = hours[i]
-        if 21 <= hour <= 23:
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(hma_12h_aligned[i])):
+            np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -116,15 +115,15 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # Trend filter: 12h HMA slope
-        hma_rising = hma_12h_aligned[i] > hma_12h_aligned[i-1]
-        hma_falling = hma_12h_aligned[i] < hma_12h_aligned[i-1]
+        # Trend filter: price must be above both 4h and 1d EMA for long, below both for short
+        uptrend = price > ema_4h_aligned[i] and price > ema_1d_aligned[i]
+        downtrend = price < ema_4h_aligned[i] and price < ema_1d_aligned[i]
         
         # Entry conditions: 
-        # Long: breakout up with volume AND HMA rising
-        # Short: breakout down with volume AND HMA falling
-        long_setup = breakout_up and volume_confirmed and hma_rising
-        short_setup = breakout_down and volume_confirmed and hma_falling
+        # Long: breakout up with volume AND uptrend on both 4h and 1d
+        # Short: breakout down with volume AND downtrend on both 4h and 1d
+        long_setup = breakout_up and volume_confirmed and uptrend
+        short_setup = breakout_down and volume_confirmed and downtrend
         
         if long_setup:
             in_position = True
@@ -144,5 +143,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
