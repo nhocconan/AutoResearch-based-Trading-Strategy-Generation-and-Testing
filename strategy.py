@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4814: 1h Volume Spike + 4h/1d Trend Filter with Session
-HYPOTHESIS: On 1h timeframe, volume spikes (>2x 20-bar average) in direction of 4h HMA21 and 1d close>open trend capture momentum bursts. Uses 4h/1d for signal direction (reducing whipsaw) and 1h only for entry timing. Session filter (08-20 UTC) avoids low-liquidity hours. Target: 60-150 trades over 4 years (15-37/year) to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (mean reversion off extremes with volume).
+Experiment #4815: 6h Ichimoku Cloud Breakout + 1w Trend Filter + Volume Spike
+HYPOTHESIS: On 6h timeframe, Ichimoku cloud breaks in direction of 1w Kumo twist with volume confirmation (>1.5x average) capture strong momentum in both bull and bear markets. The Kumo twist (Senkou Span A/B cross) acts as a reliable trend reversal filter. Target: 15-30 trades/year to minimize fee drag while maintaining statistical significance. Works in bull markets (breaks above cloud with bullish twist) and bear markets (breaks below cloud with bearish twist).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4814_1h_volume_spike_4h_1d_trend_session_v1"
-timeframe = "1h"
+name = "exp_4815_6h_ichimoku_1w_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,118 +17,135 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # Precompute session hours (08-20 UTC) ONCE before loop
-    hours = pd.DatetimeIndex(open_time).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Precompute HTF: 1w data for Kumo twist trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Precompute HTF: 4h data for HMA21 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    # Precompute HTF: 1d data for daily trend filter (close > open)
-    df_1d = get_htf_data(prices, '1d')
-    
-    # === 4h Indicators: HMA21 for trend filter ===
-    if len(df_4h) >= 21:
-        # Hull Moving Average calculation
-        half_len = len(df_4h) // 2
-        sqrt_len = int(np.sqrt(len(df_4h)))
+    # === 1w Indicators: Ichimoku components for Kumo twist ===
+    if len(df_1w) >= 52:
+        high_1w = df_1w['high'].values
+        low_1w = df_1w['low'].values
         
-        # WMA function using convolution for speed
-        def wma(values, window):
-            if len(values) < window:
-                return np.full(len(values), np.nan)
-            weights = np.arange(1, window + 1)
-            return np.convolve(values, weights, 'valid') / weights.sum()
+        # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+        period9_high = pd.Series(high_1w).rolling(window=9, min_periods=9).max().values
+        period9_low = pd.Series(low_1w).rolling(window=9, min_periods=9).min().values
+        tenkan_sen = (period9_high + period9_low) / 2
         
-        close_4h = df_4h['close'].values
-        wma_half = np.array([wma(close_4h[i:i+half_len], half_len)[-1] 
-                            if i+half_len <= len(close_4h) else np.nan 
-                            for i in range(len(close_4h))])
-        wma_full = np.array([wma(close_4h[i:i+len(close_4h)], len(close_4h))[-1] 
-                            if i+len(close_4h) <= len(close_4h) else np.nan 
-                            for i in range(len(close_4h))])
-        wma_sqrt = np.array([wma(close_4h[i:i+sqrt_len], sqrt_len)[-1] 
-                            if i+sqrt_len <= len(close_4h) else np.nan 
-                            for i in range(len(close_4h))])
+        # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+        period26_high = pd.Series(high_1w).rolling(window=26, min_periods=26).max().values
+        period26_low = pd.Series(low_1w).rolling(window=26, min_periods=26).min().values
+        kijun_sen = (period26_high + period26_low) / 2
         
-        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        hma_raw = 2 * wma_half - wma_full
-        hma_4h = np.array([wma(hma_raw[i:i+sqrt_len], sqrt_len)[-1] 
-                          if i+sqrt_len <= len(hma_raw) else np.nan 
-                          for i in range(len(hma_raw))])
+        # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+        senkou_a = ((tenkan_sen + kijun_sen) / 2)
+        
+        # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+        period52_high = pd.Series(high_1w).rolling(window=52, min_periods=52).max().values
+        period52_low = pd.Series(low_1w).rolling(window=52, min_periods=52).min().values
+        senkou_b = ((period52_high + period52_low) / 2)
+        
+        # Kumo twist: Senkou Span A crossing above/below Senkou Span B
+        # Bullish twist: Senkou A > Senkou B (uptrend)
+        # Bearish twist: Senkou A < Senkou B (downtrend)
+        kumo_twist_bullish = senkou_a > senkou_b
+        kumo_twist_bearish = senkou_a < senkou_b
     else:
-        hma_4h = np.full(len(df_4h), np.nan)
+        kumo_twist_bullish = np.full(len(df_1w), False)
+        kumo_twist_bearish = np.full(len(df_1w), False)
     
-    # Align HTF HMA21 to 1h timeframe
-    if len(hma_4h) > 0:
-        hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h)
+    # Align HTF Kumo twist to 6h timeframe
+    if len(kumo_twist_bullish) > 0:
+        kumo_twist_bullish_aligned = align_htf_to_ltf(prices, df_1w, kumo_twist_bullish.astype(float))
+        kumo_twist_bearish_aligned = align_htf_to_ltf(prices, df_1w, kumo_twist_bearish.astype(float))
+        kumo_twist_bullish_aligned = kumo_twist_bullish_aligned > 0.5
+        kumo_twist_bearish_aligned = kumo_twist_bearish_aligned > 0.5
     else:
-        hma_4h_aligned = np.full(n, np.nan)
+        kumo_twist_bullish_aligned = np.full(n, False)
+        kumo_twist_bearish_aligned = np.full(n, False)
     
-    # === 1d Indicators: Daily trend (close > open) ===
-    if len(df_1d) >= 1:
-        daily_bull = df_1d['close'].values > df_1d['open'].values  # True if bullish day
+    # === 6h Indicators: Ichimoku Cloud ===
+    if len(high) >= 52:
+        # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+        period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
+        period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
+        tenkan_sen_6h = (period9_high + period9_low) / 2
+        
+        # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+        period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
+        period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
+        kijun_sen_6h = (period26_high + period26_low) / 2
+        
+        # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+        senkou_a_6h = ((tenkan_sen_6h + kijun_sen_6h) / 2)
+        
+        # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+        period52_high_6h = pd.Series(high).rolling(window=52, min_periods=52).max().values
+        period52_low_6h = pd.Series(low).rolling(window=52, min_periods=52).min().values
+        senkou_b_6h = ((period52_high_6h + period52_low_6h) / 2)
+        
+        # Cloud top and bottom
+        cloud_top = np.maximum(senkou_a_6h, senkou_b_6h)
+        cloud_bottom = np.minimum(senkou_a_6h, senkou_b_6h)
     else:
-        daily_bull = np.array([])
+        tenkan_sen_6h = np.full(n, np.nan)
+        kijun_sen_6h = np.full(n, np.nan)
+        senkou_a_6h = np.full(n, np.nan)
+        senkou_b_6h = np.full(n, np.nan)
+        cloud_top = np.full(n, np.nan)
+        cloud_bottom = np.full(n, np.nan)
     
-    # Align HTF daily trend to 1h timeframe
-    if len(daily_bull) > 0:
-        daily_bull_aligned = align_htf_to_ltf(prices, df_1d, daily_bull.astype(float))
-        # Convert back to boolean (alignment may produce floats)
-        daily_bull_aligned = daily_bull_aligned > 0.5
-    else:
-        daily_bull_aligned = np.full(n, False)
-    
-    # === 1h Indicators: Volume confirmation (2x spike) ===
+    # === 6h Indicators: Volume confirmation (1.5x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
+    # === 6h Indicators: ATR(14) for stoploss ===
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    warmup = max(20, 20)  # Volume MA, HTF alignment warmup
+    warmup = max(52, 20, 14)  # Ichimoku, Volume MA, ATR warmup
     
     for i in range(warmup, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
-        if (np.isnan(hma_4h_aligned[i]) or np.isnan(vol_ratio[i]) or 
-            np.isnan(daily_bull_aligned[i])):
+        if (np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i]) or 
+            np.isnan(cloud_top[i]) or np.isnan(cloud_bottom[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic: Close position on opposite signal ---
+        # --- Exit Logic ---
         if in_position:
-            # Exit conditions: volume spike in opposite direction OR daily trend flip
-            vol_confirm = vol_ratio[i] > 2.0
-            
-            if position_side > 0:  # Long position
-                # Exit if: volume spike short AND daily trend turns bearish
-                exit_signal = vol_confirm and (price < hma_4h_aligned[i]) and (~daily_bull_aligned[i])
-                if exit_signal:
+            # Update highest/lowest since entry for trailing stop
+            if position_side > 0:  # Long
+                highest_since_entry = max(highest_since_entry, high[i])
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
-            else:  # Short position
-                # Exit if: volume spike long AND daily trend turns bullish
-                exit_signal = vol_confirm and (price > hma_4h_aligned[i]) and daily_bull_aligned[i]
-                if exit_signal:
+            else:  # Short
+                lowest_since_entry = min(lowest_since_entry, low[i])
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -137,23 +154,27 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>2.0x)
-        vol_confirm = vol_ratio[i] > 2.0
+        # Volume filter: confirmation (>1.5x)
+        vol_confirm = vol_ratio[i] > 1.5
         
-        # Entry conditions: volume spike + 4h trend alignment + daily trend filter
-        entry_long = vol_confirm and (price > hma_4h_aligned[i]) and daily_bull_aligned[i]
-        entry_short = vol_confirm and (price < hma_4h_aligned[i]) and (~daily_bull_aligned[i])
+        # Ichimoku cloud breakout conditions with Kumo twist alignment
+        bullish_breakout = (price > cloud_top[i]) and kumo_twist_bullish_aligned[i] and vol_confirm
+        bearish_breakout = (price < cloud_bottom[i]) and kumo_twist_bearish_aligned[i] and vol_confirm
         
         # Final entry conditions
-        if entry_long:
+        if bullish_breakout:
             in_position = True
             position_side = 1
             entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif entry_short:
+        elif bearish_breakout:
             in_position = True
             position_side = -1
             entry_price = close[i]
+            highest_since_entry = high[i]
+            lowest_since_entry = low[i]
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
