@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #5208: 12h Donchian(20) Breakout + 1w EMA Trend + Volume Spike
-HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with 1w EMA(50) trend capture momentum bursts while minimizing overtrading. Volume > 2.0x average confirms institutional participation. Designed for 12-37 trades/year on 12h timeframe (50-150 total over 4 years) to minimize fee drag. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
+Experiment #5208: 12h Donchian(20) Breakout + 1d EMA Trend + Volume Spike
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with 1d EMA(50) trend capture momentum bursts with lower overtrading risk. Volume > 2.0x average confirms institutional participation. Designed for 12-37 trades/year on 12h timeframe (50-150 total over 4 years) to minimize fee drag. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5208_12h_donchian20_1w_ema_vol_v1"
+name = "exp_5208_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -19,16 +19,16 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1w data for EMA trend
-    df_1w = get_htf_data(prices, '1w')
+    # Precompute HTF: 1d data for EMA trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # === 1w Indicators: EMA(50) for trend ===
-    if len(df_1w) >= 50:
-        close_1w = df_1w['close'].values
-        ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # === 1d Indicators: EMA(50) for trend ===
+    if len(df_1d) >= 50:
+        close_1d = df_1d['close'].values
+        ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        ema_1w_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
     # === 12h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -62,7 +62,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -95,11 +95,11 @@ def generate_signals(prices):
         # Volume filter: confirmation (>2.0x)
         vol_confirm = vol_ratio[i] > 2.0
         
-        # Donchian breakout conditions with 1w EMA trend filter
-        # Long: Donchian breakout above + price > 1w EMA (uptrend)
-        # Short: Donchian breakdown below + price < 1w EMA (downtrend)
-        breakout_long = (price >= high_roll[i]) and (price > ema_1w_aligned[i]) and vol_confirm
-        breakout_short = (price <= low_roll[i]) and (price < ema_1w_aligned[i]) and vol_confirm
+        # Donchian breakout conditions with 1d EMA trend filter
+        # Long: Donchian breakout above + price > 1d EMA (uptrend)
+        # Short: Donchian breakdown below + price < 1d EMA (downtrend)
+        breakout_long = (price >= high_roll[i]) and (price > ema_1d_aligned[i]) and vol_confirm
+        breakout_short = (price <= low_roll[i]) and (price < ema_1d_aligned[i]) and vol_confirm
         
         # Final entry conditions
         if breakout_long:
@@ -120,5 +120,4 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
+</strategy>
