@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #3992: 12h Donchian(20) breakout + 1d EMA(50) + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with daily EMA(50) trend capture sustained moves with low frequency.
-Daily EMA(50) acts as a strong trend filter: price > EMA50 = bullish bias, price < EMA50 = bearish bias.
+Experiment #3993: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h HMA(21) trend capture sustained moves with less whipsaw.
 Volume > 1.5x MA(20) confirms breakout strength. ATR(20) trailing stop (2.5x) manages risk.
-Discrete sizing (0.25) reduces fee drag. Target: 50-150 trades over 4 years (12-37/year).
-Works in bull/bear via daily EMA as trend filter. Uses 1d HTF for EMA calculation.
+Discrete sizing (0.25) reduces fee drag. Target: 75-200 trades over 4 years (19-50/year).
+Works in bull/bear via 12h HMA as trend filter (avoids counter-trend trades).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3992_12h_donchian20_1d_ema50_vol_v1"
-timeframe = "12h"
+name = "exp_3993_4h_donchian20_12h_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,27 +22,47 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA(50) trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    # Calculate EMA(50) on daily close
-    if len(df_1d) >= 50:
-        ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        # Align to LTF (12h) with proper shift(1) for completed bars only
-        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # === HTF: 12h data for HMA trend ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) >= 21:
+        # Calculate HMA(21) on 12h close
+        half_len = 21 // 2
+        sqrt_len = int(np.sqrt(21))
+        
+        # WMA function
+        def wma(values, window):
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, 'valid') / weights.sum()
+        
+        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        wma_half = pd.Series(df_12h['close'].values).rolling(window=half_len, min_periods=half_len).apply(
+            lambda x: np.dot(x, np.arange(1, len(x)+1)) / np.arange(1, len(x)+1).sum(), raw=True
+        ).values
+        wma_full = pd.Series(df_12h['close'].values).rolling(window=21, min_periods=21).apply(
+            lambda x: np.dot(x, np.arange(1, len(x)+1)) / np.arange(1, len(x)+1).sum(), raw=True
+        ).values
+        
+        hma_raw = 2 * wma_half - wma_full
+        hma_12h = pd.Series(hma_raw).rolling(window=sqrt_len, min_periods=sqrt_len).apply(
+            lambda x: np.dot(x, np.arange(1, len(x)+1)) / np.arange(1, len(x)+1).sum(), raw=True
+        ).values
+        
+        # Align to LTF (4h) with proper shift(1) for completed bars only
+        hma_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     else:
-        ema_50_aligned = np.full(n, np.nan)
+        hma_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel(20) for breakout ===
+    # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(20) for volatility and trailing stop ===
+    # === 4h Indicators: ATR(20) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -61,12 +80,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20, 20, 50 + 1)  # DC lookback, vol MA, ATR, EMA50 data
+    warmup = max(lookback_dc + 1, 20, 20, 21 + 10)  # DC lookback, vol MA, ATR, HMA buffer
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(hma_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -100,11 +119,11 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Determine trend alignment from daily EMA(50)
-            # Bullish bias: price above EMA50
-            # Bearish bias: price below EMA50
-            bullish_bias = price > ema_50_aligned[i]
-            bearish_bias = price < ema_50_aligned[i]
+            # Determine trend alignment from 12h HMA
+            # Bullish bias: price above 12h HMA
+            # Bearish bias: price below 12h HMA
+            bullish_bias = price > hma_aligned[i]
+            bearish_bias = price < hma_aligned[i]
             
             # Breakout conditions
             breakout_up = price > highest_high[i-1]
