@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #5310: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: On 1d timeframe, price breaking above/below the 20-period Donchian channel 
-with volume > 1.5x average and aligned with 1w HMA21 trend captures strong momentum moves. 
-Donchian channels adapt to volatility and work in both bull and bear markets by catching 
-breakouts from consolidation. Volume confirmation ensures breakouts have participation. 
-1w HMA21 filter ensures we only trade in the direction of the higher timeframe trend, 
-avoiding counter-trend breakouts that fail. Uses discrete position sizing (0.25) and 
-ATR-based stoploss to control drawdown. Target: 7-25 trades/year on 1d timeframe 
-(30-100 total over 4 years) to minimize fee drag while maintaining statistical significance.
+Experiment #5311: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+HYPOTHESIS: On 6h timeframe, price breaking above/below the 20-period Donchian channel 
+with volume > 1.5x average and aligned with 1d weekly pivot bias (price above/below 
+weekly pivot) captures strong momentum moves. Weekly pivot provides structural support/resistance 
+from higher timeframe, filtering false breakouts. Works in bull markets (breakouts above weekly pivot) 
+and bear markets (breakdowns below weekly pivot). Uses discrete position sizing (0.25) and 
+ATR-based stoploss to control drawdown. Target: 12-37 trades/year on 6h timeframe 
+(50-150 total over 4 years) to minimize fee drag while maintaining statistical significance.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5310_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_5311_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,46 +28,35 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for HMA21 trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 21:
-        # Calculate HMA(21) on weekly close
-        close_1w = pd.Series(df_1w['close'].values)
-        half_len = int(21 / 2)
-        sqrt_len = int(np.sqrt(21))
+    # === HTF: 1d data for weekly pivot calculation ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 5:
+        # Calculate weekly pivot from prior week's OHLC
+        # For each 1d bar, use prior week's (Monday-Friday) OHLC
+        weekly_high = pd.Series(df_1d['high']).rolling(window=5, min_periods=5).max().shift(1).values
+        weekly_low = pd.Series(df_1d['low']).rolling(window=5, min_periods=5).min().shift(1).values
+        weekly_close = pd.Series(df_1d['close']).rolling(window=5, min_periods=5).last().shift(1).values
         
-        # WMA(21/2) of close
-        wma_half = close_1w.rolling(window=half_len, min_periods=half_len).apply(
-            lambda x: np.average(x, weights=np.arange(1, half_len + 1)), raw=True
-        ).values
+        # Weekly pivot = (H + L + C) / 3
+        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
         
-        # WMA(21) of close
-        wma_full = close_1w.rolling(window=21, min_periods=21).apply(
-            lambda x: np.average(x, weights=np.arange(1, 22)), raw=True
-        ).values
-        
-        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        raw_hma = 2 * wma_half - wma_full
-        hma_21 = pd.Series(raw_hma).rolling(window=sqrt_len, min_periods=sqrt_len).apply(
-            lambda x: np.average(x, weights=np.arange(1, sqrt_len + 1)), raw=True
-        ).values
-        
-        hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
+        # Align to 6h timeframe
+        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     else:
-        hma_21_aligned = np.full(n, np.nan)
+        weekly_pivot_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: Donchian Channel (20-period) ===
+    # === 6h Indicators: Donchian Channel (20-period) ===
     # Upper band: 20-period high
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     # Lower band: 20-period low
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume confirmation ===
+    # === 6h Indicators: Volume confirmation ===
     # Average volume over 20 periods
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)  # Avoid division by zero
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -88,7 +76,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21)  # Donchian, volume avg, ATR, HMA21 warmup
+    warmup = max(20, 20, 14, 5)  # Donchian, volume avg, ATR, weekly pivot warmup
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (optional) ---
@@ -101,7 +89,7 @@ def generate_signals(prices):
         
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or np.isnan(hma_21_aligned[i])):
+            np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or np.isnan(weekly_pivot_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -117,8 +105,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks below Donchian lower band (failed breakout)
-                # 3. Price crosses below 1w HMA21 (trend change)
-                if price <= stop_price or price <= donchian_low[i] or price < hma_21_aligned[i]:
+                # 3. Price crosses below weekly pivot (trend change)
+                if price <= stop_price or price <= donchian_low[i] or price < weekly_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -131,8 +119,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks above Donchian upper band (failed breakout)
-                # 3. Price crosses above 1w HMA21 (trend change)
-                if price >= stop_price or price >= donchian_high[i] or price > hma_21_aligned[i]:
+                # 3. Price crosses above weekly pivot (trend change)
+                if price >= stop_price or price >= donchian_high[i] or price > weekly_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -148,19 +136,19 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # Trend filter from 1w HMA21
-        trend_bullish = price > hma_21_aligned[i]
-        trend_bearish = price < hma_21_aligned[i]
+        # Trend filter from weekly pivot
+        pivot_bullish = price > weekly_pivot_aligned[i]
+        pivot_bearish = price < weekly_pivot_aligned[i]
         
-        # Entry conditions: Donchian breakout + volume confirmation + trend alignment
-        if breakout_up and volume_confirmed and trend_bullish:
+        # Entry conditions: Donchian breakout + volume confirmation + pivot alignment
+        if breakout_up and volume_confirmed and pivot_bullish:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif breakout_down and volume_confirmed and trend_bearish:
+        elif breakout_down and volume_confirmed and pivot_bearish:
             in_position = True
             position_side = -1
             entry_price = close[i]
