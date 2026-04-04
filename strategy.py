@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3499: 6h Williams %R + 12h EMA Trend + Volume Spike
-HYPOTHESIS: 6h Williams %R(14) identifies overbought/oversold conditions within the 12h EMA trend. 
-Volume spikes confirm momentum. In bull markets (price > 12h EMA), we buy oversold pullbacks (%R < -80). 
-In bear markets (price < 12h EMA), we sell overbought bounces (%R > -20). This mean-reversion-within-trend 
-approach works in both regimes by fading extremes while respecting the medium-term trend. 
-Position size 0.25. Target: 100-200 total trades over 4 years (25-50/year).
-Uses 12h for trend filter and 6h for entry timing and risk management.
+Experiment #3499: 6h Donchian Breakout + 12h ADX Trend Filter + Volume Confirmation
+HYPOTHESIS: 6h Donchian(20) breakouts filtered by 12h ADX (>25) capture strong trends while avoiding whipsaws in ranging markets. Volume confirmation (>1.5x average) ensures breakout validity. Works in bull (breakouts above Donchian high in uptrend) and bear (breakouts below Donchian low in downtrend) via ADX regime filter. Position size 0.25. Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3499_6h_williamsr_12h_ema_vol_v1"
+name = "exp_3499_6h_donchian20_12h_adx_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -24,23 +19,72 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for EMA trend filter (Call ONCE before loop) ===
+    # === HTF: 12h data for ADX trend filter (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Calculate 12h EMA(50) for trend filter
-    ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)  # auto shift(1)
+    # Calculate ADX(14) on 12h data
+    def calculate_adx(high, low, close, period=14):
+        # True Range
+        tr1 = high[1:] - low[1:]
+        tr2 = np.abs(high[1:] - close[:-1])
+        tr3 = np.abs(low[1:] - close[:-1])
+        tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        
+        # Directional Movement
+        up_move = high[1:] - high[:-1]
+        down_move = low[:-1] - low[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        # Smooth TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+        tr_period = len(tr)
+        atr = np.full(tr_period, np.nan)
+        plus_dm_smooth = np.full(tr_period, np.nan)
+        minus_dm_smooth = np.full(tr_period, np.nan)
+        
+        # First values (simple average)
+        if tr_period >= period:
+            atr[period-1] = np.nanmean(tr[1:period])
+            plus_dm_smooth[period-1] = np.nanmean(plus_dm[1:period])
+            minus_dm_smooth[period-1] = np.nanmean(minus_dm[1:period])
+            
+            # Wilder's smoothing
+            for i in range(period, tr_period):
+                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+                plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+                minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
+        
+        # Directional Indicators
+        plus_di = np.full(tr_period, np.nan)
+        minus_di = np.full(tr_period, np.nan)
+        dx = np.full(tr_period, np.nan)
+        
+        for i in range(period-1, tr_period):
+            if atr[i] != 0:
+                plus_di[i] = (plus_dm_smooth[i] / atr[i]) * 100
+                minus_di[i] = (minus_dm_smooth[i] / atr[i]) * 100
+                if (plus_di[i] + minus_di[i]) != 0:
+                    dx[i] = (np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
+        
+        # ADX: smoothed DX
+        adx = np.full(tr_period, np.nan)
+        if tr_period >= 2*period-1:
+            adx[2*period-2] = np.nanmean(dx[period-1:2*period-1])
+            for i in range(2*period-1, tr_period):
+                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+        
+        return adx
     
-    # === 6h Indicators: Williams %R(14) ===
-    lookback_wr = 14
-    highest_high = pd.Series(high).rolling(window=lookback_wr, min_periods=lookback_wr).max().values
-    lowest_low = pd.Series(low).rolling(window=lookback_wr, min_periods=lookback_wr).min().values
-    # Williams %R = (Highest High - Close) / (Highest High - Lowest Low) * -100
-    wr = np.ones(n) * -50  # default to neutral
-    denominator = highest_high - lowest_low
-    wr[lookback_wr:] = ((highest_high[lookback_wr:] - close[lookback_wr:]) / 
-                        np.where(denominator[lookback_wr:] == 0, 1, denominator[lookback_wr:])) * -100
+    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    
+    # === 6h Indicators: Donchian channels (20-period) for entry timing ===
+    lookback_6h = 20
+    highest_high_6h = pd.Series(high).rolling(window=lookback_6h, min_periods=lookback_6h).max().values
+    lowest_low_6h = pd.Series(low).rolling(window=lookback_6h, min_periods=lookback_6h).min().values
     
     # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -65,12 +109,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback_wr + 1, 20, 14)  # sufficient for all indicators
+    warmup = max(50, lookback_6h, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_12h_aligned[i]) or np.isnan(wr[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(highest_high_6h[i]) or np.isnan(lowest_low_6h[i]) or
+            np.isnan(adx_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -86,8 +130,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if Williams %R reaches overbought (take profit in strong uptrend)
-                elif wr[i] > -20:
+                # Exit if ADX weakens (<20) indicating trend end
+                elif adx_12h_aligned[i] < 20:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -100,8 +144,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if Williams %R reaches oversold (take profit in strong downtrend)
-                elif wr[i] < -80:
+                # Exit if ADX weakens (<20) indicating trend end
+                elif adx_12h_aligned[i] < 20:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -110,23 +154,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) for confirmation
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume spike (> 1.5x average) and strong trend (ADX > 25)
+        volume_spike = vol_ratio[i] > 1.5
+        strong_trend = adx_12h_aligned[i] > 25
         
-        if volume_spike:
-            # Determine trend bias from 12h EMA
-            above_ema = price > ema_12h_aligned[i]
-            
-            # Long entry: price above 12h EMA (bullish trend) + Williams %R oversold (%R < -80)
-            if above_ema and wr[i] < -80:
+        if volume_spike and strong_trend:
+            # Long entry: price breaks above 6h Donchian high
+            if price > highest_high_6h[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price below 12h EMA (bearish trend) + Williams %R overbought (%R > -20)
-            elif (not above_ema) and wr[i] > -20:
+            # Short entry: price breaks below 6h Donchian low
+            elif price < lowest_low_6h[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
