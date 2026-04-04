@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #3885: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with daily Hull Moving Average (HMA-21) trend capture momentum with reduced whipsaw. Volume > 1.5x MA(30) confirms participation. ATR(14) trailing stop (2.0x) manages risk. Target: 50-150 trades over 4 years (12-37/year) for 12h timeframe.
+Experiment #3885: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA-50 trend capture medium-term momentum with reduced whipsaw.
+Volume > 1.5x MA(30) confirms participation. ATR(14) trailing stop (2.0x) manages risk.
+In bull markets (price above EMA), buy breakouts; in bear markets (price below EMA), short breakdowns.
+Target: 50-150 trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3885_12h_donchian20_1d_hma_vol_v1"
+name = "exp_3885_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -19,18 +22,11 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for HMA trend ===
+    # === HTF: 1d data for EMA trend ===
     df_1d = get_htf_data(prices, '1d')
-    hma_period = 21
-    half_period = hma_period // 2
-    sqrt_period = int(np.sqrt(hma_period))
-    
-    # Hull Moving Average calculation
-    wma_half = pd.Series(df_1d['close'].values).ewm(span=half_period, adjust=False).mean()
-    wma_full = pd.Series(df_1d['close'].values).ewm(span=hma_period, adjust=False).mean()
-    hma_raw = 2.0 * wma_half - wma_full
-    hma_values = hma_raw.ewm(span=sqrt_period, adjust=False).mean().values
-    hma_aligned = align_htf_to_ltf(prices, df_1d, hma_values)
+    ema_period = 50
+    ema_values = pd.Series(df_1d['close'].values).ewm(span=ema_period, adjust=False).mean().values
+    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_values)
     
     # === 12h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -60,12 +56,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 30, hma_period)
+    warmup = max(lookback_dc + 1, 30, ema_period)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(hma_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -109,9 +105,9 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Determine trend: bullish if price above 1d HMA, bearish if below
-            bullish = price > hma_aligned[i]
-            bearish = price < hma_aligned[i]
+            # Determine trend: bullish if price above 1d EMA, bearish if below
+            bullish = price > ema_aligned[i]
+            bearish = price < ema_aligned[i]
             
             # Long entry: breakout above Donchian upper band in bullish regime
             long_breakout = price > highest_high[i-1] and bullish
