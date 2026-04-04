@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-exp_6473_4h_donchian20_12h_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-Uses 12h EMA50 to determine trend bias: long only when price above 12h EMA50,
-short only when below. Volume confirmation filters weak breakouts.
-Designed for fewer trades (<200 total over 4 years) to reduce fee drag while
-maintaining edge in both bull and bear markets via adaptive trend filter.
+exp_6475_6h_donchian20_1w_pivot_vol_v1
+Hypothesis: 6h Donchian(20) breakout with 1w Camarilla pivot direction filter and volume confirmation.
+Uses weekly Camarilla pivot levels (R3/S3, R4/S4) to determine bias: long only when price above weekly R3,
+short only when below weekly S3. Volume confirmation filters weak breakouts.
+Target: 75-200 trades over 4 years (19-50/year).
+Works in both bull and bear markets by using weekly Camarilla levels as adaptive structure
+and Donchian breakouts for momentum entries.
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6473_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_6475_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
 VOL_THRESHOLD = 1.8  # volume must be 1.8x its 20-period MA
-EMA_PERIOD = 50      # 12h EMA for trend filter
 SIGNAL_SIZE = 0.25   # 25% position size
 
 def generate_signals(prices):
@@ -28,12 +28,23 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, min_periods=EMA_PERIOD, adjust=False).mean().values
-    # Align to LTF (4h) with shift(1) for completed bars only
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    df_1w = get_htf_data(prices, '1w')
+    # Calculate weekly Camarilla pivot levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    # Camarilla levels: based on previous week's range
+    pivot = (high_1w + low_1w + close_1w) / 3
+    range_1w = high_1w - low_1w
+    r3 = pivot + range_1w * 1.1 / 2
+    s3 = pivot - range_1w * 1.1 / 2
+    r4 = pivot + range_1w * 1.1
+    s4 = pivot - range_1w * 1.1
+    # Align to LTF (6h) with shift(1) for completed bars only
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -53,21 +64,21 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available (first bar)
-        if np.isnan(ema_12h_aligned[i]):
+        # Skip if pivot levels not available (first few bars)
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             continue
             
-        # Long conditions: price breaks above Donchian HIGH + above 12h EMA50 + volume spike
+        # Long conditions: price breaks above Donchian HIGH + above weekly R3 + volume spike
         long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
-        long_bias = close[i] > ema_12h_aligned[i]      # price above 12h EMA50 (bullish bias)
+        long_bias = close[i] > r3_aligned[i]           # price above weekly R3 (bullish bias)
         long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Short conditions: price breaks below Donchian LOW + below 12h EMA50 + volume spike
+        # Short conditions: price breaks below Donchian LOW + below weekly S3 + volume spike
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
-        short_bias = close[i] < ema_12h_aligned[i]     # price below 12h EMA50 (bearish bias)
+        short_bias = close[i] < s3_aligned[i]          # price below weekly S3 (bearish bias)
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Exit conditions: ATR-based stoploss approximation
@@ -109,5 +120,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
