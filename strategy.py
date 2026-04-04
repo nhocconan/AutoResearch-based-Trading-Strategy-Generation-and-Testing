@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #5150: 1d Donchian(20) Breakout + 1w EMA Trend + Volume Spike
-HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts aligned with 1w EMA(50) trend capture major momentum moves. 
+HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts aligned with 1w EMA(50) trend capture momentum bursts. 
 Volume > 2.0x average confirms institutional participation. Designed for 15-25 trades/year on 1d timeframe 
 (60-100 total over 4 years) to minimize fee drag. Works in bull markets (breakouts with trend) and bear markets 
-(breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
+(breakdowns with trend). Uses ATR-based stoploss and discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
@@ -123,4 +123,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-</trading_assistant>
+
+</think>
