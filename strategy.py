@@ -1,87 +1,58 @@
 #!/usr/bin/env python3
 """
-exp_6791_6h_ichimoku_cloud_1d_trend_v1
-Hypothesis: 6h Ichimoku cloud breakout with 1d trend filter (price > 1d EMA50 for longs, < for shorts).
-Ichimoku provides dynamic support/resistance via cloud (Senkou Span A/B) and momentum via TK cross.
-In bull markets (price > 1d EMA50): long when price breaks above cloud + TK cross bullish.
-In bear markets (price < 1d EMA50): short when price breaks below cloud + TK cross bearish.
-1d EMA50 prevents counter-trend trades. Target: 50-150 total trades over 4 years.
-Works in both bull and bear by aligning with 1d trend direction.
+exp_6792_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with daily EMA trend filter and volume confirmation.
+In bull markets (price > daily EMA50): long breakouts only. In bear markets (price < daily EMA50): short breakouts only.
+Daily EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
+Designed for 12h timeframe to capture major swings with ~12-37 trades/year (50-150 total over 4 years).
+Works in both bull and bear markets by aligning with daily trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6791_6h_ichimoku_cloud_1d_trend_v1"
-timeframe = "6h"
+name = "exp_6792_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-TENKAN_PERIOD = 9      # Tenkan-sen (Conversion Line)
-KIJUN_PERIOD = 26      # Kijun-sen (Base Line)
-SENKOU_PERIOD = 52     # Senkou Span B
-DISPLACEMENT = 26      # Kumo cloud displacement
-EMA_PERIOD = 50        # 1d EMA for trend filter
-SIGNAL_SIZE = 0.25     # 25% position size
+DONCHIAN_PERIOD = 20
+VOL_MA_PERIOD = 20
+VOL_BASE_THRESHOLD = 2.0
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 50     # ~12.5 days (6h bars)
+MAX_HOLD_BARS = 15  # ~7.5 days (12h bars)
+EMA_PERIOD = 50
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for trend filter
+    # Load HTF data ONCE before loop - using 1d for daily EMA
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate daily EMA50
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align 1d EMA to 6h timeframe
+    # Align to LTF (12h)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate Ichimoku components on 6h data
+    # Calculate LTF indicators
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    period9_high = pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max().values
-    period9_low = pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    period26_high = pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max().values
-    period26_low = pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min().values
-    kijun = (period26_high + period26_low) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    period52_high = pd.Series(high).rolling(window=SENKOU_PERIOD, min_periods=SENKOU_PERIOD).max().values
-    period52_low = pd.Series(low).rolling(window=SENKOU_PERIOD, min_periods=SENKOU_PERIOD).min().values
-    senkou_b = ((period52_high + period52_low) / 2)
-    
-    # Al Ichimoku components need to be shifted forward by DISPLACEMENT for cloud
-    # But for signal generation at time t, we use Senkou A/B values that were calculated DISPLACEMENT periods ago
-    # So we shift Senkou A/B BACK by DISPLACEMENT to align with current price
-    senkou_a_aligned = np.roll(senkou_a, DISPLACEMENT)
-    senkou_b_aligned = np.roll(senkou_b, DISPLACEMENT)
-    # First DISPLACEMENT values are invalid (rolled from end)
-    senkou_a_aligned[:DISPLACEMENT] = np.nan
-    senkou_b_aligned[:DISPLACEMENT] = np.nan
-    
-    # Cloud top/bottom: max/min of Senkou A/B
-    cloud_top = np.maximum(senkou_a_aligned, senkou_b_aligned)
-    cloud_bottom = np.minimum(senkou_a_aligned, senkou_b_aligned)
-    
-    # TK Cross: Tenkan > Kijun = bullish, Tenkan < Kijun = bearish
-    tk_bullish = tenkan > kijun
-    tk_bearish = tenkan < kijun
+    # Volume MA for confirmation
+    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
     # ATR for stoploss
     tr1 = pd.Series(high - low)
@@ -95,8 +66,8 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    # Warmup: need enough data for Ichimoku calculations
-    start = max(TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_PERIOD, EMA_PERIOD, ATR_PERIOD) + DISPLACEMENT + 1
+    # Start from warmup period
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
@@ -127,27 +98,25 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Ichimoku signals with 1d trend filter
-        price_above_cloud = close[i] > cloud_top[i] if not np.isnan(cloud_top[i]) else False
-        price_below_cloud = close[i] < cloud_bottom[i] if not np.isnan(cloud_bottom[i]) else False
+        # Volume confirmation
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine 1d trend direction
+        # Determine trend direction from daily EMA50
         daily_uptrend = close[i] > ema_1d_aligned[i]
         daily_downtrend = close[i] < ema_1d_aligned[i]
         
-        # Long: price above cloud + TK bullish + daily uptrend
-        long_signal = price_above_cloud and tk_bullish[i] and daily_uptrend
-        # Short: price below cloud + TK bearish + daily downtrend
-        short_signal = price_below_cloud and tk_bearish[i] and daily_downtrend
+        # Breakout signals aligned with daily trend
+        long_breakout = daily_uptrend and (close[i] > highest_high[i]) and vol_confirmed
+        short_breakout = daily_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if long_signal:
+            if long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif short_signal:
+            elif short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
