@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #3496: 12h Donchian(20) Breakout + 1d Trend + Volume Confirmation
-HYPOTHESIS: 12h Donchian(20) breakouts with 1d EMA50 trend filter and volume confirmation capture medium-term momentum.
-The 1d EMA50 provides robust trend direction (bullish when price > EMA50, bearish when price < EMA50).
-Volume confirms breakout strength. Position size 0.25. Target: 75-150 total trades over 4 years (19-37/year).
-Uses 1d for trend filter and 12h only for entry timing and risk management. Works in bull (continuation from uptrend)
-and bear (continuation from downtrend) via price channels.
+Experiment #3496: 12h Donchian(20) breakout + 1d trend filter + volume confirmation
+HYPOTHESIS: 12h Donchian(20) breakouts with 1d EMA(50) trend filter and volume confirmation capture medium-term momentum while avoiding false breakouts. 
+The 1d EMA provides a higher-timeframe trend filter to align with the dominant market direction. Volume confirms breakout strength. 
+Position size 0.25. Target: 75-150 total trades over 4 years (19-38/year).
+Uses 1d for trend filter only, 12h for entry timing and risk management.
+Works in bull (continuation from uptrend) and bear (continuation from downtrend) via price channels.
 """
 
 import numpy as np
@@ -24,15 +24,13 @@ def generate_signals(prices):
     open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1d data for EMA50 trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA50
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Align EMA50 to 12h timeframe
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    # Calculate EMA(50) on daily closes
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # === 12h Indicators: Donchian channels (20-period) for entry timing ===
     lookback_12h = 20
@@ -67,7 +65,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high_12h[i]) or np.isnan(lowest_low_12h[i]) or
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -83,7 +81,7 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below 12h Donchian low (mean reversion)
+                # Exit if price breaks below 12h Donchian low - trend reversal
                 elif price < lowest_low_12h[i]:
                     in_position = False
                     position_side = 0
@@ -97,7 +95,7 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above 12h Donchian high (mean reversion)
+                # Exit if price breaks above 12h Donchian high - trend reversal
                 elif price > highest_high_12h[i]:
                     in_position = False
                     position_side = 0
@@ -111,21 +109,21 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Determine trend bias from 1d EMA50
-            price_vs_ema = price - ema50_1d_aligned[i]
+            # Determine trend bias from 1d EMA
+            price_vs_ema = price - ema_1d_aligned[i]
             
-            # Long entry: price breaks above 12h Donchian high with bullish bias (above EMA50)
+            # Long entry: price breaks above 12h Donchian high with bullish bias (above EMA)
             if (price > highest_high_12h[i] and 
-                price_vs_ema > 0):  # Above 1d EMA50 = bullish bias
+                price_vs_ema > 0):  # Above daily EMA = bullish bias
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below 12h Donchian low with bearish bias (below EMA50)
+            # Short entry: price breaks below 12h Donchian low with bearish bias (below EMA)
             elif (price < lowest_low_12h[i] and 
-                  price_vs_ema < 0):  # Below 1d EMA50 = bearish bias
+                  price_vs_ema < 0):  # Below daily EMA = bearish bias
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
