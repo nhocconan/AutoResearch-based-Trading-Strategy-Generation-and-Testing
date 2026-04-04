@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Experiment #2355: 6h Donchian(20) breakout + 1w pivot direction + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts with weekly pivot alignment and volume spikes capture 
-institutional participation during trend acceleration. Weekly pivot provides structural 
-bias from higher timeframe, reducing false breakouts in choppy markets. Works in bull 
-markets (breakouts with volume) and bear markets (breakdowns with volume). Uses discrete 
-position sizing (0.25) to limit fee drag and ensure 50-150 total trades over 4 years.
+Experiment #2355: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
+HYPOTHESIS: Donchian channel breakouts on 6h timeframe aligned with weekly pivot bias 
+and volume spikes capture institutional participation. Weekly pivots provide structural 
+support/resistance from longer-term market participants. Volume confirmation ensures 
+breakouts have genuine interest. Works in bull markets (breakouts with volume above 
+weekly pivot) and bear markets (breakdowns with volume below weekly pivot). Uses 
+discrete position sizing (0.25) to limit fee drag and ensure 50-150 total trades over 4 years.
 """
 
 import numpy as np
@@ -23,14 +24,13 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for pivot points (Call ONCE before loop) ===
+    # === HTF: 1w data for weekly pivot points (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot points (standard formula)
-    # Pivot = (H + L + C) / 3
+    # Calculate weekly pivot points: P = (H + L + C)/3
     # R1 = 2*P - L, S1 = 2*P - H
     # R2 = P + (H - L), S2 = P - (H - L)
     # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
@@ -42,7 +42,7 @@ def generate_signals(prices):
     r3_1w = high_1w + 2 * (pivot_1w - low_1w)
     s3_1w = low_1w - 2 * (high_1w - pivot_1w)
     
-    # Determine weekly bias: price above pivot = bullish, below = bearish
+    # Determine weekly bias: price above weekly pivot = bullish bias
     weekly_bias = np.where(close_1w > pivot_1w, 1, -1)
     weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias)
     
@@ -117,11 +117,11 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require weekly pivot bias for directional filter
+        # Require weekly pivot bias for direction filter
         bias = weekly_bias_aligned[i]
         
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike and bias != 0:
             # Long entry: price breaks above Donchian high with bullish weekly bias
