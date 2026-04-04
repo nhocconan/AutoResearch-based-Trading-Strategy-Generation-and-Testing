@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #5755: 6h Donchian(20) breakout + 1w Camarilla pivot + volume confirmation
-HYPOTHESIS: Weekly Camarilla pivot levels (R4/S4) act as strong support/resistance. 
-Breakouts beyond R4/S4 with volume confirmation capture sustained moves. 
-6h timeframe balances responsiveness with low overtrading. 
-Works in bull markets (breakout continuation) and bear markets (mean reversion at extremes).
-Target: 75-150 total trades over 4 years (19-37/year).
+Experiment #5755: 6h Donchian(20) breakout + 1w Camarilla pivot regime + volume confirmation
+HYPOTHESIS: Donchian breakouts aligned with weekly Camarilla pivot structure (R3/S3 for mean reversion, R4/S4 for continuation) capture sustained moves while avoiding false breakouts. Volume > 1.5x average confirms breakout strength. In bear markets (price < weekly pivot), favor shorts at R3/R4; in bull markets (price > weekly pivot), favor longs at S3/S4. This adapts to regime via pivot levels, working in both bull and bear environments. Uses 6h timeframe for lower fee drag vs lower timeframes.
 """
 
 import numpy as np
@@ -29,26 +25,34 @@ def generate_signals(prices):
     # === HTF: 1w data for Camarilla pivot levels ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 1:
-        # Calculate weekly OHLC for Camarilla
-        weekly_high = df_1w['high'].values
-        weekly_low = df_1w['low'].values
-        weekly_close = df_1w['close'].values
+        # Calculate weekly Camarilla levels from previous week's OHLC
+        # Using rolling window of 1 week for H, L, C
+        weekly_high = df_1w['high'].rolling(window=1, min_periods=1).max().values  # current week high
+        weekly_low = df_1w['low'].rolling(window=1, min_periods=1).min().values    # current week low
+        weekly_close = df_1w['close'].rolling(window=1, min_periods=1).mean().values # current week close
         
-        # Camarilla levels: R4 = close + ((high-low) * 1.1/2), S4 = close - ((high-low) * 1.1/2)
-        camarilla_r4 = weekly_close + ((weekly_high - weekly_low) * 1.1 / 2)
-        camarilla_s4 = weekly_close - ((weekly_high - weekly_low) * 1.1 / 2)
-        
-        # Pivot point (optional for bias)
-        camarilla_pivot = (weekly_high + weekly_low + weekly_close) / 3
+        # Camarilla formula: 
+        # H4 = Close + 1.5*(High-Low)
+        # L4 = Close - 1.5*(High-Low)
+        # H3 = Close + 1.125*(High-Low)
+        # L3 = Close - 1.125*(High-Low)
+        # H3 and L3 are key reversal levels
+        rng = weekly_high - weekly_low
+        camarilla_h3 = weekly_close + 1.125 * rng
+        camarilla_l3 = weekly_close - 1.125 * rng
+        camarilla_h4 = weekly_close + 1.5 * rng
+        camarilla_l4 = weekly_close - 1.5 * rng
     else:
-        camarilla_r4 = np.full(len(df_1w), np.nan)
-        camarilla_s4 = np.full(len(df_1w), np.nan)
-        camarilla_pivot = np.full(len(df_1w), np.nan)
+        camarilla_h3 = np.full(len(df_1w), np.nan)
+        camarilla_l3 = np.full(len(df_1w), np.nan)
+        camarilla_h4 = np.full(len(df_1w), np.nan)
+        camarilla_l4 = np.full(len(df_1w), np.nan)
     
     # Align weekly Camarilla levels to 6h timeframe (shifted by 1 for completed weeks only)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
-    camarilla_pivot_aligned = align_htf_to_ltf(prices, df_1w, camarilla_pivot)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l3)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_l4)
     
     # === 6h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -89,7 +93,8 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i])):
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -100,8 +105,8 @@ def generate_signals(prices):
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
                 stop_price = highest_since_entry - 2.5 * atr[i]
-                # Exit: stoploss OR price breaks below weekly S4 (mean reversion)
-                if price <= stop_price or price <= camarilla_s4_aligned[i]:
+                # Exit: stoploss OR price breaks below Camarilla L3 (mean reversion)
+                if price <= stop_price or price <= camarilla_l3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -110,8 +115,8 @@ def generate_signals(prices):
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 stop_price = lowest_since_entry + 2.5 * atr[i]
-                # Exit: stoploss OR price breaks above weekly R4 (mean reversion)
-                if price >= stop_price or price >= camarilla_r4_aligned[i]:
+                # Exit: stoploss OR price breaks above Camarilla H3 (mean reversion)
+                if price >= stop_price or price >= camarilla_h3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -122,25 +127,31 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 2.0
+        volume_confirmed = volume_ratio[i] > 1.5
         
-        # Camarilla bias: long above weekly pivot, short below weekly pivot
-        long_bias = price > camarilla_pivot_aligned[i]
-        short_bias = price < camarilla_pivot_aligned[i]
+        # Camarilla regime: 
+        # In bull regime (price > weekly pivot): look for longs at S3/S4, shorts at R3/R4
+        # In bear regime (price < weekly pivot): look for shorts at R3/R4, longs at S3/S4
+        weekly_pivot = (camarilla_h3_aligned[i] + camarilla_l3_aligned[i]) / 2
+        bull_regime = price > weekly_pivot
+        bear_regime = price < weekly_pivot
         
-        # Entry conditions: Donchian breakout beyond Camarilla R4/S4 with volume
-        # R4/S4 act as breakout thresholds - only enter when breaking these key levels
-        long_setup = breakout_up and volume_confirmed and long_bias and (price > camarilla_r4_aligned[i])
-        short_setup = breakout_down and volume_confirmed and short_bias and (price < camarilla_s4_aligned[i])
+        # Long setups: breakout up with volume, aligned with regime
+        long_setup_breakout = breakout_up and volume_confirmed
+        long_setup_pullback = (price <= camarilla_l3_aligned[i] * 1.005) and volume_confirmed and bull_regime  # near S3 in bull
         
-        if long_setup:
+        # Short setups: breakout down with volume, aligned with regime
+        short_setup_breakout = breakout_down and volume_confirmed
+        short_setup_pullback = (price >= camarilla_h3_aligned[i] * 0.995) and volume_confirmed and bear_regime  # near R3 in bear
+        
+        if long_setup_breakout or long_setup_pullback:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif short_setup:
+        elif short_setup_breakout or short_setup_pullback:
             in_position = True
             position_side = -1
             entry_price = close[i]
