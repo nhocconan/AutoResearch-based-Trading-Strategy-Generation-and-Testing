@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #6345: 12h Donchian(20) breakout + 1d HMA21 trend + volume confirmation
-HYPOTHESIS: Tight Donchian breakouts on 12h with 1d HMA21 trend filter and volume > 1.8x average capture institutional momentum in both bull and bear markets. 
+Experiment #6346: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation
+HYPOTHESIS: Tight Donchian breakouts on 4h with 1d HMA21 trend filter and volume > 1.8x average capture institutional momentum in both bull and bear markets. 
 The 1d HMA21 provides smooth trend direction that adapts to changing market regimes while reducing whipsaw. Volume filter ensures breakouts have participation. 
-Uses discrete sizing (0.25) to minimize fee churn. Target: 50-150 trades over 4 years (12-37/year).
+Uses discrete sizing (0.25) to minimize fee churn. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6345_12h_donchian20_1d_hma_vol_v1"
-timeframe = "12h"
+name = "exp_6346_4h_donchian20_1d_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -37,15 +37,15 @@ def generate_signals(prices):
     else:
         hma_1d_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation ===
+    # === 4h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 12h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
