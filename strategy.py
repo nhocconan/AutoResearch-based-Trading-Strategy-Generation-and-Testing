@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #4460: 4h Donchian(20) Breakout + 1d EMA50 Trend + Volume Confirmation
+Experiment #4461: 4h Donchian(20) Breakout + 1d EMA50 Trend + Volume Confirmation
 HYPOTHESIS: 4h Donchian(20) breakouts aligned with 1d EMA50 trend direction and confirmed by volume (>1.8x average) capture institutional momentum with minimal false signals. The 1d EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4460_4h_donchian20_1d_ema50_vol_v1"
+name = "exp_4461_4h_donchian20_1d_ema50_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
