@@ -2,7 +2,7 @@
 """
 Experiment #3149: 4h Donchian Breakout + 1d EMA Trend + Volume Spike
 HYPOTHESIS: 4h Donchian(20) breakouts capture medium-term trends with controlled trade frequency. 
-1d EMA(50) trend filter ensures alignment with higher timeframe momentum. Volume spike (>2.0x 
+1d EMA(50) trend filter ensures alignment with higher timeframe direction. Volume spike (>2.0x 
 20-period average) confirms breakout strength. ATR-based trailing stop (2.5x) manages risk. 
 Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year). Designed to work in 
 both bull (trend continuation) and bear (mean reversion from extremes) markets by using price 
@@ -134,3 +134,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
