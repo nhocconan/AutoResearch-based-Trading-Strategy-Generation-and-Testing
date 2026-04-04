@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #2519: 6h Donchian(20) breakout + 12h pivot direction + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h with 12h trend alignment and volume spikes capture 
+Experiment #2519: 6h Donchian(20) breakout + 12h trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 6h with 12h EMA trend alignment and volume spikes capture 
 institutional participation during trend acceleration. Works in bull markets (breakouts with volume) 
 and bear markets (breakdowns with volume). Uses discrete position sizing (0.25) to limit fee drag 
 and ensure statistical significance with 75-200 total trades over 4 years.
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2519_6h_donchian20_12h_trend_vol_v1"
+name = "exp_2519_6h_donchian20_12h_ema_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -22,11 +22,11 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for trend (Call ONCE before loop) ===
+    # === HTF: 12h data for EMA trend (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
-    # Calculate 12h EMA(50) for trend
+    # Calculate 12h EMA(50)
     ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
     trend_12h = np.where(close_12h > ema_12h, 1, -1)
     trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
@@ -131,5 +131,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
