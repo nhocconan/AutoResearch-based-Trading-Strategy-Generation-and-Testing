@@ -6,7 +6,7 @@ In bull markets: long when price > 1d pivot and breaks Donchian high with volume
 In bear markets: short when price < 1d pivot and breaks Donchian low with volume.
 Uses 1d Camarilla pivots (calculated from prior 1d OHLC) to define institutional support/resistance.
 Volume confirmation ensures breakouts have conviction. Designed for low-frequency, high-conviction trades.
-Target: 75-150 total trades over 4 years (19-38/year) to minimize fee drag.
+Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
