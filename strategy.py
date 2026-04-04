@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #4197: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture momentum when aligned with 1d EMA(50) trend
-and confirmed by volume (>1.8x average). The 1d EMA provides long-term trend bias that adapts to
+Experiment #4198: 1d Donchian(20) breakout + 1w EMA(50) trend + volume confirmation
+HYPOTHESIS: Donchian channel breakouts on 1d timeframe capture momentum when aligned with 1w EMA(50) trend
+and confirmed by volume (>1.8x average). The 1w EMA provides long-term trend bias that adapts to
 both bull and bear markets by identifying the prevailing direction. Discrete position sizing (0.25)
-limits fee churn, targeting 75-200 total trades over 4 years (19-50/year).
+limits fee churn, targeting 75-250 total trades over 4 years (19-62/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4197_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_4198_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,16 +22,16 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === Precompute HTF: 1d data for EMA(50) trend ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
-        close_1d = df_1d['close'].values
-        ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === Precompute HTF: 1w data for EMA(50) trend ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 50:
+        close_1w = df_1w['close'].values
+        ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        ema_1w_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel (20) ===
+    # === 1d Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -39,12 +39,12 @@ def generate_signals(prices):
     
     donch_upper, donch_lower = calculate_donchian(high, low, 20)
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 1d Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -67,7 +67,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -105,9 +105,9 @@ def generate_signals(prices):
             breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
             breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
             
-            # 1d EMA trend bias: price above EMA = bullish, below = bearish
-            bullish_bias = price > ema_1d_aligned[i]
-            bearish_bias = price < ema_1d_aligned[i]
+            # 1w EMA trend bias: price above EMA = bullish, below = bearish
+            bullish_bias = price > ema_1w_aligned[i]
+            bearish_bias = price < ema_1w_aligned[i]
             
             # Long conditions: Donchian breakout up + bullish bias + volume confirmation
             long_entry = breakout_up and bullish_bias
