@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #5265: 12h Donchian Breakout + Volume Spike + Regime Filter (1d)
-HYPOTHESIS: On 12h timeframe, price breaking Donchian(20) channels from 1d timeframe with volume spike (>1.5x) in the direction of 1d trend (price > 1d EMA50 = bullish, < 1d EMA50 = bearish) captures institutional breakouts while avoiding false moves. Uses discrete position sizing (0.25) and session filter (08-20 UTC) to reduce overtrading. Designed for 12-37 trades/year on 12h timeframe (50-150 total over 4 years) to minimize fee drag. Works in bull markets (breakouts continue uptrend) and bear markets (breakouts continue downtrend) by aligning with higher timeframe direction.
+Experiment #5265: 12h Donchian(20) breakout + volume spike + 1d EMA50 regime filter
+HYPOTHESIS: On 12h timeframe, price breaking Donchian(20) channels from 1d timeframe with volume spike (>1.8x) in the direction of 1d trend (price > 1d EMA50 = bullish, < 1d EMA50 = bearish) captures institutional breakouts while avoiding false moves. Uses discrete position sizing (0.25) and ATR trailing stop (2.0x) to manage risk. Designed for 12-37 trades/year on 12h timeframe (50-150 total over 4 years) to minimize fee drag. Works in bull markets (breakouts continue uptrend) and bear markets (breakouts continue downtrend) by aligning with higher timeframe direction.
 """
 
 import numpy as np
@@ -23,7 +23,7 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === HTF: 1d data for Donchian channels (structure) and EMA50 (regime) ===
+    # === HTF: 1d data for Donchian channels (structure) ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 20:
         # Donchian(20) on prior completed 1d bar (shift(1) in align)
@@ -31,16 +31,18 @@ def generate_signals(prices):
         donch_low = pd.Series(df_1d['low']).rolling(window=20, min_periods=20).min().shift(1).values
         donch_high_aligned = align_htf_to_ltf(prices, df_1d, donch_high)
         donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
-        
-        # EMA50 on prior completed 1d bar
-        ema_50 = pd.Series(df_1d['close']).ewm(span=50, min_periods=50, adjust=False).mean().shift(1).values
-        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     else:
         donch_high_aligned = np.full(n, np.nan)
         donch_low_aligned = np.full(n, np.nan)
+    
+    # === HTF: 1d data for regime filter (EMA50) ===
+    if len(df_1d) >= 50:
+        ema_50 = pd.Series(df_1d['close']).ewm(span=50, min_periods=50, adjust=False).mean().shift(1).values
+        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    else:
         ema_50_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Volume confirmation (1.5x spike) ===
+    # === 12h Indicators: Volume confirmation (1.8x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -103,8 +105,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>1.5x)
-        vol_confirm = vol_ratio[i] > 1.5
+        # Volume filter: confirmation (>1.8x)
+        vol_confirm = vol_ratio[i] > 1.8
         
         # Regime filter: bullish if price > 1d EMA50, bearish if price < 1d EMA50
         regime_bullish = price > ema_50_aligned[i]
