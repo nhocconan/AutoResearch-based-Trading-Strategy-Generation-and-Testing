@@ -1,36 +1,17 @@
 #!/usr/bin/env python3
-"""
-Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter and volume confirmation.
-Works in both bull and bear markets because:
-- Donchian breakouts capture strong momentum moves
-- 1w HMA ensures we only trade with the higher timeframe trend
-- Volume confirmation reduces false breakouts
-- ATR-based stoploss manages risk
-Target: 30-100 trades over 4 years (7-25/year) on 1d timeframe.
-"""
+# exp_6459_6h_donchian20_12h_pivot_vol_v1
+# Hypothesis: 6h Donchian(20) breakout with 12h Camarilla pivot direction filter and volume confirmation.
+# In bull markets, breakouts above R4 continue; in bear markets, breakdowns below S4 continue.
+# Weekly pivot adds structural bias. Volume confirms momentum. Designed for low frequency (~20-50/year).
+# Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. Includes ATR-based stoploss.
 
-name = "exp_6458_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_6459_6h_donchian20_12h_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
-
-def calculate_hma(arr, period):
-    """Hull Moving Average"""
-    if len(arr) < period:
-        return np.full_like(arr, np.nan, dtype=float)
-    half = period // 2
-    sqrt = int(np.sqrt(period))
-    wma2 = np.convolve(arr, np.ones(half)/half, mode='same')
-    wma1 = np.convolve(arr, np.ones(period)/period, mode='same')
-    raw = 2 * wma2 - wma1
-    hma = np.convolve(raw, np.ones(sqrt)/sqrt, mode='same')
-    # Fill edges
-    hma[:half] = hma[half]
-    hma[-sqrt:] = hma[-sqrt-1] if len(hma) > sqrt else hma[0]
-    return hma
 
 def generate_signals(prices):
     n = len(prices)
@@ -38,92 +19,111 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    hma_1w = calculate_hma(df_1w['close'].values, 21)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Pre-calculate indicators
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
+    # Calculate 12h Camarilla pivot levels (based on prior 12h bar)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Donchian channels (20-period)
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(lookback-1, n):
-        highest_high[i] = np.max(high[i-lookback+1:i+1])
-        lowest_low[i] = np.min(low[i-lookback+1:i+1])
+    # Pivot point
+    pp_12h = (high_12h + low_12h + close_12h) / 3.0
+    # Camarilla levels
+    r4_12h = pp_12h + ((high_12h - low_12h) * 1.1 / 2.0)
+    s4_12h = pp_12h - ((high_12h - low_12h) * 1.1 / 2.0)
+    r3_12h = pp_12h + ((high_12h - low_12h) * 1.1 / 4.0)
+    s3_12h = pp_12h - ((high_12h - low_12h) * 1.1 / 4.0)
     
-    # Average True Range for stoploss
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
+    # Align to 6h timeframe (shifted by 1 for completed bars only)
+    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
+    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    
+    # Calculate 6h Donchian channels (20-period)
+    high_6h = prices['high'].values
+    low_6h = prices['low'].values
+    close_6h = prices['close'].values
+    
+    # Donchian upper/lower (20-period lookback)
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donch_high[i] = np.max(high_6h[i-20:i])
+        donch_low[i] = np.min(low_6h[i-20:i])
+    
+    # Volume confirmation: 6h volume > 1.5 * 20-period average
+    volume_6h = prices['volume'].values
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume_6h[i-20:i])
+    vol_ratio = np.where(vol_ma > 0, volume_6h / vol_ma, 0)
+    
+    # ATR for stoploss (14-period)
+    tr1 = high_6h[1:] - low_6h[1:]
+    tr2 = np.abs(high_6h[1:] - close_6h[:-1])
+    tr3 = np.abs(low_6h[1:] - close_6h[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.zeros(n)
-    for i in range(1, n):
-        if i < 14:
-            atr[i] = np.nan
-        else:
-            atr[i] = np.nanmean(tr[i-13:i+1])
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        atr[i] = np.mean(tr[i-13:i+1])  # Simple ATR
     
-    # Volume average (20-period)
-    vol_ma = np.zeros(n)
-    for i in range(n):
-        if i < 19:
-            vol_ma[i] = np.nan
-        else:
-            vol_ma[i] = np.mean(volume[i-19:i+1])
-    
+    # Initialize signals
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    
+    # Track position state for stoploss
+    position_side = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start from sufficient lookback
-    start_idx = max(lookback, 21)  # Ensure we have enough data
+    # Start from index 20 (enough for Donchian and volume MA)
+    start_idx = max(20, 14)  # ATR needs 14
     
     for i in range(start_idx, n):
-        # Skip if any required data is NaN
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]) or np.isnan(hma_1w_aligned[i]):
+        # Skip if any required value is NaN
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(atr[i]):
             continue
             
-        # Volume confirmation: current volume > 1.5x average
-        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        current_price = close_6h[i]
         
-        # Trend filter: price above/below 1w HMA
-        price_above_hma = close[i] > hma_1w_aligned[i]
-        price_below_hma = close[i] < hma_1w_aligned[i]
+        # Check stoploss for existing position
+        if position_side == 1:  # Long position
+            if current_price < entry_price - 2.0 * atr[i]:
+                signals[i] = 0.0
+                position_side = 0
+                continue
+        elif position_side == -1:  # Short position
+            if current_price > entry_price + 2.0 * atr[i]:
+                signals[i] = 0.0
+                position_side = 0
+                continue
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > highest_high[i] and vol_confirm and price_above_hma
-        short_breakout = close[i] < lowest_low[i] and vol_confirm and price_below_hma
+        # Entry conditions
+        long_signal = False
+        short_signal = False
         
-        # Exit conditions
-        exit_long = position == 1 and (close[i] < lowest_low[i] or close[i] < entry_price - 2.5 * atr[i])
-        exit_short = position == -1 and (close[i] > highest_high[i] or close[i] > entry_price + 2.5 * atr[i])
+        # Long: price breaks above Donchian high AND above 12h R4 AND volume confirmation
+        if (current_price > donch_high[i] and 
+            current_price > r4_12h_aligned[i] and 
+            vol_ratio[i] > 1.5):
+            long_signal = True
+            
+        # Short: price breaks below Donchian low AND below 12h S4 AND volume confirmation
+        if (current_price < donch_low[i] and 
+            current_price < s4_12h_aligned[i] and 
+            vol_ratio[i] > 1.5):
+            short_signal = True
         
         # Generate signals
-        if position == 0:
-            if long_breakout:
-                signals[i] = 0.30  # Long 30%
-                position = 1
-                entry_price = close[i]
-            elif short_breakout:
-                signals[i] = -0.30  # Short 30%
-                position = -1
-                entry_price = close[i]
-        elif position == 1:
-            if exit_long:
-                signals[i] = 0.0  # Exit long
-                position = 0
-            else:
-                signals[i] = 0.30  # Hold long
-        elif position == -1:
-            if exit_short:
-                signals[i] = 0.0  # Exit short
-                position = 0
-            else:
-                signals[i] = -0.30  # Hold short
+        if long_signal and position_side <= 0:
+            signals[i] = 0.25  # Long 25%
+            position_side = 1
+            entry_price = current_price
+        elif short_signal and position_side >= 0:
+            signals[i] = -0.25  # Short 25%
+            position_side = -1
+            entry_price = current_price
+        elif position_side == 0:
+            signals[i] = 0.0  # Flat
+        # If already in position and no stoploss/exit signal, hold position (signal remains unchanged)
     
     return signals
