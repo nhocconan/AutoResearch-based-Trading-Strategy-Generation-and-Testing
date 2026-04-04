@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #6257: 4h Donchian(20) breakout + 1d/1w HTF filters + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 trend and 1w Camarilla pivot extremes (R4/S4) capture institutional participation in both bull and bear markets. Volume >2.0x average confirms conviction. Discrete sizing (0.25) manages fee drag. Target: 75-200 trades over 4 years (19-50/year) for 4h timeframe. Works in bull markets (breakout continuation above R4) and bear markets (mean reversion from S4/R4 extremes).
+Experiment #6258: 1d Donchian(20) breakout + 1w Camarilla pivot + volume confirmation
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly Camarilla pivot levels (R4/S4 for continuation, R3/S3 for mean reversion) capture institutional order flow on higher timeframes. Volume >2.0x average confirms participation. Uses 1w HTF for pivot calculation. Discrete sizing (0.25) manages fee drag. Target: 30-100 trades over 4 years (7-25/year) for 1d timeframe. Works in both bull (breakout continuation) and bear (mean reversion at extremes) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6257_4h_donchian20_1d_1w_ema_camarilla_vol_v1"
-timeframe = "4h"
+name = "exp_6258_1d_donchian20_1w_camarilla_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,17 +22,10 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for EMA50 trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    else:
-        ema_1d_aligned = np.full(n, np.nan)
-    
     # === HTF: 1w data for Camarilla pivot levels ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 2:
+    if len(df_1w) >= 2:  # Need at least 2 weekly bars for pivot calculation
+        # Calculate Camarilla pivot levels from previous week
         high_1w = df_1w['high'].values
         low_1w = df_1w['low'].values
         close_1w = df_1w['close'].values
@@ -47,26 +40,26 @@ def generate_signals(prices):
         s3 = pivot - (range_1w * 1.1 / 4)
         s4 = pivot - (range_1w * 1.1 / 2)
         
-        # Align to 4h timeframe (shift(1) inside align_htf_to_ltf for completed bars only)
-        r4_4h = align_htf_to_ltf(prices, df_1w, r4)
-        r3_4h = align_htf_to_ltf(prices, df_1w, r3)
-        s3_4h = align_htf_to_ltf(prices, df_1w, s3)
-        s4_4h = align_htf_to_ltf(prices, df_1w, s4)
+        # Align to 1d timeframe (shift(1) inside align_htf_to_ltf for completed bars only)
+        r4_1d = align_htf_to_ltf(prices, df_1w, r4)
+        r3_1d = align_htf_to_ltf(prices, df_1w, r3)
+        s3_1d = align_htf_to_ltf(prices, df_1w, s3)
+        s4_1d = align_htf_to_ltf(prices, df_1w, s4)
     else:
-        r4_4h = np.full(n, np.nan)
-        r3_4h = np.full(n, np.nan)
-        s3_4h = np.full(n, np.nan)
-        s4_4h = np.full(n, np.nan)
+        r4_1d = np.full(n, np.nan)
+        r3_1d = np.full(n, np.nan)
+        s3_1d = np.full(n, np.nan)
+        s4_1d = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === 1d Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation ===
+    # === 1d Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 4h Indicators: ATR(14) for trailing stop ===
+    # === 1d Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -85,7 +78,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50) + 1  # Donchian, volume avg, ATR, 1d EMA + 1
+    warmup = max(20, 20, 14) + 1  # Donchian, volume avg, ATR + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (22:00-23:59 UTC) ---
@@ -97,8 +90,8 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_1d_aligned[i]) or np.isnan(r4_4h[i]) or
-            np.isnan(r3_4h[i]) or np.isnan(s3_4h[i]) or np.isnan(s4_4h[i])):
+            np.isnan(r4_1d[i]) or np.isnan(r3_1d[i]) or
+            np.isnan(s3_1d[i]) or np.isnan(s4_1d[i])):
             signals[i] = 0.0
             continue
         
@@ -113,7 +106,7 @@ def generate_signals(prices):
                 # 1. Stoploss
                 # 2. Price breaks below Donchian low (failed breakout)
                 # 3. Mean reversion: price reaches S3 (strong support) in bullish context
-                if price <= stop_price or price <= donchian_low[i] or price <= s3_4h[i]:
+                if price <= stop_price or price <= donchian_low[i] or price <= s3_1d[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -126,7 +119,7 @@ def generate_signals(prices):
                 # 1. Stoploss
                 # 2. Price breaks above Donchian high (failed breakout)
                 # 3. Mean reversion: price reaches R3 (strong resistance) in bearish context
-                if price >= stop_price or price >= donchian_high[i] or price >= r3_4h[i]:
+                if price >= stop_price or price >= donchian_high[i] or price >= r3_1d[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -138,22 +131,20 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 2.0  # Strong volume filter
-        price_above_1d_ema = price > ema_1d_aligned[i]
-        price_below_1d_ema = price < ema_1d_aligned[i]
         
-        # Entry logic based on HTF filters:
+        # Entry logic based on Camarilla zones:
         # LONG: 
-        #   - Breakout above Donchian high with volume AND price > R4 (continuation) AND above 1d EMA50
-        #   - OR mean reversion from extreme low: price < S4 AND breaking above Donchian low with volume AND above 1d EMA50
+        #   - Breakout above Donchian high with volume AND price > R4 (continuation)
+        #   - OR mean reversion from extreme low: price < S4 AND breaking above Donchian low with volume
         # SHORT:
-        #   - Breakout below Donchian low with volume AND price < S4 (continuation) AND below 1d EMA50
-        #   - OR mean reversion from extreme high: price > R4 AND breaking below Donchian high with volume AND below 1d EMA50
+        #   - Breakout below Donchian low with volume AND price < S4 (continuation)
+        #   - OR mean reversion from extreme high: price > R4 AND breaking below Donchian high with volume
         
-        long_breakout = breakout_up and volume_confirmed and price > r4_4h[i] and price_above_1d_ema
-        long_mean_reversion = (price < s4_4h[i]) and breakout_up and volume_confirmed and price > donchian_low[i-1] and price_above_1d_ema
+        long_breakout = breakout_up and volume_confirmed and price > r4_1d[i]
+        long_mean_reversion = (price < s4_1d[i]) and breakout_up and volume_confirmed and price > donchian_low[i-1]
         
-        short_breakout = breakout_down and volume_confirmed and price < s4_4h[i] and price_below_1d_ema
-        short_mean_reversion = (price > r4_4h[i]) and breakout_down and volume_confirmed and price < donchian_high[i-1] and price_below_1d_ema
+        short_breakout = breakout_down and volume_confirmed and price < s4_1d[i]
+        short_mean_reversion = (price > r4_1d[i]) and breakout_down and volume_confirmed and price < donchian_high[i-1]
         
         long_entry = long_breakout or long_mean_reversion
         short_entry = short_breakout or short_mean_reversion
