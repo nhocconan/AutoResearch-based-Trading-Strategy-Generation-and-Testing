@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #2819: 6h Elder Ray Power + 12h ADX Regime + Volume Spike
-HYPOTHESIS: Combines Elder Ray (bull/bear power) for momentum strength with 12h ADX regime filter 
-(trending vs ranging) and volume confirmation to capture strong directional moves while avoiding 
-whipsaws in low-volume or choppy markets. Works in both bull/bear markets by adapting to regime.
-Target: 75-150 total trades over 4 years.
+Experiment #2820: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA trend and volume spikes capture
+strong momentum moves while avoiding whipsaws. Daily trend filter provides robust bias
+for both bull and bear markets, reducing counter-trend entries. 4h timeframe balances
+trend capture with reasonable trade frequency. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2819_6h_elder_ray_adx_regime_vol_v1"
-timeframe = "6h"
+name = "exp_2820_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,78 +22,31 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for ADX regime filter (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate ADX(14) on 12h
-    def calculate_adx(high, low, close, period=14):
-        plus_dm = np.zeros_like(high)
-        minus_dm = np.zeros_like(high)
-        tr = np.zeros_like(high)
-        
-        for i in range(1, len(high)):
-            plus_dm[i] = max(0, high[i] - high[i-1])
-            minus_dm[i] = max(0, low[i-1] - low[i])
-            if plus_dm[i] == minus_dm[i]:
-                plus_dm[i] = 0
-                minus_dm[i] = 0
-            elif plus_dm[i] < minus_dm[i]:
-                plus_dm[i] = 0
-            else:
-                minus_dm[i] = 0
-            
-            tr[i] = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
-        
-        # Wilder's smoothing
-        atr = np.zeros_like(high)
-        atr[period] = np.nansum(tr[1:period+1]) / period
-        for i in range(period+1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = np.zeros_like(high)
-        minus_di = np.zeros_like(high)
-        dx = np.zeros_like(high)
-        
-        if np.sum(atr[period+1:]) > 0:
-            plus_sm = np.zeros_like(high)
-            minus_sm = np.zeros_like(high)
-            plus_sm[period] = np.nansum(plus_dm[1:period+1]) / period
-            minus_sm[period] = np.nansum(minus_dm[1:period+1]) / period
-            
-            for i in range(period+1, len(high)):
-                plus_sm[i] = (plus_sm[i-1] * (period-1) + plus_dm[i]) / period
-                minus_sm[i] = (minus_sm[i-1] * (period-1) + minus_dm[i]) / period
-                
-                plus_di[i] = 100 * plus_sm[i] / atr[i]
-                minus_di[i] = 100 * minus_sm[i] / atr[i]
-                dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
-        
-        adx = np.full_like(high, np.nan)
-        if np.sum(dx[2*period+1:]) > 0:
-            adx[2*period] = np.nansum(dx[period+1:2*period+1]) / period
-            for i in range(2*period+1, len(high)):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-        
-        return adx
+    # Calculate 1d EMA(50)
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    
-    # === 6h Indicators: Elder Ray Power, EMA(13), Volume MA(20) ===
-    # EMA(13) for Elder Ray
-    ema_13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    
-    # Elder Ray Power: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-    bull_power = high - ema_13
-    bear_power = low - ema_13
+    # === 4h Indicators: Donchian(20) channels, Volume MA(20) ===
+    # Donchian channels (20-period high/low)
+    highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume MA for spike detection
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    
+    # === ATR(14) for stoploss ===
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -110,9 +63,9 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(adx_12h_aligned[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(vol_ratio[i])):
+        if (np.isnan(trend_1d_aligned[i]) or
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -123,15 +76,13 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if Elder Ray turns bearish OR ADX drops below 20 (regime change to ranging)
-                if bear_power[i] > bull_power[i] or adx_12h_aligned[i] < 20:
+                # Exit if price drops 2*ATR below highest since entry
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Trailing stop: exit if price drops 2.5*ATR below highest since entry
-                # ATR approximation using 6h range
-                atr_estimate = (high[i] - low[i]) * 0.15  # approximate ATR
-                if price < highest_since_entry - 2.5 * atr_estimate:
+                # Exit if price breaks below Donchian low (mean reversion)
+                elif price < lowest_20[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -139,14 +90,13 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if Elder Ray turns bullish OR ADX drops below 20 (regime change to ranging)
-                if bull_power[i] > bear_power[i] or adx_12h_aligned[i] < 20:
+                # Exit if price rises 2*ATR above lowest since entry
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Trailing stop: exit if price rises 2.5*ATR above lowest since entry
-                atr_estimate = (high[i] - low[i]) * 0.15
-                if price > lowest_since_entry + 2.5 * atr_estimate:
+                # Exit if price breaks above Donchian high (mean reversion)
+                elif price > highest_20[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -155,23 +105,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Regime filter: require ADX > 25 for trending market
-        trending_regime = adx_12h_aligned[i] > 25
+        # Require 1d trend alignment for bias filter
+        trend_bias = trend_1d_aligned[i]
         
-        # Volume confirmation: require volume spike (> 1.8x average)
-        volume_spike = vol_ratio[i] > 1.8
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
-        if trending_regime and volume_spike:
-            # Long entry: Bull Power positive and increasing (momentum building)
-            if bull_power[i] > 0 and bull_power[i] > bull_power[i-1]:
+        if volume_spike:
+            # Long entry: price breaks above Donchian high with uptrend on 1d
+            if trend_bias > 0 and price > highest_20[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Bear Power negative and decreasing (momentum building)
-            elif bear_power[i] < 0 and bear_power[i] < bear_power[i-1]:
+            # Short entry: price breaks below Donchian low with downtrend on 1d
+            elif trend_bias < 0 and price < lowest_20[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
