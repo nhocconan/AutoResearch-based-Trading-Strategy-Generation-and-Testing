@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #2851: 6h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with daily EMA trend and volume spikes capture
-strong momentum moves while minimizing whipsaws. Daily trend filter provides robust bias
-for both bull and bear markets. 6h timeframe balances trade frequency (target: 75-200 total over 4 years)
-with fee drag control. Uses discrete position sizing (0.25) to minimize churn.
+Experiment #2852: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with daily EMA trend and volume spikes capture
+strong momentum moves while avoiding whipsaws. Daily trend filter provides robust bias
+for both bull and bear markets, reducing counter-trend entries. 12h timeframe minimizes
+fee drag while capturing multi-day trends. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2851_6h_donchian20_1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_2852_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,7 +22,7 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA(50) trend (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
@@ -31,7 +31,7 @@ def generate_signals(prices):
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 6h Indicators: Donchian(20) channels, Volume MA(20) ===
+    # === 12h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
