@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #2821: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+Experiment #2821: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation + ATR stoploss
 HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA trend and volume spikes capture
 strong momentum moves while avoiding whipsaws. Daily trend filter provides robust bias
 for both bull and bear markets, reducing counter-trend entries. 4h timeframe balances
-trade frequency and trend capture. Target: 75-200 total trades over 4 years.
+trade frequency and signal quality. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
