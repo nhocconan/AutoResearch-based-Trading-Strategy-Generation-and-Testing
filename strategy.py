@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4614: 1h Camarilla Pivot Breakout with 4h/1d HTF Filter
-HYPOTHESIS: 1h price breaking Camarilla R4/S4 levels (from prior 1d) with volume confirmation and aligned with 4h/1d trend captures strong momentum breakouts. Uses 4h/1d for signal direction (only trade long when 4h/1d both bullish, short when both bearish) and 1h only for entry timing precision. Session filter (08-20 UTC) reduces noise. Discrete sizing (0.20) and ATR trailing stop manage risk. Target: 60-150 total trades over 4 years = 15-37/year on 1h timeframe.
+Experiment #4614: 1h Donchian Breakout + 4h EMA Trend + Volume Confirmation
+HYPOTHESIS: 1h price breaking 20-period Donchian channels with 4h EMA(21) trend alignment and volume (>1.5x average) captures momentum in both bull and bear markets. Uses 4h/1d HTF for signal direction (trend filter and structure), 1h only for entry timing precision. Session filter (08-20 UTC) reduces noise. Discrete sizing (0.20) and ATR trailing stop (2.0x) manage risk. Target: 60-150 total trades over 4 years = 15-37/year on 1h.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4614_1h_camarilla_pivot_4h_1d_vol_v1"
+name = "exp_4614_1h_donchian20_4h_ema_vol_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -17,60 +17,32 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # Precompute session hours ONCE (open_time is already datetime64[ms])
-    hours = pd.DatetimeIndex(open_time).hour
-    
-    # Precompute HTF: 4h and 1d data for trend and Camarilla pivot levels
+    # Precompute HTF: 4h EMA(21) for trend direction
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    # === 4h Indicators: EMA(21) for trend direction ===
-    if len(df_4h) >= 1:
+    if len(df_4h) >= 21:
         ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, min_periods=21, adjust=False).mean().values
+        ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)  # auto shift(1)
     else:
-        ema_4h = np.array([])
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h) if len(ema_4h) > 0 else np.full(n, np.nan)
+        ema_4h_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: EMA(50) for HTF trend filter ===
-    if len(df_1d) >= 1:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Precompute HTF: 1d Donchian(20) for structure (using prior day to avoid look-ahead)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 20:
+        # Use prior day's high/low for Donchian (shifted by 1)
+        prev_high = np.concatenate([[np.nan], df_1d['high'].values[:-1]])
+        prev_low = np.concatenate([[np.nan], df_1d['low'].values[:-1]])
+        # Calculate rolling max/min on prior day data
+        high_series = pd.Series(prev_high)
+        low_series = pd.Series(prev_low)
+        donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+        donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+        donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+        donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     else:
-        ema_1d = np.array([])
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d) if len(ema_1d) > 0 else np.full(n, np.nan)
-    
-    # === 1d Indicators: Camarilla pivot levels from prior 1d OHLC ===
-    if len(df_1d) >= 1:
-        # Use prior day's OHLC (shifted by 1 to avoid look-ahead)
-        ph = np.concatenate([[np.nan], df_1d['high'].values[:-1]])  # prior day high
-        pl = np.concatenate([[np.nan], df_1d['low'].values[:-1]])   # prior day low
-        pc = np.concatenate([[np.nan], df_1d['close'].values[:-1]]) # prior day close
-        
-        # Camarilla calculations
-        rng = ph - pl
-        camarilla_r4 = pc + (rng * 1.1 / 2.0)
-        camarilla_r3 = pc + (rng * 1.1 / 4.0)
-        camarilla_s3 = pc - (rng * 1.1 / 4.0)
-        camarilla_s4 = pc - (rng * 1.1 / 2.0)
-    else:
-        camarilla_r4 = np.array([])
-        camarilla_r3 = np.array([])
-        camarilla_s3 = np.array([])
-        camarilla_s4 = np.array([])
-    
-    # Align Camarilla levels to 1h timeframe
-    if len(camarilla_r4) > 0:
-        r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-        r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-        s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-        s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    else:
-        r4_aligned = np.full(n, np.nan)
-        r3_aligned = np.full(n, np.nan)
-        s3_aligned = np.full(n, np.nan)
-        s4_aligned = np.full(n, np.nan)
+        donchian_high_aligned = np.full(n, np.nan)
+        donchian_low_aligned = np.full(n, np.nan)
     
     # === 1h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -84,6 +56,10 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
+    # Session filter: 08-20 UTC (pre-compute hours for efficiency)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     # === Signals Initialization ===
     signals = np.zeros(n)
     SIZE = 0.20  # 20% position size
@@ -95,29 +71,21 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 21, 50)  # Volume MA, 4h EMA, 1d EMA warmup
+    warmup = max(20, 14, 21)  # Volume MA, ATR, EMA warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
-        # --- Session Filter: 08-20 UTC ---
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        # Session filter
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
         price = close[i]
-        
-        # --- Determine HTF Trend Direction (4h & 1d both bullish/bearish) ---
-        # For long: need both 4h and 1d bullish (price above their EMAs)
-        htf_bullish = (price > ema_4h_aligned[i]) and (price > ema_1d_aligned[i])
-        # For short: need both 4h and 1d bearish (price below their EMAs)
-        htf_bearish = (price < ema_4h_aligned[i]) and (price < ema_1d_aligned[i])
         
         # --- Exit Logic ---
         if in_position:
@@ -143,23 +111,28 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation for breakouts (>1.5x avg volume)
-        vol_breakout = vol_ratio[i] > 1.5
+        # Volume confirmation: >1.5x average volume
+        vol_confirm = vol_ratio[i] > 1.5
         
-        # Breakout conditions: price breaks R4/S4 with volume confirmation AND HTF alignment
-        breakout_long = price > r4_aligned[i] and vol_breakout and htf_bullish
-        breakout_short = price < s4_aligned[i] and vol_breakout and htf_bearish
+        # Breakout conditions: price breaks Donchian levels
+        breakout_long = price > donchian_high_aligned[i] and vol_confirm
+        breakout_short = price < donchian_low_aligned[i] and vol_confirm
         
-        # Enter long on bullish breakout with HTF alignment
-        if breakout_long:
+        # Trend filter: 4h EMA(21) direction
+        # For long: price above 4h EMA (uptrend)
+        # For short: price below 4h EMA (downtrend)
+        trend_long = price > ema_4h_aligned[i]
+        trend_short = price < ema_4h_aligned[i]
+        
+        # Combine: breakout in direction of 4h trend
+        if breakout_long and trend_long:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        # Enter short on bearish breakout with HTF alignment
-        elif breakout_short:
+        elif breakout_short and trend_short:
             in_position = True
             position_side = -1
             entry_price = close[i]
