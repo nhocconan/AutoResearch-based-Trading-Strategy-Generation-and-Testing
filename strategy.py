@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4684: 1d Donchian(20) Breakout + 1w HMA Trend Filter + Volume Confirmation
-HYPOTHESIS: Daily price breaking Donchian(20) channels (from prior 20 daily bars) with volume confirmation and aligned with 1-week HMA21 trend captures momentum in both bull and bear markets. 1-week HMA21 acts as a higher timeframe trend filter: only take longs when price > HMA21, shorts when price < HMA21. This avoids counter-trend whipsaws. Target: 7-25 trades/year on 1d timeframe.
+Experiment #4684: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Confirmation
+HYPOTHESIS: 1d price breaking Donchian(20) channels with volume confirmation (>1.5x avg volume) and aligned with 1w HMA21 trend captures momentum while minimizing whipsaws. 1w HMA21 acts as a smoother trend filter than 1d, reducing false signals in ranging markets. Target: 7-25 trades/year on 1d timeframe.
 """
 
 import numpy as np
@@ -24,13 +24,15 @@ def generate_signals(prices):
     
     # === 1w Indicators: HMA21 for trend filter ===
     if len(df_1w) >= 21:
-        # Hull Moving Average: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        half = 21 // 2
-        sqrt_n = int(np.sqrt(21))
-        wma_half = pd.Series(df_1w['close'].values).ewm(span=half, adjust=False).mean().values
-        wma_full = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False).mean().values
+        # Hull Moving Average calculation
+        df_1w_close = pd.Series(df_1w['close'].values)
+        half_len = 21 // 2
+        sqrt_len = int(np.sqrt(21))
+        
+        wma_half = df_1w_close.ewm(span=half_len, adjust=False).mean()
+        wma_full = df_1w_close.ewm(span=21, adjust=False).mean()
         raw_hma = 2 * wma_half - wma_full
-        hma_1w = pd.Series(raw_hma).ewm(span=sqrt_n, adjust=False).mean().values
+        hma_1w = raw_hma.ewm(span=sqrt_len, adjust=False).mean().values
     else:
         hma_1w = np.full(len(df_1w), np.nan)
     
