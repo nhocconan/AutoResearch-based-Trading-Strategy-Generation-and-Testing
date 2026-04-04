@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 exp_6510_1d_donchian20_1w_ema_vol_v1
-Hypothesis: 1d Donchian(20) breakout with 1w EMA trend filter and volume confirmation.
-Uses 1w EMA(50) as trend filter: long only when price > EMA50, short only when price < EMA50.
-Donchian(20) breakout provides entry timing, volume confirmation filters weak breakouts.
-Designed to work in both bull and bear markets by using 1w EMA as trend filter and Donchian breakouts for momentum.
-Target: 30-100 trades over 4 years (7-25/year) on 1d timeframe.
+Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
+Uses 1w EMA(50) as trend filter to capture major trend direction, reducing whipsaw in sideways markets.
+Donchian(20) breakout on 1d provides entry timing with volume confirmation to filter weak breakouts.
+Designed for low trade frequency (target 30-100 trades over 4 years) to minimize fee drag.
+Uses 1d primary timeframe per experiment instructions.
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
@@ -19,7 +19,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 1.8  # volume must be 1.8x its 20-period MA
+VOL_THRESHOLD = 2.0  # volume must be 2.0x its 20-period MA for confirmation
 SIGNAL_SIZE = 0.25   # 25% position size
 
 def generate_signals(prices):
@@ -109,5 +109,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</output>
