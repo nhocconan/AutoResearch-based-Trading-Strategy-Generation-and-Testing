@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #4181: 4h Donchian(20) breakout + 1d EMA(50) trend + volume spike + ATR stoploss
-HYPOTHESIS: Price breaking the 20-period Donchian channel on 4h timeframe indicates 
-strong momentum. Combined with 1d EMA(50) trend filter and volume confirmation (>1.5x 
-average), this captures sustained moves in both bull and bear markets. ATR-based 
-trailing stop (2.0) limits drawdown. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #4181: 4h Donchian(20) breakout + 1d/1w EMA trend filter + volume confirmation
+HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture strong momentum moves. 
+Filtered by 1d and 1w EMA alignment to ensure trend consistency across timeframes, 
+volume confirmation (>1.5x average) to avoid false breakouts, and ATR-based trailing 
+stoploss for risk management. Uses 0.25 position size targeting 75-200 total trades 
+over 4 years (19-50/year). Works in bull/bear via multi-timeframe trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4181_4h_donchian20_1d_ema_vol_v1"
+name = "exp_4181_4h_donchian20_1d1w_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,7 +24,11 @@ def generate_signals(prices):
     open_time = prices["open_time"].values
     n = len(close)
     
-    # === Precompute HTF: 1d EMA(50) for trend filter ===
+    # === Precompute session filter (08-20 UTC) ===
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # === HTF: 1d EMA(50) for trend filter ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 50:
         ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
@@ -31,7 +36,15 @@ def generate_signals(prices):
     else:
         ema_1d_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian(20) channels ===
+    # === HTF: 1w EMA(50) for stronger trend filter ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 50:
+        ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    else:
+        ema_1w_aligned = np.full(n, np.nan)
+    
+    # === 4h Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
         upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
         lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -62,12 +75,17 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20 + 5, 20 + 5, 50 + 5, 14 + 5)  # Donchian, vol MA, 1d EMA, ATR
+    warmup = max(20 + 5, 20 + 5, 50 + 5, 50 + 5, 14 + 5)  # Donchian, vol MA, 1d EMA, 1w EMA, ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(ema_1w_aligned[i])):
+            signals[i] = 0.0
+            continue
+        
+        # --- Session Filter ---
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
@@ -105,9 +123,10 @@ def generate_signals(prices):
             breakout_upper = price > donch_upper[i]
             breakout_lower = price < donch_lower[i]
             
-            # Trend filter: price above/below 1d EMA(50)
-            bullish_trend = price > ema_1d_aligned[i]
-            bearish_trend = price < ema_1d_aligned[i]
+            # Trend filters: price above both 1d and 1w EMA = bullish bias
+            # price below both 1d and 1w EMA = bearish bias
+            bullish_trend = price > ema_1d_aligned[i] and price > ema_1w_aligned[i]
+            bearish_trend = price < ema_1d_aligned[i] and price < ema_1w_aligned[i]
             
             # Long conditions: Donchian upper breakout + bullish trend + volume confirmation
             long_entry = breakout_upper and bullish_trend
