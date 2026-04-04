@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #6363: 4h Donchian(20) breakout + 12h HMA(21) trend filter + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts with volume confirmation (>1.8x avg) and 12h HMA(21) trend filter capture institutional momentum across market regimes. 
-The 12h HMA provides smoother trend identification than EMA, reducing whipsaw in choppy markets while maintaining responsiveness to strong trends. 
-Volume confirmation filters false breakouts. Discrete sizing (0.25) minimizes fee churn. Target: 75-200 trades over 4 years.
+HYPOTHESIS: 4h Donchian breakouts with volume confirmation (>1.8x avg) and 12h HMA(21) trend filter capture institutional momentum with fewer trades than daily timeframe. 
+HMA provides smoother trend signal than EMA, reducing whipsaw. Volume confirmation filters false breakouts. 
+Target: 75-200 trades over 4 years (discrete sizing 0.25) for SOL/ETH/BTC.
 """
 
 import numpy as np
@@ -29,12 +29,27 @@ def generate_signals(prices):
     if len(df_12h) >= 21:
         # Calculate HMA(21) on 12h close
         close_12h = df_12h['close'].values
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        wma_half = pd.Series(close_12h).ewm(span=half_len, adjust=False).mean().values
-        wma_full = pd.Series(close_12h).ewm(span=21, adjust=False).mean().values
-        hma_12h = 2 * wma_half - wma_full
-        hma_12h = pd.Series(hma_12h).ewm(span=sqrt_len, adjust=False).mean().values
+        n_12h = len(close_12h)
+        half_n = n_12h // 2
+        sqrt_n = int(np.sqrt(n_12h))
+        
+        # WMA for HMA: 2*WMA(n/2) - WMA(n)
+        def wma(values, window):
+            if len(values) < window:
+                return np.full_like(values, np.nan)
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, mode='valid') / weights.sum()
+        
+        wma_half = wma(close_12h, half_n)
+        wma_full = wma(close_12h, n_12h)
+        hma_12h = np.full(n_12h, np.nan)
+        if len(wma_half) >= half_n and len(wma_full) >= 1:
+            hma_12h[half_n-1:half_n-1+len(2*wma_half[-len(wma_full):] - wma_full)] = 2*wma_half[-len(wma_full):] - wma_full
+        # Pad beginning with NaN
+        hma_12h = np.concatenate([np.full(half_n-1, np.nan), hma_12h[half_n-1:]]) if len(hma_12h) >= half_n else np.full(n_12h, np.nan)
+        hma_12h = hma_12h[:n_12h]  # Ensure correct length
+        
+        # Align to 4h timeframe
         hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     else:
         hma_12h_aligned = np.full(n, np.nan)
