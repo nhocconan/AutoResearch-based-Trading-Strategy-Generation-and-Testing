@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3578: 1d Donchian Breakout + 1w EMA Trend + Volume Confirmation
-HYPOTHESIS: Daily Donchian(20) breakouts with weekly EMA(21) trend filter and volume confirmation capture medium-term momentum in both bull and bear markets. Weekly EMA provides multi-week trend direction. Volume confirms breakout strength. Uses discrete position sizing (0.30) to minimize fee churn. Target: 30-100 total trades over 4 years (7-25/year).
+Experiment #3578: 1d Donchian Breakout + 1w HMA Trend + Volume Confirmation
+HYPOTHESIS: Daily Donchian(20) breakouts with 1-week HMA(21) trend filter and volume confirmation capture medium-term momentum. Weekly HMA avoids whipsaws in bear markets while allowing trend participation. Volume spike (>2.0x MA20) confirms institutional interest. Position size 0.25. Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3578_1d_donchian20_1w_ema_vol_v1"
+name = "exp_3578_1d_donchian20_1w_hma_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -19,15 +19,26 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for EMA trend filter (Call ONCE before loop) ===
+    # === HTF: 1w data for HMA trend filter (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate weekly EMA(21)
-    ema_21_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_1w, ema_21_1w)
+    # Calculate HMA(21) on weekly close
+    def hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma1 = pd.Series(arr).rolling(window=half_period, min_periods=half_period).mean().values
+        wma2 = pd.Series(arr).rolling(window=period, min_periods=period).mean().values
+        raw_hma = 2 * wma1 - wma2
+        hma_vals = pd.Series(raw_hma).rolling(window=sqrt_period, min_periods=sqrt_period).mean().values
+        return hma_vals
     
-    # === 1d Indicators: Donchian channels (20-period) for entry timing ===
+    hma_1w = hma(close_1w, 21)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    
+    # === 1d Indicators: Donchian channels (20-period) ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
@@ -37,7 +48,7 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for volatility and trailing stop ===
+    # === 1d Indicators: ATR(14) for volatility and stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -46,7 +57,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -55,12 +66,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 21, 20, 14)  # sufficient for all indicators
+    warmup = max(50, lookback, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(hma_1w_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -76,7 +87,7 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below 1d Donchian low - trend reversal
+                # Exit if price breaks below Donchian low - trend reversal
                 elif price < lowest_low[i]:
                     in_position = False
                     position_side = 0
@@ -90,7 +101,7 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above 1d Donchian high - trend reversal
+                # Exit if price breaks above Donchian high - trend reversal
                 elif price > highest_high[i]:
                     in_position = False
                     position_side = 0
@@ -100,25 +111,25 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) for confirmation
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume spike (> 2.0x average) for confirmation
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Determine market bias relative to weekly EMA
-            price_vs_ema = price - ema_aligned[i]
+            # Determine trend bias from weekly HMA
+            price_vs_hma = price - hma_1w_aligned[i]
             
-            # Long entry: price breaks above 1d Donchian high with bullish bias (above weekly EMA)
+            # Long entry: price breaks above 1d Donchian high with bullish trend (above HMA)
             if (price > highest_high[i] and 
-                price_vs_ema > 0):  # Above weekly EMA = bullish bias
+                price_vs_hma > 0):  # Above weekly HMA = bullish bias
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below 1d Donchian low with bearish bias (below weekly EMA)
+            # Short entry: price breaks below 1d Donchian low with bearish trend (below HMA)
             elif (price < lowest_low[i] and 
-                  price_vs_ema < 0):  # Below weekly EMA = bearish bias
+                  price_vs_hma < 0):  # Below weekly HMA = bearish bias
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
