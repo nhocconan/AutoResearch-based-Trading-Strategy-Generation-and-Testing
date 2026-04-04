@@ -4,6 +4,7 @@ Experiment #2729: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts with 1d EMA trend alignment and volume spikes capture
 institutional participation with optimal frequency for 4h timeframe. Uses 1d for signal
 direction, 4h only for entry timing. Target: 75-200 total trades over 4 years.
+Works in both bull and bear markets by following higher timeframe trend.
 """
 
 import numpy as np
@@ -130,3 +131,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
