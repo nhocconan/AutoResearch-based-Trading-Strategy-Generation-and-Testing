@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #2401: 4h Donchian(20) breakout + 1d/1w EMA trend + volume confirmation
-HYPOTHESIS: Donchian channel breakouts with multi-timeframe trend alignment (1d EMA50 + 1w EMA200) 
-and volume spikes capture institutional participation. Works in bull markets (breakouts with volume) 
-and bear markets (breakdowns with volume). Uses discrete position sizing (0.25) and ATR-based 
-trailing stop to limit drawdown. Target: 75-200 total trades over 4 years.
+Experiment #2401: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: Donchian channel breakouts with daily trend alignment and volume spikes capture 
+institutional participation during trend acceleration. Works in bull markets (breakouts with volume) 
+and bear markets (breakdowns with volume). Uses discrete position sizing (0.25) to limit fee drag 
+and ensure statistical significance with 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2401_4h_donchian20_1d1w_ema_vol_v1"
+name = "exp_2401_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -22,21 +22,14 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d and 1w data for EMA trends (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    df_1w = get_htf_data(prices, '1w')
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(50) and 1w EMA(200)
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1w = pd.Series(df_1w['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-    
-    # Trend: 1 = bullish (price > EMA), -1 = bearish (price < EMA)
-    trend_1d = np.where(df_1d['close'].values > ema_1d, 1, -1)
-    trend_1w = np.where(df_1w['close'].values > ema_1w, 1, -1)
-    
-    # Align HTF trends to LTF (4h)
+    # Calculate 1d EMA(50)
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
     # === 4h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
@@ -59,11 +52,11 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = 200  # sufficient for 1w EMA200
+    warmup = 50  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(trend_1d_aligned[i]) or np.isnan(trend_1w_aligned[i]) or
+        if (np.isnan(trend_1d_aligned[i]) or
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
@@ -76,7 +69,7 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2*ATR below highest since entry
+                # Exit if price drops 2*ATR below highest since entry (using Donchian width as ATR proxy)
                 donchian_width = highest_20[i] - lowest_20[i]
                 atr_estimate = donchian_width * 0.15  # approximate ATR from channel width
                 if price < highest_since_entry - 2.0 * atr_estimate:
@@ -109,34 +102,29 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require BOTH 1d and 1w trend alignment for stronger bias filter
-        trend_bias_1d = trend_1d_aligned[i]
-        trend_bias_1w = trend_1w_aligned[i]
+        # Require 1d trend alignment for bias filter
+        trend_bias = trend_1d_aligned[i]
         
-        # Only trade when both timeframes agree
-        if trend_bias_1d == trend_bias_1w and trend_bias_1d != 0:
-            # Volume confirmation: require volume spike (> 2.0x average)
-            volume_spike = vol_ratio[i] > 2.0
-            
-            if volume_spike:
-                # Long entry: price breaks above Donchian high with uptrend on both TFs
-                if trend_bias_1d > 0 and price > highest_20[i]:
-                    in_position = True
-                    position_side = 1
-                    entry_price = close[i]
-                    highest_since_entry = high[i]
-                    lowest_since_entry = low[i]
-                    signals[i] = SIZE
-                # Short entry: price breaks below Donchian low with downtrend on both TFs
-                elif trend_bias_1d < 0 and price < lowest_20[i]:
-                    in_position = True
-                    position_side = -1
-                    entry_price = close[i]
-                    highest_since_entry = high[i]
-                    lowest_since_entry = low[i]
-                    signals[i] = -SIZE
-                else:
-                    signals[i] = 0.0
+        # Volume confirmation: require volume spike (> 2.0x average)
+        volume_spike = vol_ratio[i] > 2.0
+        
+        if volume_spike and trend_bias != 0:
+            # Long entry: price breaks above Donchian high with uptrend
+            if trend_bias > 0 and price > highest_20[i]:
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                signals[i] = SIZE
+            # Short entry: price breaks below Donchian low with downtrend
+            elif trend_bias < 0 and price < lowest_20[i]:
+                in_position = True
+                position_side = -1
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                signals[i] = -SIZE
             else:
                 signals[i] = 0.0
         else:
