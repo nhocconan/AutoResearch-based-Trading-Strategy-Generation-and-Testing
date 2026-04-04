@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #5965: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 12h aligned with 1d EMA trend capture sustained moves with lower noise.
+HYPOTHESIS: Donchian breakouts on 12h aligned with 1d EMA trend capture sustained moves with lower noise. 
 1d EMA provides structural trend filter (more stable than shorter EMAs). Volume >1.5x average confirms breakout strength.
 ATR trailing stop manages risk. Target: 50-150 trades over 4 years (12-37/year) to minimize fee drift.
 Works in both bull/bear: trend filter prevents counter-trend entries, volume confirmation avoids false breakouts.
@@ -136,3 +136,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
