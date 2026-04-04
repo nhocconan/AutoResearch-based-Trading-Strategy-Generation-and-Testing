@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #2321: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: 4h Donchian breakouts with 1d trend alignment and volume confirmation capture 
-institutional participation during trend acceleration. Works in bull markets (breakouts with volume) 
-and bear markets (breakdowns with volume). Uses discrete position sizing (0.25) to limit fee drag. 
-Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #2322: 12h Donchian(20) breakout + 1d/1w Trend Alignment + Volume Spike
+HYPOTHESIS: 12h Donchian breakouts with 1d/1w trend alignment and volume confirmation 
+capture institutional participation during trend acceleration. Works in bull markets 
+(breakouts with volume) and bear markets (breakdowns with volume). 
+- Entry: Long when price breaks above Donchian(20) upper band with 1d/1w uptrend + volume spike
+         Short when price breaks below Donchian(20) lower band with 1d/1w downtrend + volume spike
+- Exit: Opposite Donchian band or trailing stop (2*ATR from extreme)
+- Volume: > 1.8x 20-bar average spike to confirm participation
+- Target: 50-150 total trades over 4 years (12-37/year) - suitable for 12h timeframe
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2321_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_2322_12h_donchian20_1d1w_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,7 +35,16 @@ def generate_signals(prices):
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 4h Indicators: Donchian(20), Volume MA(20), ATR(14) ===
+    # === HTF: 1w data for EMA trend ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    
+    # Calculate 1w EMA(50)
+    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1w = np.where(close_1w > ema_1w, 1, -1)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    
+    # === 12h Indicators: Donchian(20) bands, ATR(14), Volume MA(20) ===
     # Donchian channels
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -65,8 +78,9 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(trend_1d_aligned[i]) or np.isnan(highest_20[i]) or
-            np.isnan(lowest_20[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(trend_1d_aligned[i]) or np.isnan(trend_1w_aligned[i]) or
+            np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -82,7 +96,7 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below Donchian low (trend reversal)
+                # Exit if price breaks below lower Donchian band (mean reversion)
                 elif price < lowest_20[i]:
                     in_position = False
                     position_side = 0
@@ -96,7 +110,7 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above Donchian high (trend reversal)
+                # Exit if price breaks above upper Donchian band (mean reversion)
                 elif price > highest_20[i]:
                     in_position = False
                     position_side = 0
@@ -106,14 +120,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1d trend alignment for bias filter
-        trend_bias = trend_1d_aligned[i]
+        # Require both 1d and 1w trend alignment for bias filter
+        trend_bias_1d = trend_1d_aligned[i]
+        trend_bias_1w = trend_1w_aligned[i]
         
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Only trade when both timeframes agree
+        if trend_bias_1d == trend_bias_1w:
+            trend_bias = trend_bias_1d  # Either 1 or -1
+        else:
+            trend_bias = 0  # No clear trend, skip
+        
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike and trend_bias != 0:
-            # Long entry: price breaks above Donchian high with uptrend
+            # Long entry: price breaks above upper Donchian band with uptrend on both timeframes
             if trend_bias > 0 and price > highest_20[i]:
                 in_position = True
                 position_side = 1
@@ -121,7 +142,7 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with downtrend
+            # Short entry: price breaks below lower Donchian band with downtrend on both timeframes
             elif trend_bias < 0 and price < lowest_20[i]:
                 in_position = True
                 position_side = -1
