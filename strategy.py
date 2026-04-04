@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #5428: 12h Donchian(20) breakout + 1w EMA trend + volume confirmation
-HYPOTHESIS: On 12h timeframe, price breaking above/below the 20-period Donchian channel 
-with volume > 2.0x average and aligned with the 1-week EMA trend (price above/below EMA(21)) 
-captures strong momentum moves while minimizing false breakouts. The 1w EMA acts as a 
+Experiment #5430: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
+HYPOTHESIS: On daily timeframe, price breaking above/below the 20-period Donchian channel 
+with volume > 2.0x average and aligned with the weekly EMA trend (price above/below EMA(21)) 
+captures strong momentum moves while minimizing false breakouts. The weekly EMA acts as a 
 higher timeframe trend filter to avoid counter-trend trades. Discrete position sizing (0.25) 
-and ATR-based stoploss (2.0x ATR) control risk. Target: 12-37 trades/year (50-150 total over 4 years) 
+and ATR-based stoploss (2.0x ATR) control risk. Target: 7-25 trades/year (30-100 total over 4 years) 
 to minimize fee drag while maintaining statistical significance. Works in bull markets via breakouts 
-above rising 1w EMA and in bear markets via short breakdowns below falling 1w EMA.
+above rising weekly EMA and in bear markets via short breakdowns below falling weekly EMA.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5428_12h_donchian20_1w_ema_vol_v1"
-timeframe = "12h"
+name = "exp_5430_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,23 +34,23 @@ def generate_signals(prices):
         # Calculate EMA(21) on 1w close
         close_1w = pd.Series(df_1w['close'].values)
         ema_1w = close_1w.ewm(span=21, min_periods=21, adjust=False).mean().values
-        # Align to LTF (12h) with shift(1) for completed bars only
+        # Align to LTF (1d) with shift(1) for completed bars only
         ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w) if len(ema_1w) > 0 else np.full(n, np.nan)
     else:
         ema_1w_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel (20-period) ===
+    # === 1d Indicators: Donchian Channel (20-period) ===
     # Upper band: 20-period high
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     # Lower band: 20-period low
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation ===
+    # === 1d Indicators: Volume confirmation ===
     # Average volume over 20 periods
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)  # Avoid division by zero
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for stoploss ===
     # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
