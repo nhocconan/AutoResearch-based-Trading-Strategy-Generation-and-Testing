@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4624: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: 1d price breaking 20-day Donchian channels with 1-week HMA trend filter and volume confirmation captures sustained momentum moves. Uses discrete sizing (0.25) and ATR trailing stop (2.5x) for risk management. Target: 20-50 trades over 4 years (5-12/year) on 1d timeframe.
+Experiment #4624: 1d Donchian(20) Breakout + Weekly Trend + Volume Confirmation
+HYPOTHESIS: Daily price breaking 20-day Donchian channels with weekly EMA(21) trend alignment and volume confirmation (>1.3x average) captures strong momentum moves. Uses discrete sizing (0.25) and ATR(14) trailing stop (2.0x) for risk management. Target: 15-30 trades/year on 1d timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4624_1d_donchian20_1w_hma_vol_v1"
+name = "exp_4624_1d_donchian20_weekly_trend_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -19,33 +19,28 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1w data for HMA trend filter
+    # Precompute HTF: 1w data for weekly EMA trend
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate HMA(21) on weekly close
+    # Calculate weekly EMA(21) for trend filter
     if len(df_1w) >= 1:
-        # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-        half_len = len(df_1w) // 2
-        sqrt_len = int(np.sqrt(len(df_1w)))
-        if half_len > 0 and sqrt_len > 0:
-            wma_half = pd.Series(df_1w['close'].values).ewm(span=half_len, adjust=False).mean()
-            wma_full = pd.Series(df_1w['close'].values).ewm(span=len(df_1w), adjust=False).mean()
-            raw_hma = 2 * wma_half - wma_full
-            hma_21 = pd.Series(raw_hma.values).ewm(span=sqrt_len, adjust=False).mean().values
-        else:
-            hma_21 = np.full(len(df_1w), np.nan)
+        weekly_close = df_1w['close'].values
+        weekly_ema = pd.Series(weekly_close).ewm(span=21, min_periods=21, adjust=False).mean().values
     else:
-        hma_21 = np.array([])
+        weekly_ema = np.array([])
     
-    # Align HMA to daily timeframe
-    if len(hma_21) > 0:
-        hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
+    # Align weekly EMA to daily timeframe
+    if len(weekly_ema) > 0:
+        weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
     else:
-        hma_21_aligned = np.full(n, np.nan)
+        weekly_ema_aligned = np.full(n, np.nan)
     
     # === Daily Indicators: Donchian(20) channels ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian upper = max(high, lookback=20), lower = min(low, lookback=20)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
     
     # === Daily Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -70,12 +65,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, Volume MA, ATR warmup
+    warmup = max(20, 21, 20)  # Donchian, weekly EMA, volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(hma_21_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(weekly_ema_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -86,8 +81,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.5 * atr[i]:
+                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -95,8 +90,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.5 * atr[i]:
+                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -105,16 +100,16 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: >1.3x average volume
+        # Volume filter: confirmation (>1.3x average volume)
         vol_confirm = vol_ratio[i] > 1.3
         
-        # Trend filter: price above/below weekly HMA
-        uptrend = price > hma_21_aligned[i]
-        downtrend = price < hma_21_aligned[i]
+        # Trend filter: price above/below weekly EMA
+        price_above_weekly = price > weekly_ema_aligned[i]
+        price_below_weekly = price < weekly_ema_aligned[i]
         
-        # Donchian breakout conditions with volume and trend confirmation
-        breakout_long = price > donchian_high[i] and vol_confirm and uptrend
-        breakout_short = price < donchian_low[i] and vol_confirm and downtrend
+        # Breakout conditions: price breaks Donchian channels with volume and trend confirmation
+        breakout_long = price > donchian_upper[i] and vol_confirm and price_above_weekly
+        breakout_short = price < donchian_lower[i] and vol_confirm and price_below_weekly
         
         if breakout_long:
             in_position = True
