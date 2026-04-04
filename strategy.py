@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-exp_6731_6h_donchian20_1d_pivot_vol_v1
-Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot direction filter and volume confirmation.
-In bull markets: buy breakouts above upper Donchian when price > 1d pivot (R3 level).
-In bear markets: sell breakdowns below lower Donchian when price < 1d pivot (S3 level).
+exp_6733_4h_donchian20_12h_hma_v1
+Hypothesis: 4h Donchian(20) breakout with 12h HMA(21) trend filter and volume confirmation.
+In bull markets: buy breakouts above upper Donchian when 12h HMA is rising.
+In bear markets: sell breakdowns below lower Donchian when 12h HMA is falling.
 Volume confirmation ensures breakout legitimacy. ATR-based stoploss limits drawdown.
-Designed for 6h timeframe to capture medium-term swings with ~12-37 trades/year.
+Designed for 4h timeframe to capture medium-term swings with ~20-50 trades/year.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6731_6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_6733_4h_donchian20_12h_hma_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -23,35 +23,20 @@ VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 8  # ~3 weeks (6h bars)
+MAX_HOLD_BARS = 8  # ~2 weeks (4h bars)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for Camarilla pivot
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - using 12h for HMA trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla pivot calculation
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    r3_1d = pivot_1d + range_1d * 1.1 / 2.0
-    s3_1d = pivot_1d - range_1d * 1.1 / 2.0
-    r4_1d = pivot_1d + range_1d * 1.1
-    s4_1d = pivot_1d - range_1d * 1.1
-    
-    # Align pivot levels to 6h timeframe
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Calculate 12h HMA(21)
+    close_12h = df_12h['close'].values
+    hma_12h = calculate_hma(close_12h, 21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -85,7 +70,7 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(pivot_1d_aligned[i]):
+        if np.isnan(hma_12h_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -113,16 +98,9 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime from 1d pivot
-        # Bull regime: price above R3 pivot
-        # Bear regime: price below S3 pivot
-        # Range regime: between S3 and R3 (no trades)
-        bull_regime = close[i] > r3_1d_aligned[i]
-        bear_regime = close[i] < s3_1d_aligned[i]
-        
-        # Breakout signals with 1d pivot regime filter
-        long_breakout = (close[i] > highest_high[i]) and vol_confirmed and bull_regime
-        short_breakout = (close[i] < lowest_low[i]) and vol_confirmed and bear_regime
+        # Breakout signals with 12h HMA trend filter
+        long_breakout = (close[i] > highest_high[i]) and vol_confirmed and (hma_12h_aligned[i] > hma_12h_aligned[i-1])
+        short_breakout = (close[i] < lowest_low[i]) and vol_confirmed and (hma_12h_aligned[i] < hma_12h_aligned[i-1])
         
         # Enter new positions only if flat
         if position == 0:
@@ -144,8 +122,30 @@ def generate_signals(prices):
     
     return signals
 
-if __name__ == "__main__":
-    # Quick test for syntax
-    import numpy as np
-    import pandas as pd
-    print("Strategy loaded successfully")
+def calculate_hma(values, period):
+    """Calculate Hull Moving Average"""
+    if len(values) < period:
+        return np.full_like(values, np.nan)
+    
+    half_period = int(period / 2)
+    sqrt_period = int(np.sqrt(period))
+    
+    # WMA of half period
+    wma_half = np.zeros_like(values)
+    for i in range(half_period, len(values)):
+        wma_half[i] = np.nansum(values[i-half_period+1:i+1] * np.arange(1, half_period+1)) / (half_period * (half_period + 1) / 2)
+    
+    # WMA of full period
+    wma_full = np.zeros_like(values)
+    for i in range(period, len(values)):
+        wma_full[i] = np.nansum(values[i-period+1:i+1] * np.arange(1, period+1)) / (period * (period + 1) / 2)
+    
+    # Raw HMA
+    raw_hma = 2 * wma_half - wma_full
+    
+    # Final WMA of sqrt period
+    hma = np.zeros_like(values)
+    for i in range(sqrt_period, len(values)):
+        hma[i] = np.nansum(raw_hma[i-sqrt_period+1:i+1] * np.arange(1, sqrt_period+1)) / (sqrt_period * (sqrt_period + 1) / 2)
+    
+    return hma
