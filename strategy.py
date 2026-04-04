@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3785: 12h Donchian(20) breakout + 1d HMA trend + 1d volume confirmation
-HYPOTHESIS: 12h Donchian breakouts capture swing moves aligned with 1d HMA trend, with 1d volume spike (>1.8x) confirming institutional participation. Works in bull markets (breakouts above VHN) and bear markets (breakdowns below VHN). Discrete position sizing (0.25) minimizes fee drag. Target: 50-150 trades over 4 years.
+Experiment #3786: 4h Donchian(20) breakout + 1d HMA trend + 1d volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d HMA trend and confirmed by 1d volume spike (>1.5x) capture institutional swing moves. Works in bull markets (breakouts above trend) and bear markets (breakdowns below trend). Discrete position sizing (0.25) minimizes fee drag. Target: 100-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3785_12h_donchian20_1d_hma_vol_v1"
-timeframe = "12h"
+name = "exp_3786_4h_donchian20_1d_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -29,7 +29,7 @@ def generate_signals(prices):
     wma_full = pd.Series(close_1d).ewm(span=21, adjust=False).mean().values
     hma_1d_raw = 2 * wma_half - wma_full
     hma_1d = pd.Series(hma_1d_raw).ewm(span=sqrt_len, adjust=False).mean().values
-    # Align to 12h timeframe (shifted by 1 for completed 1d bar)
+    # Align to 4h timeframe (shifted by 1 for completed 1d bar)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
     # === HTF: 1d data for volume profile VHN (Call ONCE before loop) ===
@@ -55,15 +55,15 @@ def generate_signals(prices):
             max_bin_idx = np.argmax(hist)
             vhn_1d[i] = (bin_edges[max_bin_idx] + bin_edges[max_bin_idx + 1]) / 2
     
-    # Align 1d VHN to 12h timeframe (shifted by 1 for completed 1d bar)
+    # Align 1d VHN to 4h timeframe (shifted by 1 for completed 1d bar)
     vhn_1d_aligned = align_htf_to_ltf(prices, df_1d, vhn_1d)
     
-    # === 12h Indicators: Donchian Channel(20) for breakout ===
+    # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -125,13 +125,13 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average)
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
             # Long entry: Price breaks above Donchian upper band AND above 1d HMA (bullish breakout with trend)
             if (price > highest_high[i-1] and  # Breakout above previous period's high
-                price > hma_1d_aligned[i]):    # Above 1d HMA trend
+                price > hma_1d_aligned[i]):   # Above 1d HMA trend
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
@@ -140,7 +140,7 @@ def generate_signals(prices):
                 signals[i] = SIZE
             # Short entry: Price breaks below Donchian lower band AND below 1d HMA (bearish breakdown against trend)
             elif (price < lowest_low[i-1] and    # Breakout below previous period's low
-                  price < hma_1d_aligned[i]):    # Below 1d HMA trend
+                  price < hma_1d_aligned[i]):   # Below 1d HMA trend
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
