@@ -16,14 +16,14 @@ name = "exp_6844_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
-# Parameters
+# Parameters - optimized for lower trade frequency and better win rate
 DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0
+VOL_BASE_THRESHOLD = 2.5  # Increased for stricter volume confirmation
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 30  # ~1.5 months (1d bars)
+MAX_HOLD_BARS = 45  # Increased to ~1.5 months for longer holds
 EMA_PERIOD = 50
 
 def generate_signals(prices):
@@ -98,7 +98,7 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Volume confirmation
+        # Volume confirmation with higher threshold
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Determine trend direction from weekly EMA50
