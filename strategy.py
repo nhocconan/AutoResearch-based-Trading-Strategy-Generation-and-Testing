@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #5897: 4h Donchian(20) breakout + 1d HMA(21) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d HMA trend direction capture high-probability 
-continuation moves. Volume confirmation filters weak breakouts. HMA(21) on daily timeframe provides 
-smooth trend filter that works in both bull and bear markets by reducing whipsaw. Target: 75-200 
-total trades over 4 years.
+Experiment #5898: 1d Donchian(20) breakout + weekly HMA trend + volume confirmation
+HYPOTHESIS: Weekly HMA(21) defines the major trend regime on 1d timeframe. 
+1d Donchian breakouts aligned with weekly HMA direction (price > weekly HMA = long bias, 
+price < weekly HMA = short bias) capture high-probability continuation moves. 
+Volume confirmation filters weak breakouts. Works in bull/bear via weekly trend filter. 
+Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5897_4h_donchian20_1d_hma_vol_v1"
-timeframe = "4h"
+name = "exp_5898_1d_donchian20_1w_hma_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,61 +26,46 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for HMA(21) trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 21:
-        # Calculate HMA(21) on daily close prices
-        # HMA = WMA(2 * WMA(n/2) - WMA(n), sqrt(n))
-        def wma(arr, period):
-            if len(arr) < period:
-                return np.full_like(arr, np.nan)
-            weights = np.arange(1, period + 1)
-            return np.convolve(arr, weights / weights.sum(), mode='valid')
+    # === HTF: 1w data for HMA(21) trend ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 21:
+        # Calculate HMA(21) on weekly close
+        # HMA = WMA(2 * WMA(n/2) - WMA(n)), sqrt(n)
+        half = 21 // 2
+        sqrt_n = int(np.sqrt(21))
         
-        close_1d = df_1d['close'].values
-        half_len = len(close_1d) // 2
-        sqrt_len = int(np.sqrt(len(close_1d)))
+        def wma(values, window):
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights, 'valid') / weights.sum()
         
-        wma_half = wma(close_1d, half_len) if half_len >= 1 else np.full_like(close_1d, np.nan)
-        wma_full = wma(close_1d, len(close_1d)) if len(close_1d) >= 1 else np.full_like(close_1d, np.nan)
-        
-        # Handle array alignment for WMA calculations
-        if len(wma_half) > 0 and len(wma_full) > 0:
-            # Pad wma_half to match close_1d length
-            wma_half_padded = np.full_like(close_1d, np.nan)
-            wma_half_padded[half_len-1:half_len-1+len(wma_half)] = wma_half
+        close_1w = df_1w['close'].values.astype(np.float64)
+        if len(close_1w) >= 21:
+            wma_half = wma(close_1w, half)
+            wma_full = wma(close_1w, 21)
+            hma_2x = 2 * wma_half
+            hma_raw = hma_2x - wma_full
+            hma_values = wma(hma_raw, sqrt_n)
             
-            # Pad wma_full to match close_1d length
-            wma_full_padded = np.full_like(close_1d, np.nan)
-            wma_full_padded[len(close_1d)-1:len(close_1d)-1+len(wma_full)] = wma_full
+            # Pad to match original length
+            hma_padded = np.full(len(close_1w), np.nan)
+            hma_padded[half-1:half-1+len(hma_values)] = hma_values
             
-            # 2 * WMA(half) - WMA(full)
-            diff = 2 * wma_half_padded - wma_full_padded
-            
-            # WMA of diff with sqrt(n) period
-            if sqrt_len >= 1 and len(diff) >= sqrt_len:
-                wma_diff = wma(diff, sqrt_len)
-                hma_1d = np.full_like(close_1d, np.nan)
-                hma_1d[sqrt_len-1:sqrt_len-1+len(wma_diff)] = wma_diff
-            else:
-                hma_1d = np.full_like(close_1d, np.nan)
+            # Align to LTF (1d) with shift(1) for completed bars only
+            hma_aligned = align_htf_to_ltf(prices, df_1w, hma_padded)
         else:
-            hma_1d = np.full_like(close_1d, np.nan)
-        
-        # Align to LTF (4h) with shift(1) for completed bars only
-        hma_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+            hma_aligned = np.full(n, np.nan)
     else:
         hma_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === 1d Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation ===
+    # === 1d Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 4h Indicators: ATR(14) for trailing stop ===
+    # === 1d Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -98,10 +84,10 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 20)  # Donchian, volume avg, ATR
+    warmup = max(20, 20, 21)  # Donchian, volume avg, ATR
     
     for i in range(warmup, n):
-        # --- Session Filter: Avoid low liquidity periods ---
+        # --- Session Filter: Avoid low liquidity periods (21:00-23:59 UTC) ---
         hour = hours[i]
         if 21 <= hour <= 23:
             signals[i] = 0.0
@@ -145,13 +131,14 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # HMA trend filter: price above HMA = uptrend, below = downtrend
-        uptrend = price > hma_aligned[i]
-        downtrend = price < hma_aligned[i]
+        # Weekly HMA trend logic:
+        # Price above weekly HMA = long bias, below = short bias
+        long_bias = price > hma_aligned[i]
+        short_bias = price < hma_aligned[i]
         
-        # Entry conditions: breakout in direction of HMA trend
-        long_setup = breakout_up and volume_confirmed and uptrend
-        short_setup = breakout_down and volume_confirmed and downtrend
+        # Entry conditions: breakout in direction of weekly HMA trend
+        long_setup = breakout_up and volume_confirmed and long_bias
+        short_setup = breakout_down and volume_confirmed and short_bias
         
         if long_setup:
             in_position = True
