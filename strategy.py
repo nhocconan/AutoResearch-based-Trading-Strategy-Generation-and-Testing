@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
 """
-exp_6539_6h_donchian20_1d_ema_vol_v2
-Hypothesis: 6h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation (2.0x).
-Uses 6h timeframe to reduce trade frequency vs 4h while maintaining edge.
-Target: 75-150 total trades over 4 years (19-38/year) to balance statistical significance and fee drag.
+exp_6541_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 1d EMA200 as trend filter and volume confirmation.
+In bull markets: long when price > 1d EMA200 and breaks above Donchian high with volume > 2.0x MA.
+In bear markets: short when price < 1d EMA200 and breaks below Donchian low with volume > 2.0x MA.
+Uses volume spike (2.0x) to confirm breakout strength and avoid false signals.
+Designed for low-frequency, high-conviction trades targeting 75-200 total trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6539_6h_donchian20_1d_ema_vol_v2"
-timeframe = "6h"
+name = "exp_6541_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 200
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 2.0  # volume must be 2.0x its 20-period MA
+VOL_THRESHOLD = 2.0  # volume must be 2.0x its 20-period MA for confirmation
 SIGNAL_SIZE = 0.25   # 25% position size
 
 def generate_signals(prices):
@@ -33,7 +35,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False).mean().values
     
-    # Align to LTF (6h) with shift(1) for completed bars only
+    # Align to LTF (4h) with shift(1) for completed bars only
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -108,3 +110,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
