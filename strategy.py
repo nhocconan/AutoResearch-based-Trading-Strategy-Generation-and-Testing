@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5071: 6h Camarilla Pivot Reversion + Volume Spike + ATR Stoploss
-HYPOTHESIS: On 6h timeframe, price tends to revert to the mean when reaching extreme Camarilla levels (R3/S3, R4/S4) derived from prior 1d pivot, especially when confirmed by volume spikes (>2x average). In ranging markets (2022-2024), this mean reversion captures profits at extremes. In trending markets, breakouts beyond R4/S4 with volume confirmation continue the trend. The strategy uses discrete position sizing (0.25) to minimize fee churn and ATR-based trailing stops (2.5x) to manage risk. Designed for 12-37 trades/year on 6h timeframe to overcome fee drag while maintaining statistical significance across BTC/ETH/SOL.
+Experiment #5072: 12h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Spike + ATR Stoploss
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with weekly pivot levels (from 1d HTF) capture strong momentum with lower frequency. Weekly pivot acts as regime filter: R3/S3 for mean reversion, R4/S4 for breakout confirmation. Volume > 2x average confirms institutional participation. ATR(14) trailing stop (2.5x) manages risk. Designed for 12-37 trades/year on 12h timeframe to minimize fee drag while maintaining statistical significance. Weekly pivot provides structural support/resistance that works in both bull (breakouts through R4) and bear (breakdowns through S4) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5071_6h_camarilla_pivot_reversion_vol_v1"
-timeframe = "6h"
+name = "exp_5072_12h_donchian20_1d_weekly_pivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,72 +19,65 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for Camarilla pivot levels
+    # Precompute HTF: 1d data for weekly pivot levels
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d Indicators: Camarilla Pivot Levels (based on prior day's OHLC) ===
-    # Camarilla uses prior day's H, L, C to calculate support/resistance
-    if len(df_1d) >= 1:
-        # Prior day's OHLC (shifted by 1 to avoid look-ahead)
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        close_1d = df_1d['close'].values
+    # === 1d Indicators: Weekly Pivot Points (using prior week's OHLC) ===
+    if len(df_1d) >= 5:  # Need at least a week of data
+        # Calculate weekly OHLC from daily data
+        # We'll use rolling window of 5 days to approximate weekly OHLC
+        # For true weekly pivot, we need prior week's H, L, C
+        high_5d = pd.Series(high).rolling(window=5, min_periods=5).max().values
+        low_5d = pd.Series(low).rolling(window=5, min_periods=5).min().values
+        close_5d = pd.Series(close).rolling(window=5, min_periods=5).last().values
         
-        # True Camarilla calculation: based on prior day's range
-        # Pivot = (H + L + C) / 3
-        # R4 = C + (H-L) * 1.1/2
-        # R3 = C + (H-L) * 1.1/4
-        # R2 = C + (H-L) * 1.1/6
-        # R1 = C + (H-L) * 1.1/12
-        # S1 = C - (H-L) * 1.1/12
-        # S2 = C - (H-L) * 1.1/6
-        # S3 = C - (H-L) * 1.1/4
-        # S4 = C - (H-L) * 1.1/2
+        # Weekly Pivot Point = (Prior Week H + L + C) / 3
+        pp = (high_5d + low_5d + close_5d) / 3.0
         
-        # Calculate for prior day (shift by 1)
-        if len(high_1d) >= 2:
-            # Use prior day's values (index i-1 for current day i)
-            high_prev = np.concatenate([[np.nan], high_1d[:-1]])
-            low_prev = np.concatenate([[np.nan], low_1d[:-1]])
-            close_prev = np.concatenate([[np.nan], close_1d[:-1]])
-            
-            # Camarilla levels based on prior day
-            pivot = (high_prev + low_prev + close_prev) / 3.0
-            rng = high_prev - low_prev
-            r4 = close_prev + rng * 1.1 / 2.0
-            r3 = close_prev + rng * 1.1 / 4.0
-            r2 = close_prev + rng * 1.1 / 6.0
-            r1 = close_prev + rng * 1.1 / 12.0
-            s1 = close_prev - rng * 1.1 / 12.0
-            s2 = close_prev - rng * 1.1 / 6.0
-            s3 = close_prev - rng * 1.1 / 4.0
-            s4 = close_prev - rng * 1.1 / 2.0
-            
-            # Align to 6h timeframe (prior day's levels are valid for current day)
-            pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-            r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-            s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-            r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-            s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-        else:
-            pivot_aligned = np.full(n, np.nan)
-            r3_aligned = np.full(n, np.nan)
-            s3_aligned = np.full(n, np.nan)
-            r4_aligned = np.full(n, np.nan)
-            s4_aligned = np.full(n, np.nan)
+        # Weekly Support/Resistance Levels
+        # R1 = (2 * PP) - Prior Week L
+        # S1 = (2 * PP) - Prior Week H
+        # R2 = PP + (Prior Week H - Prior Week L)
+        # S2 = PP - (Prior Week H - Prior Week L)
+        # R3 = Prior Week H + 2*(PP - Prior Week L)
+        # S3 = Prior Week L - 2*(Prior Week H - PP)
+        # R4 = PP + 3*(Prior Week H - Prior Week L)
+        # S4 = PP - 3*(Prior Week H - Prior Week L)
+        rng = high_5d - low_5d
+        r1 = (2 * pp) - low_5d
+        s1 = (2 * pp) - high_5d
+        r2 = pp + rng
+        s2 = pp - rng
+        r3 = high_5d + 2 * (pp - low_5d)
+        s3 = low_5d - 2 * (high_5d - pp)
+        r4 = pp + 3 * rng
+        s4 = pp - 3 * rng
+        
+        # For breakout confirmation, we'll use R4/S4 levels
+        # For mean reversion fade, we'll use R3/S3 levels
+        # Align to 12h timeframe
+        pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     else:
-        pivot_aligned = np.full(n, np.nan)
+        pp_aligned = np.full(n, np.nan)
         r3_aligned = np.full(n, np.nan)
         s3_aligned = np.full(n, np.nan)
         r4_aligned = np.full(n, np.nan)
         s4_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Volume confirmation (2x spike) ===
+    # === 12h Indicators: Donchian(20) channels ===
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === 12h Indicators: Volume confirmation (2x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -102,13 +95,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 14)  # Volume MA, ATR warmup
+    warmup = max(20, 20, 14)  # Donchian, Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -141,35 +134,28 @@ def generate_signals(prices):
         # Volume filter: confirmation (>2.0x)
         vol_confirm = vol_ratio[i] > 2.0
         
-        # Camarilla reversion/breakout logic
-        # Long: Revert from S3/S4 OR breakout above R4 with volume
-        # Short: Revert from R3/R4 OR breakdown below S4 with volume
-        # Fade extremes (reversion to mean) when price hits R3/S3
-        # Continue trend when price breaks R4/S4 with volume
+        # Donchian breakout conditions with weekly pivot alignment
+        # Long: Donchian breakout above R4 (strong breakout) OR above R3 with volume (mean reversion fail)
+        # Short: Donchian breakdown below S4 (strong breakdown) OR below S3 with volume (mean reversion fail)
+        breakout_long = ((price >= high_roll[i]) and 
+                        ((price >= r4_aligned[i]) or  # Strong breakout through weekly R4
+                         ((price >= r3_aligned[i]) and vol_confirm)) and  # Fade failure at R3 with volume
+                        vol_confirm)
         
-        long_condition = (
-            # Mean reversion long from support
-            ((price <= s3_aligned[i]) and vol_confirm) or
-            # Breakout long above resistance
-            ((price >= r4_aligned[i]) and vol_confirm)
-        )
-        
-        short_condition = (
-            # Mean reversion short from resistance
-            ((price >= r3_aligned[i]) and vol_confirm) or
-            # Breakdown short below support
-            ((price <= s4_aligned[i]) and vol_confirm)
-        )
+        breakout_short = ((price <= low_roll[i]) and 
+                         ((price <= s4_aligned[i]) or  # Strong breakdown through weekly S4
+                          ((price <= s3_aligned[i]) and vol_confirm)) and  # Fade failure at S3 with volume
+                         vol_confirm)
         
         # Final entry conditions
-        if long_condition:
+        if breakout_long:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif short_condition:
+        elif breakout_short:
             in_position = True
             position_side = -1
             entry_price = close[i]
