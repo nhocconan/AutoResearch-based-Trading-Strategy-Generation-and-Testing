@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5078: 1d Donchian(20) Breakout + 1w Weekly Pivot Direction + Volume Spike + ATR Stoploss
-HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts aligned with weekly pivot levels (from 1w HTF) capture strong momentum with lower frequency. Weekly pivot acts as regime filter: R3/S3 for mean reversion, R4/S4 for breakout confirmation. Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. Designed for 7-25 trades/year on 1d timeframe to minimize fee drag while maintaining statistical significance. Weekly pivot provides structural support/resistance that works in both bull (breakouts through R4) and bear (breakdowns through S4) markets.
+Experiment #5079: 6h Elder Ray + ADX Regime + Volume Spike
+HYPOTHESIS: On 6h timeframe, Elder Ray (Bull/Bear Power) combined with ADX regime filter captures strong trending moves while avoiding chop. Bull Power > 0 and Bear Power < 0 with ADX > 25 indicates strong trend. Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. Designed for 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Works in both bull (strong upward thrusts) and bear (strong downward thrusts) markets by filtering for genuine momentum.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5078_1d_donchian20_1w_weekly_pivot_vol_v1"
-timeframe = "1d"
+name = "exp_5079_6h_elder_ray_adx_regime_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,58 +19,45 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1w data for weekly pivot levels
-    df_1w = get_htf_data(prices, '1w')
+    # === 6h Indicators: EMA(13) for Elder Ray ===
+    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
     
-    # === 1w Indicators: Weekly Pivot Points (using prior week's OHLC) ===
-    if len(df_1w) >= 1:  # Need at least one week of data
-        # Use prior week's OHLC for pivot calculation
-        # Rolling window of 7 days (1 week) for OHLC
-        high_7d = pd.Series(high).rolling(window=7, min_periods=7).max().values
-        low_7d = pd.Series(low).rolling(window=7, min_periods=7).min().values
-        close_7d = pd.Series(close).rolling(window=7, min_periods=7).last().values
-        
-        # Weekly Pivot Point = (Prior Week H + L + C) / 3
-        pp = (high_7d + low_7d + close_7d) / 3.0
-        
-        # Weekly Support/Resistance Levels
-        rng = high_7d - low_7d
-        r1 = (2 * pp) - low_7d
-        s1 = (2 * pp) - high_7d
-        r2 = pp + rng
-        s2 = pp - rng
-        r3 = high_7d + 2 * (pp - low_7d)
-        s3 = low_7d - 2 * (high_7d - pp)
-        r4 = pp + 3 * rng
-        s4 = pp - 3 * rng
-        
-        # Align to 1d timeframe
-        pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-        r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-        s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-        r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-        s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
-    else:
-        pp_aligned = np.full(n, np.nan)
-        r3_aligned = np.full(n, np.nan)
-        s3_aligned = np.full(n, np.nan)
-        r4_aligned = np.full(n, np.nan)
-        s4_aligned = np.full(n, np.nan)
+    # === 6h Indicators: Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) ===
+    bull_power = high - ema13
+    bear_power = low - ema13
     
-    # === 1d Indicators: Donchian(20) channels ===
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 1d Indicators: Volume confirmation (1.5x spike) ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
-    
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ADX(14) for regime filter ===
+    # True Range
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
+    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed TR, DM+, DM-
+    tr_ma = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    dm_plus_ma = pd.Series(dm_plus).ewm(span=14, min_periods=14, adjust=False).mean().values
+    dm_minus_ma = pd.Series(dm_minus).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_ma / tr_ma
+    di_minus = 100 * dm_minus_ma / tr_ma
+    
+    # DX and ADX
+    dx = np.abs(di_plus - di_minus) / (np.abs(di_plus) + np.abs(di_minus)) * 100
+    adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
+    
+    # === 6h Indicators: Volume confirmation (1.5x spike) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.ones(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    
+    # === 6h Indicators: ATR(14) for stoploss ===
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Signals Initialization ===
@@ -84,13 +71,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, Volume MA, ATR warmup
+    warmup = max(13, 14, 20, 14)  # EMA13, ADX, Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(adx[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -123,28 +109,43 @@ def generate_signals(prices):
         # Volume filter: confirmation (>1.5x)
         vol_confirm = vol_ratio[i] > 1.5
         
-        # Donchian breakout conditions with weekly pivot alignment
-        # Long: Donchian breakout above R4 (strong breakout) OR above R3 with volume (mean reversion fail)
-        # Short: Donchian breakdown below S4 (strong breakdown) OR below S3 with volume (mean reversion fail)
-        breakout_long = ((price >= high_roll[i]) and 
-                        ((price >= r4_aligned[i]) or  # Strong breakout through weekly R4
-                         ((price >= r3_aligned[i]) and vol_confirm)) and  # Fade failure at R3 with volume
-                        vol_confirm)
+        # Regime filter: ADX > 25 indicates trending market
+        trending = adx[i] > 25
         
-        breakout_short = ((price <= low_roll[i]) and 
-                         ((price <= s4_aligned[i]) or  # Strong breakdown through weekly S4
-                          ((price <= s3_aligned[i]) and vol_confirm)) and  # Fade failure at S3 with volume
-                         vol_confirm)
+        # Elder Ray conditions:
+        # Long: Bull Power > 0 (strong bullish momentum) AND Bear Power < 0 (no bearish pressure)
+        # Short: Bear Power < 0 (strong bearish momentum) AND Bull Power > 0 (no bullish pressure)
+        # Actually: For long, we want Bull Power > 0 AND Bear Power < 0 (both conditions show bullish bias)
+        # For short, we want Bear Power < 0 AND Bull Power > 0 (both conditions show bearish bias)
+        # Wait, that's the same. Let me reconsider:
+        # Bull Power = High - EMA > 0 means bulls are pushing price above average
+        # Bear Power = Low - EMA < 0 means bears are pushing price below average
+        # For long: We want Bull Power > 0 (bulls in control) 
+        # For short: We want Bear Power < 0 (bears in control)
+        # But we also need to avoid chop: both shouldn't be near zero
+        long_signal = (bull_power[i] > 0) and (bear_power[i] < 0)  # Bulls in, bears out
+        short_signal = (bear_power[i] < 0) and (bull_power[i] > 0)  # Same condition - this is wrong
+        
+        # Correct Elder Ray interpretation:
+        # Bull Power > 0 indicates bulls are stronger than the average
+        # Bear Power < 0 indicates bears are stronger than the average
+        # For a strong trend, we want one to be significantly positive/negative
+        # Long: Bull Power > 0 AND Bear Power < some small threshold (lets say -0.1*price) 
+        # Actually simpler: Long when Bull Power > 0 (bulls pushing up)
+        # Short when Bear Power < 0 (bears pushing down)
+        # But we need to avoid false signals in chop - hence ADX filter
+        long_signal = bull_power[i] > 0
+        short_signal = bear_power[i] < 0
         
         # Final entry conditions
-        if breakout_long:
+        if long_signal and trending and vol_confirm:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif breakout_short:
+        elif short_signal and trending and vol_confirm:
             in_position = True
             position_side = -1
             entry_price = close[i]
@@ -155,5 +156,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
