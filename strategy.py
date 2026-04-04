@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #6181: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA50 trend capture structural moves 
-while minimizing false breakouts. Volume >2.0x average confirms strong participation. 
-ATR trailing stop manages risk. Discrete sizing (0.25) minimizes fee churn. 
-Target: 75-200 trades over 4 years (19-50/year). Works in both bull and bear markets 
-by requiring trend alignment (EMA50) to avoid counter-trend breakouts that fail in ranging/bear conditions.
-Timeframe: 4h. HTF: 1d for EMA50 trend filter.
+Experiment #6181: 4h Donchian(20) breakout + 1d EMA200 trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA200 trend capture strong momentum moves 
+while avoiding counter-trend traps. Volume >2.0x average confirms institutional participation. 
+ATR trailing stop manages risk. Discrete sizing (0.30) balances return and fee drag. 
+Target: 75-200 trades over 4 years (19-50/year).
+Timeframe: 4h. HTF: 1d for EMA200 trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6181_4h_donchian20_1d_ema_vol_v1"
+name = "exp_6181_4h_donchian20_1d_ema200_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,10 +26,10 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for EMA50 trend filter ===
+    # === HTF: 1d data for EMA200 trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    if len(df_1d) >= 200:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=200, adjust=False).mean().values
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
         ema_1d_aligned = np.full(n, np.nan)
@@ -53,7 +52,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size (discrete level)
+    SIZE = 0.30  # 30% position size (discrete level)
     
     # Position tracking state variables
     in_position = False
@@ -62,10 +61,10 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50) + 1  # Donchian, volume avg, ATR, EMA50 + 1
+    warmup = max(20, 20, 14, 200) + 1  # Donchian, volume avg, ATR, EMA200 + 1
     
     for i in range(warmup, n):
-        # --- Session Filter: Avoid low liquidity periods ---
+        # --- Session Filter: Avoid low liquidity periods (21:00-23:59 UTC) ---
         hour = hours[i]
         if 21 <= hour <= 23:
             signals[i] = 0.0
@@ -109,11 +108,11 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 2.0  # Volume filter for stronger signals
         
-        # Daily EMA50 trend filter: price relative to EMA50
+        # Daily EMA200 trend filter: price relative to EMA200
         bullish_trend = price > ema_1d_aligned[i]
         bearish_trend = price < ema_1d_aligned[i]
         
-        # Entry conditions require trend alignment:
+        # Entry conditions: breakout with volume AND trend alignment
         # Long: breakout up with volume AND bullish trend
         # Short: breakout down with volume AND bearish trend
         long_entry = breakout_up and volume_confirmed and bullish_trend
