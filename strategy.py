@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4880: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Confirmation
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts in direction of 1d HMA21 trend with volume confirmation (>1.8x average) capture strong momentum moves in both bull and bear markets. Uses ATR(14) trailing stop (2.5x) for risk control. Designed for 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
+Experiment #4881: 4h Donchian(20) Breakout + 1d HMA Trend + Volume Spike
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts in direction of 1d HMA21 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) trailing stop (2.5x) to limit downside. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4880_4h_donchian20_1d_hma_vol_v1"
+name = "exp_4881_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -62,7 +62,7 @@ def generate_signals(prices):
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation (1.8x spike) ===
+    # === 4h Indicators: Volume confirmation (2x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -120,8 +120,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>1.8x)
-        vol_confirm = vol_ratio[i] > 1.8
+        # Volume filter: confirmation (>2.0x)
+        vol_confirm = vol_ratio[i] > 2.0
         
         # Donchian breakout conditions with trend alignment
         breakout_long = (price >= high_roll[i]) and (price > hma_1d_aligned[i]) and vol_confirm
