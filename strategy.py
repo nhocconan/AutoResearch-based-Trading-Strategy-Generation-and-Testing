@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #6088: 12h Donchian(20) breakout + 1w EMA50 trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1w EMA50 direction capture major swing moves with proper structure. 
-1w EMA50 provides clean multi-month trend bias: price above EMA50 = bullish, below = bearish. 
-Volume >1.5x average confirms institutional participation. Works in bull markets (breakouts above rising EMA50) 
-and bear markets (breakdowns below falling EMA50) by only taking trades in trend direction. 
+HYPOTHESIS: 12h Donchian breakouts aligned with weekly EMA50 trend capture multi-week swings with minimal overtrading. 
+Weekly EMA50 provides robust trend bias: price above = bullish, below = bearish. 
+Volume >1.8x average confirms institutional participation. 
 Target: 50-150 trades over 4 years (12-37/year). Discrete sizing (0.25) minimizes fee drag.
+Works in bull markets (breakouts above rising weekly EMA50) and bear markets (breakdowns below falling weekly EMA50).
 """
 
 import numpy as np
@@ -106,7 +106,7 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.5  # Volume filter for stronger signals
+        volume_confirmed = volume_ratio[i] > 1.8  # Stricter volume filter to reduce trades
         
         # Multi-timeframe trend filter: price must be aligned with 1w EMA50
         bullish_trend = price > ema_1w_aligned[i]
