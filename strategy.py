@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #2617: 4h Donchian(20) breakout + 1d/1w EMA trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts with 1d/1w trend alignment and volume spikes capture
-strong momentum moves in both bull and bear markets. Using 4h as primary timeframe
-reduces trade frequency vs lower timeframes, minimizing fee drag while maintaining
-enough trades for statistical significance. Volume confirmation ensures institutional
-participation. Trend filters from 1d/1w avoid counter-trend trades.
+HYPOTHESIS: 4h Donchian breakouts with 1d/1w trend alignment and volume spikes capture 
+institutional participation while minimizing whipsaws. Uses 1d/1w for signal direction, 
+4h only for entry timing. Target: 75-200 total trades over 4 years (19-50/year).
+Works in bull markets via breakout momentum and in bear markets via short-side breakdowns 
+with trend filters preventing counter-trend trades.
 """
 
 import numpy as np
