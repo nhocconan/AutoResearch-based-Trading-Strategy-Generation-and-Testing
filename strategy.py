@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #5368: 12h Donchian(20) breakout + 1w EMA direction + volume confirmation
+Experiment #5368: 12h Donchian(20) breakout + 1w EMA trend + volume confirmation
 HYPOTHESIS: On 12h timeframe, price breaking above/below the 20-period Donchian channel 
-with volume > 2.0x average and aligned with 1-week EMA50 trend (price above/below EMA50) 
-captures strong momentum moves while minimizing overtrading. Weekly EMA provides 
-structural trend bias from higher timeframe, reducing false breakouts. Discrete 
-position sizing (0.25) and ATR-based trailing stoploss (2.5x ATR) control risk. 
-Target: 12-37 trades/year (50-150 total over 4 years) to minimize fee drag while 
-maintaining statistical significance. Works in bull markets via breakouts above 
-weekly EMA50 and in bear markets via short breakdowns below weekly EMA50.
+with volume > 1.8x average and aligned with 1-week EMA50 trend captures strong momentum 
+while minimizing overtrading. Weekly EMA provides structural trend filter from higher 
+timeframe, reducing false breakouts in choppy markets. Discrete position sizing (0.25) 
+and ATR-based trailing stoploss (2.5x ATR) control risk. Target: 12-37 trades/year 
+(50-150 total over 4 years) to minimize fee drag while maintaining statistical significance. 
+Works in bull markets via breakouts above weekly EMA and in bear markets via short 
+breakdowns below weekly EMA.
 """
 
 import numpy as np
@@ -33,11 +33,11 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 50:
         # Calculate EMA50 on weekly close
-        ema_50 = pd.Series(df_1w['close']).ewm(span=50, min_periods=50, adjust=False).mean().values
+        weekly_ema = pd.Series(df_1w['close']).ewm(span=50, min_periods=50, adjust=False).mean().values
         # Align to LTF (12h) with shift(1) for completed bars only
-        ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50) if len(ema_50) > 0 else np.full(n, np.nan)
+        ema_50w_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema) if len(weekly_ema) > 0 else np.full(n, np.nan)
     else:
-        ema_50_aligned = np.full(n, np.nan)
+        ema_50w_aligned = np.full(n, np.nan)
     
     # === 12h Indicators: Donchian Channel (20-period) ===
     # Upper band: 20-period high
@@ -84,7 +84,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or 
-            np.isnan(ema_50_aligned[i])):
+            np.isnan(ema_50w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -101,7 +101,7 @@ def generate_signals(prices):
                 # 1. Stoploss hit
                 # 2. Price breaks below Donchian lower band (failed breakout)
                 # 3. Price crosses below weekly EMA50 (trend reversal)
-                if price <= stop_price or price <= donchian_low[i] or price < ema_50_aligned[i]:
+                if price <= stop_price or price <= donchian_low[i] or price < ema_50w_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -115,7 +115,7 @@ def generate_signals(prices):
                 # 1. Stoploss hit
                 # 2. Price breaks above Donchian upper band (failed breakout)
                 # 3. Price crosses above weekly EMA50 (trend reversal)
-                if price >= stop_price or price >= donchian_high[i] or price > ema_50_aligned[i]:
+                if price >= stop_price or price >= donchian_high[i] or price > ema_50w_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -128,24 +128,24 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]  # Break above previous period's high
         breakout_down = price < donchian_low[i-1]  # Break below previous period's low
         
-        # Volume confirmation: current volume > 2.0x average volume (stricter than 1.8x)
-        volume_confirmed = volume_ratio[i] > 2.0
+        # Volume confirmation: current volume > 1.8x average volume
+        volume_confirmed = volume_ratio[i] > 1.8
         
         # Weekly EMA50 trend filter
         # Long: price above weekly EMA50 (bullish bias)
         # Short: price below weekly EMA50 (bearish bias)
-        ema_bias_up = price > ema_50_aligned[i-1]
-        ema_bias_down = price < ema_50_aligned[i-1]
+        trend_bias_up = price > ema_50w_aligned[i-1]
+        trend_bias_down = price < ema_50w_aligned[i-1]
         
         # Entry conditions
-        if breakout_up and volume_confirmed and ema_bias_up:
+        if breakout_up and volume_confirmed and trend_bias_up:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif breakout_down and volume_confirmed and ema_bias_down:
+        elif breakout_down and volume_confirmed and trend_bias_down:
             in_position = True
             position_side = -1
             entry_price = close[i]
