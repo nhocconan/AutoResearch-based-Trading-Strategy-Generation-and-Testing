@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #5601: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts with volume > 1.5x average and aligned 
-with daily EMA(50) trend capture high-probability moves. Daily EMA provides structural 
-trend filter from higher timeframe, reducing false breakouts in ranging markets. 
-ATR-based trailing stop (2.0x ATR) limits drawdown. Discrete position sizing (0.25) 
-minimizes fee churn. Works in bull (breakouts with daily EMA support) and bear 
-(breakouts with daily EMA resistance). Target: 19-50 trades/year (75-200 total over 4 years).
+Experiment #5600: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts with volume > 2.0x average and aligned 
+with daily HMA(21) trend capture high-probability moves while avoiding whipsaws. 
+Daily HMA provides smooth trend filter from higher timeframe, reducing false breakouts. 
+ATR-based trailing stop (2.5x ATR) limits drawdown. Discrete position sizing (0.25) 
+minimizes fee churn. Works in bull (breakouts with daily HMA support) and bear 
+(breakouts with daily HMA resistance). Target: 19-50 trades/year (75-200 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5601_4h_donchian20_1d_ema_vol_v1"
+name = "exp_5600_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,13 +27,28 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for EMA(50) trend ===
+    # === HTF: 1d data for HMA(21) trend ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
-        ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    if len(df_1d) >= 21:
+        # Calculate HMA(21) on daily close
+        close_1d = pd.Series(df_1d['close'].values)
+        half_len = 21 // 2
+        sqrt_len = int(np.sqrt(21))
+        
+        # WMA function
+        def wma(series, period):
+            weights = np.arange(1, period + 1)
+            return series.rolling(period).apply(lambda x: np.dot(x, weights) / weights.sum(), raw=True)
+        
+        wma_half = wma(close_1d, half_len)
+        wma_full = wma(close_1d, 21)
+        hma_21 = 2 * wma_half - wma_full
+        hma_21 = wma(hma_21, sqrt_len)
+        
+        # Align to LTF (4h)
+        hma_21_aligned = align_htf_to_ltf(prices, df_1d, hma_21.values)
     else:
-        ema_50 = np.full(len(df_1d), np.nan)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+        hma_21_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -62,7 +77,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50)  # Donchian, volume avg, ATR, EMA
+    warmup = max(20, 20, 14)  # Donchian, volume avg, ATR
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -74,7 +89,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_50_aligned[i])):
+            np.isnan(hma_21_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -84,8 +99,8 @@ def generate_signals(prices):
         if in_position:
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
-                stop_price = highest_since_entry - 2.0 * atr[i]
-                # Exit: stoploss OR price breaks below Donchian low (mean reversion)
+                stop_price = highest_since_entry - 2.5 * atr[i]
+                # Exit: stoploss OR price breaks below Donchian low (trend reversal)
                 if price <= stop_price or price <= donchian_low[i]:
                     in_position = False
                     position_side = 0
@@ -94,8 +109,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                stop_price = lowest_since_entry + 2.0 * atr[i]
-                # Exit: stoploss OR price breaks above Donchian high (mean reversion)
+                stop_price = lowest_since_entry + 2.5 * atr[i]
+                # Exit: stoploss OR price breaks above Donchian high (trend reversal)
                 if price >= stop_price or price >= donchian_high[i]:
                     in_position = False
                     position_side = 0
@@ -107,14 +122,13 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.5
+        volume_confirmed = volume_ratio[i] > 2.0
         
-        # Determine bias from Daily EMA trend
-        # In uptrend: only take long breakouts
-        # In downtrend: only take short breakouts
-        # In ranging: require stronger volume confirmation
-        long_setup = breakout_up and volume_confirmed and (price > ema_50_aligned[i])
-        short_setup = breakout_down and volume_confirmed and (price < ema_50_aligned[i])
+        # Trend filter: price relative to daily HMA(21)
+        # Long: breakout above Donchian high with price > daily HMA
+        # Short: breakout below Donchian low with price < daily HMA
+        long_setup = breakout_up and volume_confirmed and (price > hma_21_aligned[i])
+        short_setup = breakout_down and volume_confirmed and (price < hma_21_aligned[i])
         
         if long_setup:
             in_position = True
@@ -134,5 +148,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
