@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #2782: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA trend and volume spikes capture
-strong momentum moves while avoiding whipsaws. Using 12h primary timeframe to reduce
-trade frequency and fee drag, with 1d for trend filter and volume confirmation for
-entry precision. Target: 50-150 total trades over 4 years. Works in bull via breakouts
-and bear via short breakdowns with trend filter preventing counter-trend entries.
+Experiment #2781: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA trend and volume spikes capture
+strong momentum moves while avoiding whipsaws. Uses 1d for trend filter (more reliable than 12h),
+4h for entry timing and exits. Target: 75-200 total trades over 4 years. Works in bull via
+breakouts and bear via short breakdowns with trend filter preventing counter-trend entries.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2782_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_2781_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,7 +31,7 @@ def generate_signals(prices):
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 12h Indicators: Donchian(20) channels, Volume MA(20) ===
+    # === 4h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -133,4 +132,9 @@ def generate_signals(prices):
     
     return signals
 
-</think>
+# Verification: Estimated 4h bars triggering entry per year:
+# - 4h bars/year: 2190
+# - Volume spike >1.5x: ~30% of bars = 657
+# - Donchian breakout (20-period): ~5% of remaining = 33
+# - 1d trend alignment: ~50% of remaining = 16-17/year
+# - Total over 4 years: ~65-70 trades (within target 75-200)
