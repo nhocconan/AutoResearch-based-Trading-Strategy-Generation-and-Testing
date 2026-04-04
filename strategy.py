@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #2884: 1d Donchian(20) breakout + Weekly pivot direction + Volume spike
-HYPOTHESIS: Donchian(20) breakouts on 1d timeframe capture major trends with low frequency.
-Weekly pivot (from 1w data) provides directional bias: only take long breakouts when
-price > weekly pivot, short breakouts when price < weekly pivot. Volume spike (>2.0x
-20-period average) confirms breakout strength. This combination filters false breakouts
-in choppy markets while capturing strong trends. 1d timeframe minimizes fee drag.
-Target: 30-100 total trades over 4 years (7-25/year).
+Experiment #2887: 6h Donchian Breakout + 1d Volume Spike + Weekly Pivot Filter
+HYPOTHESIS: Donchian(20) breakouts on 6h capture medium-term trends. 
+Weekly pivot bias from 1d data (price > weekly pivot = bullish bias) filters direction.
+Volume spike (>2.0x 20-period average) confirms breakout strength. 
+This reduces false breakouts in choppy markets while maintaining sufficient trade frequency.
+Target: 75-150 total trades over 4 years (19-37/year) to balance opportunity and fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2884_1d_donchian20_1w_pivot_vol_v1"
-timeframe = "1d"
+name = "exp_2887_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,32 +23,34 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for weekly pivot calculation (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === HTF: 1d data for weekly pivot calculation (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot from weekly OHLC: Pivot = (High + Low + Close) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Calculate daily pivot point: (High + Low + Close) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Weekly bias: 5-day rolling average of daily pivots (approximates weekly pivot)
+    weekly_pivot = pd.Series(pivot_1d).rolling(window=5, min_periods=5).mean().values
     
-    # Align to 1d timeframe (shifted by 1 for completed bars only)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    # Align to 6h timeframe (shifted by 1 for completed bars only)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
-    # === 1d Indicators: Donchian channels (20-period) ===
+    # === 6h Indicators: Donchian channels (20-period) ===
     lookback = 20
-    # Rolling max/min for Donchian channels
+    # Rolling max/min for Donchian channels with proper min_periods
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.25  # 25% position size (discrete level to minimize fee churn)
     
     # Position tracking state variables
     in_position = False
@@ -75,7 +76,7 @@ def generate_signals(prices):
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
                 # Exit if price drops 2.5*ATR below highest since entry
-                # Use 1d ATR(14) approximation from price range
+                # ATR approximation from 6h price range
                 atr_estimate = (high[i] - low[i]) * 0.5
                 if price < highest_since_entry - 2.5 * atr_estimate:
                     in_position = False
