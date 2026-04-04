@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4093: 4h Donchian(20) breakout + 12h HTF trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Donchian breakouts on 4h aligned with 12h EMA(25) trend direction and volume confirmation capture continuation moves while minimizing trades. The 12h EMA(25) provides a medium-term trend filter that works in both bull and bear markets by only allowing breakouts in the direction of the medium-term trend. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #4093: 4h Donchian(20) breakout + 12h HTF trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 4h aligned with 12h EMA(50) trend direction and volume confirmation capture continuation moves while minimizing trades. The 12h EMA(50) provides a medium-term trend filter that works in both bull and bear markets by only allowing breakouts in the direction of the medium-term trend. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -19,13 +19,13 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h EMA(25) for trend direction ===
+    # === HTF: 12h EMA(50) for trend direction ===
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) >= 1:
-        ema_25 = pd.Series(df_12h['close'].values).ewm(span=25, min_periods=25, adjust=False).mean().values
-        ema_25_aligned = align_htf_to_ltf(prices, df_12h, ema_25)
+        ema_50 = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     else:
-        ema_25_aligned = np.full(n, np.nan)
+        ema_50_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -61,7 +61,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_25_aligned[i])):
+            np.isnan(ema_50_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -95,18 +95,18 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # HTF 12h EMA(25) trend bias: 
-            price_above_ema = price > ema_25_aligned[i]
-            price_below_ema = price < ema_25_aligned[i]
+            # HTF 12h EMA(50) trend bias: 
+            price_above_ema = price > ema_50_aligned[i]
+            price_below_ema = price < ema_50_aligned[i]
             
             # Breakout logic: 
             breakout_up = price > highest_high[i-1]
             breakout_down = price < lowest_low[i-1]
             
-            # Long conditions: above 12h EMA(25) + upper Donchian breakout
+            # Long conditions: above 12h EMA(50) + upper Donchian breakout
             long_entry = breakout_up and price_above_ema
             
-            # Short conditions: below 12h EMA(25) + lower Donchian breakout
+            # Short conditions: below 12h EMA(50) + lower Donchian breakout
             short_entry = breakout_down and price_below_ema
             
             if long_entry:
