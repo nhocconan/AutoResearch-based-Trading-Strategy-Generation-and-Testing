@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4060: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 4h aligned with 1d EMA50 trend (price above/below EMA50) with volume confirmation capture high-probability continuation moves. The 1d EMA50 provides structural trend filter from higher timeframe, reducing false breakouts and whipsaws. This should work in both bull and bear markets by only taking breakouts in the direction of the 1d EMA50 trend. Target: 75-200 total trades over 4 years (19-50/year).
+HYPOTHESIS: Donchian breakouts on 4h aligned with 1d EMA50 trend (price above/below EMA50) with volume confirmation capture high-probability continuation moves. The 1d EMA50 provides structural trend filter from higher timeframe, reducing false breakouts. This should work in both bull and bear markets by only taking breakouts in the direction of the 1d EMA50 trend. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -22,10 +22,11 @@ def generate_signals(prices):
     # === HTF: 1d data for EMA50 trend filter ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 50:
-        ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+        # Daily EMA50 for trend direction
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        ema_50_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -61,7 +62,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_50_aligned[i])):
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -96,8 +97,8 @@ def generate_signals(prices):
         
         if volume_spike:
             # HTF 1d EMA50 trend filter: 
-            price_above_ema = price > ema_50_aligned[i]
-            price_below_ema = price < ema_50_aligned[i]
+            price_above_ema = price > ema_1d_aligned[i]
+            price_below_ema = price < ema_1d_aligned[i]
             
             # Breakout logic: 
             breakout_up = price > highest_high[i-1]
@@ -129,10 +130,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-# Note: This strategy implements the proven pattern from top performers: Donchian breakout + HTF EMA trend + volume confirmation. 
-# Using 4h primary timeframe with 1d EMA50 as trend filter should yield 75-200 total trades over 4 years. 
-# Discrete position size of 0.25 minimizes fee churn while maintaining adequate exposure. 
-# Trailing stop at 2.0*ATR manages risk effectively. 
-# The volume spike filter (>1.5x average) ensures breakouts have sufficient momentum behind them. 
-# This approach has historically produced test Sharpe ratios above 1.0 on multiple symbols.
