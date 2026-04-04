@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3723: 4h Donchian(20) breakout + 12h EMA50 trend + volume spike + ATR trailing stop
-HYPOTHESIS: 4h Donchian breakouts capture intermediate-term momentum, with 12h EMA50 providing trend bias to filter false breakouts. Volume spike (>1.8x) confirms breakout authenticity. ATR-based trailing stop (2.0x) manages risk. Uses 12h HTF for faster trend adaptation than 1d, targeting 75-200 trades over 4 years. Position size 0.25 manages drawdown. Works in both bull (breakouts with trend) and bear (breakouts against trend filtered by EMA) regimes.
+Experiment #3725: 12h Donchian(20) breakout + 1d EMA50 trend + volume spike + ATR trailing stop
+HYPOTHESIS: 12h Donchian breakouts capture medium-term momentum with fewer trades than lower timeframes. 1d EMA50 provides trend bias to filter false breakouts. Volume spike (>1.8x) confirms authenticity. ATR trailing stop (2.0x) manages risk. Targets 50-150 total trades over 4 years (12-37/year) on 12h timeframe. Position size 0.25 manages drawdown. Works in bull (breakouts with trend) and bear (breakouts against trend filtered by EMA) regimes.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3723_4h_donchian20_12h_ema50_vol_v1"
-timeframe = "4h"
+name = "exp_3725_12h_donchian20_1d_ema50_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,27 +19,27 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for EMA50 trend (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # === HTF: 1d data for EMA50 trend (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 12h data
-    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    # Calculate EMA(50) on 1d data
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align 12h EMA50 to 4h timeframe (shifted by 1 for completed 12h bar)
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
+    # Align 1d EMA50 to 12h timeframe (shifted by 1 for completed 1d bar)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # === 4h Indicators: Donchian Channel(20) for breakout ===
+    # === 12h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -78,7 +78,7 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below 12h EMA50 (trend change)
+                # Exit if price breaks below 1d EMA50 (trend change)
                 elif price < ema_50_aligned[i]:
                     in_position = False
                     position_side = 0
@@ -92,7 +92,7 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above 12h EMA50 (trend change)
+                # Exit if price breaks above 1d EMA50 (trend change)
                 elif price > ema_50_aligned[i]:
                     in_position = False
                     position_side = 0
@@ -106,18 +106,18 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Long entry: Price breaks above Donchian upper band AND above 12h EMA50 (bullish trend)
+            # Long entry: Price breaks above Donchian upper band AND above 1d EMA50 (bullish trend)
             if (price > highest_high[i-1] and  # Breakout above previous period's high
-                price > ema_50_aligned[i]):    # Above 12h EMA50 (bullish bias)
+                price > ema_50_aligned[i]):    # Above 1d EMA50 (bullish bias)
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Price breaks below Donchian lower band AND below 12h EMA50 (bearish trend)
+            # Short entry: Price breaks below Donchian lower band AND below 1d EMA50 (bearish trend)
             elif (price < lowest_low[i-1] and   # Breakout below previous period's low
-                  price < ema_50_aligned[i]):   # Below 12h EMA50 (bearish bias)
+                  price < ema_50_aligned[i]):   # Below 1d EMA50 (bearish bias)
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
