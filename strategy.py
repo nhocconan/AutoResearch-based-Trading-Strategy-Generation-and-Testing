@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #5539: 6h Donchian(20) breakout + 12h Supertrend + volume confirmation
-HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts with volume > 1.5x average and aligned with 
-12h Supertrend direction capture high-probability trend continuation moves. The 12h Supertrend 
-provides robust trend filtering that works across bull/bear regimes, while volume confirmation 
-filters false breakouts. Target: 12-37 trades/year (50-150 total over 4 years).
+Experiment #5540: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts with volume > 1.5x average and aligned with 
+1d HMA(21) direction capture high-probability trend continuation moves across bull/bear regimes. 
+The 1d HMA provides smooth trend filtering that adapts to changing market conditions, while 
+volume confirmation filters false breakouts. Target: 19-50 trades/year (75-200 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5539_6h_donchian20_12h_supertrend_vol_v1"
-timeframe = "6h"
+name = "exp_5540_4h_donchian20_1d_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,57 +25,48 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 12h data for Supertrend ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 10:
-        # Calculate Supertrend on 12h data
-        hl2 = (df_12h['high'] + df_12h['low']) / 2
-        # ATR calculation
-        tr1 = df_12h['high'] - df_12h['low']
-        tr2 = np.abs(df_12h['high'] - df_12h['close'].shift(1))
-        tr3 = np.abs(df_12h['low'] - df_12h['close'].shift(1))
-        tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr_12h = tr_12h.rolling(window=10, min_periods=10).mean()
-        # Basic bands
-        upper_basic = hl2 + 3.0 * atr_12h
-        lower_basic = hl2 - 3.0 * atr_12h
-        # Final bands
-        upper_band = upper_basic.copy()
-        lower_band = lower_basic.copy()
-        for i in range(1, len(upper_basic)):
-            if close.iloc[i-1] <= upper_band.iloc[i-1]:
-                upper_band.iloc[i] = min(upper_basic.iloc[i], upper_band.iloc[i-1])
-            else:
-                upper_band.iloc[i] = upper_basic.iloc[i]
-            if close.iloc[i-1] >= lower_band.iloc[i-1]:
-                lower_band.iloc[i] = max(lower_basic.iloc[i], lower_band.iloc[i-1])
-            else:
-                lower_band.iloc[i] = lower_basic.iloc[i]
-        # Supertrend
-        supertrend = pd.Series(index=df_12h.index, dtype=float)
-        for i in range(len(supertrend)):
-            if i == 0:
-                supertrend.iloc[i] = upper_band.iloc[i]
-            elif supertrend.iloc[i-1] == upper_band.iloc[i-1]:
-                supertrend.iloc[i] = upper_band.iloc[i] if close.iloc[i] <= upper_band.iloc[i] else lower_band.iloc[i]
-            else:
-                supertrend.iloc[i] = lower_band.iloc[i] if close.iloc[i] >= lower_band.iloc[i-1] else upper_band.iloc[i]
-        # Trend direction: 1 = uptrend (price below Supertrend), -1 = downtrend (price above Supertrend)
-        trend_12h = np.where(close.values[:len(supertrend)] <= supertrend.values, 1, -1)
-        # Align to LTF (6h) with shift(1) for completed bars only
-        trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
+    # === HTF: 1d data for HMA(21) trend ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 21:
+        # Calculate HMA(21) on 1d data
+        half_len = 21 // 2
+        sqrt_len = int(np.sqrt(21))
+        
+        # WMA function
+        def wma(arr, period):
+            if len(arr) < period:
+                return np.full_like(arr, np.nan)
+            weights = np.arange(1, period + 1)
+            return np.convolve(arr, weights / weights.sum(), mode='valid')
+        
+        # HMA = WMA(2 * WMA(n/2) - WMA(n), sqrt(n))
+        wma_half = wma(close, half_len)
+        wma_full = wma(close, 21)
+        # Handle array lengths
+        raw_hma = 2 * wma_half - wma_full
+        hma_1d = wma(raw_hma[~np.isnan(raw_hma)], sqrt_len) if len(raw_hma[~np.isnan(raw_hma)]) >= sqrt_len else np.array([])
+        # Pad to original length
+        hma_padded = np.full(len(close), np.nan)
+        start_idx = 21 - 1  # WMA(21) loses 20 points
+        hma_padded[start_idx:start_idx+len(hma_1d)] = hma_1d
+        hma_1d_values = hma_padded
+        
+        # Trend direction: 1 = uptrend (price > HMA), -1 = downtrend (price < HMA)
+        trend_1d = np.where(close > hma_1d_values, 1, -1)
+        # Align to LTF (4h) with shift(1) for completed bars only
+        trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     else:
-        trend_12h_aligned = np.full(n, 0)  # neutral if insufficient data
+        trend_1d_aligned = np.full(n, 0)  # neutral if insufficient data
     
-    # === 6h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation ===
+    # === 4h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 6h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -94,7 +85,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 10, 14)  # Donchian, volume avg, Supertrend ATR, ATR warmup
+    warmup = max(20, 20, 21, 14)  # Donchian, volume avg, HMA, ATR warmup
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -117,7 +108,7 @@ def generate_signals(prices):
                 highest_since_entry = max(highest_since_entry, high[i])
                 stop_price = highest_since_entry - 2.0 * atr[i]
                 # Exit: stoploss OR Donchian lower band break OR trend reversal
-                if price <= stop_price or price <= donchian_low[i] or (i < len(trend_12h_aligned) and trend_12h_aligned[i] == -1):
+                if price <= stop_price or price <= donchian_low[i] or (i < len(trend_1d_aligned) and trend_1d_aligned[i] == -1):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -127,7 +118,7 @@ def generate_signals(prices):
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 stop_price = lowest_since_entry + 2.0 * atr[i]
                 # Exit: stoploss OR Donchian upper band break OR trend reversal
-                if price >= stop_price or price >= donchian_high[i] or (i < len(trend_12h_aligned) and trend_12h_aligned[i] == 1):
+                if price >= stop_price or price >= donchian_high[i] or (i < len(trend_1d_aligned) and trend_1d_aligned[i] == 1):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -140,9 +131,9 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # Only trade in direction of 12h Supertrend trend
-        long_entry = breakout_up and volume_confirmed and (i < len(trend_12h_aligned) and trend_12h_aligned[i] == 1)
-        short_entry = breakout_down and volume_confirmed and (i < len(trend_12h_aligned) and trend_12h_aligned[i] == -1)
+        # Only trade in direction of 1d HMA trend
+        long_entry = breakout_up and volume_confirmed and (i < len(trend_1d_aligned) and trend_1d_aligned[i] == 1)
+        short_entry = breakout_down and volume_confirmed and (i < len(trend_1d_aligned) and trend_1d_aligned[i] == -1)
         
         if long_entry:
             in_position = True
