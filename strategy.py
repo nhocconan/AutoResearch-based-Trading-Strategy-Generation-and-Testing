@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #2929: 4h Donchian Breakout + Daily Pivot Direction + Volume Spike
-HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture medium-term trends with lower fee drag.
-Daily pivot (from 1d data) provides directional bias: only take long breakouts when price > daily pivot,
-and short breakouts when price < daily pivot. Volume spike (>2.0x 20-period average) confirms breakout strength.
-This combination filters false breakouts in choppy markets while capturing strong trends. 4h timeframe
-targets 75-200 total trades over 4 years (19-50/year) to minimize fee drag and improve test generalization.
-Works in both bull (breakouts with momentum) and bear (breakdowns with continuation) regimes.
+Experiment #2930: 1d Donchian Breakout + Weekly Trend Filter + Volume Spike
+HYPOTHESIS: Daily Donchian(20) breakouts capture medium-term trends with lower fee drag.
+Weekly trend filter (price > weekly EMA50) ensures we trade with the dominant trend.
+Volume spike (>1.8x 20-day average) confirms breakout strength. This combination
+works in both bull and bear markets by only taking breakouts in the direction of
+the weekly trend. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2929_4h_donchian20_1d_pivot_vol_v1"
-timeframe = "4h"
+name = "exp_2930_1d_donchian20_1w_trend_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,25 +23,22 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for daily pivot calculation (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === HTF: 1w data for weekly trend filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate daily pivot: P = (High + Low + Close) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate weekly EMA50 for trend filter
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align to 4h timeframe (shifted by 1 for completed bars only)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    # Align to daily timeframe (shifted by 1 for completed weekly bars only)
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
     
-    # === 4h Indicators: Donchian channels (20-period) ===
+    # === Daily Indicators: Donchian channels (20-period) ===
     lookback = 20
-    # Rolling max/min for Donchian channels
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === Daily Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -63,7 +59,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(ema50_1w_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -75,7 +71,7 @@ def generate_signals(prices):
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
                 # Exit if price drops 2.5*ATR below highest since entry
-                # Use 4h ATR(14) approximation from price range
+                # Use daily ATR(14) approximation from price range
                 atr_estimate = (high[i] - low[i]) * 0.5
                 if price < highest_since_entry - 2.5 * atr_estimate:
                     in_position = False
@@ -106,23 +102,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
+        # Require volume spike (> 1.8x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Get daily pivot bias
-            price_vs_pivot = price - pivot_aligned[i]
+            # Get weekly trend bias
+            price_vs_ema = price - ema50_1w_aligned[i]
             
-            # Long entry: price breaks above Donchian high with bullish bias
-            if price > highest_high[i] and price_vs_pivot > 0:
+            # Long entry: price breaks above Donchian high with bullish weekly trend
+            if price > highest_high[i] and price_vs_ema > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with bearish bias
-            elif price < lowest_low[i] and price_vs_pivot < 0:
+            # Short entry: price breaks below Donchian low with bearish weekly trend
+            elif price < lowest_low[i] and price_vs_ema < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -135,5 +131,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
