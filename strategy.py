@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4403: 4h Donchian Breakout + Daily Pivot Direction + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with daily Camarilla pivot direction (price above/below pivot = long/short bias) and confirmed by volume (>1.8x average) capture institutional momentum with minimal false signals. Daily pivot provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
+Experiment #4405: 12h Donchian(20) Breakout + 1d EMA50 Trend + Volume Confirmation
+HYPOTHESIS: 12h Donchian(20) breakouts aligned with 1d EMA50 trend direction (price above/below EMA = long/short bias) and confirmed by volume (>1.8x average) capture institutional momentum with minimal false signals. 1d EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4403_4h_donchian20_1d_pivot_vol_v1"
-timeframe = "4h"
+name = "exp_4405_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,27 +23,27 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1d Camarilla Pivot for bias ===
+    # === Precompute HTF: 1d EMA50 for trend bias ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 1:
-        # Calculate daily pivot points: P = (H+L+C)/3
-        pivot = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
-        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    if len(df_1d) >= 50:
+        close_1d = pd.Series(df_1d['close'].values)
+        ema_1d = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        pivot_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel(20) ===
+    # === 12h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -61,12 +61,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
+    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, EMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(pivot_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -105,9 +105,9 @@ def generate_signals(prices):
         # Require volume confirmation (> 1.8x average) to filter noise
         volume_confirm = vol_ratio[i] > 1.8
         
-        # Daily pivot bias: price > pivot = long bias, price < pivot = short bias
-        long_bias = price > pivot_aligned[i]
-        short_bias = price < pivot_aligned[i]
+        # Daily EMA bias: price > EMA = long bias, price < EMA = short bias
+        long_bias = price > ema_1d_aligned[i]
+        short_bias = price < ema_1d_aligned[i]
         
         # Donchian breakout conditions
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
