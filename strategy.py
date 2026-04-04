@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #2988: 12h Donchian Breakout + 1w HMA Trend + Volume Spike + Chop Filter
-HYPOTHESIS: Donchian(20) breakouts on 12h capture medium-term trends with lower trade frequency. 
-1w HMA(34) provides strong trend filter. Volume confirmation (>1.8x 24-period average) ensures 
-breakout strength. Choppiness Index (CHOP) > 61.8 avoids ranging markets. Target: 50-150 total trades 
-over 4 years (12-37/year) to minimize fee drag while maintaining statistical validity.
+Experiment #2990: 1d Donchian(20) Breakout + 1w HMA(21) Trend + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on daily timeframe capture medium-term trends with low trade frequency.
+Weekly HMA(21) provides trend filter: only take longs when price > weekly HMA, shorts when price < weekly HMA.
+Volume spike (>2.0x 20-period average) confirms breakout strength. This combination filters false breakouts
+while capturing strong trends in both bull and bear markets. Daily timeframe targets 30-100 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2988_12h_donchian20_1w_hma_vol_chop_v1"
-timeframe = "12h"
+name = "exp_2990_1d_donchian20_1w_hma_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +26,7 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate HMA(34) on 1w close
+    # Calculate HMA(21) on 1w close
     def calculate_hma(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -38,44 +38,18 @@ def generate_signals(prices):
         hma = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
         return hma.values
     
-    hma_1w = calculate_hma(close_1w, 34)
+    hma_1w = calculate_hma(close_1w, 21)
     hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
-    # === HTF: 1d data for Chop Filter ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Choppiness Index (CHOP) on 1d data
-    def calculate_chop(high_arr, low_arr, close_arr, period=14):
-        if len(close_arr) < period:
-            return np.full_like(close_arr, np.nan)
-        atr = np.zeros_like(close_arr)
-        tr1 = np.abs(high_arr[1:] - low_arr[1:])
-        tr2 = np.abs(high_arr[1:] - close_arr[:-1])
-        tr3 = np.abs(low_arr[1:] - close_arr[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr[1:] = tr
-        atr_sum = pd.Series(atr).rolling(window=period, min_periods=period).sum().values
-        highest_high = pd.Series(high_arr).rolling(window=period, min_periods=period).max().values
-        lowest_low = pd.Series(low_arr).rolling(window=period, min_periods=period).min().values
-        range_hl = highest_high - lowest_low
-        chop = np.where(range_hl != 0, 100 * np.log10(atr_sum / range_hl) / np.log10(period), 50)
-        return chop
-    
-    chop_1d = calculate_chop(high_1d, low_1d, close_1d, 14)
-    chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
-    
-    # === 12h Indicators: Donchian channels (20-period) ===
+    # === 1d Indicators: Donchian channels (20-period) ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 12h Indicators: Volume MA(24) for spike detection ===
-    vol_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values
+    # === 1d Indicators: Volume MA(20) for spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
-    vol_ratio[24:] = volume[24:] / vol_ma[24:]
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -88,13 +62,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 24, 34)  # sufficient for all indicators
+    warmup = max(50, lookback, 20)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(hma_1w_aligned[i]) or np.isnan(chop_1d_aligned[i]) or
-            np.isnan(vol_ratio[i])):
+            np.isnan(hma_1w_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -136,12 +109,10 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) for confirmation
-        volume_spike = vol_ratio[i] > 1.8
-        # Require trending market (CHOP <= 61.8)
-        trending_market = chop_1d_aligned[i] <= 61.8
+        # Require volume spike (> 2.0x average) for confirmation
+        volume_spike = vol_ratio[i] > 2.0
         
-        if volume_spike and trending_market:
+        if volume_spike:
             # Get 1w HMA trend
             price_vs_hma = price - hma_1w_aligned[i]
             
