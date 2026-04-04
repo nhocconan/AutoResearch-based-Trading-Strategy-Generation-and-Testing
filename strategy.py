@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-exp_6490_1d_donchian20_1w_ema_vol_v1
-Hypothesis: Daily Donchian(20) breakout with weekly EMA(21) trend filter and volume confirmation.
-Uses weekly EMA as trend filter: long only when price > weekly EMA21, short only when price < weekly EMA21.
-Donchian(20) breakout on daily timeframe provides entry timing with volume spike confirmation.
-Designed to work in both bull and bear markets by using weekly EMA as trend filter and Donchian breakouts for momentum.
-Target: 30-100 trades over 4 years (7-25/year) on 1d timeframe per experiment instructions.
+exp_6492_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+Uses daily EMA(50) as trend filter: long only when price > EMA50, short only when price < EMA50.
+Donchian(20) breakout provides entry timing, volume confirmation filters weak breakouts.
+Designed to work in both bull and bear markets by using 1d EMA as trend filter and Donchian breakouts for momentum.
+Target: 75-150 trades over 4 years (19-37/year). Uses 12h primary timeframe per experiment instructions.
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6490_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_6492_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 21
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 2.0  # volume must be 2.0x its 20-period MA
+VOL_THRESHOLD = 1.8  # volume must be 1.8x its 20-period MA
 SIGNAL_SIZE = 0.25   # 25% position size
 
 def generate_signals(prices):
@@ -27,15 +27,15 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1w for EMA trend
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop - using 1d for EMA trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA(21)
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, min_periods=EMA_PERIOD, adjust=False).mean().values
+    # Calculate 1d EMA(50)
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, min_periods=EMA_PERIOD, adjust=False).mean().values
     
-    # Align to LTF (1d) with shift(1) for completed bars only
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align to LTF (12h) with shift(1) for completed bars only
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -59,17 +59,17 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if EMA data not available
-        if np.isnan(ema_1w_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]):
             continue
             
-        # Long conditions: price breaks above Donchian HIGH + above weekly EMA + volume spike
+        # Long conditions: price breaks above Donchian HIGH + above 1d EMA + volume spike
         long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
-        long_trend = close[i] > ema_1w_aligned[i]  # price above weekly EMA (bullish trend)
+        long_trend = close[i] > ema_1d_aligned[i]  # price above 1d EMA (bullish trend)
         long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Short conditions: price breaks below Donchian LOW + below weekly EMA + volume spike
+        # Short conditions: price breaks below Donchian LOW + below 1d EMA + volume spike
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
-        short_trend = close[i] < ema_1w_aligned[i]  # price below weekly EMA (bearish trend)
+        short_trend = close[i] < ema_1d_aligned[i]  # price below 1d EMA (bearish trend)
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Exit conditions: simple midpoint reversal
@@ -109,3 +109,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
