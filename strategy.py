@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4121: 4h Donchian(20) breakout + 1d EMA filter + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with daily EMA trend (1d EMA50) and volume confirmation capture institutional order flow. Daily EMA acts as dynamic support/resistance filter - only take breakouts in direction of daily trend. Works in bull/bear by using daily EMA as trend filter. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #4122: 12h Donchian(20) breakout + 1d EMA50 filter + volume confirmation + chop regime
+HYPOTHESIS: 12h Donchian breakouts aligned with daily EMA50 trend and volume confirmation capture institutional order flow. Adding choppiness regime filter (CHOP > 61.8) avoids whipsaws in ranging markets. Works in bull/bear by using daily EMA as trend filter and chop filter to avoid false signals. Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4121_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_4122_12h_donchian20_1d_ema_vol_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,17 +28,48 @@ def generate_signals(prices):
     else:
         ema_1d_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel(20) for breakout ===
+    # === HTF: 1d Chopiness Index(14) for regime filter ===
+    if len(df_1d) >= 1:
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
+        close_1d = df_1d['close'].values
+        
+        # True Range
+        tr1 = high_1d[1:] - low_1d[1:]
+        tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+        tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+        tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        
+        # ATR(14)
+        atr_1d = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+        
+        # Highest high and lowest low over 14 periods
+        highest_high_14 = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
+        lowest_low_14 = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
+        
+        # Chopiness Index: 100 * log10(sum(ATR14) / (max(HH14) - min(LL14))) / log10(14)
+        sum_atr_14 = pd.Series(atr_1d).rolling(window=14, min_periods=14).sum().values
+        hh_ll_diff = highest_high_14 - lowest_low_14
+        chop_1d = np.where(
+            (hh_ll_diff > 0) & (~np.isnan(sum_atr_14)) & (~np.isnan(hh_ll_diff)),
+            100 * np.log10(sum_atr_14 / hh_ll_diff) / np.log10(14),
+            50.0  # neutral when invalid
+        )
+        chop_1d_aligned = align_htf_to_ltf(prices, df_1d, chop_1d)
+    else:
+        chop_1d_aligned = np.full(n, 50.0)
+    
+    # === 12h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(20) for volatility and stoploss ===
+    # === 12h Indicators: ATR(20) for volatility and stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -56,13 +87,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 10, 50 + 10)  # DC lookback, vol MA buffer, EMA buffer
+    warmup = max(lookback_dc + 1, 20 + 10, 50 + 10, 14 + 10)  # DC, vol MA, EMA, chop buffers
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_1d_aligned[i])):
+            np.isnan(ema_1d_aligned[i]) or np.isnan(chop_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -94,8 +125,12 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         # Require volume spike (> 1.5x average) to filter noise
         volume_spike = vol_ratio[i] > 1.5
+        # Require choppy market (CHOP > 61.8) for mean reversion avoidance - actually we want TRENDING
+        # Chop > 61.8 = ranging, Chop < 38.2 = trending
+        # We want trending markets for breakouts, so chop < 38.2
+        trending_regime = chop_1d_aligned[i] < 38.2
         
-        if volume_spike:
+        if volume_spike and trending_regime:
             # Donchian breakout logic
             breakout_up = price > highest_high[i-1]
             breakout_down = price < lowest_low[i-1]
