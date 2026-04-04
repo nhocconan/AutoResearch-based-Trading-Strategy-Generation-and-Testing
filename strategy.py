@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #5714: 1h Donchian(20) breakout + 4h EMA200 trend + volume confirmation
-HYPOTHESIS: On 1h timeframe, Donchian(20) breakouts with volume > 1.5x average and aligned 
-with 4h EMA200 trend (price above EMA200 = bullish, below = bearish) capture high-probability 
-trend continuation moves. The 4h EMA200 provides a strong trend filter that reduces whipsaw 
-in both bull and bear markets. Volume confirms breakout strength. Session filter (08-20 UTC) 
-reduces noise trades. Discrete sizing (0.20) minimizes fee churn. Target: 15-37 trades/year.
+Experiment #5715: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
+HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts with volume > 2.0x average and aligned 
+with weekly pivot direction (price above weekly pivot = bullish, below = bearish) capture 
+high-probability trend continuation moves. Weekly pivots derived from 1w high/low/close 
+provide significant support/resistance levels that work in both bull and bear markets. 
+Volume confirms breakout strength. ATR trailing stop (2.5x) manages risk. Discrete sizing 
+(0.25) minimizes fee churn. Target: 19-37 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5714_1h_donchian20_4h_ema200_vol_v1"
-timeframe = "1h"
+name = "exp_5715_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,25 +27,29 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 4h data for EMA200 trend ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) >= 200:
-        ema_4h = pd.Series(df_4h['close'].values).ewm(span=200, adjust=False).mean().values
+    # === HTF: 1w data for pivot points ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 1:
+        # Calculate weekly pivot: P = (H + L + C) / 3
+        weekly_high = df_1w['high'].values
+        weekly_low = df_1w['low'].values
+        weekly_close = df_1w['close'].values
+        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
     else:
-        ema_4h = np.full(len(df_4h), np.nan)
+        weekly_pivot = np.full(len(df_1w), np.nan)
     
-    # Align 4h EMA200 to 1h timeframe
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Align weekly pivot to 6h timeframe (shifted by 1 for completed weekly bars only)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
     
-    # === 1h Indicators: Donchian Channel (20-period) ===
+    # === 6h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1h Indicators: Volume confirmation ===
+    # === 6h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 1h Indicators: ATR(14) for trailing stop ===
+    # === 6h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -54,7 +59,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size (discrete level)
+    SIZE = 0.25  # 25% position size (discrete level)
     
     # Position tracking state variables
     in_position = False
@@ -63,19 +68,19 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 200)  # Donchian, volume avg, ATR, EMA200
+    warmup = max(20, 20, 14)  # Donchian, volume avg, ATR
     
     for i in range(warmup, n):
-        # --- Session Filter: Trade only during active hours (08-20 UTC) ---
+        # --- Session Filter: Avoid low liquidity periods ---
         hour = hours[i]
-        if hour < 8 or hour > 20:
+        if 21 <= hour <= 23:
             signals[i] = 0.0
             continue
         
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_4h_aligned[i])):
+            np.isnan(weekly_pivot_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -86,8 +91,8 @@ def generate_signals(prices):
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
                 stop_price = highest_since_entry - 2.5 * atr[i]
-                # Exit: stoploss OR price breaks below 4h EMA200 (trend change)
-                if price <= stop_price or price <= ema_4h_aligned[i]:
+                # Exit: stoploss OR price breaks below weekly pivot (trend change)
+                if price <= stop_price or price <= weekly_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -96,8 +101,8 @@ def generate_signals(prices):
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 stop_price = lowest_since_entry + 2.5 * atr[i]
-                # Exit: stoploss OR price breaks above 4h EMA200 (trend change)
-                if price >= stop_price or price >= ema_4h_aligned[i]:
+                # Exit: stoploss OR price breaks above weekly pivot (trend change)
+                if price >= stop_price or price >= weekly_pivot_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -108,13 +113,13 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.5
+        volume_confirmed = volume_ratio[i] > 2.0
         
-        # 4h EMA200 bias: long above EMA200, short below EMA200
-        long_bias = price > ema_4h_aligned[i]
-        short_bias = price < ema_4h_aligned[i]
+        # Weekly pivot bias: long above pivot, short below pivot
+        long_bias = price > weekly_pivot_aligned[i]
+        short_bias = price < weekly_pivot_aligned[i]
         
-        # Entry conditions: breakout in direction of 4h EMA200 bias with volume
+        # Entry conditions: breakout in direction of weekly pivot bias with volume
         long_setup = breakout_up and volume_confirmed and long_bias
         short_setup = breakout_down and volume_confirmed and short_bias
         
@@ -136,3 +141,20 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+def calculate_hma(values, period):
+    """Calculate Hull Moving Average - kept for compatibility but not used"""
+    if len(values) < period:
+        return np.full_like(values, np.nan)
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    # WMA of half period
+    wma_half = pd.Series(values).ewm(span=half_period, adjust=False).mean().values
+    # WMA of full period
+    wma_full = pd.Series(values).ewm(span=period, adjust=False).mean().values
+    # Raw HMA: 2*WMA(half) - WMA(full)
+    raw_hma = 2 * wma_half - wma_full
+    # Final HMA: WMA of raw_hma with sqrt_period
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
+    return hma
