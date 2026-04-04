@@ -1,72 +1,82 @@
 #!/usr/bin/env python3
 """
-exp_6847_6h_camarilla1d_pivot_v1
-Hypothesis: 6h Camarilla pivot levels from 1d: fade at R3/S3, breakout continuation at R4/S4.
-Camarilla pivots identify intraday support/resistance with statistical significance.
-In ranging markets: fade extreme levels (R3/S3) with mean reversion.
-In trending markets: break through R4/S4 signals continuation with volume confirmation.
-Uses 1d HTF for pivot calculation to avoid look-ahead and align with actual daily sessions.
-Designed for 6h timeframe to capture 12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by adapting to regime via price action at pivot levels.
+exp_6850_1d_kama_rsi_chop_v1
+Hypothesis: 1d KAMA trend + RSI(14) extremes + Choppiness Index regime filter.
+In trending markets (CHOP < 38.2): follow KAMA direction (long if price > KAMA, short if price < KAMA).
+In ranging markets (CHOP > 61.8): mean revert at RSI extremes (long if RSI < 30, short if RSI > 70).
+Only trade when volume confirms (volume > 1.5x 20-day average). Uses discrete position sizing (0.25)
+to minimize fee churn. Designed for low trade frequency (~10-25/year) to avoid overtrading.
+Works in both bull and bear markets by adapting to regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6847_6h_camarilla1d_pivot_v1"
-timeframe = "6h"
+name = "exp_6850_1d_kama_rsi_chop_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-PIVOT_LOOKBACK = 1  # use previous day's OHLC
+KAMA_ER_PERIOD = 10
+KAMA_FAST = 2
+KAMA_SLOW = 30
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
+CHOP_PERIOD = 14
+CHOP_THRESHOLD_TRENDING = 38.2
+CHOP_THRESHOLD_RANGING = 61.8
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 8  # ~2 days (6h bars)
-PIVOT_PERIOD = 10  # for adaptive pivot relevance
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 40  # ~1.3 months
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Camarilla pivots from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Typical price for pivot calculation
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels
-    r4 = pp + range_1d * 1.1 / 2
-    r3 = pp + range_1d * 1.1 / 4
-    r2 = pp + range_1d * 1.1 / 6
-    r1 = pp + range_1d * 1.1 / 12
-    s1 = pp - range_1d * 1.1 / 12
-    s2 = pp - range_1d * 1.1 / 6
-    s3 = pp - range_1d * 1.1 / 4
-    s4 = pp - range_1d * 1.1 / 2
-    
-    # Align HTF pivot levels to LTF (6h)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Calculate LTF indicators
+    # Calculate indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # KAMA (Kaufman Adaptive Moving Average)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.sum(np.abs(np.diff(close)), axis=0)  # placeholder, will compute correctly below
+    # Recompute volatility properly: sum of absolute changes over ER_PERIOD
+    volatility = pd.Series(close).diff().abs().rolling(window=KAMA_ER_PERIOD, min_periods=1).sum().values
+    change = pd.Series(close).diff().abs().rolling(window=KAMA_ER_PERIOD, min_periods=1).sum().values
+    er = np.where(volatility > 0, change / volatility, 0)
+    sc = (er * (2/(KAMA_FAST+1) - 2/(KAMA_SLOW+1)) + 2/(KAMA_SLOW+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, n):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    
+    # RSI
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Choppiness Index
+    atr1 = pd.Series(np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1)))))
+    atr_sum = atr1.rolling(window=CHOP_PERIOD, min_periods=CHOP_PERIOD).sum().values
+    highest_high = pd.Series(high).rolling(window=CHOP_PERIOD, min_periods=CHOP_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=CHOP_PERIOD, min_periods=CHOP_PERIOD).min().values
+    range_max_min = highest_high - lowest_low
+    chop = np.where(range_max_min != 0, 100 * np.log10(atr_sum / range_max_min) / np.log10(CHOP_PERIOD), 50)
+    
+    # Volume MA
+    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
     # ATR for stoploss
     tr1 = pd.Series(high - low)
@@ -75,22 +85,19 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Volume MA for confirmation
-    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=1).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(PIVOT_LOOKBACK, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(KAMA_ER_PERIOD, RSI_PERIOD, CHOP_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if HTF data not available
-        if np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        # Skip if any data not available
+        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -116,201 +123,40 @@ def generate_signals(prices):
             continue
             
         # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if i < len(vol_ma) and not np.isnan(vol_ma[i]) else False
+        vol_confirmed = volume[i] > vol_ma[i] * VOLUME_THRESHOLD
         
-        # Fade at R3/S3 (mean reversion)
-        fade_long = close[i] <= s3_aligned[i] and close[i] > s4_aligned[i] and vol_confirmed
-        fade_short = close[i] >= r3_aligned[i] and close[i] < r4_aligned[i] and vol_confirmed
+        # Determine regime
+        is_trending = chop[i] < CHOP_THRESHOLD_TRENDING
+        is_ranging = chop[i] > CHOP_THRESHOLD_RANGING
         
-        # Breakout continuation at R4/S4 (trend following)
-        breakout_long = close[i] > r4_aligned[i] and vol_confirmed
-        breakout_short = close[i] < s4_aligned[i] and vol_confirmed
+        # Initialize signal
+        new_signal = 0
         
-        # Enter new positions only if flat
-        if position == 0:
-            if fade_long:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-            elif fade_short:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-            elif breakout_long:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-            elif breakout_short:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
+        if is_trending and vol_confirmed:
+            # Trend following: follow KAMA direction
+            if close[i] > kama[i]:
+                new_signal = SIGNAL_SIZE  # long
+            elif close[i] < kama[i]:
+                new_signal = -SIGNAL_SIZE  # short
+        elif is_ranging and vol_confirmed:
+            # Mean reversion: fade extremes at RSI levels
+            if rsi[i] < RSI_OVERSOLD:
+                new_signal = SIGNAL_SIZE  # long
+            elif rsi[i] > RSI_OVERBOUGHT:
+                new_signal = -SIGNAL_SIZE  # short
+        
+        # Only change position if signal differs from current
+        if new_signal != position * SIGNAL_SIZE:
+            signals[i] = new_signal
+            if new_signal != 0:
+                position = 1 if new_signal > 0 else -1
                 entry_price = close[i]
                 bars_since_entry = 0
             else:
-                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
         else:
             # Hold current position
-            signals[i] = position * SIGNAL_SIZE
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-"""
-exp_6847_6h_camarilla1d_pivot_v1
-Hypothesis: 6h Camarilla pivot levels from 1d: fade at R3/S3, breakout continuation at R4/S4.
-Camarilla pivots identify intraday support/resistance with statistical significance.
-In ranging markets: fade extreme levels (R3/S3) with mean reversion.
-In trending markets: break through R4/S4 signals continuation with volume confirmation.
-Uses 1d HTF for pivot calculation to avoid look-ahead and align with actual daily sessions.
-Designed for 6h timeframe to capture 12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by adapting to regime via price action at pivot levels.
-"""
-
-from mtf_data import get_htf_data, align_htf_to_ltf
-import numpy as np
-import pandas as pd
-
-name = "exp_6847_6h_camarilla1d_pivot_v1"
-timeframe = "6h"
-leverage = 1.0
-
-# Parameters
-PIVOT_LOOKBACK = 1  # use previous day's OHLC
-VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 8  # ~2 days (6h bars)
-PIVOT_PERIOD = 10  # for adaptive pivot relevance
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Load HTF data ONCE before loop - using 1d for Camarilla pivots
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate Camarilla pivots from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Typical price for pivot calculation
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels
-    r4 = pp + range_1d * 1.1 / 2
-    r3 = pp + range_1d * 1.1 / 4
-    r2 = pp + range_1d * 1.1 / 6
-    r1 = pp + range_1d * 1.1 / 12
-    s1 = pp - range_1d * 1.1 / 12
-    s2 = pp - range_1d * 1.1 / 6
-    s3 = pp - range_1d * 1.1 / 4
-    s4 = pp - range_1d * 1.1 / 2
-    
-    # Align HTF pivot levels to LTF (6h)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Calculate LTF indicators
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # ATR for stoploss
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
-    
-    # Volume MA for confirmation
-    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=1).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    bars_since_entry = 0
-    
-    # Start from warmup period
-    start = max(PIVOT_LOOKBACK, VOL_MA_PERIOD, ATR_PERIOD) + 1
-    
-    for i in range(start, n):
-        bars_since_entry += 1
-        
-        # Skip if HTF data not available
-        if np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-            continue
-            
-        # Check stoploss
-        if position == 1:  # long position
-            if close[i] <= entry_price - ATR_STOP_MULTIPLIER * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
-        elif position == -1:  # short position
-            if close[i] >= entry_price + ATR_STOP_MULTIPLIER * atr[i]:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
-                
-        # Time-based exit
-        if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
-            signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
-            continue
-            
-        # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if i < len(vol_ma) and not np.isnan(vol_ma[i]) else False
-        
-        # Fade at R3/S3 (mean reversion)
-        fade_long = close[i] <= s3_aligned[i] and close[i] > s4_aligned[i] and vol_confirmed
-        fade_short = close[i] >= r3_aligned[i] and close[i] < r4_aligned[i] and vol_confirmed
-        
-        # Breakout continuation at R4/S4 (trend following)
-        breakout_long = close[i] > r4_aligned[i] and vol_confirmed
-        breakout_short = close[i] < s4_aligned[i] and vol_confirmed
-        
-        # Enter new positions only if flat
-        if position == 0:
-            if fade_long:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-            elif fade_short:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-            elif breakout_long:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-            elif breakout_short:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                bars_since_entry = 0
-            else:
-                signals[i] = 0.0
-        else:
-            # Hold current position
-            signals[i] = position * SIGNAL_SIZE
     
     return signals
