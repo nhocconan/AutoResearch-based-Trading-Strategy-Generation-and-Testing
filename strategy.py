@@ -1,28 +1,31 @@
 #!/usr/bin/env python3
 """
-exp_6734_1h_donchian20_4h_ema_v2
-Hypothesis: 1h Donchian(20) breakout with 4h EMA(21) trend filter and session filter (08-20 UTC).
+exp_6734_1h_donchian20_4h_ema_vol_v1
+Hypothesis: 1h Donchian(20) breakout with 4h EMA(21) trend filter and volume confirmation.
 In bull markets: buy breakouts above upper Donchian when 4h EMA is rising.
 In bear markets: sell breakdowns below lower Donchian when 4h EMA is falling.
-Session filter reduces noise trades during low-volume hours. Target: 15-37 trades/year.
-Uses 4h for SIGNAL DIRECTION, 1h only for ENTRY TIMING to minimize overtrading.
+Volume confirmation ensures breakout legitimacy. ATR-based stoploss limits drawdown.
+Designed for 1h timeframe to capture medium-term swings with 15-37 trades/year (60-150 over 4 years).
+Uses 4h EMA for signal direction, 1h for entry timing. Session filter (08-20 UTC) reduces noise.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6734_1h_donchian20_4h_ema_v2"
+name = "exp_6734_1h_donchian20_4h_ema_vol_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5
+VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+SESSION_START_HOUR = 8
+SESSION_END_HOUR = 20
 
 def generate_signals(prices):
     n = len(prices)
@@ -58,17 +61,20 @@ def generate_signals(prices):
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
     # Session filter: 08-20 UTC
-    hours = prices.index.hour  # open_time is already datetime64[ms]
-    in_session = (hours >= 8) & (hours <= 20)
+    hours = prices.index.hour
+    in_session = (hours >= SESSION_START_HOUR) & (hours <= SESSION_END_HOUR)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    bars_since_entry = 0
     
     # Start from warmup period
     start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
+        bars_since_entry += 1
+        
         # Skip if HTF data not available
         if np.isnan(ema_4h_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
@@ -79,11 +85,13 @@ def generate_signals(prices):
             if close[i] <= entry_price - ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= entry_price + ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
                 
         # Volume confirmation
@@ -93,16 +101,21 @@ def generate_signals(prices):
         long_breakout = (close[i] > highest_high[i]) and vol_confirmed and (ema_4h_aligned[i] > ema_4h_aligned[i-1])
         short_breakout = (close[i] < lowest_low[i]) and vol_confirmed and (ema_4h_aligned[i] < ema_4h_aligned[i-1])
         
+        # Session filter
+        session_ok = in_session[i]
+        
         # Enter new positions only if flat and in session
-        if position == 0 and in_session[i]:
+        if position == 0 and session_ok:
             if long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
+                bars_since_entry = 0
             elif short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         else:
