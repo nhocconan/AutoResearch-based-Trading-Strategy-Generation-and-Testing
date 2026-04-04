@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3441: 4h Donchian Breakout + 1d HMA Trend + Volume Spike (Optimized)
-HYPOTHESIS: 4h Donchian(20) breakouts with 1d HMA(50) trend filter and volume confirmation capture medium-term trends. 
-Reduced sensitivity: volume threshold increased to 3.0x, Donchian lookback increased to 25, ATR trailing stop tightened to 2.0x.
-Designed for 75-200 total trades over 4 years (19-50/year) to avoid overtrading and fee drag.
-Works in bull markets via trend continuation and in bear markets via mean reversion from extremes.
+Experiment #3441: 4h Donchian Breakout + 1d HMA Trend + Volume Spike
+HYPOTHESIS: 4h Donchian(20) breakouts with 1d HMA(50) trend filter and volume confirmation (>1.8x 20-period average) captures medium-term trends with optimal trade frequency for 4h timeframe. Uses ATR-based trailing stop (2.0x) and position size 0.25. Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets by using price channels and volatility filters. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3441_4h_donchian25_1d_hma_vol_v1"
+name = "exp_3441_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -41,8 +38,8 @@ def generate_signals(prices):
     hma_1d = hma(close_1d, 50)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # === 4h Indicators: Donchian channels (25-period for fewer signals) ===
-    lookback = 25
+    # === 4h Indicators: Donchian channels (20-period) ===
+    lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
@@ -69,7 +66,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 20, 14)  # sufficient for all indicators
+    warmup = max(50, lookback, 20, 14, 50)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -85,7 +82,7 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (tighter stop)
+                # Exit if price drops 2.0*ATR below highest since entry
                 if price < highest_since_entry - 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
@@ -99,7 +96,7 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (tighter stop)
+                # Exit if price rises 2.0*ATR above lowest since entry
                 if price > lowest_since_entry + 2.0 * atr[i]:
                     in_position = False
                     position_side = 0
@@ -114,8 +111,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 3.0x average) for confirmation (stricter)
-        volume_spike = vol_ratio[i] > 3.0
+        # Require volume spike (> 1.8x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
             # 1d HMA trend filter: only long above HMA, short below HMA
