@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4641: 4h Donchian(20) Breakout + Volume Confirmation + ATR Stoploss
-HYPOTHESIS: 4h price breaking Donchian(20) channels from prior 1d with volume confirmation (>1.5x avg) captures strong momentum breakouts in both bull and bear markets. Uses 1d HTF for Donchian calculation to avoid look-ahead. Discrete sizing (0.25) and ATR trailing stop (2.0x) manage risk. Target: 19-50 trades/year on 4h timeframe.
+Experiment #4642: 12h Donchian(20) Breakout + Volume Confirmation + ATR Stoploss
+HYPOTHESIS: 12h price breaking Donchian(20) channels from prior 1d with volume confirmation (>1.5x avg) captures strong momentum breakouts in both bull and bear markets. Uses 1d HTF for Donchian calculation to avoid look-ahead. Discrete sizing (0.25) and ATR trailing stop (2.0x) manage risk. Target: 12-37 trades/year on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4641_4h_donchian20_1d_vol_v1"
-timeframe = "4h"
+name = "exp_4642_12h_donchian20_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,7 +35,7 @@ def generate_signals(prices):
         donchian_high = np.full(n, np.nan)
         donchian_low = np.full(n, np.nan)
     
-    # Align Donchian levels to 4h timeframe
+    # Align Donchian levels to 12h timeframe
     if len(donchian_high) > 0:
         dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
         dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
@@ -43,12 +43,12 @@ def generate_signals(prices):
         dh_aligned = np.full(n, np.nan)
         dl_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
