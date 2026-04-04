@@ -2,8 +2,8 @@
 """
 Experiment #5533: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation
 HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts with volume > 1.5x average and aligned with 
-12h HMA(21) trend capture high-probability moves in both bull and bear markets. The 12h HMA 
-provides smooth trend filtering that works across regimes, while volume confirmation filters 
+12h Hull Moving Average (HMA-21) trend capture high-probability moves in both bull and bear markets. 
+The 12h HMA provides smooth trend direction with reduced lag, while volume confirmation filters 
 false breakouts. Discrete position sizing (0.25) and ATR-based trailing stop control risk. 
 Target: 19-50 trades/year (75-200 total over 4 years).
 """
@@ -26,39 +26,39 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 12h data for HMA(21) trend ===
+    # === HTF: 12h data for HMA trend ===
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) >= 21:
-        # Calculate HMA(21) on 12h close
-        close_12h = df_12h['close'].values
-        n_12h = len(close_12h)
-        half_n = 21 // 2
-        sqrt_n = int(np.sqrt(21))
+        # Hull Moving Average (HMA-21)
+        # HMA = WMA(2 * WMA(n/2) - WMA(n), sqrt(n))
+        half_len = 21 // 2
+        sqrt_len = int(np.sqrt(21))
         
-        # WMA function for HMA calculation
+        # WMA function
         def wma(values, window):
             if len(values) < window:
-                return np.full_like(values, np.nan)
+                return np.full(len(values), np.nan)
             weights = np.arange(1, window + 1)
             return np.convolve(values, weights / weights.sum(), mode='valid')
         
-        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        wma_half = wma(close_12h, half_n)
+        close_12h = df_12h['close'].values
+        wma_half = wma(close_12h, half_len)
         wma_full = wma(close_12h, 21)
-        # Handle edge cases for WMA arrays
-        wma_2x_sub = np.full_like(close_12h, np.nan)
-        wma_2x_sub[half_n-1:] = 2 * wma_half[:len(wma_2x_sub[half_n-1:])]
-        wma_diff = wma_2x_sub - wma_full
-        hma_12h = wma(wma_diff[~np.isnan(wma_diff)], sqrt_n) if np.sum(~np.isnan(wma_diff)) >= sqrt_n else np.array([])
-        # Pad HMA array to match original length
-        hma_12h_full = np.full(n_12h, np.nan)
-        if len(hma_12h) > 0:
-            start_idx = 21 - 1  # WMA(21) loses 20 points, WMA(sqrt) loses sqrt_n-1 more
-            end_idx = start_idx + len(hma_12h)
-            if end_idx <= n_12h:
-                hma_12h_full[start_idx:end_idx] = hma_12h
+        
+        # 2 * WMA(half) - WMA(full)
+        diff = 2 * wma_half - wma_full
+        # Pad diff to match original length
+        diff_padded = np.full(len(close_12h), np.nan)
+        diff_padded[half_len-1:len(close_12h)-21+half_len] = diff[:len(diff)]
+        
+        # WMA of diff with sqrt_len
+        hma_12h = wma(diff_padded, sqrt_len)
+        # Pad hma_12h to match original length
+        hma_padded = np.full(len(close_12h), np.nan)
+        hma_padded[sqrt_len-1:len(close_12h)-sqrt_len+1] = hma_12h
+        
         # Align to LTF (4h) with shift(1) for completed bars only
-        hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_full)
+        hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_padded)
     else:
         hma_12h_aligned = np.full(n, np.nan)
     
@@ -93,7 +93,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0  # For long positions
     lowest_since_entry = 0.0   # For short positions
     
-    warmup = max(20, 20, 20, 14)  # Donchian, volume avg, ATR warmup
+    warmup = max(20, 20, 20, 14, 21//2, int(np.sqrt(21)))  # Donchian, volume avg, ATR, HMA warmup
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -154,11 +154,13 @@ def generate_signals(prices):
         # Volume confirmation: current volume > 1.5x average volume
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # 12h HMA trend filter
-        hma_trend_up = hma_12h_aligned[i] > hma_12h_aligned[i-1]  # HMA rising
-        hma_trend_down = hma_12h_aligned[i] < hma_12h_aligned[i-1]  # HMA falling
+        # Trend filter: 12h HMA direction
+        # Long: price above 12h HMA (bullish trend)
+        # Short: price below 12h HMA (bearish trend)
+        hma_trend_up = price > hma_12h_aligned[i]
+        hma_trend_down = price < hma_12h_aligned[i]
         
-        # Entry conditions: breakout + volume + trend alignment
+        # Entry conditions: breakout + volume confirmation + trend alignment
         if breakout_up and volume_confirmed and hma_trend_up:
             in_position = True
             position_side = 1
