@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #4198: 1d Donchian(20) breakout + 1w EMA(50) trend + volume confirmation
-HYPOTHESIS: Donchian channel breakouts on 1d timeframe capture momentum when aligned with 1w EMA(50) trend
-and confirmed by volume (>1.8x average). The 1w EMA provides long-term trend bias that adapts to
-both bull and bear markets by identifying the prevailing direction. Discrete position sizing (0.25)
-limits fee churn, targeting 75-250 total trades over 4 years (19-62/year).
+HYPOTHESIS: Donchian channel breakouts on daily timeframe capture momentum when aligned with weekly EMA(50) trend
+and confirmed by volume (>1.8x average). The weekly EMA provides long-term trend bias that adapts to
+both bull and bear markets by identifying the prevailing direction. Discrete position sizing (0.25) limits fee churn,
+targeting 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
