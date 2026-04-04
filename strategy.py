@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #5253: 4h Donchian(20) Breakout + HMA Trend + Volume Confirmation + ATR Stoploss
-HYPOTHESIS: On 4h timeframe, Donchian channel breakouts (20-period) provide high-probability trend entries when aligned with 12h HMA(21) trend filter and volume confirmation (>1.5x average). Designed for 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag. Works in bull markets (breakouts above upper band with volume) and bear markets (breakouts below lower band with volume). Uses discrete position sizing (0.30) to balance return and drawdown. ATR-based trailing stop (2.0) limits losses during reversals.
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts capture institutional momentum when confirmed by volume (>1.5x 20-bar average) and aligned with 12h HMA(21) trend. Exits via ATR(14) trailing stop (2.0x). Designed for 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag. Works in bull markets (breakouts with trend) and bear markets (breakouts against trend filtered by regime). Uses discrete position sizing (0.30) to minimize fee churn.
 """
 
 import numpy as np
@@ -19,35 +19,47 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 12h data for HMA trend filter
+    # Precompute HTF: 12h data for HMA(21) trend
     df_12h = get_htf_data(prices, '12h')
     
-    # === 12h Indicators: HMA(21) for trend ===
+    # === 12h Indicators: HMA(21) for trend filter ===
     if len(df_12h) >= 21:
-        # Hull Moving Average calculation
-        n_hl = int(21 / 2)
-        n_sqrt = int(np.sqrt(21))
+        # Hull Moving Average: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        half_len = 12 // 2
+        sqrt_len = int(np.sqrt(12))
         
-        # WMA helper function
-        def wma(values, window):
-            weights = np.arange(1, window + 1)
-            return np.convolve(values, weights, mode='full')[-len(values):] / weights.sum()
+        def wma(arr, period):
+            weights = np.arange(1, period + 1)
+            return np.convolve(arr, weights/weights.sum(), mode='valid')
         
-        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        half_wma = wma(df_12h['close'].values, n_hl)
-        full_wma = wma(df_12h['close'].values, 21)
-        raw_hma = 2 * half_wma - full_wma
-        hma_21 = wma(raw_hma, n_sqrt)
-        
-        # Align to 4h timeframe (shift(1) in align_htf_to_ltf ensures prior completed bar only)
-        hma_aligned = align_htf_to_ltf(prices, df_12h, hma_21)
+        close_12h = df_12h['close'].values
+        if len(close_12h) >= 12:
+            wma_half = wma(close_12h, half_len)
+            wma_full = wma(close_12h, 12)
+            wma_diff = 2 * wma_half - wma_full
+            if len(wma_diff) >= sqrt_len:
+                hma_12h = wma(wma_diff, sqrt_len)
+                # Prepend NaNs for alignment
+                hma_12h_full = np.full(len(close_12h), np.nan)
+                hma_12h_full[half_len:half_len+len(hma_12h)] = hma_12h
+                hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_full)
+            else:
+                hma_12h_aligned = np.full(n, np.nan)
+        else:
+            hma_12h_aligned = np.full(n, np.nan)
     else:
-        hma_aligned = np.full(n, np.nan)
+        hma_12h_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel (20) ===
-    donchian_window = 20
-    upper = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
-    lower = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
+    # === 4h Indicators: Donchian(20) channels ===
+    donch_len = 20
+    if n >= donch_len:
+        # Upper channel: highest high over past 20 periods
+        upper = pd.Series(high).rolling(window=donch_len, min_periods=donch_len).max().values
+        # Lower channel: lowest low over past 20 periods
+        lower = pd.Series(low).rolling(window=donch_len, min_periods=donch_len).min().values
+    else:
+        upper = np.full(n, np.nan)
+        lower = np.full(n, np.nan)
     
     # === 4h Indicators: Volume confirmation (1.5x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,12 +84,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(donchian_window, 20, 21, 14)  # Donchian, volume MA, HMA warmup, ATR
+    warmup = max(20, 20, 14)  # Donchian, Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(hma_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(hma_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -111,10 +123,10 @@ def generate_signals(prices):
         vol_confirm = vol_ratio[i] > 1.5
         
         # Trend filter: bullish if price > 12h HMA(21), bearish if price < 12h HMA(21)
-        trend_bullish = price > hma_aligned[i]
-        trend_bearish = price < hma_aligned[i]
+        trend_bullish = price > hma_12h_aligned[i]
+        trend_bearish = price < hma_12h_aligned[i]
         
-        # Donchian breakout conditions
+        # Breakout conditions
         breakout_long = (price >= upper[i]) and trend_bullish and vol_confirm
         breakout_short = (price <= lower[i]) and trend_bearish and vol_confirm
         
