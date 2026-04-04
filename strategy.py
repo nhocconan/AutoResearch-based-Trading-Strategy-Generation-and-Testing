@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3710: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts capture intermediate-term momentum with weekly HMA21 providing structural trend bias. Volume spike confirms breakout authenticity. This combination avoids whipsaw in ranging markets and works in both bull (breakouts with trend) and bear (breakouts against trend filtered by weekly HMA) regimes. Targets 30-100 trades over 4 years (7-25/year) with strict 3-condition confluence. Position size 0.25 manages drawdown from 2022 crash while allowing profit accumulation.
+Experiment #3711: 6h Donchian(20) breakout + 1d volume confirmation + ATR-based stoploss
+HYPOTHESIS: 6h Donchian breakouts capture intermediate momentum with daily volume spike confirming institutional participation. ATR-based trailing stop manages drawdown in volatile markets. Targets 75-150 trades over 4 years (19-38/year) with strict 2-condition confluence. Position size 0.25 manages drawdown from 2022 crash while allowing profit accumulation. Works in bull (breakouts with volume) and bear (breakouts filtered by volume, avoiding false signals in low-volume ranges).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3710_1d_donchian20_1w_hma_vol_v1"
-timeframe = "1d"
+name = "exp_3711_6h_donchian20_1d_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,41 +19,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for HMA21 trend (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # === HTF: 1d data for volume confirmation (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
     
-    # Calculate weekly HMA21: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-    half_len = 21 // 2
-    sqrt_len = int(np.sqrt(21))
+    # Calculate daily volume MA(20)
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ratio_1d = np.ones(len(volume_1d))
+    vol_ratio_1d[20:] = volume_1d[20:] / vol_ma_1d[20:]
     
-    def wma(arr, period):
-        if period <= 0:
-            return np.full_like(arr, np.nan)
-        weights = np.arange(1, period + 1, dtype=np.float64)
-        return pd.Series(arr).rolling(window=period, min_periods=period).apply(
-            lambda x: np.dot(x, weights) / weights.sum(), raw=True
-        ).values
+    # Align daily volume ratio to 6h timeframe (shifted by 1 for completed daily bar)
+    vol_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ratio_1d)
     
-    wma_half = wma(close_1w, half_len)
-    wma_full = wma(close_1w, 21)
-    raw_hma = 2 * wma_half - wma_full
-    hma_21 = wma(raw_hma, sqrt_len)
-    
-    # Align weekly HMA21 to daily timeframe (shifted by 1 for completed weekly bar)
-    hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
-    
-    # === 1d Indicators: Donchian Channel(20) for breakout ===
+    # === 6h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
-    
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -71,12 +54,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20, 14, 21)  # sufficient for all indicators
+    warmup = max(lookback_dc + 1, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(hma_21_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(vol_ratio_1d_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -92,11 +75,6 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below weekly HMA21 (trend change)
-                elif price < hma_21_aligned[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
@@ -106,32 +84,25 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above weekly HMA21 (trend change)
-                elif price > hma_21_aligned[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
                 else:
                     signals[i] = -SIZE
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
+        # Require daily volume spike (> 1.8x average) for confirmation
+        volume_spike = vol_ratio_1d_aligned[i] > 1.8
         
         if volume_spike:
-            # Long entry: Price breaks above Donchian upper band AND above weekly HMA21 (bullish trend)
-            if (price > highest_high[i-1] and  # Breakout above previous period's high
-                price > hma_21_aligned[i]):    # Above weekly HMA21 (bullish bias)
+            # Long entry: Price breaks above Donchian upper band
+            if price > highest_high[i-1]:  # Breakout above previous period's high
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Price breaks below Donchian lower band AND below weekly HMA21 (bearish trend)
-            elif (price < lowest_low[i-1] and   # Breakout below previous period's low
-                  price < hma_21_aligned[i]):   # Below weekly HMA21 (bearish bias)
+            # Short entry: Price breaks below Donchian lower band
+            elif price < lowest_low[i-1]:  # Breakout below previous period's low
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
