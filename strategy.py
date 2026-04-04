@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4275: 6h Donchian(20) breakout + 1w/1d HTF confluence + volume confirmation
-HYPOTHESIS: Donchian breakouts on 6h capture swing momentum when aligned with 1w trend (price > 1w EMA50) and 1d bias (price > 1d VWAP), confirmed by volume (>1.5x average). Uses weekly EMA50 for strong trend filter (avoids whipsaw in ranging markets) and daily VWAP for intraday bias. ATR trailing stop (2.0x) for risk management. Position size 0.25 targets 50-150 total trades over 4 years (12-37/year). Works in bull via breakout continuation, in bear via shorting breakdowns. Novelty: Combines 1w EMA50 trend filter with 1d VWAP bias to reduce false breakouts while maintaining sufficient trade frequency.
+Experiment #4275: 6h Donchian(20) breakout + 1w Camarilla pivot direction + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts capture swing momentum when aligned with weekly Camarilla pivot structure (price > weekly R3 for longs, < weekly S3 for shorts) and confirmed by volume (>2.0x average). Weekly pivots provide institutional support/resistance levels that work in both bull (breakout continuation) and bear (fade at R4/S4) markets. Position size 0.25 targets 75-150 total trades over 4 years (19-37/year). Uses 1w HTF as specified in experiment to reduce noise while maintaining sufficient trade frequency.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4275_6h_donchian20_1w_1d_vwap_vol_v1"
+name = "exp_4275_6h_donchian20_1w_camarilla_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,24 +23,42 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1w EMA50 for trend filter ===
+    # === Precompute HTF: 1w Camarilla Pivot Levels ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 50:
-        ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    if len(df_1w) >= 2:
+        # Calculate weekly Camarilla pivot levels from previous week
+        # PP = (H + L + C) / 3
+        # R4 = PP + (H - L) * 1.1/2
+        # R3 = PP + (H - L) * 1.1/4
+        # R2 = PP + (H - L) * 1.1/6
+        # R1 = PP + (H - L) * 1.1/12
+        # S1 = PP - (H - L) * 1.1/12
+        # S2 = PP - (H - L) * 1.1/6
+        # S3 = PP - (H - L) * 1.1/4
+        # S4 = PP - (H - L) * 1.1/2
+        
+        weekly_high = df_1w['high'].values
+        weekly_low = df_1w['low'].values
+        weekly_close = df_1w['close'].values
+        
+        pp = (weekly_high + weekly_low + weekly_close) / 3.0
+        rng = weekly_high - weekly_low
+        
+        r4 = pp + rng * 1.1 / 2.0
+        r3 = pp + rng * 1.1 / 4.0
+        s3 = pp - rng * 1.1 / 4.0
+        s4 = pp - rng * 1.1 / 2.0
+        
+        # Align to 6h timeframe (use previous week's levels)
+        r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+        s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+        r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+        s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     else:
-        ema_1w_aligned = np.full(n, np.nan)
-    
-    # === Precompute HTF: 1d VWAP for bias ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 1:
-        # Typical price = (H+L+C)/3
-        typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
-        # VWAP = cum(typical_price * volume) / cum(volume)
-        vwap_1d = (typical_price * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
-        vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d.values)
-    else:
-        vwap_1d_aligned = np.full(n, np.nan)
+        r3_aligned = np.full(n, np.nan)
+        s3_aligned = np.full(n, np.nan)
+        r4_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
@@ -73,12 +91,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, 1w EMA
+    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(vwap_1d_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -95,8 +113,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -104,8 +122,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -114,25 +132,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = vol_ratio[i] > 2.0
         
         if volume_confirm:
             # Donchian breakout conditions (using previous bar's levels)
             breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
             breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
             
-            # HTF trend and bias filters
-            price_above_1w_ema = price > ema_1w_aligned[i]
-            price_below_1w_ema = price < ema_1w_aligned[i]
-            price_above_1d_vwap = price > vwap_1d_aligned[i]
-            price_below_1d_vwap = price < vwap_1d_aligned[i]
+            # Weekly Camarilla pivot filter
+            price_above_r3 = price > r3_aligned[i]
+            price_below_s3 = price < s3_aligned[i]
             
-            # Long conditions: Donchian breakout up + price above 1w EMA50 + price above 1d VWAP
-            long_entry = breakout_up and price_above_1w_ema and price_above_1d_vwap
+            # Long conditions: Donchian breakout up + price above weekly R3
+            long_entry = breakout_up and price_above_r3
             
-            # Short conditions: Donchian breakout down + price below 1w EMA50 + price below 1d VWAP
-            short_entry = breakout_dn and price_below_1w_ema and price_below_1d_vwap
+            # Short conditions: Donchian breakout down + price below weekly S3
+            short_entry = breakout_dn and price_below_s3
             
             if long_entry:
                 in_position = True
