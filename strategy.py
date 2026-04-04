@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4448: 12h Donchian(20) Breakout + 1w/1d HTF Trend + Volume Confirmation + ATR Stoploss
-HYPOTHESIS: 12h Donchian(20) breakouts aligned with weekly EMA50 and daily EMA200 trend filters capture strong momentum moves while avoiding counter-trend whipsaws. Volume confirmation (>1.5x average) ensures institutional participation. ATR-based trailing stop (2.5x) limits drawdown. Designed for low trade frequency (target: 50-150 total over 4 years) with position size 0.25 to work in both bull and bear markets.
+Experiment #4450: 1d Donchian(20) Breakout + 1w EMA50 Trend + Volume Confirmation + ATR Stoploss
+HYPOTHESIS: Daily Donchian(20) breakouts aligned with weekly EMA50 trend filter capture strong momentum moves with low trade frequency. Volume confirmation (>1.5x average) ensures institutional participation. ATR-based trailing stop (2.5x) limits drawdown. Designed for 30-100 total trades over 4 years with position size 0.25 to work in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4448_12h_donchian20_1w_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_4450_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,7 +23,7 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1w EMA50 and 1d EMA200 for trend filter ===
+    # === Precompute HTF: 1w EMA50 for trend filter ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 50:
         ema_50_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
@@ -31,25 +31,18 @@ def generate_signals(prices):
     else:
         ema_50_1w_aligned = np.full(n, np.nan)
     
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 200:
-        ema_200_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-        ema_200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
-    else:
-        ema_200_1d_aligned = np.full(n, np.nan)
-    
-    # === 12h Indicators: Donchian Channel(20) ===
+    # === 1d Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume MA(20) for confirmation ===
+    # === 1d Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -67,12 +60,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50, 200)  # Donchian, vol MA, ATR, 1w EMA50, 1d EMA200
+    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, 1w EMA50
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_50_1w_aligned[i]) or np.isnan(ema_200_1d_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_50_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -111,9 +104,9 @@ def generate_signals(prices):
         # Require volume confirmation (> 1.5x average) to filter noise
         volume_confirm = vol_ratio[i] > 1.5
         
-        # Trend filters: price above both EMAs for long, below both for short
-        uptrend = price > ema_50_1w_aligned[i] and price > ema_200_1d_aligned[i]
-        downtrend = price < ema_50_1w_aligned[i] and price < ema_200_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA50
+        uptrend = price > ema_50_1w_aligned[i]
+        downtrend = price < ema_50_1w_aligned[i]
         
         # Donchian breakout conditions
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
