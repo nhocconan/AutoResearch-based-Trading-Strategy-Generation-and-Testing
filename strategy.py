@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-exp_6662_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
-Primary timeframe: 12h (target: 50-150 total trades over 4 years). Uses 1-day EMA for trend bias:
+exp_6663_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
+Primary timeframe: 4h (target: 75-200 total trades over 4 years). Uses 1-day EMA for trend bias:
 price above 1d EMA favors longs, below favors shorts. Volume confirms breakout strength.
-ATR-based stoploss limits downside. Discrete sizing (0.25) reduces fee churn.
+ATR-based stoploss limits downside. Discrete sizing (0.30) reduces fee churn.
 Designed to work in both bull and bear markets by trading breakouts in direction of 1d trend.
 """
 
@@ -12,8 +12,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6662_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_6663_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -21,10 +21,9 @@ DONCHIAN_PERIOD = 20
 EMA_PERIOD = 21
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.30
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 4  # ~2 days (12h bars)
 
 def generate_signals(prices):
     n = len(prices)
@@ -38,7 +37,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False).mean().values
     
-    # Align to LTF (12h) with shift(1) for completed bars only
+    # Align to LTF (4h) with shift(1) for completed bars only
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -64,14 +63,11 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_entry = 0
     
     # Start from warmup period
     start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        bars_since_entry += 1
-        
         # Skip if HTF data not available
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
@@ -82,21 +78,12 @@ def generate_signals(prices):
             if close[i] <= entry_price - ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= entry_price + ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
                 continue
-                
-        # Time-based exit
-        if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
-            signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
-            continue
             
         # Determine trend bias from 1d EMA
         # Above 1d EMA = bullish bias, below = bearish bias
@@ -123,12 +110,10 @@ def generate_signals(prices):
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                bars_since_entry = 0
             elif short_breakout and short_volume and bearish_bias:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         else:
