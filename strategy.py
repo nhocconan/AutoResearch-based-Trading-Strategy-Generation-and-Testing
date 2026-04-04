@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #5976: 12h Donchian(20) breakout + 1d ATR filter + volume confirmation
-HYPOTHESIS: Donchian breakouts on 12h with 1d ATR volatility filter and volume confirmation
-capture sustained momentum moves while avoiding choppy markets. ATR filter ensures we
-only trade when volatility is sufficient for meaningful moves. Volume >1.5x average
-confirms breakout strength. ATR trailing stop manages risk. Target 50-150 trades over 4 years.
-Works in both bull/bear: volatility filter avoids low-movement periods, Donchian breakouts
-capture strong directional moves regardless of broader market regime.
+Experiment #5976: 12h Donchian(20) breakout + 1d HMA trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on 12h aligned with 1d HMA trend direction capture sustained moves with lower noise.
+HMA provides smooth trend filtering superior to EMA/SMA, reducing whipsaws in both bull/bear markets.
+Volume >1.5x average confirms breakout strength. ATR trailing stop manages risk. Target 50-150 trades over 4 years.
+Works in both bull/bear: HMA trend filter prevents counter-trend entries, volume confirmation avoids false breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5976_12h_donchian20_1d_atr_vol_v1"
+name = "exp_5976_12h_donchian20_1d_hma_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -27,20 +25,38 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for ATR filter ===
+    # === HTF: 1d data for HMA(21) trend ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 14:  # Need at least 14 days for ATR calculation
-        # Calculate True Range on 1d data
-        tr1 = df_1d['high'] - df_1d['low']
-        tr2 = np.abs(df_1d['high'] - df_1d['close'].shift(1))
-        tr3 = np.abs(df_1d['low'] - df_1d['close'].shift(1))
-        tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-        atr_1d = tr_1d.rolling(window=14, min_periods=14).mean().values
+    if len(df_1d) >= 21:
+        # Calculate HMA(21) on daily close
+        close_1d = df_1d['close'].values
+        n_1d = len(close_1d)
+        half_len = 21 // 2
+        sqrt_len = int(np.sqrt(21))
         
+        # WMA function
+        def wma(values, window):
+            if len(values) < window:
+                return np.full(len(values), np.nan)
+            weights = np.arange(1, window + 1)
+            return np.convolve(values, weights / weights.sum(), mode='valid')
+        
+        # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+        wma_half = wma(close_1d, half_len)
+        wma_full = wma(close_1d, 21)
+        # Align arrays: wma_half starts at index half_len-1, wma_full at 20
+        # We need to compute 2*wma_half - wma_full where both overlap
+        hma_raw = 2 * wma_half - wma_full[:len(wma_half)]
+        # Final WMA on sqrt_len
+        hma_1d = wma(hma_1d := hma_raw[-len(hma_raw):], sqrt_len) if len(hma_raw) >= sqrt_len else np.array([])
+        # Pad to match original length
+        hma_1d_full = np.full(n_1d, np.nan)
+        if len(hma_1d) > 0:
+            hma_1d_full[-len(hma_1d):] = hma_1d
         # Align to 12h timeframe with shift(1) for completed daily bars only
-        atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+        hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d_full)
     else:
-        atr_1d_aligned = np.full(n, np.nan)
+        hma_1d_aligned = np.full(n, np.nan)
     
     # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -69,7 +85,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 14) + 1  # Donchian, volume avg, ATR, 1d ATR + 1
+    warmup = max(20, 20, 14, 21) + 1  # Donchian, volume avg, ATR, HMA lookback + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -81,7 +97,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(atr_1d_aligned[i])):
+            np.isnan(hma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -115,13 +131,16 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
-        volatility_filter = atr_1d_aligned[i] > 0  # Ensure we have valid ATR
+        
+        # HMA trend filter: price above/below HMA
+        above_hma = price > hma_1d_aligned[i]
+        below_hma = price < hma_1d_aligned[i]
         
         # Entry conditions: 
-        # Long: breakout up with volume AND sufficient volatility
-        # Short: breakout down with volume AND sufficient volatility
-        long_setup = breakout_up and volume_confirmed and volatility_filter
-        short_setup = breakout_down and volume_confirmed and volatility_filter
+        # Long: breakout up with volume AND above HMA
+        # Short: breakout down with volume AND below HMA
+        long_setup = breakout_up and volume_confirmed and above_hma
+        short_setup = breakout_down and volume_confirmed and below_hma
         
         if long_setup:
             in_position = True
