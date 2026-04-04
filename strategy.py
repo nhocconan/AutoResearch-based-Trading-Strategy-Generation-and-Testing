@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #5701: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts with volume > 1.5x average and aligned 
-with daily EMA(50) trend capture high-probability trend continuation moves. Daily EMA provides 
-trend filter that works in both bull and bear markets. Volume confirms breakout strength. 
-ATR trailing stop (2.5x) manages risk. Discrete sizing (0.25) minimizes fee churn. 
-Target: 19-50 trades/year.
+Experiment #5702: 12h Donchian(20) breakout + 1d/1w HTF trend + volume confirmation
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts with volume > 1.5x average and aligned 
+with both 1d EMA50 and 1w EMA200 trend (price above both = bullish, below both = bearish) 
+capture high-probability trend continuation moves. Multi-timeframe alignment ensures we only 
+trade with the dominant trend across multiple horizons, reducing false breakouts. Volume 
+confirms breakout strength. ATR trailing stop (2.0x) manages risk. Discrete sizing (0.25) 
+minimizes fee churn. Target: 12-37 trades/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5701_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_5702_12h_donchian20_1d_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,25 +27,31 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for EMA(50) trend filter ===
+    # === HTF: 1d data for EMA50 trend ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 50:
-        daily_ema = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d = pd.Series(df_1d['close']).ewm(span=50, adjust=False).mean().values
     else:
-        daily_ema = np.full(len(df_1d), np.nan)
+        ema_1d = np.full(len(df_1d), np.nan)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Align daily EMA to 4h timeframe
-    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
+    # === HTF: 1w data for EMA200 trend ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 200:
+        ema_1w = pd.Series(df_1w['close']).ewm(span=200, adjust=False).mean().values
+    else:
+        ema_1w = np.full(len(df_1w), np.nan)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation ===
+    # === 12h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 4h Indicators: ATR(14) for trailing stop ===
+    # === 12h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -63,7 +70,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50)  # Donchian, volume avg, ATR, daily EMA
+    warmup = max(20, 20, 14, 50, 200)  # Donchian, volume avg, ATR, 1d EMA, 1w EMA
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -75,7 +82,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(daily_ema_aligned[i])):
+            np.isnan(ema_1d_aligned[i]) or np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -85,9 +92,9 @@ def generate_signals(prices):
         if in_position:
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
-                stop_price = highest_since_entry - 2.5 * atr[i]
-                # Exit: stoploss OR price breaks below daily EMA (trend change)
-                if price <= stop_price or price <= daily_ema_aligned[i]:
+                stop_price = highest_since_entry - 2.0 * atr[i]
+                # Exit: stoploss OR price breaks below 1d EMA50 (trend change)
+                if price <= stop_price or price <= ema_1d_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -95,9 +102,9 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                stop_price = lowest_since_entry + 2.5 * atr[i]
-                # Exit: stoploss OR price breaks above daily EMA (trend change)
-                if price >= stop_price or price >= daily_ema_aligned[i]:
+                stop_price = lowest_since_entry + 2.0 * atr[i]
+                # Exit: stoploss OR price breaks above 1d EMA50 (trend change)
+                if price >= stop_price or price >= ema_1d_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -110,11 +117,11 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # Daily EMA trend filter: long above EMA, short below EMA
-        long_bias = price > daily_ema_aligned[i]
-        short_bias = price < daily_ema_aligned[i]
+        # Multi-timeframe trend alignment: long above both EMAs, short below both
+        long_bias = price > ema_1d_aligned[i] and price > ema_1w_aligned[i]
+        short_bias = price < ema_1d_aligned[i] and price < ema_1w_aligned[i]
         
-        # Entry conditions: breakout in direction of daily EMA trend with volume
+        # Entry conditions: breakout in direction of MTF trend alignment with volume
         long_setup = breakout_up and volume_confirmed and long_bias
         short_setup = breakout_down and volume_confirmed and short_bias
         
@@ -136,5 +143,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
