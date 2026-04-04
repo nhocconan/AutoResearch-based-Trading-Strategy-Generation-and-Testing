@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #6400: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+Experiment #6401: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts with volume confirmation (>2.0x avg) and 1d EMA(50) trend filter (price above/below EMA(50)) capture strong momentum while avoiding whipsaws. The 1d EMA provides a higher-timeframe trend bias: price above 1d EMA = bullish bias (favor long breakouts), price below 1d EMA = bearish bias (favor short breakdowns). Volume confirmation filters false breakouts. Discrete sizing (0.25) balances profit potential and drawdown control. Target: 75-200 trades over 4 years. Works in bull via breakouts with 1d EMA uptrend, in bear via short breakdowns with 1d EMA downtrend.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6400_4h_donchian20_1d_ema_vol_v1"
+name = "exp_6401_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
