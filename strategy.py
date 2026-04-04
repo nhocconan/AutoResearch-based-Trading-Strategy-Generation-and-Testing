@@ -1,71 +1,58 @@
 #!/usr/bin/env python3
 """
-exp_6751_6h_camarilla_pivot_1d_direction_v1
-Hypothesis: 6h Camarilla pivot levels with 1d trend filter. At 1d uptrend: long at S3/S4 breakout, short at R3/R4 breakdown. At 1d downtrend: short at R3/R4 breakdown, long at S3/S4 breakout. Uses volume confirmation to avoid false breaks. Designed for low trade frequency (~15-35/year) with clear structural levels that work in both bull and bear markets by aligning with daily trend.
+exp_6752_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with daily EMA50 trend filter and volume confirmation.
+In bull markets (price > daily EMA50): long breakouts only. In bear markets (price < daily EMA50): short breakouts only.
+Daily EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
+Designed for 12h timeframe to capture major swings with ~12-37 trades/year (50-150 total over 4 years).
+Works in both bull and bear markets by aligning with daily trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6751_6h_camarilla_pivot_1d_direction_v1"
-timeframe = "6h"
+name = "exp_6752_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-PIVOT_LOOKBACK = 1  # Use previous day's OHLC for Camarilla
+DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
-VOL_CONFIRM_THRESHOLD = 1.5
+VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 8   # ~4 days (6h bars)
-EMA_FAST = 9
-EMA_SLOW = 21
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 30  # ~15 days (12h bars)
+EMA_PERIOD = 50
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for trend and pivot calculation
+    # Load HTF data ONCE before loop - using 1d for daily EMA
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMAs for trend filter
+    # Calculate daily EMA50
     close_1d = df_1d['close'].values
-    ema_fast = pd.Series(close_1d).ewm(span=EMA_FAST, adjust=False, min_periods=EMA_FAST).mean().values
-    ema_slow = pd.Series(close_1d).ewm(span=EMA_SLOW, adjust=False, min_periods=EMA_SLOW).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align EMAs to LTF (6h)
-    ema_fast_aligned = align_htf_to_ltf(prices, df_1d, ema_fast)
-    ema_slow_aligned = align_htf_to_ltf(prices, df_1d, ema_slow)
-    
-    # Calculate previous day's Camarilla levels (using shift(1) for completed day only)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
-    
-    # Pivot = (H + L + C) / 3
-    pivot = (high_1d + low_1d + close_1d_prev) / 3.0
-    range_hl = high_1d - low_1d
-    
-    # Camarilla levels
-    r3 = pivot + (range_hl * 1.1 / 4)
-    r4 = pivot + (range_hl * 1.1 / 2)
-    s3 = pivot - (range_hl * 1.1 / 4)
-    s4 = pivot - (range_hl * 1.1 / 2)
-    
-    # Align Camarilla levels to LTF
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to LTF (12h)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Volume MA for confirmation
+    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
     # ATR for stoploss
     tr1 = pd.Series(high - low)
@@ -74,22 +61,19 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Volume MA for confirmation
-    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(PIVOT_LOOKBACK, VOL_MA_PERIOD, ATR_PERIOD, EMA_SLOW) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_fast_aligned[i]) or np.isnan(r3_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -115,37 +99,24 @@ def generate_signals(prices):
             continue
             
         # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_CONFIRM_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine 1d trend direction
-        daily_uptrend = ema_fast_aligned[i] > ema_slow_aligned[i]
-        daily_downtrend = ema_fast_aligned[i] < ema_slow_aligned[i]
+        # Determine trend direction from daily EMA50
+        daily_uptrend = close[i] > ema_1d_aligned[i]
+        daily_downtrend = close[i] < ema_1d_aligned[i]
         
-        # Entry logic based on daily trend and Camarilla levels
-        long_signal = False
-        short_signal = False
-        
-        if daily_uptrend:
-            # In uptrend: look for longs at S3/S4 breakdown (mean reversion) or breakouts above R4
-            if close[i] <= s3_aligned[i] and vol_confirmed:
-                long_signal = True  # Mean reversion long at S3
-            elif close[i] >= r4_aligned[i] and vol_confirmed:
-                long_signal = True  # Breakout long above R4
-        elif daily_downtrend:
-            # In downtrend: look for shorts at R3/R4 bounce (mean reversion) or breakdowns below S4
-            if close[i] >= r3_aligned[i] and vol_confirmed:
-                short_signal = True  # Mean reversion short at R3
-            elif close[i] <= s4_aligned[i] and vol_confirmed:
-                short_signal = True  # Breakdown short below S4
+        # Breakout signals aligned with daily trend
+        long_breakout = daily_uptrend and (close[i] > highest_high[i]) and vol_confirmed
+        short_breakout = daily_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if long_signal:
+            if long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif short_signal:
+            elif short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
