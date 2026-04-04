@@ -146,3 +146,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</exp_5001_4h_donchian20_1d_hma_vol_v1>
