@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Experiment #3061: 4h Donchian Breakout + 1d HMA Trend + Volume Spike
-HYPOTHESIS: 4h Donchian(20) breakouts capture medium-term trends with proven success on SOLUSDT (test Sharpe 1.10-1.38). 
-HTF 1d HMA(21) filters for institutional trend direction: only take longs when price > 1d HMA (bullish bias), 
-shorts when price < 1d HMA (bearish bias). Volume spike (>1.5x 20-period average) confirms breakout strength. 
-ATR-based trailing stop (2.0x) manages risk. Target: 75-200 total trades over 4 years (19-50/year). 
-Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets by using 
+Experiment #3061: 4h Donchian Breakout + Daily Pivot Direction + Volume Spike (SOL Optimized)
+HYPOTHESIS: 4h Donchian(20) breakouts capture SOL's strong trends with proper filtering. 
+Daily pivot direction from 1d Camarilla levels filters for institutional bias: only take longs 
+when price > daily pivot (bullish bias), shorts when price < daily pivot (bearish bias). 
+Volume spike (>1.8x 20-period average) confirms breakout strength. ATR trailing stop (2.0x) 
+manages risk. Target: 75-200 total trades over 4 years (19-50/year). Designed to work in 
+both bull (trend continuation) and bear (mean reversion from extremes) markets by using 
 price channels and volatility filters. Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
@@ -13,7 +14,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3061_4h_donchian20_1d_hma_vol_v1"
+name = "exp_3061_4h_donchian20_1d_pivot_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -24,24 +25,24 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for HMA trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for daily pivot calculation (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d HMA(21)
-    def hma(values, period):
-        if len(values) < period:
-            return np.full_like(values, np.nan)
-        half = period // 2
-        sqrt = int(np.sqrt(period))
-        wma2 = pd.Series(values).ewm(span=half, adjust=False).mean()
-        wma1 = pd.Series(values).ewm(span=period, adjust=False).mean()
-        raw = 2 * wma2 - wma1
-        hma_vals = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
-        return hma_vals.values
+    # Calculate Daily Camarilla Pivot (based on previous day)
+    # Pivot = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla levels: R4 = P + 1.5*(H-L), S4 = P - 1.5*(H-L)
+    range_1d = high_1d - low_1d
+    r4_1d = pivot_1d + 1.5 * range_1d
+    s4_1d = pivot_1d - 1.5 * range_1d
     
-    hma_1d = hma(close_1d, 21)
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    # Align 1d levels to 4h timeframe (shifted by 1 bar for completed day only)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
     # === 4h Indicators: Donchian channels (20-period) ===
     lookback = 20
@@ -62,7 +63,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.25  # 25% position size (discrete level to minimize churn)
     
     # Position tracking state variables
     in_position = False
@@ -76,7 +77,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(hma_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(pivot_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or
+            np.isnan(s4_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -116,23 +118,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.5x average) for confirmation
-        volume_spike = vol_ratio[i] > 1.5
+        # Require volume spike (> 1.8x average) for confirmation (slightly looser for more trades)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # HMA trend filter: only long above HMA, short below HMA
-            price_vs_hma = price - hma_1d_aligned[i]
+            # Daily pivot bias: only long above pivot, short below pivot
+            price_vs_pivot = price - pivot_1d_aligned[i]
             
-            # Long entry: price breaks above Donchian high with bullish HMA bias
-            if price > highest_high[i] and price_vs_hma > 0:
+            # Long entry: price breaks above Donchian high with bullish daily bias
+            if price > highest_high[i] and price_vs_pivot > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with bearish HMA bias
-            elif price < lowest_low[i] and price_vs_hma < 0:
+            # Short entry: price breaks below Donchian low with bearish daily bias
+            elif price < lowest_low[i] and price_vs_pivot < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
