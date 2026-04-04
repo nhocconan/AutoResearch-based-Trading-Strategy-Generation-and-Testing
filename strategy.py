@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #6377: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts with volume confirmation (>1.8x avg) and 1d EMA trend filter capture institutional momentum while avoiding whipsaws. 1d EMA provides smoother trend bias than shorter timeframes: price above EMA = bullish bias (long breakouts), price below EMA = bearish bias (short breakdowns). Volume confirmation filters false breakouts. Discrete sizing (0.25) minimizes fee churn. Target: 75-200 trades over 4 years. Works in bull via breakouts, in bear via short breakdowns with trend filter.
+Experiment #6378: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
+HYPOTHESIS: Daily Donchian breakouts with volume confirmation (>1.5x avg) and weekly EMA trend filter capture swing momentum while avoiding whipsaws. Weekly EMA provides smoother trend bias than daily: price above weekly EMA = bullish bias (long breakouts), price below weekly EMA = bearish bias (short breakdowns). Volume confirmation filters false breakouts. Discrete sizing (0.25) minimizes fee churn. Target: 30-100 trades over 4 years. Works in bull via breakouts, in bear via short breakdowns with trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6377_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_6378_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_ema(series, period):
@@ -28,23 +28,23 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for EMA trend ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 21:
-        ema_1d = calculate_ema(df_1d['close'].values, 21)
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # === HTF: 1w data for EMA trend ===
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) >= 21:
+        ema_1w = calculate_ema(df_1w['close'].values, 21)
+        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        ema_1w_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === 1d Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation ===
+    # === 1d Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 4h Indicators: ATR(14) for trailing stop ===
+    # === 1d Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -75,7 +75,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_1d_aligned[i])):
+            np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -89,8 +89,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks below Donchian low (failed breakout)
-                # 3. Price crosses below 1d EMA (trend change)
-                if price <= stop_price or price <= donchian_low[i] or price < ema_1d_aligned[i]:
+                # 3. Price crosses below 1w EMA (trend change)
+                if price <= stop_price or price <= donchian_low[i] or price < ema_1w_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -102,8 +102,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks above Donchian high (failed breakout)
-                # 3. Price crosses above 1d EMA (trend change)
-                if price >= stop_price or price >= donchian_high[i] or price > ema_1d_aligned[i]:
+                # 3. Price crosses above 1w EMA (trend change)
+                if price >= stop_price or price >= donchian_high[i] or price > ema_1w_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -114,14 +114,14 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.8  # Volume filter
+        volume_confirmed = volume_ratio[i] > 1.5  # Volume filter
         
-        # Entry logic based on 1d EMA trend filter:
-        # Long: breakout up + volume + price > 1d EMA (bullish bias)
-        # Short: breakout down + volume + price < 1d EMA (bearish bias)
+        # Entry logic based on 1w EMA trend filter:
+        # Long: breakout up + volume + price > 1w EMA (bullish bias)
+        # Short: breakout down + volume + price < 1w EMA (bearish bias)
         
-        long_entry = breakout_up and volume_confirmed and (price > ema_1d_aligned[i])
-        short_entry = breakout_down and volume_confirmed and (price < ema_1d_aligned[i])
+        long_entry = breakout_up and volume_confirmed and (price > ema_1w_aligned[i])
+        short_entry = breakout_down and volume_confirmed and (price < ema_1w_aligned[i])
         
         if long_entry:
             in_position = True
