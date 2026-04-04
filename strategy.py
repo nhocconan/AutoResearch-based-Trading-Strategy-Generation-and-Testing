@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4430: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Confirmation
-HYPOTHESIS: Daily Donchian(20) breakouts aligned with weekly HMA(21) trend direction and confirmed by volume (>2.0x average) capture strong momentum with minimal false signals. Weekly HMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 30-100 total trades over 4 years (7-25/year) with position size 0.25.
+Experiment #4430: 1d Donchian(20) Breakout + 1w HMA21 Trend + Volume Confirmation
+HYPOTHESIS: Daily Donchian(20) breakouts aligned with weekly HMA21 trend and confirmed by volume (>1.5x average) capture multi-day momentum with minimal false signals. Weekly trend provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 30-100 total trades over 4 years (7-25/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4430_1d_donchian20_1w_hma_vol_v1"
+name = "exp_4430_1d_donchian20_1w_hma21_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -23,12 +23,12 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1w HMA(21) for trend bias ===
+    # === Precompute HTF: 1w HMA21 for trend bias ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 21:
+        # Calculate Hull Moving Average (HMA) on weekly close
         close_1w = pd.Series(df_1w['close'].values)
-        # HMA calculation: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-        half_len = 21 // 2
+        half_len = int(21 / 2)
         sqrt_len = int(np.sqrt(21))
         wma_half = close_1w.ewm(span=half_len, adjust=False).mean()
         wma_full = close_1w.ewm(span=21, adjust=False).mean()
@@ -108,8 +108,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 2.0x average) to filter noise
-        volume_confirm = vol_ratio[i] > 2.0
+        # Require volume confirmation (> 1.5x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.5
         
         # 1w HMA bias: price > HMA = long bias, price < HMA = short bias
         long_bias = price > hma_1w_aligned[i]
