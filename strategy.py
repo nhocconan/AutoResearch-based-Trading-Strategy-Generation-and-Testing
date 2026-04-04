@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4483: 4h Donchian(20) Breakout + 12h HMA Trend + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h Hull Moving Average trend direction and confirmed by volume (>1.5x average) capture medium-term momentum with reduced noise. The 12h HMA provides smoother trend bias than EMA, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25-0.30.
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h Hull Moving Average trend direction and confirmed by volume (>1.5x average) capture medium-term momentum with reduced noise. The 12h HMA provides smooth trend bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
 """
 
 import numpy as np
@@ -27,7 +27,7 @@ def generate_signals(prices):
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) >= 21:
         close_12h = pd.Series(df_12h['close'].values)
-        # Hull Moving Average: WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+        # Hull Moving Average: WMA(2*WMA(n/2) - WMA(n), sqrt(n))
         half_len = 21 // 2
         sqrt_len = int(np.sqrt(21))
         wma_half = close_12h.ewm(span=half_len, adjust=False).mean()
@@ -143,3 +143,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
