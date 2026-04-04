@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-exp_6721_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+exp_6722_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
 In bull markets: buy breakouts above upper Donchian when 1d EMA is rising.
 In bear markets: sell breakdowns below lower Donchian when 1d EMA is falling.
 Volume confirmation ensures breakout legitimacy. ATR-based stoploss limits drawdown.
-Designed for 4h timeframe to capture medium-term swings with ~20-50 trades/year.
+Designed for 12h timeframe to capture medium-term swings with ~12-37 trades/year.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6721_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_6722_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -23,7 +23,7 @@ VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 8  # ~2 weeks (4h bars)
+MAX_HOLD_BARS = 4  # ~2 weeks (12h bars)
 
 def generate_signals(prices):
     n = len(prices)
