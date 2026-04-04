@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3972: 12h Donchian(20) breakout + 1d/1w EMA trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with both 1d and 1w EMA50 trend (price above both = bullish bias, below both = bearish) capture multi-month swings with low frequency. Volume > 2.0x MA(20) confirms breakout strength. ATR(14) trailing stop (2.5x) manages risk. Discrete sizing (0.25) reduces fee drag. Target: 50-150 trades over 4 years (12-37/year). Works in bull/bear via dual timeframe EMA50 regime filter.
+Experiment #3974: 1h Donchian(20) breakout + 4h EMA50 trend + 1d EMA200 filter + volume confirmation
+HYPOTHESIS: 1h Donchian breakouts aligned with 4h EMA50 trend and 1d EMA200 regime filter capture swings with controlled frequency. Volume > 2.0x MA(20) confirms strength. ATR(14) trailing stop (2.5x) manages risk. Session filter (08-20 UTC) reduces noise. Target: 60-150 trades over 4 years (15-37/year). Works in bull/bear via multi-TF trend alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3972_12h_donchian20_1d1w_ema50_vol_v1"
-timeframe = "12h"
+name = "exp_3974_1h_donchian20_4h_ema50_1d_ema200_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,29 +17,33 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
+    open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1d EMA50 for trend regime ===
+    # Pre-compute session hours for efficiency
+    hours = pd.DatetimeIndex(open_time).hour
+    
+    # === HTF: 4h EMA50 for trend regime ===
+    df_4h = get_htf_data(prices, '4h')
+    ema_4h_50 = pd.Series(df_4h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_4h_50_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_50)
+    
+    # === HTF: 1d EMA200 for higher timeframe trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    ema_1d_50 = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    ema_1d_200 = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
-    # === HTF: 1w EMA50 for trend regime ===
-    df_1w = get_htf_data(prices, '1w')
-    ema_1w_50 = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1w_50_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_50)
-    
-    # === 12h Indicators: Donchian Channel(20) for breakout ===
+    # === 1h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 1h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 1h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -48,7 +52,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.20  # 20% position size
     
     # Position tracking state variables
     in_position = False
@@ -57,12 +61,18 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20, 50)  # DC lookback, vol MA, EMA50
+    warmup = max(lookback_dc + 1, 20, 50, 200)  # DC lookback, vol MA, EMA50, EMA200
     
     for i in range(warmup, n):
+        # --- Session Filter: 08-20 UTC ---
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            continue
+        
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_1d_50_aligned[i]) or np.isnan(ema_1w_50_aligned[i]) or
+            np.isnan(ema_4h_50_aligned[i]) or np.isnan(ema_1d_200_aligned[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -107,14 +117,18 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Determine trend: bullish if price above BOTH 1d and 1w EMA50, bearish if below BOTH
-            bullish = price > ema_1d_50_aligned[i] and price > ema_1w_50_aligned[i]
-            bearish = price < ema_1d_50_aligned[i] and price < ema_1w_50_aligned[i]
+            # Determine 4h trend: bullish if price above 4h EMA50, bearish if below
+            bullish_4h = price > ema_4h_50_aligned[i]
+            bearish_4h = price < ema_4h_50_aligned[i]
             
-            # Long entry: breakout above Donchian upper band in bullish regime
-            long_breakout = price > highest_high[i-1] and bullish
-            # Short entry: breakdown below Donchian lower band in bearish regime
-            short_breakout = price < lowest_low[i-1] and bearish
+            # Determine 1d regime: bullish if price above 1d EMA200, bearish if below
+            bullish_1d = price > ema_1d_200_aligned[i]
+            bearish_1d = price < ema_1d_200_aligned[i]
+            
+            # Long entry: breakout above Donchian upper band in bullish regime (both TFs aligned)
+            long_breakout = price > highest_high[i-1] and bullish_4h and bullish_1d
+            # Short entry: breakdown below Donchian lower band in bearish regime (both TFs aligned)
+            short_breakout = price < lowest_low[i-1] and bearish_4h and bearish_1d
             
             if long_breakout and not short_breakout:
                 in_position = True
