@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #6351: 6h Camarilla Pivot Reversal with 1d Trend Filter
-HYPOTHESIS: At 6h timeframe, price reversing from Camarilla R3/S3 levels (mean reversion in range) 
-or breaking R4/S4 (continuation in trend) with 1d EMA50 trend filter captures institutional order flow. 
-Camarilla levels derived from prior 1d OHLC provide mathematically proven support/resistance. 
-Volume confirmation (>1.5x average) ensures participation. Discrete sizing (0.25) minimizes fee churn. 
-Target: 75-150 trades over 4 years.
+Experiment #6351: 6h Donchian(20) breakout + 1d Camarilla pivot levels + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts with volume confirmation (>1.8x avg) and Camarilla pivot bias from 1d timeframe capture institutional momentum. 
+Camarilla levels (R3/S3 for fade, R4/S4 for breakout) provide mathematically derived support/resistance that adapts to volatility. 
+In ranging markets (price between R3-S3), fade extremes; in breakout markets (price >R4 or <S4), continue the breakout direction. 
+Uses discrete sizing (0.25) to minimize fee churn. Target: 75-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6351_6h_camarilla_pivot_1d_ema_vol_v1"
+name = "exp_6351_6h_donchian20_1d_camarilla_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -26,41 +25,41 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for EMA50 trend and Camarilla pivot ===
+    # === HTF: 1d data for Camarilla pivot levels ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
-        # Calculate EMA50 on 1d close for trend filter
-        ema_1d = pd.Series(df_1d['close']).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    if len(df_1d) >= 2:
+        # Camarilla pivot calculation from prior day's OHLC
+        # Pivot = (H + L + C) / 3
+        # R4 = C + ((H-L) * 1.1/2)
+        # R3 = C + ((H-L) * 1.1/4)
+        # S3 = C - ((H-L) * 1.1/4)
+        # S4 = C - ((H-L) * 1.1/2)
+        daily_high = df_1d['high'].values
+        daily_low = df_1d['low'].values
+        daily_close = df_1d['close'].values
         
-        # Calculate Camarilla pivot levels from prior 1d OHLC
-        # Camarilla uses prior day's OHLC to calculate 8 levels (L1-L4, H1-H4)
-        # H4 = Close + 1.5 * (High - Low)
-        # H3 = Close + 1.1 * (High - Low)
-        # H2 = Close + 0.55 * (High - Low)
-        # H1 = Close + 0.275 * (High - Low)
-        # L1 = Close - 0.275 * (High - Low)
-        # L2 = Close - 0.55 * (High - Low)
-        # L3 = Close - 1.1 * (High - Low)
-        # L4 = Close - 1.5 * (High - Low)
-        prior_high = df_1d['high'].shift(1).values
-        prior_low = df_1d['low'].shift(1).values
-        prior_close = df_1d['close'].shift(1).values
-        camarilla_h4 = prior_close + 1.5 * (prior_high - prior_low)
-        camarilla_h3 = prior_close + 1.1 * (prior_high - prior_low)
-        camarilla_l3 = prior_close - 1.1 * (prior_high - prior_low)
-        camarilla_l4 = prior_close - 1.5 * (prior_high - prior_low)
+        pivot = (daily_high + daily_low + daily_close) / 3.0
+        r4 = daily_close + ((daily_high - daily_low) * 1.1 / 2.0)
+        r3 = daily_close + ((daily_high - daily_low) * 1.1 / 4.0)
+        s3 = daily_close - ((daily_high - daily_low) * 1.1 / 4.0)
+        s4 = daily_close - ((daily_high - daily_low) * 1.1 / 2.0)
         
-        camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-        camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-        camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-        camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+        # Align to 6h timeframe (shift by 1 day for prior day's levels)
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
-        camarilla_h4_aligned = np.full(n, np.nan)
-        camarilla_h3_aligned = np.full(n, np.nan)
-        camarilla_l3_aligned = np.full(n, np.nan)
-        camarilla_l4_aligned = np.full(n, np.nan)
+        pivot_aligned = np.full(n, np.nan)
+        r3_aligned = np.full(n, np.nan)
+        r4_aligned = np.full(n, np.nan)
+        s3_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
+    
+    # === 6h Indicators: Donchian Channel (20-period) ===
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # === 6h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -85,7 +84,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 50, 14) + 1  # volume avg, EMA50, ATR + 1
+    warmup = max(20, 20, 14) + 1  # Donchian, volume avg, ATR + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (22:00-23:59 UTC) ---
@@ -95,10 +94,10 @@ def generate_signals(prices):
             continue
         
         # --- Data Validity Check ---
-        if (np.isnan(ema_1d_aligned[i]) or 
-            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_h3_aligned[i]) or
-            np.isnan(camarilla_l3_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or
-            np.isnan(volume_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -111,9 +110,9 @@ def generate_signals(prices):
                 stop_price = highest_since_entry - 2.5 * atr[i]
                 # Exit conditions:
                 # 1. Stoploss
-                # 2. Price breaks below Camarilla L3 (failed continuation/reversal)
-                # 3. Price crosses below 1d EMA50 (trend change)
-                if price <= stop_price or price <= camarilla_l3_aligned[i] or price < ema_1d_aligned[i]:
+                # 2. Price breaks below Donchian low (failed breakout)
+                # 3. Price crosses below S3 (mean reversion in range)
+                if price <= stop_price or price <= donchian_low[i] or price < s3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -124,9 +123,9 @@ def generate_signals(prices):
                 stop_price = lowest_since_entry + 2.5 * atr[i]
                 # Exit conditions:
                 # 1. Stoploss
-                # 2. Price breaks above Camarilla H3 (failed continuation/reversal)
-                # 3. Price crosses above 1d EMA50 (trend change)
-                if price >= stop_price or price >= camarilla_h3_aligned[i] or price > ema_1d_aligned[i]:
+                # 2. Price breaks above Donchian high (failed breakout)
+                # 3. Price crosses above R3 (mean reversion in range)
+                if price >= stop_price or price >= donchian_high[i] or price > r3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -135,33 +134,33 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Camarilla-based entries:
-        # LONG: 
-        #   - Mean reversion: price < L3 and reversing up (price > prior close) 
-        #   - OR breakout: price > H4 with volume
-        #   - Filter: only if price > 1d EMA50 (uptrend bias)
-        # SHORT:
-        #   - Mean reversion: price > H3 and reversing down (price < prior close)
-        #   - OR breakdown: price < L4 with volume
-        #   - Filter: only if price < 1d EMA50 (downtrend bias)
+        breakout_up = price > donchian_high[i-1]
+        breakout_down = price < donchian_low[i-1]
+        volume_confirmed = volume_ratio[i] > 1.8  # Volume filter
         
-        # Need prior close for reversal detection
-        if i > 0:
-            prior_close = close[i-1]
-        else:
-            prior_close = price
+        # Entry logic based on Camarilla zones:
+        # ZONE 1: Breakout continuation (price > R4 or < S4) - trade in breakout direction
+        # ZONE 2: Fade extreme (price > R3 or < S3 but within R4/S4) - trade mean reversion
+        # ZONE 3: Range (between S3 and R3) - no trade (chop)
         
-        volume_confirmed = volume_ratio[i] > 1.5
+        long_entry = False
+        short_entry = False
         
-        # Long entry conditions
-        long_mean_reversion = (price < camarilla_l3_aligned[i]) and (price > prior_close) and volume_confirmed
-        long_breakout = (price > camarilla_h4_aligned[i]) and volume_confirmed
-        long_entry = (long_mean_reversion or long_breakout) and (price > ema_1d_aligned[i])
-        
-        # Short entry conditions
-        short_mean_reversion = (price > camarilla_h3_aligned[i]) and (price < prior_close) and volume_confirmed
-        short_breakdown = (price < camarilla_l4_aligned[i]) and volume_confirmed
-        short_entry = (short_mean_reversion or short_breakdown) and (price < ema_1d_aligned[i])
+        if breakout_up and volume_confirmed:
+            # Long breakout continuation above R4
+            if price > r4_aligned[i]:
+                long_entry = True
+            # Long fade from S3 (mean reversion) - only if not already above R4
+            elif price > s3_aligned[i] and price <= r4_aligned[i]:
+                long_entry = True
+                
+        if breakout_down and volume_confirmed:
+            # Short breakdown continuation below S4
+            if price < s4_aligned[i]:
+                short_entry = True
+            # Short fade from R3 (mean reversion) - only if not already below S4
+            elif price < r3_aligned[i] and price >= s4_aligned[i]:
+                short_entry = True
         
         if long_entry:
             in_position = True
