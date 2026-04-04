@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #6346: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation
+Experiment #6346: 4h Donchian(20) breakout + 1d HMA21 trend + volume confirmation
 HYPOTHESIS: Tight Donchian breakouts on 4h with 1d HMA21 trend filter and volume > 1.8x average capture institutional momentum in both bull and bear markets. 
 The 1d HMA21 provides smooth trend direction that adapts to changing market regimes while reducing whipsaw. Volume filter ensures breakouts have participation. 
 Uses discrete sizing (0.25) to minimize fee churn. Target: 75-200 trades over 4 years.
