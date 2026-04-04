@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #3036: 12h Donchian Breakout + 1d HMA Trend + Volume Spike + ATR Filter
-HYPOTHESIS: Donchian(20) breakouts on 12h capture medium-term trends with lower frequency. 
-1d HMA(21) provides trend filter: only take longs when price > HMA, shorts when price < HMA. 
-Volume spike (>2.0x 20-period average) confirms breakout strength. ATR-based trailing stop 
-(2.5x) manages risk. This combination filters false breakouts while capturing strong trends. 
-12h timeframe targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-Works in both bull (trend continuation) and bear (mean reversion via Donchian exit).
+Experiment #3037: 4h Donchian Breakout + 1d HMA Trend + Volume Spike + ATR Filter
+HYPOTHESIS: Donchian(20) breakouts on 4h capture medium-term trends. 1d HMA(21) provides
+trend filter: only take longs when price > HMA, shorts when price < HMA. Volume spike
+(>2.0x 20-period average) confirms breakout strength. ATR-based stoploss (2.5x) manages risk.
+This combination filters false breakouts in choppy markets while capturing strong trends.
+Using 1d HTF instead of 12h to reduce noise and improve signal quality. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3036_12h_donchian20_1d_hma_vol_atr_v1"
-timeframe = "12h"
+name = "exp_3037_4h_donchian20_1d_hma_vol_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,17 +42,17 @@ def generate_signals(prices):
     hma_1d = calculate_hma(close_1d, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # === 12h Indicators: Donchian channels (20-period) ===
+    # === 4h Indicators: Donchian channels (20-period) ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 4h Indicators: ATR(14) for volatility and stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
