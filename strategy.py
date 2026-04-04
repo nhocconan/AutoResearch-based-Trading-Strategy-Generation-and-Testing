@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3808: 12h Donchian(20) breakout + 1w volume profile VHN + 1d chop regime filter
-HYPOTHESIS: 12h Donchian breakouts capture medium-term swings with 1d volume profile (>61.8 chop = range) filtering false breakouts. Uses 1w HTF trend filter (price > 1w EMA50 for longs, < 1w EMA50 for shorts) to align with major trend. Target: 75-150 trades over 4 years.
+Experiment #3809: 4h Donchian(20) breakout + 1d volume confirmation + chop regime filter
+HYPOTHESIS: 4h Donchian breakouts capture swing moves with 1d volume (>1.3x) confirming participation. Choppiness Index (14) > 61.8 filters range markets to avoid false breakouts. Works in bull markets (breakouts above resistance) and bear markets (breakdowns below support). Discrete position sizing (0.25) minimizes fee drag. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3808_12h_donchian20_1w_ema_1d_chop_v1"
-timeframe = "12h"
+name = "exp_3809_4h_donchian20_1d_vol_chop_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,12 +18,6 @@ def generate_signals(prices):
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
-    
-    # === HTF: 1w EMA50 for trend filter (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w_50 = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1w_50_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_50)
     
     # === HTF: 1d data for volume profile VHN (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
@@ -50,15 +44,20 @@ def generate_signals(prices):
             max_bin_idx = np.argmax(hist)
             vhn_1d[i] = (bin_edges[max_bin_idx] + bin_edges[max_bin_idx + 1]) / 2
     
-    # Align 1d VHN to 12h timeframe (shifted by 1 for completed 1d bar)
+    # Align 1d VHN to 4h timeframe (shifted by 1 for completed 1d bar)
     vhn_1d_aligned = align_htf_to_ltf(prices, df_1d, vhn_1d)
     
-    # === 12h Indicators: Donchian Channel(20) for breakout ===
+    # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 12h Indicators: Choppiness Index(14) for regime filter ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.ones(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    
+    # === 4h Indicators: Choppiness Index(14) for regime filter ===
     def true_range(high, low, prev_close):
         return np.maximum(high - low, np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)))
     
@@ -87,12 +86,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 50, 14)  # sufficient for all indicators
+    warmup = max(lookback_dc + 1, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(vhn_1d_aligned[i]) or np.isnan(ema_1w_50_aligned[i]) or
+            np.isnan(vhn_1d_aligned[i]) or np.isnan(vol_ratio[i]) or
             np.isnan(chop[i])):
             signals[i] = 0.0
             continue
@@ -133,24 +132,23 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require chop > 61.8 (range regime) for mean reversion breakouts
+        # Require volume spike (> 1.3x average) AND chop > 61.8 (range regime)
+        volume_spike = vol_ratio[i] > 1.3
         chop_filter = chop[i] > 61.8
         
-        if chop_filter:
-            # Long entry: Price breaks above Donchian upper band AND above 1d VHN AND above 1w EMA50 (bullish alignment)
-            if (price > highest_high[i-1] and    # Breakout above previous period's high
-                price > vhn_1d_aligned[i] and    # Above 1d VHN (institutional interest level)
-                price > ema_1w_50_aligned[i]):   # Above 1w EMA50 (bullish trend filter)
+        if volume_spike and chop_filter:
+            # Long entry: Price breaks above Donchian upper band AND above 1d VHN (bullish breakout with volume confirmation)
+            if (price > highest_high[i-1] and  # Breakout above previous period's high
+                price > vhn_1d_aligned[i]):    # Above 1d VHN (institutional interest level)
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: Price breaks below Donchian lower band AND below 1d VHN AND below 1w EMA50 (bearish alignment)
+            # Short entry: Price breaks below Donchian lower band AND below 1d VHN (bearish breakdown with volume confirmation)
             elif (price < lowest_low[i-1] and    # Breakout below previous period's low
-                  price < vhn_1d_aligned[i] and  # Below 1d VHN (institutional interest level)
-                  price < ema_1w_50_aligned[i]): # Below 1w EMA50 (bearish trend filter)
+                  price < vhn_1d_aligned[i]):    # Below 1d VHN (institutional interest level)
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
