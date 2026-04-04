@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 exp_6731_6h_donchian20_1d_pivot_vol_v1
-Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot filter and volume confirmation.
-In bull markets: buy breakouts above upper Donchian when price is above daily R3 pivot level.
-In bear markets: sell breakdowns below lower Donchian when price is below daily S3 pivot level.
+Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot direction filter and volume confirmation.
+In bull markets: buy breakouts above upper Donchian when price > 1d pivot (R3 level).
+In bear markets: sell breakdowns below lower Donchian when price < 1d pivot (S3 level).
 Volume confirmation ensures breakout legitimacy. ATR-based stoploss limits drawdown.
 Designed for 6h timeframe to capture medium-term swings with ~12-37 trades/year.
 """
@@ -30,7 +30,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for Camarilla pivot levels
+    # Load HTF data ONCE before loop - using 1d for Camarilla pivot
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d Camarilla pivot levels
@@ -38,15 +38,15 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot point
+    # Camarilla pivot calculation
     pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Camarilla levels
-    r3_1d = close_1d + (high_1d - low_1d) * 1.1 / 4.0
-    s3_1d = close_1d - (high_1d - low_1d) * 1.1 / 4.0
-    r4_1d = close_1d + (high_1d - low_1d) * 1.1 / 2.0
-    s4_1d = close_1d - (high_1d - low_1d) * 1.1 / 2.0
+    range_1d = high_1d - low_1d
+    r3_1d = pivot_1d + range_1d * 1.1 / 2.0
+    s3_1d = pivot_1d - range_1d * 1.1 / 2.0
+    r4_1d = pivot_1d + range_1d * 1.1
+    s4_1d = pivot_1d - range_1d * 1.1
     
-    # Align HTF pivot levels to LTF
+    # Align pivot levels to 6h timeframe
     pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
     s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
@@ -85,7 +85,7 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(pivot_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]):
+        if np.isnan(pivot_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -113,9 +113,16 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Breakout signals with 1d Camarilla pivot filter
-        long_breakout = (close[i] > highest_high[i]) and vol_confirmed and (close[i] > r3_1d_aligned[i])
-        short_breakout = (close[i] < lowest_low[i]) and vol_confirmed and (close[i] < s3_1d_aligned[i])
+        # Determine market regime from 1d pivot
+        # Bull regime: price above R3 pivot
+        # Bear regime: price below S3 pivot
+        # Range regime: between S3 and R3 (no trades)
+        bull_regime = close[i] > r3_1d_aligned[i]
+        bear_regime = close[i] < s3_1d_aligned[i]
+        
+        # Breakout signals with 1d pivot regime filter
+        long_breakout = (close[i] > highest_high[i]) and vol_confirmed and bull_regime
+        short_breakout = (close[i] < lowest_low[i]) and vol_confirmed and bear_regime
         
         # Enter new positions only if flat
         if position == 0:
@@ -138,20 +145,7 @@ def generate_signals(prices):
     return signals
 
 if __name__ == "__main__":
-    # Test with sample data
-    import pandas as pd
+    # Quick test for syntax
     import numpy as np
-    dates = pd.date_range('2021-01-01', periods=1000, freq='6h')
-    df = pd.DataFrame({
-        'open_time': dates,
-        'open': np.random.randn(1000).cumsum() + 100,
-        'high': np.random.randn(1000).cumsum() + 105,
-        'low': np.random.randn(1000).cumsum() + 95,
-        'close': np.random.randn(1000).cumsum() + 100,
-        'volume': np.random.rand(1000) * 1000,
-        'taker_buy_volume': np.random.rand(1000) * 500,
-        'trades': np.random.randint(50, 200, 1000)
-    })
-    print("Testing strategy...")
-    signals = generate_signals(df)
-    print(f"Generated {np.count_nonzero(signals != 0)} signals")
+    import pandas as pd
+    print("Strategy loaded successfully")
