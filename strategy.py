@@ -2,7 +2,7 @@
 """
 exp_6576_12h_donchian20_1d_pivot_vol_v1
 Hypothesis: 12h Donchian(20) breakout with 1d Camarilla pivot direction filter and volume confirmation.
-Uses 12h primary timeframe to minimize trade frequency (target: 50-150 total trades over 4 years).
+Uses 12h primary timeframe to target 50-150 total trades over 4 years (12-37/year).
 1d Camarilla pivots provide institutional support/resistance levels that work in both bull and bear markets:
 - Fade at R3/S3 (mean reversion in ranges)
 - Breakout continuation at R4/S4 (trend acceleration)
