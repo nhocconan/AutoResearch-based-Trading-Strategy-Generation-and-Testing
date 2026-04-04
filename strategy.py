@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #2915: 6h Elder Ray + ADX Regime Filter
-HYPOTHESIS: Elder Ray (Bull Power/Bear Power) measures trend strength relative to EMA13.
-ADX > 25 filters for trending markets. Long when Bull Power > 0 and ADX rising.
-Short when Bear Power < 0 and ADX rising. 6h timeframe reduces noise vs lower TFs.
-Target: 75-150 total trades over 4 years (19-37/year). Discrete sizing: 0.25.
-Works in both bull (strong Bull Power) and bear (strong Bear Power) regimes.
+Experiment #2915: 6h Donchian Breakout + Weekly Pivot Direction + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 6h timeframe capture medium-term trends.
+Weekly pivot (from 1d data) provides directional bias: only take long breakouts
+when weekly pivot shows bullish bias (price > weekly pivot), and short breakouts
+when bearish (price < weekly pivot). Volume spike (>2.0x 20-period average)
+confirms breakout strength. This combination filters false breakouts in choppy
+markets while capturing strong trends in both bull and bear regimes. 6h timeframe
+balances trade frequency and fee drag. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2915_6h_elder_ray_adx_regime_v1"
+name = "exp_2915_6h_donchian20_1w_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -20,77 +22,86 @@ def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
+    volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === Indicators: EMA13 for Elder Ray ===
-    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    # === HTF: 1d data for weekly pivot calculation (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Bull Power = High - EMA13
-    bull_power = high - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema13
+    # Calculate weekly pivot from daily OHLC (simplified: use last 5 days)
+    # Pivot = (High + Low + Close) / 3 for each day, then average last 5 days
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Rolling mean of last 5 daily pivots for weekly bias
+    weekly_pivot = pd.Series(pivot_1d).rolling(window=5, min_periods=5).mean().values
     
-    # === Indicators: ADX(14) for trend strength ===
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # first value
+    # Align to 6h timeframe (shifted by 1 for completed bars only)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    dm_plus[0] = 0
-    dm_minus[0] = 0
+    # === 6h Indicators: Donchian channels (20-period) ===
+    lookback = 20
+    # Rolling max/min for Donchian channels
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Smoothed TR, DM+, DM- (Wilder's smoothing = EMA with alpha=1/period)
-    def wilders_smoothing(x, period):
-        return pd.Series(x).ewm(alpha=1/period, min_periods=period, adjust=False).mean().values
-    
-    atr = wilders_smoothing(tr, 14)
-    dm_plus_smooth = wilders_smoothing(dm_plus, 14)
-    dm_minus_smooth = wilders_smoothing(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_smooth / (atr + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = wilders_smoothing(dx, 14)
+    # === 6h Indicators: Volume MA(20) for spike detection ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_ratio = np.ones(n)
+    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === Signals Initialization ===
     signals = np.zeros(n)
     SIZE = 0.25  # 25% position size
     
-    # Position tracking
+    # Position tracking state variables
     in_position = False
     position_side = 0
+    entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    warmup = 50  # sufficient for all indicators
+    warmup = max(50, lookback, 20)  # sufficient for all indicators
     
     for i in range(warmup, n):
-        # Skip if any indicator is NaN
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx[i]) or np.isnan(di_plus[i]) or np.isnan(di_minus[i])):
+        # --- Data Validity Check ---
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
+        price = close[i]
+        
         # --- Exit Logic ---
         if in_position:
-            # Exit if ADX weakens (< 20) or power reverses
+            # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
-                if adx[i] < 20.0 or bull_power[i] <= 0:
+                highest_since_entry = max(highest_since_entry, high[i])
+                # Exit if price drops 2.5*ATR below highest since entry
+                # Use 6h ATR(14) approximation from price range
+                atr_estimate = (high[i] - low[i]) * 0.5
+                if price < highest_since_entry - 2.5 * atr_estimate:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price re-enters Donchian channel (mean reversion)
+                elif price <= highest_high[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
-                if adx[i] < 20.0 or bear_power[i] >= 0:
+                lowest_since_entry = min(lowest_since_entry, low[i])
+                # Exit if price rises 2.5*ATR above lowest since entry
+                atr_estimate = (high[i] - low[i]) * 0.5
+                if price > lowest_since_entry + 2.5 * atr_estimate:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                # Exit if price re-enters Donchian channel (mean reversion)
+                elif price >= lowest_low[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -99,17 +110,28 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require ADX > 25 for trending market
-        if adx[i] > 25.0:
-            # Long: Bull Power positive AND DI+ > DI- (bullish momentum)
-            if bull_power[i] > 0 and di_plus[i] > di_minus[i]:
+        # Require volume spike (> 2.0x average) for confirmation
+        volume_spike = vol_ratio[i] > 2.0
+        
+        if volume_spike:
+            # Get weekly pivot bias
+            price_vs_pivot = price - weekly_pivot_aligned[i]
+            
+            # Long entry: price breaks above Donchian high with bullish weekly bias
+            if price > highest_high[i] and price_vs_pivot > 0:
                 in_position = True
                 position_side = 1
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short: Bear Power negative AND DI- > DI+ (bearish momentum)
-            elif bear_power[i] < 0 and di_minus[i] > di_plus[i]:
+            # Short entry: price breaks below Donchian low with bearish weekly bias
+            elif price < lowest_low[i] and price_vs_pivot < 0:
                 in_position = True
                 position_side = -1
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
