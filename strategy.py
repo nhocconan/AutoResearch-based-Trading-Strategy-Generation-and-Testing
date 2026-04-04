@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4135: 6h Donchian(20) breakout + 1w Camarilla pivot + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with weekly Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) capture institutional order flow from weekly structure. Volume confirmation filters false breakouts. Weekly Camarilla adapts to longer-term volatility, working in both bull/bear markets. Target: 75-150 total trades over 4 years (19-37/year).
+HYPOTHESIS: 6h Donchian breakouts aligned with 1w Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) capture institutional order flow from weekly structure. Volume confirmation filters false breakouts. Weekly Camarilla adapts to longer-term volatility, working in both bull/bear markets. Target: 75-150 total trades over 4 years (19-37/year).
 """
 
 import numpy as np
