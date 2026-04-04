@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3805: 12h Donchian(20) breakout + 1d volume profile high-volume node (VHN) + chop regime filter
-HYPOTHESIS: 12h Donchian breakouts capture medium-term swings with 1d VHN acting as institutional interest level. Volume confirmation (>1.5x average) ensures participation. Chop > 61.8 filters range markets to avoid false breakouts. Works in bull markets (breakouts above resistance) and bear markets (breakdowns below support). Discrete position sizing (0.25) minimizes fee drag. Target: 75-150 trades over 4 years.
+Experiment #3805: 12h Donchian(20) breakout + 1d volume confirmation + chop regime filter
+HYPOTHESIS: 12h Donchian breakouts capture medium-term swings with 1d volume (>1.5x) confirming institutional participation. Choppiness Index (14) > 61.8 filters range markets to avoid false breakouts. Works in bull markets (breakouts above resistance) and bear markets (breakdowns below support). Discrete position sizing (0.25) minimizes fee drag. Target: 75-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3805_12h_donchian20_1d_vhn_vol_chop_v1"
+name = "exp_3805_12h_donchian20_1d_vol_chop_v1"
 timeframe = "12h"
 leverage = 1.0
 
