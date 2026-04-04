@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #3529: 4h Donchian Breakout + 1d Weekly Pivot + Volume Confirmation + ATR Stop
+Experiment #3529: 4h Donchian Breakout + 1d Weekly Pivot + Volume Confirmation
 HYPOTHESIS: 4h Donchian(20) breakouts with 1d weekly pivot direction and volume confirmation capture medium-term momentum. 
 Weekly pivot (from 1d data) provides institutional support/resistance levels. Volume confirms breakout strength. 
-Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+Position size 0.25. Target: 80-180 total trades over 4 years (20-45/year).
 Uses 1d for pivot calculation and trend filter, 4h only for entry timing and risk management.
 Works in bull (continuation from pivot support) and bear (continuation from pivot resistance) via price channels.
 """
