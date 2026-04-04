@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #4246: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
+Experiment #4246: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation + ATR stoploss
 HYPOTHESIS: Donchian breakouts on 4h timeframe capture swing momentum when aligned with 1d EMA50 trend (price > EMA50 for longs, < EMA50 for shorts) and confirmed by volume (>2.0x average). Uses 1d EMA for direction, 4h only for entry/exit timing. ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 75-200 total trades over 4 years (19-50/year). Works in bull via breakout continuation, in bear via shorting breakdowns. Novelty: Uses 1d HTF (not 6h/12h) to reduce whipsaw in choppy markets while maintaining sufficient trade frequency for 4h.
 """
 
