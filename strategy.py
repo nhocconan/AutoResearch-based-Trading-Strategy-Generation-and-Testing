@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #3562: 12h Donchian Breakout + 1d Trend Filter + Volume Spike
-HYPOTHESIS: 12h Donchian(20) breakouts with 1d EMA trend filter and volume confirmation 
-capture medium-term momentum with minimal trades. The 1d EMA (50) provides the 
-primary trend direction, avoiding counter-trend entries. Volume spike (>2.0x) 
-confirms breakout strength. Position size 0.25. Target: 50-150 total trades 
-over 4 years (12-37/year). Uses 1d for trend filter, 12h only for entry timing 
-and risk management. Works in bull (continuation from uptrend) and bear 
-(continuation from downtrend) via price channels.
+Experiment #3562: 12h Donchian Breakout + 1d Trend Filter + Volume Confirmation
+HYPOTHESIS: 12h Donchian(20) breakouts with 1d EMA50 trend filter and volume confirmation capture medium-term momentum with low trade frequency. 
+The 1d EMA50 provides a reliable trend filter that works in both bull and bear markets by aligning with the dominant trend. 
+Volume confirmation ensures breakout strength. Position size 0.25. Target: 75-150 total trades over 4 years (19-37/year).
+Uses 1d for trend filter and 12h only for entry timing and risk management.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3562_12h_donchian20_1d_trend_vol_v1"
+name = "exp_3562_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -23,23 +20,22 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1d data for EMA trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA50 trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(50) for trend filter
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate EMA50 on 1d
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align EMA to 12h timeframe
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # Align EMA50 to 12h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # === 12h Indicators: Donchian channels (20-period) for entry timing ===
-    lookback_12h = 20
-    highest_high_12h = pd.Series(high).rolling(window=lookback_12h, min_periods=lookback_12h).max().values
-    lowest_low_12h = pd.Series(low).rolling(window=lookback_12h, min_periods=lookback_12h).min().values
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -64,12 +60,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_12h, 50, 20, 14)  # sufficient for all indicators
+    warmup = max(50, lookback, 20, 14)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(highest_high_12h[i]) or np.isnan(lowest_low_12h[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -85,8 +81,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below 12h Donchian low (trend reversal)
-                elif price < lowest_low_12h[i]:
+                # Exit if price breaks below Donchian low (mean reversion)
+                elif price < lowest_low[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -99,8 +95,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above 12h Donchian high (trend reversal)
-                elif price > highest_high_12h[i]:
+                # Exit if price breaks above Donchian high (mean reversion)
+                elif price > highest_high[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -109,25 +105,25 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
+        # Require volume spike (> 1.8x average) for confirmation
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Determine trend bias from 1d EMA(50)
-            price_vs_ema = price - ema_50_1d_aligned[i]
+            # Determine trend bias from 1d EMA50
+            price_vs_ema = price - ema50_1d_aligned[i]
             
-            # Long entry: price breaks above 12h Donchian high with bullish trend (above EMA)
-            if (price > highest_high_12h[i] and 
-                price_vs_ema > 0):  # Above 1d EMA = bullish trend
+            # Long entry: price breaks above 12h Donchian high with bullish bias (above EMA50)
+            if (price > highest_high[i] and 
+                price_vs_ema > 0):  # Above EMA50 = bullish bias
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below 12h Donchian low with bearish trend (below EMA)
-            elif (price < lowest_low_12h[i] and 
-                  price_vs_ema < 0):  # Below 1d EMA = bearish trend
+            # Short entry: price breaks below 12h Donchian low with bearish bias (below EMA50)
+            elif (price < lowest_low[i] and 
+                  price_vs_ema < 0):  # Below EMA50 = bearish bias
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
