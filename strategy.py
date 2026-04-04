@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #5880: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 trend capture momentum moves with controlled frequency.
+Experiment #5880: 4h Donchian(20) breakout + 1d EMA200 trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA200 trend capture strong momentum moves.
 Volume confirmation filters weak breakouts. ATR-based trailing stop manages risk.
-Designed for 4h timeframe targeting 75-200 trades over 4 years (19-50/year).
-Works in bull markets (breakouts above EMA50 with volume) and bear markets
-(breakdowns below EMA50 with volume).
+Works in bull markets (breakouts above EMA200 with volume) and bear markets
+(breakdowns below EMA200 with volume). Targets 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5880_4h_donchian20_1d_ema50_vol_v1"
+name = "exp_5880_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,14 +25,14 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for EMA50 trend filter ===
+    # === HTF: 1d data for EMA200 trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
+    if len(df_1d) >= 200:
         close_1d = pd.Series(df_1d['close'])
-        ema50_1d = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+        ema200_1d = close_1d.ewm(span=200, min_periods=200, adjust=False).mean().values
+        ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     else:
-        ema50_1d_aligned = np.full(n, np.nan)
+        ema200_1d_aligned = np.full(n, np.nan)
     
     # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -62,7 +61,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 20, 50, 14)  # Donchian, volume avg, EMA50, ATR
+    warmup = max(20, 20, 20, 200, 14)  # Donchian, volume avg, EMA200, ATR
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -74,7 +73,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema50_1d_aligned[i])):
+            np.isnan(ema200_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -108,11 +107,11 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
-        # EMA50 trend filter: long above EMA50, short below EMA50
-        trend_long = price > ema50_1d_aligned[i]
-        trend_short = price < ema50_1d_aligned[i]
+        # EMA200 trend filter: long above EMA200, short below EMA200
+        trend_long = price > ema200_1d_aligned[i]
+        trend_short = price < ema200_1d_aligned[i]
         
-        # Entry conditions: breakout in direction of 1d EMA50 trend with volume confirmation
+        # Entry conditions: breakout in direction of 1d EMA200 trend with volume confirmation
         long_setup = breakout_up and trend_long and volume_confirmed
         short_setup = breakout_down and trend_short and volume_confirmed
         
