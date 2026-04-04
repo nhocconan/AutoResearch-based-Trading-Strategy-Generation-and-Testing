@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #2666: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts with 1d EMA trend alignment and volume spikes capture
-institutional participation with controlled frequency. Uses 1d for signal direction, 4h for
-entry timing. Target: 75-200 total trades over 4 years (19-50/year). Works in bull/bear via
-trend filter and ATR-based stoploss.
+Experiment #2667: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts aligned with 1d weekly pivot levels (R3/S3 for fade, R4/S4 for continuation) 
+and volume spikes capture institutional participation. Weekly pivots provide structural support/resistance 
+that works in both bull and bear markets. Uses 1d for pivot levels and trend bias, 6h only for entry timing. 
+Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2666_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_2667_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,17 +22,38 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
+    # === HTF: 1d data for weekly pivots and trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Calculate 1d EMA(50)
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # We'll use prior daily bar as proxy for weekly calculation (simplified)
+    # For proper weekly, we'd need to group by week, but prior day OHLC gives reasonable pivot levels
+    pivot_1d = (high_1d[:-2] + low_1d[:-2] + close_1d[:-2]) / 3.0  # prior bar
+    r1_1d = 2 * pivot_1d - low_1d[:-2]
+    s1_1d = 2 * pivot_1d - high_1d[:-2]
+    r2_1d = pivot_1d + (high_1d[:-2] - low_1d[:-2])
+    s2_1d = pivot_1d - (high_1d[:-2] - low_1d[:-2])
+    r3_1d = high_1d[:-2] + 2 * (pivot_1d - low_1d[:-2])
+    s3_1d = low_1d[:-2] - 2 * (high_1d[:-2] - pivot_1d)
+    r4_1d = r3_1d + (high_1d[:-2] - low_1d[:-2])
+    s4_1d = s3_1d - (high_1d[:-2] - low_1d[:-2])
+    
+    # Align pivot levels to 6h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # 1d EMA(50) for trend bias
     ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 4h Indicators: Donchian(20) channels, Volume MA(20) ===
-    # Donchian channels (20-period high/low)
+    # === 6h Indicators: Donchian(20) channels, Volume MA(20) ===
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -57,6 +78,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(trend_1d_aligned[i]) or
+            np.isnan(pivot_1d_aligned[i]) or np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]) or
+            np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
@@ -109,27 +132,40 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Long entry: price breaks above Donchian high with uptrend on 1d
-            if trend_bias > 0 and price > highest_20[i]:
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with downtrend on 1d
-            elif trend_bias < 0 and price < lowest_20[i]:
-                in_position = True
-                position_side = -1
-                entry_price = close[i]
-                highest_since_entry = high[i]
-                lowest_since_entry = low[i]
-                signals[i] = -SIZE
+            # Determine pivot-based entry logic
+            pivot = pivot_1d_aligned[i]
+            r3 = r3_1d_aligned[i]
+            s3 = s3_1d_aligned[i]
+            r4 = r4_1d_aligned[i]
+            s4 = s4_1d_aligned[i]
+            
+            # Long entry conditions:
+            # 1. Continuation: price breaks above R4 with uptrend on 1d
+            # 2. Fade: price rejects from S3 with uptrend on 1d (mean reversion)
+            if trend_bias > 0:
+                if (price > r4 and price > highest_20[i]) or \
+                   (price < s3 and price > low[i] and close[i] > open[i]):  # bullish rejection at S3
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    highest_since_entry = high[i]
+                    lowest_since_entry = low[i]
+                    signals[i] = SIZE
+            # Short entry conditions:
+            # 1. Continuation: price breaks below S4 with downtrend on 1d
+            # 2. Fade: price rejects from R3 with downtrend on 1d (mean reversion)
+            elif trend_bias < 0:
+                if (price < s4 and price < lowest_20[i]) or \
+                   (price > r3 and price < high[i] and close[i] < open[i]):  # bearish rejection at R3
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    highest_since_entry = high[i]
+                    lowest_since_entry = low[i]
+                    signals[i] = -SIZE
             else:
                 signals[i] = 0.0
         else:
             signals[i] = 0.0
     
     return signals
-
-</think>
