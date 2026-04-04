@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #2910: 1d Donchian Breakout + Weekly Pivot Direction + Volume Spike
-HYPOTHESIS: Donchian(20) breakouts on daily timeframe capture primary trends.
-Weekly pivot (from 1w data) provides directional bias: only take long breakouts
-when weekly pivot shows bullish bias (price > weekly pivot), and short breakouts
-when bearish (price < weekly pivot). Volume spike (>2.0x 20-period average)
-confirms breakout strength. This filters false breakouts in choppy markets while
-capturing strong trends in both bull and bear regimes. 1d timeframe minimizes
-fee drag. Target: 30-100 total trades over 4 years.
+Experiment #2911: 6h Donchian Breakout + 1d Volume Spike + Weekly Pivot Direction
+HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts with volume confirmation (>2.0x 20-period average)
+and weekly pivot bias (from 1d data) capture strong trends while filtering false breakouts.
+Weekly pivot provides directional bias: only long when price > weekly pivot, short when price < weekly pivot.
+This combination works in both bull (breakouts continue) and bear (breakdowns continue) markets.
+Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2910_1d_donchian20_1w_pivot_vol_v1"
-timeframe = "1d"
+name = "exp_2911_6h_donchian20_1d_vol_pivot_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,27 +23,27 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for weekly pivot calculation (Call ONCE before loop) ===
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # === HTF: 1d data for weekly pivot (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot from weekly OHLC: Pivot = (High + Low + Close) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # No further smoothing - use raw weekly pivot as bias
-    weekly_pivot = pivot_1w
+    # Calculate daily pivot: (High + Low + Close) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Weekly pivot bias: 5-day average of daily pivots (simplified weekly)
+    weekly_pivot = pd.Series(pivot_1d).rolling(window=5, min_periods=5).mean().values
     
-    # Align to 1d timeframe (shifted by 1 for completed bars only)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    # Align to 6h timeframe (shifted by 1 for completed bars only)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     
-    # === 1d Indicators: Donchian channels (20-period) ===
+    # === 6h Indicators: Donchian channels (20-period) ===
     lookback = 20
     # Rolling max/min for Donchian channels
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 1d Indicators: Volume MA(20) for spike detection ===
+    # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -78,7 +76,7 @@ def generate_signals(prices):
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
                 # Exit if price drops 2.5*ATR below highest since entry
-                # Use 1d ATR(14) approximation from price range
+                # Use 6h ATR(14) approximation from price range
                 atr_estimate = (high[i] - low[i]) * 0.5
                 if price < highest_since_entry - 2.5 * atr_estimate:
                     in_position = False
