@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4143: 4h Donchian(20) breakout + 12h EMA(20) trend filter + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA(20) trend direction capture strong momentum moves. Volume confirmation filters false breakouts. 12h EMA adapts faster than 1d to trend changes, working in both bull/bear markets. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #4143: 4h Donchian(20) breakout + 12h EMA(20) trend filter + volume confirmation + ATR trailing stop
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA(20) trend direction capture strong momentum moves with lower lag than 1d EMA. Volume confirmation filters false breakouts. ATR trailing stop manages risk. Works in both bull/bear as EMA adapts to trend. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
