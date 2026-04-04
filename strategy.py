@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3712: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts capture medium-term momentum with 1d EMA50 providing structural trend bias. Volume spike confirms breakout authenticity. This combination avoids whipsaw in ranging markets and works in both bull (breakouts with trend) and bear (breakouts against trend filtered by EMA) regimes. Targets 50-150 trades over 4 years (12-37/year) with strict 3-condition confluence. Position size 0.25 manages drawdown from 2022 crash while allowing profit accumulation.
+HYPOTHESIS: 12h Donchian breakouts capture longer-term momentum with 1d EMA50 providing structural trend bias. Volume spike confirms breakout authenticity. Targets 50-150 trades over 4 years (12-37/year) with strict 3-condition confluence. Position size 0.25 manages drawdown from 2022 crash while allowing profit accumulation. Works in both bull (breakouts with trend) and bear (breakouts against trend filtered by EMA) regimes.
 """
 
 import numpy as np
