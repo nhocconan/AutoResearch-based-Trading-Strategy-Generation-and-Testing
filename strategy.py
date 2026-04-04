@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #3671: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+Experiment #3675: 6h Donchian(20) breakout + 1w pivot direction + volume confirmation
 HYPOTHESIS: 6h Donchian breakouts capture swing momentum while 1d weekly pivot levels (from prior week) provide institutional support/resistance structure. Volume spike confirms breakout authenticity. Weekly pivot direction (price above/below weekly pivot) filters for trend alignment. This avoids counter-trend trades and works in both bull (breakouts with volume above pivot) and bear (failed breakouts below pivot reverse quickly) markets. Position size 0.25 balances return and drawdown. Target: 75-200 total trades over 4 years (19-50/year) by using strict entry conditions requiring Donchian breakout, weekly pivot alignment, and volume confirmation.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3671_6h_donchian20_1d_weekly_pivot_vol_v1"
+name = "exp_3675_6h_donchian20_1w_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
