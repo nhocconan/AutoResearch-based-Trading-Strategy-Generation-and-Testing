@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-exp_6476_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+exp_6477_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
 Uses 1d EMA50 to determine bias: long only when price above 1d EMA50,
 short only when below. Volume confirmation filters weak breakouts.
-Target: 75-150 trades over 4 years (19-37/year) on 12h timeframe.
+Target: 75-200 trades over 4 years (19-50/year).
 Works in both bull and bear markets by using 1d EMA50 as adaptive trend filter
 and Donchian breakouts for momentum entries.
 """
@@ -12,8 +12,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6476_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_6477_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -33,7 +33,7 @@ def generate_signals(prices):
     # Calculate 1d EMA50
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, min_periods=EMA_PERIOD, adjust=False).mean().values
-    # Align to LTF (12h) with shift(1) for completed bars only
+    # Align to LTF (4h) with shift(1) for completed bars only
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -111,4 +111,4 @@ def generate_signals(prices):
     
     return signals
 
-</think>
+</output>
