@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #3266: 4h Donchian Breakout + 1d HMA Trend + Volume Spike
-HYPOTHESIS: 4h Donchian(20) breakouts with 1d HMA(50) trend filter and volume confirmation capture medium-term trends while avoiding overtrading. 4h timeframe balances trade frequency (target: 75-200 total trades over 4 years) and signal quality. Volume spike (>2.0x 20-period average) confirms breakout strength. ATR trailing stop (2.5x) manages risk. Position size 0.25. Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets by using price channels and volatility filters.
+HYPOTHESIS: 4h Donchian(20) breakouts with 1d HMA(50) trend filter and volume confirmation (>2.0x) capture medium-term trends.
+ATR trailing stop (2.5x) manages risk. Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+Designed for both bull (trend continuation) and bear (mean reversion from extremes) markets using price channels and volatility filters.
+Timeframe: 4h, HTF: 1d for trend alignment.
 """
 
 import numpy as np
