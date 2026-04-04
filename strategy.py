@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4855: 6h Donchian(20) Breakout + 1w Camarilla Pivot + Volume Spike
-HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts aligned with weekly Camarilla pivot levels (R3/S3 for continuation, R4/S4 for strong breakouts) with volume confirmation (>1.5x average) capture sustained momentum. Weekly pivot provides structural support/resistance that works in both bull (breakouts above R3) and bear (breakdowns below S3) markets. Target: 12-37 trades/year on 6h timeframe to minimize fee drag.
+HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts aligned with weekly Camarilla pivot levels (R3/S3 for fade, R4/S4 for breakout) with volume confirmation (>1.5x average) capture institutional flow. Weekly pivot provides structural support/resistance from smart money. Designed for 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (R4 breakouts) and bear markets (S4 breakdowns).
 """
 
 import numpy as np
@@ -22,39 +22,47 @@ def generate_signals(prices):
     # Precompute HTF: 1w data for Camarilla pivot levels
     df_1w = get_htf_data(prices, '1w')
     
-    # === 1w Indicators: Camarilla Pivot Levels (using previous week's OHLC) ===
+    # === 1w Indicators: Camarilla Pivot Levels ===
     if len(df_1w) >= 1:
-        # Calculate pivot points from previous week's OHLC
-        # We need to shift by 1 week to avoid look-ahead (use completed week only)
+        # Calculate pivot points from previous weekly bar
         high_1w = df_1w['high'].values
         low_1w = df_1w['low'].values
         close_1w = df_1w['close'].values
         
-        # Previous week's values (shifted by 1)
-        prev_high = np.concatenate([[np.nan], high_1w[:-1]])
-        prev_low = np.concatenate([[np.nan], low_1w[:-1]])
-        prev_close = np.concatenate([[np.nan], close_1w[:-1]])
+        # Pivot = (H + L + C) / 3
+        pivot_1w = (high_1w + low_1w + close_1w) / 3.0
         
-        # Camarilla pivot calculation
-        pivot = (prev_high + prev_low + prev_close) / 3.0
-        range_val = prev_high - prev_low
+        # Range = H - L
+        range_1w = high_1w - low_1w
         
         # Camarilla levels
-        r3 = pivot + (range_val * 1.1 / 2.0)  # R3 = pivot + 1.1*(H-L)/2
-        s3 = pivot - (range_val * 1.1 / 2.0)  # S3 = pivot - 1.1*(H-L)/2
-        r4 = pivot + (range_val * 1.1)        # R4 = pivot + 1.1*(H-L)
-        s4 = pivot - (range_val * 1.1)        # S4 = pivot - 1.1*(H-L)
+        r3_1w = pivot_1w + range_1w * 1.1 / 2.0
+        s3_1w = pivot_1w - range_1w * 1.1 / 2.0
+        r4_1w = pivot_1w + range_1w * 1.1
+        s4_1w = pivot_1w - range_1w * 1.1
         
-        # Align to 6h timeframe (use align_htf_to_ltf which includes shift(1))
-        r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-        s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-        r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
-        s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+        # Store as arrays
+        r3_1w_arr = r3_1w
+        s3_1w_arr = s3_1w
+        r4_1w_arr = r4_1w
+        s4_1w_arr = s4_1w
     else:
-        r3_aligned = np.full(n, np.nan)
-        s3_aligned = np.full(n, np.nan)
-        r4_aligned = np.full(n, np.nan)
-        s4_aligned = np.full(n, np.nan)
+        r3_1w_arr = np.full(len(df_1w), np.nan)
+        s3_1w_arr = np.full(len(df_1w), np.nan)
+        r4_1w_arr = np.full(len(df_1w), np.nan)
+        s4_1w_arr = np.full(len(df_1w), np.nan)
+    
+    # Align HTF Camarilla levels to 6h timeframe (shift by 1 for completed weekly bar)
+    if len(r3_1w_arr) > 0:
+        r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w_arr)
+        s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w_arr)
+        r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w_arr)
+        s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w_arr)
+    else:
+        r3_1w_aligned = np.full(n, np.nan)
+        s3_1w_aligned = np.full(n, np.nan)
+        r4_1w_aligned = np.full(n, np.nan)
+        s4_1w_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -88,8 +96,8 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
+            np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
+            np.isnan(r4_1w_aligned[i]) or np.isnan(s4_1w_aligned[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
@@ -123,20 +131,16 @@ def generate_signals(prices):
         # Volume filter: confirmation (>1.5x)
         vol_confirm = vol_ratio[i] > 1.5
         
-        # Donchian breakout conditions with Camarilla pivot alignment
-        # Long: break above Donchian high AND above S3 (bullish continuation) OR above R4 (strong breakout)
-        breakout_long = (
-            (price >= high_roll[i]) and 
-            vol_confirm and
-            ((price > s3_aligned[i]) or (price > r4_aligned[i]))
-        )
+        # Donchian breakout conditions with Camarilla pivot logic
+        # Long: Break above R4 (strong breakout) OR bounce from S3 (mean reversion)
+        breakout_long = (vol_confirm and 
+                        ((price >= high_roll[i] and price >= r4_1w_aligned[i]) or  # R4 breakout
+                         (price <= low_roll[i] and price >= s3_1w_aligned[i] and price <= s3_1w_aligned[i] + (r3_1w_aligned[i] - s3_1w_aligned[i]) * 0.2)))  # S3 bounce
         
-        # Short: break below Donchian low AND below R3 (bearish continuation) OR below S4 (strong breakdown)
-        breakout_short = (
-            (price <= low_roll[i]) and 
-            vol_confirm and
-            ((price < r3_aligned[i]) or (price < s4_aligned[i]))
-        )
+        # Short: Break below S4 (strong breakdown) OR fade from R3 (mean reversion)
+        breakout_short = (vol_confirm and 
+                         ((price <= low_roll[i] and price <= s4_1w_aligned[i]) or  # S4 breakdown
+                          (price >= high_roll[i] and price <= r3_1w_aligned[i] and price >= r3_1w_aligned[i] - (r3_1w_aligned[i] - s3_1w_aligned[i]) * 0.2)))  # R3 fade
         
         # Final entry conditions
         if breakout_long:
