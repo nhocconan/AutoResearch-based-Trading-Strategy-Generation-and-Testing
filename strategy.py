@@ -23,7 +23,7 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 30  # ~5 months (4h bars)
+MAX_HOLD_BARS = 30  # ~5 days (4h bars)
 EMA_PERIOD = 50
 
 def generate_signals(prices):
