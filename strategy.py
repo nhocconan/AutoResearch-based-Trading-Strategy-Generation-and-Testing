@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4090: 1d Donchian(20) breakout + 1w EMA(50) trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on daily timeframe aligned with weekly EMA(50) trend direction and volume confirmation capture major trend moves while minimizing trades. Weekly EMA provides a robust trend filter that works in both bull and bear markets by only allowing breakouts in the direction of the weekly trend. Target: 30-100 total trades over 4 years (7-25/year).
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA(50) trend and volume confirmation capture strong continuation moves with low trade frequency. The weekly EMA provides a robust trend filter that adapts to both bull and bear markets, while the daily Donchian channel ensures we only trade significant breakouts. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
@@ -27,17 +27,17 @@ def generate_signals(prices):
     else:
         ema_50_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: Donchian Channel(20) for breakout ===
+    # === Daily Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 1d Indicators: Volume MA(20) for confirmation ===
+    # === Daily Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(20) for volatility and stoploss ===
+    # === Daily Indicators: ATR(20) for volatility and stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
