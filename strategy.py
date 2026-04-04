@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 exp_6659_6h_donchian20_12h_ema_vol_v2
-Hypothesis: 6h Donchian(20) breakout with 12h EMA trend filter and volume confirmation.
-Primary timeframe: 6h (target: 75-200 total trades over 4 years). Uses 12h EMA for trend bias:
+Hypothesis: 6h Donchian(20) breakout with 12-hour EMA trend filter and volume confirmation.
+Primary timeframe: 6h (target: 75-150 total trades over 4 years). Uses 12-hour EMA for trend bias:
 price above 12h EMA favors longs, below favors shorts. Volume confirms breakout strength.
 ATR-based stoploss limits downside. Discrete sizing (0.25) reduces fee churn.
 Designed to work in both bull and bear markets by trading breakouts in direction of 12h trend.
@@ -18,7 +18,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+EMA_PERIOD = 21
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
