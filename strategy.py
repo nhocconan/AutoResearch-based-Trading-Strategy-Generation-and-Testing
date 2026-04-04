@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4998: 1d Donchian(20) Breakout + 1w HMA21 Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts in direction of 1w HMA21 trend with volume confirmation (>2x average) capture strong momentum moves. Uses ATR(14) trailing stop (2.5x) to limit downside. Designed for 7-25 trades/year on 1d timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
+HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts in direction of 1w HMA21 trend with volume confirmation (>1.5x average) capture strong momentum moves in both bull and bear markets. Uses ATR(14) trailing stop (2.5x) to limit downside. Target: 15-25 trades/year to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
 """
 
 import numpy as np
@@ -62,7 +62,7 @@ def generate_signals(prices):
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume confirmation (2x spike) ===
+    # === 1d Indicators: Volume confirmation (1.5x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -120,8 +120,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>2.0x)
-        vol_confirm = vol_ratio[i] > 2.0
+        # Volume filter: confirmation (>1.5x)
+        vol_confirm = vol_ratio[i] > 1.5
         
         # Donchian breakout conditions with trend alignment
         breakout_long = (price >= high_roll[i]) and (price > hma_1w_aligned[i]) and vol_confirm
@@ -146,3 +146,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
