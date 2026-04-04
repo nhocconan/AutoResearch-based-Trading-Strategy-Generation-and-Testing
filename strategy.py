@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4628: 12h Donchian(20) Breakout + Volume Confirmation + ATR Stoploss (MTF 1w/1d)
-HYPOTHESIS: 12h price breaking Donchian(20) channels from prior 1d/1w with volume confirmation (>1.5x avg) captures strong momentum breakouts in both bull and bear markets. Uses 1w HTF for regime filter (price > 200EMA = bull trend) and 1d HTF for Donchian calculation to avoid look-ahead. Discrete sizing (0.25) and ATR trailing stop (2.0x) manage risk. Target: 12-37 trades/year on 12h timeframe.
+Experiment #4629: 4h Donchian(20) Breakout + Volume Confirmation + ATR Stoploss
+HYPOTHESIS: 4h price breaking Donchian(20) channels from prior 1d with volume confirmation (>1.5x avg) captures strong momentum breakouts in both bull and bear markets. Uses 1d HTF for Donchian calculation to avoid look-ahead. Discrete sizing (0.25) and ATR trailing stop (2.0x) manage risk. Target: 19-50 trades/year on 4h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4628_12h_donchian20_vol_v1"
-timeframe = "12h"
+name = "exp_4629_4h_donchian20_1d_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,8 +21,6 @@ def generate_signals(prices):
     
     # Precompute HTF: 1d data for Donchian channels
     df_1d = get_htf_data(prices, '1d')
-    # Precompute HTF: 1w data for regime filter (200EMA)
-    df_1w = get_htf_data(prices, '1w')
     
     # Calculate Donchian(20) from prior 1d OHLC (shifted by 1 to avoid look-ahead)
     if len(df_1d) >= 20:
@@ -37,7 +35,7 @@ def generate_signals(prices):
         donchian_high = np.full(n, np.nan)
         donchian_low = np.full(n, np.nan)
     
-    # Align Donchian levels to 12h timeframe
+    # Align Donchian levels to 4h timeframe
     if len(donchian_high) > 0:
         dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
         dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
@@ -45,19 +43,12 @@ def generate_signals(prices):
         dh_aligned = np.full(n, np.nan)
         dl_aligned = np.full(n, np.nan)
     
-    # Calculate 1w 200EMA for regime filter
-    if len(df_1w) >= 200:
-        ema_200 = pd.Series(df_1w['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
-        ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200)
-    else:
-        ema_200_aligned = np.full(n, np.nan)
-    
-    # === 12h Indicators: Volume MA(20) for confirmation ===
+    # === 4h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -75,12 +66,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 14, 200)  # Volume MA, ATR, 1w EMA warmup
+    warmup = max(20, 14)  # Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(dh_aligned[i]) or np.isnan(dl_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or np.isnan(ema_200_aligned[i])):
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
