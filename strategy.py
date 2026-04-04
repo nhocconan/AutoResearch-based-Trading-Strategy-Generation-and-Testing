@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #5108: 12h Donchian(20) Breakout + 1w HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with 1-week HMA(21) trend capture strong momentum with lower trade frequency. 
-Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. 
-Designed for 12-37 trades/year on 12h timeframe to minimize fee drag. Works in bull markets (breakouts with trend) 
-and bear markets (breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
+Experiment #5110: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts aligned with 1w HMA(21) trend capture strong momentum across bull and bear markets. 
+Volume > 1.8x average confirms institutional participation. ATR(14) trailing stop (2.5x) manages risk during volatile periods. 
+Designed for 15-25 trades/year on 1d timeframe (60-100 total over 4 years) to minimize fee drag. 
+Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5108_12h_donchian20_1w_hma_vol_v1"
-timeframe = "12h"
+name = "exp_5110_1d_donchian20_1w_hma_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -49,16 +49,16 @@ def generate_signals(prices):
     else:
         hma_1w_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian(20) channels ===
+    # === 1d Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation (1.5x spike) ===
+    # === 1d Indicators: Volume confirmation (1.8x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -92,8 +92,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -101,8 +101,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -111,8 +111,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>1.5x)
-        vol_confirm = vol_ratio[i] > 1.5
+        # Volume filter: confirmation (>1.8x)
+        vol_confirm = vol_ratio[i] > 1.8
         
         # Donchian breakout conditions with 1w HMA trend filter
         # Long: Donchian breakout above + price > 1w HMA (uptrend)
