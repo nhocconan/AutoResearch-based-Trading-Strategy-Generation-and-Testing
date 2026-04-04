@@ -3,9 +3,9 @@
 exp_6588_12h_donchian20_1w_ema_vol_v1
 Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
 Uses 12h primary timeframe (target: 50-150 total trades over 4 years). 1w EMA50 provides
-clear long-term trend direction that works in both bull and bear markets (above EMA50 = bullish bias,
+clear trend direction that works in both bull and bear markets (above EMA50 = bullish bias,
 below = bearish bias). Volume confirmation ensures breakouts have conviction.
-Discrete sizing (0.25) minimizes fee churn. Includes ATR-based stoploss and time-based exit.
+Discrete sizing (0.25) minimizes fee churn. Includes ATR-based stoploss.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -24,7 +24,7 @@ VOL_BASE_THRESHOLD = 2.0  # Volume threshold for confirmation
 SIGNAL_SIZE = 0.25      # 25% position size
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5  # Stoploss at 2.5 * ATR
-MAX_HOLD_BARS = 15      # Max hold: ~15 * 12h = 7.5 days
+MAX_HOLD_BARS = 20      # Max hold: ~20 * 12h = 10 days
 
 def generate_signals(prices):
     n = len(prices)
