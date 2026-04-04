@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #6415: 6h Donchian(20) breakout + 1w trend filter + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts filtered by 1w trend (price above/below 50 EMA) and volume confirmation (>2.0x avg) capture high-probability momentum moves. In bull markets, longs taken when price > 1w EMA50 and breaks Donchian high with volume. In bear markets, shorts taken when price < 1w EMA50 and breaks Donchian low with volume. The 1w EMA50 acts as a dynamic trend filter to avoid counter-trend trades, while volume confirmation filters false breakouts. Discrete sizing (0.25) balances profit potential and drawdown control. Target: 100-180 trades over 4 years.
+HYPOTHESIS: 6h Donchian breakouts filtered by weekly trend (price above/below weekly EMA50) and volume confirmation (>2.0x avg) capture strong momentum moves while avoiding false breakouts in choppy markets. Weekly EMA50 acts as a dynamic trend filter: long only when price > weekly EMA50, short only when price < weekly EMA50. This avoids counter-trend trades that fail in strong trends. Volume confirmation ensures breakouts have institutional participation. Discrete sizing (0.25) balances profit potential and drawdown control. Target: 75-200 trades over 4 years. Works in bull via upward breakouts with volume, in bear via downward breakouts with volume, and avoids ranging markets via trend filter.
 """
 
 import numpy as np
@@ -22,13 +22,14 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for trend filter (EMA50) ===
+    # === HTF: 1w data for trend filter ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 50:
-        ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, adjust=False).mean().values
-        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    if len(df_1w) >= 1:
+        # Calculate weekly EMA50 for trend filter
+        weekly_ema50 = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        weekly_ema50_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema50)
     else:
-        ema_1w_aligned = np.full(n, np.nan)
+        weekly_ema50_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -57,7 +58,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 50, 14) + 1  # Donchian, volume avg, 1w EMA, ATR lookback + 1
+    warmup = max(20, 20, 14, 50) + 1  # Donchian, volume avg, ATR, weekly EMA lookback + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (22:00-23:59 UTC) ---
@@ -69,7 +70,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_1w_aligned[i])):
+            np.isnan(weekly_ema50_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -83,8 +84,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks below Donchian low (failed breakout)
-                # 3. Price closes below 1w EMA50 (trend change)
-                if price <= stop_price or price <= donchian_low[i] or close[i] < ema_1w_aligned[i]:
+                # 3. Price crosses below weekly EMA50 (trend change)
+                if price <= stop_price or price <= donchian_low[i] or price < weekly_ema50_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -96,8 +97,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss
                 # 2. Price breaks above Donchian high (failed breakout)
-                # 3. Price closes above 1w EMA50 (trend change)
-                if price >= stop_price or price >= donchian_high[i] or close[i] > ema_1w_aligned[i]:
+                # 3. Price crosses above weekly EMA50 (trend change)
+                if price >= stop_price or price >= donchian_high[i] or price > weekly_ema50_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -110,11 +111,15 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 2.0  # Volume filter
         
-        # Entry logic based on 1w trend filter:
-        # Long: price > 1w EMA50 AND breakout above Donchian high with volume
-        # Short: price < 1w EMA50 AND breakdown below Donchian low with volume
-        long_entry = breakout_up and volume_confirmed and (close[i] > ema_1w_aligned[i])
-        short_entry = breakout_down and volume_confirmed and (close[i] < ema_1w_aligned[i])
+        # Trend filter from weekly EMA50
+        uptrend = price > weekly_ema50_aligned[i]
+        downtrend = price < weekly_ema50_aligned[i]
+        
+        # Entry logic:
+        # Long: breakout above Donchian high + volume + uptrend filter
+        # Short: breakdown below Donchian low + volume + downtrend filter
+        long_entry = breakout_up and volume_confirmed and uptrend
+        short_entry = breakout_down and volume_confirmed and downtrend
         
         if long_entry:
             in_position = True
