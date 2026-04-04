@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4170: 1d Donchian(20) breakout + 1w EMA(50) trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA(50) direction capture major trends while avoiding whipsaw. The weekly EMA(50) provides a robust long-term trend filter that works in both bull and bear markets. Volume confirmation (>1.5x) ensures breakout validity. ATR-based trailing stop manages risk. Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
+Experiment #4171: 6h Donchian(20) breakout + 1d pivot direction + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts aligned with daily pivot levels (R1/S1) capture medium-term trends while avoiding whipsaw. Daily pivots provide robust support/resistance levels that work in both bull and bear markets. Volume confirmation (>1.5x) ensures breakout validity. ATR-based trailing stop manages risk. Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4170_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_4171_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,25 +19,33 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1w data for EMA(50) trend filter ===
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 50:
-        ema_1w = pd.Series(df_1w['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # === HTF: 1d data for pivot levels ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 2:
+        # Calculate daily pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+        typical_price = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+        pivot = typical_price.values
+        r1 = (2 * pivot) - df_1d['low'].values
+        s1 = (2 * pivot) - df_1d['high'].values
+        pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+        r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+        s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     else:
-        ema_1w_aligned = np.full(n, np.nan)
+        pivot_aligned = np.full(n, np.nan)
+        r1_aligned = np.full(n, np.nan)
+        s1_aligned = np.full(n, np.nan)
     
-    # === 1d Indicators: Donchian Channel(20) for breakout ===
+    # === 6h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 1d Indicators: Volume MA(20) for confirmation ===
+    # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 6h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -55,13 +63,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 5, 50 + 5, 14 + 5)  # DC lookback, vol MA buffer, EMA buffer, ATR buffer
+    warmup = max(lookback_dc + 1, 20 + 5, 2 + 5, 14 + 5)  # DC lookback, vol MA buffer, pivot buffer, ATR buffer
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_1w_aligned[i])):
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -99,15 +107,15 @@ def generate_signals(prices):
             breakout_up = price > highest_high[i-1]
             breakout_down = price < lowest_low[i-1]
             
-            # Weekly EMA trend filter: price above EMA = bullish bias, below = bearish bias
-            above_ema = price > ema_1w_aligned[i]
-            below_ema = price < ema_1w_aligned[i]
+            # Daily pivot trend filter: price above R1 = bullish bias, below S1 = bearish bias
+            above_r1 = price > r1_aligned[i]
+            below_s1 = price < s1_aligned[i]
             
-            # Long conditions: Donchian breakout up + price above weekly EMA
-            long_entry = breakout_up and above_ema
+            # Long conditions: Donchian breakout up + price above daily R1
+            long_entry = breakout_up and above_r1
             
-            # Short conditions: Donchian breakout down + price below weekly EMA
-            short_entry = breakout_down and below_ema
+            # Short conditions: Donchian breakout down + price below daily S1
+            short_entry = breakout_down and below_s1
             
             if long_entry:
                 in_position = True
