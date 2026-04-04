@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #4190: 1d Donchian(20) breakout + weekly pivot direction + volume confirmation
-HYPOTHESIS: Donchian channel breakouts on 1d timeframe capture significant momentum moves 
-when aligned with weekly pivot direction (bullish above weekly pivot, bearish below) 
-and confirmed by volume spikes (>1.5x average). Uses discrete position sizing (0.25) 
-to limit fee churn and targets 30-100 total trades over 4 years (7-25/year). 
-Weekly pivot provides structural bias that works in both bull/bear markets by 
-identifying key institutional levels where price tends to respect or break through.
+Experiment #4190: 1d Donchian(20) breakout + 1w EMA(50) trend + volume confirmation
+HYPOTHESIS: Donchian channel breakouts on daily timeframe capture significant momentum moves
+when aligned with weekly EMA(50) trend (price above EMA = bullish, below = bearish)
+and confirmed by volume spikes (>1.8x average). Uses discrete position sizing (0.25)
+to limit fee churn and targets 75-200 total trades over 4 years (19-50/year).
+Weekly EMA provides structural bias that works in both bull/bear markets by identifying
+the primary trend direction where breakouts are more likely to succeed.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4190_1d_donchian20_1w_pivot_vol_v1"
+name = "exp_4190_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -24,22 +24,14 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === Precompute HTF: 1w data for weekly pivot calculation ===
+    # === Precompute HTF: 1w data for EMA(50) trend ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 1:
-        # Calculate weekly pivot from prior week's OHLC (using 1w data)
-        # Weekly pivot = (Prior Week HIGH + LOW + CLOSE) / 3
-        high_1w = df_1w['high'].values
-        low_1w = df_1w['low'].values
+    if len(df_1w) >= 50:
         close_1w = df_1w['close'].values
-        
-        # Shift by 1 to use prior week's pivot (no look-ahead)
-        weekly_pivot_1w = (np.roll(high_1w, 1) + np.roll(low_1w, 1) + np.roll(close_1w, 1)) / 3.0
-        weekly_pivot_1w[0] = np.nan  # First value has no prior week
-        
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot_1w)
+        ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     else:
-        weekly_pivot_aligned = np.full(n, np.nan)
+        ema_1w_aligned = np.full(n, np.nan)
     
     # === 1d Indicators: Donchian Channel (20) ===
     def calculate_donchian(high, low, period=20):
@@ -72,12 +64,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20 + 5, 20 + 5, 20 + 5, 14 + 5)  # Donchian, vol MA, weekly pivot, ATR
+    warmup = max(20, 20, 50)  # Donchian, vol MA, EMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(weekly_pivot_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -107,17 +99,17 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume confirmation (> 1.8x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.8
         
         if volume_confirm:
             # Donchian breakout conditions
             breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
             breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
             
-            # Weekly pivot bias: price above pivot = bullish, below = bearish
-            bullish_bias = price > weekly_pivot_aligned[i]
-            bearish_bias = price < weekly_pivot_aligned[i]
+            # 1w EMA trend bias: price above EMA = bullish, below = bearish
+            bullish_bias = price > ema_1w_aligned[i]
+            bearish_bias = price < ema_1w_aligned[i]
             
             # Long conditions: Donchian breakout up + bullish bias + volume confirmation
             long_entry = breakout_up and bullish_bias
