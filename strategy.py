@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4001: 4h Donchian(20) breakout + 1d/1w EMA trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d/1w EMA trend direction capture high-probability moves in both bull and bear regimes.
-Volume > 1.5x MA(20) confirms institutional participation. Uses discrete sizing (0.25) and ATR(20) trailing stop (2.0x) for risk control.
-1d/1w EMA filters ensure we only trade in the direction of the higher timeframe trend, reducing false breakouts.
-Target: 75-200 trades over 4 years (19-50/year). Works via trend alignment reducing whipsaws.
+Experiment #4002: 12h Donchian(20) breakout + 1d/1w EMA trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d/1w EMA trend direction capture high-probability moves in both bull and bear regimes. Volume > 1.5x MA(20) confirms institutional participation. Uses discrete sizing (0.25) and ATR(20) trailing stop (2.0x) for risk control. Target: 75-150 trades over 4 years (19-37/year). Works via trend alignment reducing whipsaws and lower frequency minimizing fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4001_4h_donchian20_1d1w_ema_vol_v1"
-timeframe = "4h"
+name = "exp_4002_12h_donchian20_1d1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,17 +35,17 @@ def generate_signals(prices):
     else:
         ema_1w_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian Channel(20) for breakout ===
+    # === 12h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 4h Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(20) for volatility and trailing stop ===
+    # === 12h Indicators: ATR(20) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
