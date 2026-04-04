@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #5930: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA trend capture high-probability 
-continuation moves. Volume confirmation filters weak breakouts. Weekly HMA acts as dynamic 
-trend filter effective in both bull (price above HMA) and bear (price below HMA) markets. 
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA trend (price above/below HMA(21)) 
+capture high-probability continuation moves. Volume confirmation filters weak breakouts. 
+Weekly HMA acts as dynamic trend filter, effective in both bull and bear markets. 
 Target: 30-100 total trades over 4 years (7-25/year).
 """
 
@@ -25,11 +25,11 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for HMA(21) trend ===
+    # === HTF: 1w data for HMA(21) trend filter ===
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 21:
         close_1w = pd.Series(df_1w['close'].values)
-        # HMA(21): WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+        # HMA(21) = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
         half = 21 // 2
         sqrt_n = int(np.sqrt(21))
         wma_half = close_1w.rolling(window=half, min_periods=half).mean()
@@ -68,7 +68,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21)  # Donchian, volume avg, ATR, weekly HMA
+    warmup = max(20, 20, 14, 21)  # Donchian, volume avg, ATR, HMA lookback
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -116,11 +116,11 @@ def generate_signals(prices):
         volume_confirmed = volume_ratio[i] > 1.5
         
         # Weekly HMA trend filter:
-        # Price above weekly HMA = long bias, below = short bias
+        # Price above HMA(21) = long bias, below = short bias
         long_bias = price > hma_21_aligned[i]
         short_bias = price < hma_21_aligned[i]
         
-        # Entry conditions: breakout in direction of weekly HMA trend
+        # Entry conditions: breakout in direction of HMA trend
         long_setup = breakout_up and volume_confirmed and long_bias
         short_setup = breakout_down and volume_confirmed and short_bias
         
