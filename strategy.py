@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5079: 6h Elder Ray + ADX Regime + Volume Spike
-HYPOTHESIS: On 6h timeframe, Elder Ray (Bull/Bear Power) combined with ADX regime filter captures strong trending moves while avoiding chop. Bull Power > 0 and Bear Power < 0 with ADX > 25 indicates strong trend. Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. Designed for 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Works in both bull (strong upward thrusts) and bear (strong downward thrusts) markets by filtering for genuine momentum.
+Experiment #5081: 4h Donchian(20) Breakout + 1d/1w HTF Regime + Volume Spike + ATR Stoploss
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 1d/1w HTF regime (trending vs ranging) capture strong momentum with controlled frequency. HTF regime filter uses ADX(14) on 1d and 1w timeframes: only take longs when both are trending up (ADX>25 + +DI>-DI) and shorts when both trending down. Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts through resistance) and bear markets (breakdowns through support) by requiring HTF trend alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5079_6h_elder_ray_adx_regime_vol_v1"
-timeframe = "6h"
+name = "exp_5081_4h_donchian20_1d_1w_regime_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,45 +19,100 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === 6h Indicators: EMA(13) for Elder Ray ===
-    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    # Precompute HTF: 1d and 1w data for regime filter
+    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # === 6h Indicators: Elder Ray (Bull Power = High - EMA13, Bear Power = Low - EMA13) ===
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # === 1d Indicators: ADX(14) for regime ===
+    if len(df_1d) >= 14:
+        # Calculate True Range
+        tr1 = df_1d['high'].values[1:] - df_1d['low'].values[1:]
+        tr2 = np.abs(df_1d['high'].values[1:] - df_1d['close'].values[:-1])
+        tr3 = np.abs(df_1d['low'].values[1:] - df_1d['close'].values[:-1])
+        tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        atr_1d = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+        
+        # Calculate +DM and -DM
+        up_move = df_1d['high'].values[1:] - df_1d['high'].values[:-1]
+        down_move = df_1d['low'].values[:-1] - df_1d['low'].values[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        # Smoothed values
+        tr_smoothed = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+        plus_dm_smoothed = pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
+        minus_dm_smoothed = pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
+        
+        # Directional Indicators
+        plus_di_1d = 100 * plus_dm_smoothed / tr_smoothed
+        minus_di_1d = 100 * minus_dm_smoothed / tr_smoothed
+        dx_1d = 100 * np.abs(plus_di_1d - minus_di_1d) / (plus_di_1d + minus_di_1d + 1e-10)
+        adx_1d = pd.Series(dx_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+        
+        # Regime: trending up when ADX>25 and +DI>-DI
+        trending_up_1d = (adx_1d > 25) & (plus_di_1d > minus_di_1d)
+        # Regime: trending down when ADX>25 and -DI>+DI
+        trending_down_1d = (adx_1d > 25) & (minus_di_1d > plus_di_1d)
+        
+        # Align to 4h timeframe
+        trending_up_1d_aligned = align_htf_to_ltf(prices, df_1d, trending_up_1d.astype(float))
+        trending_down_1d_aligned = align_htf_to_ltf(prices, df_1d, trending_down_1d.astype(float))
+    else:
+        trending_up_1d_aligned = np.full(n, False)
+        trending_down_1d_aligned = np.full(n, False)
     
-    # === 6h Indicators: ADX(14) for regime filter ===
-    # True Range
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # === 1w Indicators: ADX(14) for regime ===
+    if len(df_1w) >= 14:
+        # Calculate True Range
+        tr1 = df_1w['high'].values[1:] - df_1w['low'].values[1:]
+        tr2 = np.abs(df_1w['high'].values[1:] - df_1w['close'].values[:-1])
+        tr3 = np.abs(df_1w['low'].values[1:] - df_1w['close'].values[:-1])
+        tr_1w = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        atr_1w = pd.Series(tr_1w).ewm(span=14, min_periods=14, adjust=False).mean().values
+        
+        # Calculate +DM and -DM
+        up_move = df_1w['high'].values[1:] - df_1w['high'].values[:-1]
+        down_move = df_1w['low'].values[:-1] - df_1w['low'].values[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        # Smoothed values
+        tr_smoothed = pd.Series(tr_1w).ewm(span=14, min_periods=14, adjust=False).mean().values
+        plus_dm_smoothed = pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
+        minus_dm_smoothed = pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
+        
+        # Directional Indicators
+        plus_di_1w = 100 * plus_dm_smoothed / tr_smoothed
+        minus_di_1w = 100 * minus_dm_smoothed / tr_smoothed
+        dx_1w = 100 * np.abs(plus_di_1w - minus_di_1w) / (plus_di_1w + minus_di_1w + 1e-10)
+        adx_1w = pd.Series(dx_1w).ewm(span=14, min_periods=14, adjust=False).mean().values
+        
+        # Regime: trending up when ADX>25 and +DI>-DI
+        trending_up_1w = (adx_1w > 25) & (plus_di_1w > minus_di_1w)
+        # Regime: trending down when ADX>25 and -DI>+DI
+        trending_down_1w = (adx_1w > 25) & (minus_di_1w > plus_di_1w)
+        
+        # Align to 4h timeframe
+        trending_up_1w_aligned = align_htf_to_ltf(prices, df_1w, trending_up_1w.astype(float))
+        trending_down_1w_aligned = align_htf_to_ltf(prices, df_1w, trending_down_1w.astype(float))
+    else:
+        trending_up_1w_aligned = np.full(n, False)
+        trending_down_1w_aligned = np.full(n, False)
     
-    # Directional Movement
-    dm_plus = np.where((high[1:] - high[:-1]) > (low[:-1] - low[1:]), np.maximum(high[1:] - high[:-1], 0), 0)
-    dm_minus = np.where((low[:-1] - low[1:]) > (high[1:] - high[:-1]), np.maximum(low[:-1] - low[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # === 4h Indicators: Donchian(20) channels ===
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Smoothed TR, DM+, DM-
-    tr_ma = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
-    dm_plus_ma = pd.Series(dm_plus).ewm(span=14, min_periods=14, adjust=False).mean().values
-    dm_minus_ma = pd.Series(dm_minus).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # DI+ and DI-
-    di_plus = 100 * dm_plus_ma / tr_ma
-    di_minus = 100 * dm_minus_ma / tr_ma
-    
-    # DX and ADX
-    dx = np.abs(di_plus - di_minus) / (np.abs(di_plus) + np.abs(di_minus)) * 100
-    adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
-    
-    # === 6h Indicators: Volume confirmation (1.5x spike) ===
+    # === 4h Indicators: Volume confirmation (1.5x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 4h Indicators: ATR(14) for stoploss ===
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
     # === Signals Initialization ===
@@ -71,12 +126,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(13, 14, 20, 14)  # EMA13, ADX, Volume MA, ATR warmup
+    warmup = max(20, 20, 14)  # Donchian, Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(ema13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(adx[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -109,43 +164,25 @@ def generate_signals(prices):
         # Volume filter: confirmation (>1.5x)
         vol_confirm = vol_ratio[i] > 1.5
         
-        # Regime filter: ADX > 25 indicates trending market
-        trending = adx[i] > 25
+        # HTF regime filter: both 1d and 1w must agree on trend direction
+        regime_long = trending_up_1d_aligned[i] and trending_up_1w_aligned[i]
+        regime_short = trending_down_1d_aligned[i] and trending_down_1w_aligned[i]
         
-        # Elder Ray conditions:
-        # Long: Bull Power > 0 (strong bullish momentum) AND Bear Power < 0 (no bearish pressure)
-        # Short: Bear Power < 0 (strong bearish momentum) AND Bull Power > 0 (no bullish pressure)
-        # Actually: For long, we want Bull Power > 0 AND Bear Power < 0 (both conditions show bullish bias)
-        # For short, we want Bear Power < 0 AND Bull Power > 0 (both conditions show bearish bias)
-        # Wait, that's the same. Let me reconsider:
-        # Bull Power = High - EMA > 0 means bulls are pushing price above average
-        # Bear Power = Low - EMA < 0 means bears are pushing price below average
-        # For long: We want Bull Power > 0 (bulls in control) 
-        # For short: We want Bear Power < 0 (bears in control)
-        # But we also need to avoid chop: both shouldn't be near zero
-        long_signal = (bull_power[i] > 0) and (bear_power[i] < 0)  # Bulls in, bears out
-        short_signal = (bear_power[i] < 0) and (bull_power[i] > 0)  # Same condition - this is wrong
-        
-        # Correct Elder Ray interpretation:
-        # Bull Power > 0 indicates bulls are stronger than the average
-        # Bear Power < 0 indicates bears are stronger than the average
-        # For a strong trend, we want one to be significantly positive/negative
-        # Long: Bull Power > 0 AND Bear Power < some small threshold (lets say -0.1*price) 
-        # Actually simpler: Long when Bull Power > 0 (bulls pushing up)
-        # Short when Bear Power < 0 (bears pushing down)
-        # But we need to avoid false signals in chop - hence ADX filter
-        long_signal = bull_power[i] > 0
-        short_signal = bear_power[i] < 0
+        # Donchian breakout conditions with HTF regime alignment
+        # Long: Donchian breakout above + HTF trending up
+        # Short: Donchian breakdown below + HTF trending down
+        breakout_long = (price >= high_roll[i]) and regime_long and vol_confirm
+        breakout_short = (price <= low_roll[i]) and regime_short and vol_confirm
         
         # Final entry conditions
-        if long_signal and trending and vol_confirm:
+        if breakout_long:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif short_signal and trending and vol_confirm:
+        elif breakout_short:
             in_position = True
             position_side = -1
             entry_price = close[i]
