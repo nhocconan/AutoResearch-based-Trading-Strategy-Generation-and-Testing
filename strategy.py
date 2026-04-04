@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3543: 4h Donchian Breakout + 12h HMA Trend + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with 12h HMA(21) trend direction and volume confirmation capture medium-term momentum with low overtrading. 
-The 12h HMA provides a smoother trend filter than EMA, reducing whipsaws in ranging markets. Volume confirms breakout strength. 
-Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-Uses 12h for trend filter and 4h for entry timing and risk management.
-Works in bull (continuation from uptrend) and bear (continuation from downtrend) via price channels.
+Experiment #3543: 4h Donchian Breakout + 12h/1d Regime + Volume Spike
+HYPOTHESIS: 4h Donchian(20) breakouts with 12h/1d regime filter (choppiness index) and volume confirmation capture medium-term momentum while avoiding false breakouts in ranging markets. The 12h timeframe provides intermediate trend direction, and 1d choppiness filter ensures we only trade in trending regimes. Position size 0.25. Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3543_4h_donchian20_12h_hma_vol_v1"
+name = "exp_3543_4h_donchian20_12h_1d_chop_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,36 +17,50 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 12h data for HMA trend filter (Call ONCE before loop) ===
+    # === HTF: 12h data for Donchian channels and trend (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Calculate HMA(21) on 12h close
-    # HMA = WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-    n_hma = 21
-    half_n = n_hma // 2
-    sqrt_n = int(np.sqrt(n_hma))
+    # === HTF: 1d data for choppiness index regime filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    def wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, mode='valid') / weights.sum()
+    # === 12h Indicators: Donchian channels (20-period) for trend direction ===
+    lookback_12h = 20
+    highest_high_12h = pd.Series(high_12h).rolling(window=lookback_12h, min_periods=lookback_12h).max().values
+    lowest_low_12h = pd.Series(low_12h).rolling(window=lookback_12h, min_periods=lookback_12h).min().values
     
-    # Calculate WMA for 12h series
-    wma_half = np.array([wma(close_12h[i:i+half_n], half_n) if i+half_n <= len(close_12h) else np.nan 
-                         for i in range(len(close_12h))])
-    wma_full = np.array([wma(close_12h[i:i+n_hma], n_hma) if i+n_hma <= len(close_12h) else np.nan 
-                         for i in range(len(close_12h))])
+    # === 1d Indicators: Choppiness Index (14-period) for regime detection ===
+    chop_period = 14
+    # True Range
+    tr1 = high_1d[1:] - low_1d[1:]
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # Sum of TR over period
+    tr_sum = pd.Series(tr_1d).rolling(window=chop_period, min_periods=chop_period).sum().values
+    # Highest high and lowest low over period
+    hh_1d = pd.Series(high_1d).rolling(window=chop_period, min_periods=chop_period).max().values
+    ll_1d = pd.Series(low_1d).rolling(window=chop_period, min_periods=chop_period).min().values
+    # Choppiness Index: CHOP = 100 * log10(sumTR/(period*(HH-LL))) / log10(period)
+    # Avoid division by zero
+    hl_range = hh_1d - ll_1d
+    chop_raw = np.ones_like(close_1d) * 50.0  # default to neutral
+    mask = (hl_range > 0) & (~np.isnan(tr_sum))
+    chop_raw[mask] = 100 * np.log10(tr_sum[mask] / (chop_period * hl_range[mask])) / np.log10(chop_period)
+    chop_raw = np.where(chop_raw > 100, 100, chop_raw)
+    chop_raw = np.where(chop_raw < 0, 0, chop_raw)
     
-    # HMA = WMA(2*WMA(half_n) - WMA(full_n)), sqrt_n)
-    hma_12h_raw = 2 * wma_half - wma_full
-    hma_12h = np.array([wma(hma_12h_raw[i:i+sqrt_n], sqrt_n) if i+sqrt_n <= len(hma_12h_raw) else np.nan 
-                        for i in range(len(hma_12h_raw))])
-    
-    # Align HMA to 4h timeframe
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    # Align HTF indicators to 4h timeframe
+    highest_high_12h_aligned = align_htf_to_ltf(prices, df_12h, highest_high_12h)
+    lowest_low_12h_aligned = align_htf_to_ltf(prices, df_12h, lowest_low_12h)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop_raw)
     
     # === 4h Indicators: Donchian channels (20-period) for entry timing ===
     lookback_4h = 20
@@ -80,12 +90,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback_4h, 20, 14)  # sufficient for all indicators
+    warmup = max(50, lookback_12h, lookback_4h, chop_period + 1, 20, 14)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high_4h[i]) or np.isnan(lowest_low_4h[i]) or
-            np.isnan(hma_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(highest_high_12h_aligned[i]) or np.isnan(lowest_low_12h_aligned[i]) or
+            np.isnan(chop_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -101,7 +112,7 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below Donchian low - trend reversal
+                # Exit if price breaks below 4h Donchian low (structure break)
                 elif price < lowest_low_4h[i]:
                     in_position = False
                     position_side = 0
@@ -115,7 +126,7 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above Donchian high - trend reversal
+                # Exit if price breaks above 4h Donchian high (structure break)
                 elif price > highest_high_4h[i]:
                     in_position = False
                     position_side = 0
@@ -128,23 +139,25 @@ def generate_signals(prices):
         # Require volume spike (> 1.8x average) for confirmation
         volume_spike = vol_ratio[i] > 1.8
         
-        if volume_spike:
-            # Determine trend direction from 12h HMA
-            # Uptrend: price above HMA, Downtrend: price below HMA
-            price_vs_hma = price - hma_12h_aligned[i]
+        # Regime filter: only trade when market is trending (CHOP < 40)
+        trending_regime = chop_aligned[i] < 40.0
+        
+        if volume_spike and trending_regime:
+            # Determine 12h trend bias
+            price_vs_12h_mid = price - (highest_high_12h_aligned[i] + lowest_low_12h_aligned[i]) / 2.0
             
-            # Long entry: price breaks above 4h Donchian high with bullish trend (above HMA)
+            # Long entry: price breaks above 4h Donchian high with bullish 12h bias
             if (price > highest_high_4h[i] and 
-                price_vs_hma > 0):  # Above 12h HMA = bullish trend
+                price_vs_12h_mid > 0):  # Above 12h midpoint = bullish bias
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below 4h Donchian low with bearish trend (below HMA)
+            # Short entry: price breaks below 4h Donchian low with bearish 12h bias
             elif (price < lowest_low_4h[i] and 
-                  price_vs_hma < 0):  # Below 12h HMA = bearish trend
+                  price_vs_12h_mid < 0):  # Below 12h midpoint = bearish bias
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
