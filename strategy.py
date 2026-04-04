@@ -2,9 +2,8 @@
 """
 Experiment #2632: 12h Donchian(20) breakout + 1d/1w EMA trend + volume confirmation
 HYPOTHESIS: 12h Donchian breakouts with 1d/1w trend alignment and volume spikes capture 
-institutional participation. Uses 1d/1w for signal direction, 12h only for entry timing. 
-Target: 50-150 total trades over 4 years (12-37/year). Works in both bull (breakouts with trend) 
-and bear (mean reversion from extremes) markets via volatility-based exits.
+strong momentum moves while avoiding whipsaws. Uses 1d/1w for signal direction, 
+12h only for entry timing. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
