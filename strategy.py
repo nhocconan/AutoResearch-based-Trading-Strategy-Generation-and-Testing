@@ -1,41 +1,42 @@
 #!/usr/bin/env python3
 """
-exp_6524_1d_donchian20_1w_ema_vol_v1
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-In bull markets: long when price > 1w EMA50 and breaks above Donchian high with volume > 1.5x MA.
-In bear markets: short when price < 1w EMA50 and breaks below Donchian low with volume > 1.5x MA.
-Uses discrete position sizing (0.25) to minimize fee churn. Targets 30-100 trades over 4 years.
+exp_6525_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d EMA50 as trend filter and volume confirmation.
+Only trade breakouts in direction of 1d trend (price > EMA50 for long, price < EMA50 for short).
+Volume must be > 1.5x its 20-period MA to confirm breakout strength.
+Designed for low frequency (target 50-150 total trades over 4 years) with high conviction.
+Uses discrete position sizing (0.25) to minimize fee churn.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6524_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_6525_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 1.5  # volume must be 1.5x its 20-period MA
-SIGNAL_SIZE = 0.25   # 25% position size
+VOL_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1w for EMA50
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop - using 1d for EMA50
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA50
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False).mean().values
+    # Calculate 1d EMA50
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False).mean().values
     
-    # Align to LTF (1d) with shift(1) for completed bars only
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align to LTF (12h) with shift(1) for completed bars only
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -59,29 +60,29 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1w_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]):
             continue
             
-        # Long conditions: price > 1w EMA50 (bullish bias) + breaks above Donchian HIGH + volume spike
-        long_bias = close[i] > ema_1w_aligned[i]  # price above 1w EMA50 (bullish)
+        # Long conditions: price > 1d EMA50 (bullish bias) + breaks above Donchian HIGH + volume spike
+        long_bias = close[i] > ema_1d_aligned[i]  # price above 1d EMA50 (bullish)
         long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
         long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Short conditions: price < 1w EMA50 (bearish bias) + breaks below Donchian LOW + volume spike
-        short_bias = close[i] < ema_1w_aligned[i]  # price below 1w EMA50 (bearish)
+        # Short conditions: price < 1d EMA50 (bearish bias) + breaks below Donchian LOW + volume spike
+        short_bias = close[i] < ema_1d_aligned[i]  # price below 1d EMA50 (bearish)
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Exit conditions: EMA reversal
         if position == 1:  # long position
-            # Exit if price drops back below 1w EMA50 (trend change)
-            if close[i] < ema_1w_aligned[i]:
+            # Exit if price drops back below EMA50 (trend change)
+            if close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            # Exit if price rises back above 1w EMA50 (trend change)
-            if close[i] > ema_1w_aligned[i]:
+            # Exit if price rises back above EMA50 (trend change)
+            if close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 continue
