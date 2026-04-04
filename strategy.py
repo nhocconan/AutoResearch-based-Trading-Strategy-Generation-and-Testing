@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #4145: 12h Donchian(20) breakout + 1d EMA(50) trend filter + volume confirmation + ATR trailing stop
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(50) trend capture sustained momentum with lower noise. Volume confirmation filters false breakouts. ATR trailing stop manages risk. Works in bull/bear via adaptive EMA. Target: 50-150 total trades over 4 years (12-37/year).
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA(50) trend capture strong momentum moves with proper filtering.
+Volume confirmation (>2.0x average) reduces false breakouts. ATR trailing stop (2.5x) manages risk.
+Timeframe=12h targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+Works in both bull/bear markets as EMA adapts to trend and Donchian breaks structure.
 """
 
 import numpy as np
@@ -91,8 +94,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) to filter noise
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume spike (> 2.0x average) to filter noise
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
             # Donchian breakout logic
