@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #6142: 12h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d weekly pivot (R1/S1) capture structural moves. 
-Weekly pivot from 1d provides medium-term bias: price above weekly pivot = bullish, below = bearish.
-Volume >1.5x average confirms strong participation. ATR trailing stop manages risk.
-Discrete sizing (0.25) minimizes fee churn. Target: 50-150 trades over 4 years.
-Timeframe: 12h. HTF: 1d for weekly pivot calculation.
+Experiment #6143: 4h Donchian(20) breakout + 12h/1d trend filter + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA50 and 1d EMA200 capture structural moves 
+in both bull and bear markets. Volume >1.5x average confirms participation. ATR trailing stop 
+manages risk. Discrete sizing (0.25) minimizes fee churn. Target: 75-200 trades over 4 years.
+Timeframe: 4h. HTF: 12h for EMA50 trend, 1d for EMA200 regime filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6142_12h_donchian20_1d_weekly_pivot_vol_v1"
-timeframe = "12h"
+name = "exp_6143_4h_donchian20_12h_ema50_1d_ema200_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,31 +25,31 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for weekly pivot (using prior week's high/low/close) ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 10:
-        # Calculate weekly pivot from prior week's OHLC (approximated via 1d data)
-        # Weekly high = max of last 7 bars (1 week of 1d data)
-        # Weekly low = min of last 7 bars
-        # Weekly close = close of 7 bars ago
-        lookback = 7  # 1 week of 1d bars
-        weekly_high = pd.Series(df_1d['high'].values).rolling(window=lookback, min_periods=lookback).max().values
-        weekly_low = pd.Series(df_1d['low'].values).rolling(window=lookback, min_periods=lookback).min().values
-        weekly_close = pd.Series(df_1d['close'].values).shift(lookback).values
-        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    # === HTF: 12h data for EMA50 trend filter ===
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) >= 50:
+        ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     else:
-        weekly_pivot_aligned = np.full(n, np.nan)
+        ema_12h_aligned = np.full(n, np.nan)
     
-    # === 12h Indicators: Donchian Channel (20-period) ===
+    # === HTF: 1d data for EMA200 regime filter ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 200:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=200, min_periods=200, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    else:
+        ema_1d_aligned = np.full(n, np.nan)
+    
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation ===
+    # === 4h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 12h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -69,7 +68,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 7, 14) + 1  # Donchian, volume avg, weekly pivot lookback, ATR + 1
+    warmup = max(20, 20, 50, 200, 14) + 1  # Donchian, volume avg, EMA50, EMA200, ATR + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -81,7 +80,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(weekly_pivot_aligned[i])):
+            np.isnan(ema_12h_aligned[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -116,15 +115,19 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5  # Volume filter for stronger signals
         
-        # Multi-timeframe trend filter: price relative to 1d weekly pivot
-        bullish_bias = price > weekly_pivot_aligned[i]  # Above weekly pivot = bullish
-        bearish_bias = price < weekly_pivot_aligned[i]  # Below weekly pivot = bearish
+        # Multi-timeframe trend filter: 
+        # - 12h EMA50: medium-term trend direction
+        # - 1d EMA200: long-term regime filter (bull/bear market)
+        # Long: price above both EMAs (bullish alignment)
+        # Short: price below both EMAs (bearish alignment)
+        bullish_alignment = price > ema_12h_aligned[i] and price > ema_1d_aligned[i]
+        bearish_alignment = price < ema_12h_aligned[i] and price < ema_1d_aligned[i]
         
         # Entry conditions:
-        # Long: breakout up with volume AND bullish bias above weekly pivot
-        # Short: breakout down with volume AND bearish bias below weekly pivot
-        long_entry = breakout_up and volume_confirmed and bullish_bias
-        short_entry = breakout_down and volume_confirmed and bearish_bias
+        # Long: breakout up with volume AND bullish alignment across timeframes
+        # Short: breakout down with volume AND bearish alignment across timeframes
+        long_entry = breakout_up and volume_confirmed and bullish_alignment
+        short_entry = breakout_down and volume_confirmed and bearish_alignment
         
         if long_entry:
             in_position = True
