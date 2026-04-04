@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4130: 1d Donchian(20) breakout + 1w EMA(50) trend + volume confirmation
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA(50) trend capture intermediate-term momentum with lower trade frequency. Weekly EMA provides robust trend filter that works in both bull and bear markets. Volume confirmation reduces false signals. Target: 30-100 total trades over 4 years (7-25/year).
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA(50) trend capture longer-term momentum while avoiding counter-trend noise. Weekly EMA(50) provides robust trend filter that works in both bull and bear markets. Volume confirmation filters false breakouts. Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
