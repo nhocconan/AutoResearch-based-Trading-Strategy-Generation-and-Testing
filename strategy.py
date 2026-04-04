@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #6194: 1h Donchian(20) breakout + 4h/1d EMA trend + volume confirmation + session filter
-HYPOTHESIS: 1h Donchian breakouts aligned with 4h/1d EMA trend capture momentum with proper timing.
-Volume >1.5x average confirms participation. Session filter (08-20 UTC) avoids low liquidity.
-Using 4h/1d for signal direction reduces noise vs pure 1h. Target: 60-150 trades over 4 years (15-37/year).
-Timeframe: 1h. HTF: 4h for EMA21, 1d for EMA50 trend filters.
+Experiment #6194: 1h Donchian(20) breakout + 4h/1d EMA trend + volume confirmation
+HYPOTHESIS: 1h Donchian breakouts aligned with 4h/1d EMA trend capture momentum while avoiding noise.
+Volume >2.0x average confirms institutional participation. Session filter (08-20 UTC) reduces low-liquidity trades.
+Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+Uses 4h/1d for signal direction, 1h only for entry timing.
 """
 
 import numpy as np
@@ -25,7 +25,7 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 4h data for EMA21 trend filter ===
+    # === HTF: 4h data for EMA trend filter ===
     df_4h = get_htf_data(prices, '4h')
     if len(df_4h) >= 21:
         ema_4h = pd.Series(df_4h['close'].values).ewm(span=21, adjust=False).mean().values
@@ -33,10 +33,10 @@ def generate_signals(prices):
     else:
         ema_4h_aligned = np.full(n, np.nan)
     
-    # === HTF: 1d data for EMA50 trend filter ===
+    # === HTF: 1d data for EMA trend filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    if len(df_1d) >= 21:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=21, adjust=False).mean().values
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
         ema_1d_aligned = np.full(n, np.nan)
@@ -59,7 +59,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size (discrete level)
+    SIZE = 0.20  # 20% position size (discrete level to reduce fee drag)
     
     # Position tracking state variables
     in_position = False
@@ -68,12 +68,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 21, 50) + 1  # Donchian, volume avg, EMA21, EMA50 + 1
+    warmup = max(20, 20, 14, 21) + 1  # Donchian, volume avg, ATR, EMA21 + 1
     
     for i in range(warmup, n):
-        # --- Session Filter: Trade only during active liquidity hours (08-20 UTC) ---
+        # --- Session Filter: Only trade during active liquidity hours (08:00-20:00 UTC) ---
         hour = hours[i]
-        if hour < 8 or hour > 20:
+        if not (8 <= hour <= 20):
             signals[i] = 0.0
             continue
         
@@ -113,17 +113,19 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.5  # Volume filter for stronger signals
+        volume_confirmed = volume_ratio[i] > 2.0  # Volume filter for stronger signals
         
-        # 4h EMA21 + 1d EMA50 trend filter: both must align
-        bullish_trend = (price > ema_4h_aligned[i]) and (price > ema_1d_aligned[i])
-        bearish_trend = (price < ema_4h_aligned[i]) and (price < ema_1d_aligned[i])
+        # 4h/1d EMA21 trend filter: price relative to EMA21 (must align both)
+        bullish_trend_4h = price > ema_4h_aligned[i]
+        bullish_trend_1d = price > ema_1d_aligned[i]
+        bearish_trend_4h = price < ema_4h_aligned[i]
+        bearish_trend_1d = price < ema_1d_aligned[i]
         
         # Entry conditions: breakout with volume AND trend alignment on BOTH timeframes
         # Long: breakout up with volume AND bullish trend on 4h AND 1d
         # Short: breakout down with volume AND bearish trend on 4h AND 1d
-        long_entry = breakout_up and volume_confirmed and bullish_trend
-        short_entry = breakout_down and volume_confirmed and bearish_trend
+        long_entry = breakout_up and volume_confirmed and bullish_trend_4h and bullish_trend_1d
+        short_entry = breakout_down and volume_confirmed and bearish_trend_4h and bearish_trend_1d
         
         if long_entry:
             in_position = True
