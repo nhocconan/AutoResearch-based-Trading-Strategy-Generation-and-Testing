@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #3459: 6h Donchian(20) Breakout + 12h Pivot Direction + Volume Spike
-HYPOTHESIS: 6h Donchian(20) breakouts capture medium-term swings with ideal trade frequency for 6h timeframe.
-12h pivot (Camarilla R3/S3) direction filter ensures alignment with intermediate-term momentum.
-Volume spike (>2.0x 20-period average) confirms breakout strength. ATR-based trailing stop (2.5x) manages risk.
-Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
-Works in bull markets (trend continuation) and bear markets (mean reversion from extremes) via price channels.
+Experiment #3461: 4h Donchian Breakout + 1d HMA Trend + Volume Spike
+HYPOTHESIS: 4h Donchian(20) breakouts capture medium-term trends with ideal trade frequency for 4h timeframe.
+1d HMA(50) trend filter ensures alignment with daily momentum. Volume spike (>2.0x 20-period average) confirms breakout strength.
+ATR-based trailing stop (2.5x) manages risk. Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year).
+Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets by using price channels and volatility filters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3459_6h_donchian20_12h_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_3461_4h_donchian20_1d_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,35 +22,36 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for pivot direction filter (Call ONCE before loop) ===
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # === HTF: 1d data for HMA trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for 12h
-    # Pivot = (H + L + C) / 3
-    # R3 = C + (H - L) * 1.1 / 4
-    # S3 = C - (H - L) * 1.1 / 4
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    r3_12h = close_12h + (high_12h - low_12h) * 1.1 / 4.0
-    s3_12h = close_12h - (high_12h - low_12h) * 1.1 / 4.0
+    # Calculate HMA(50) on 1d close
+    def hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
+        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
+        raw_hma = 2 * wma_half - wma_full
+        hma_vals = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
+        return hma_vals
     
-    # Determine pivot bias: bullish if close > pivot, bearish if close < pivot
-    pivot_bias_12h = np.where(close_12h > pivot_12h, 1, np.where(close_12h < pivot_12h, -1, 0))
-    pivot_bias_12h_aligned = align_htf_to_ltf(prices, df_12h, pivot_bias_12h)
+    hma_1d = hma(close_1d, 50)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # === 6h Indicators: Donchian channels (20-period) ===
+    # === 4h Indicators: Donchian channels (20-period) ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 6h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 4h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -69,12 +69,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(50, lookback, 20, 14)  # sufficient for all indicators
+    warmup = max(50, lookback, 20, 14, 50)  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(pivot_bias_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(hma_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -118,19 +118,19 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # 12h pivot bias filter: only long if bullish bias, short if bearish bias
-            bias = pivot_bias_12h_aligned[i]
+            # 1d HMA trend filter: only long above HMA, short below HMA
+            price_vs_hma = price - hma_1d_aligned[i]
             
-            # Long entry: price breaks above Donchian high with bullish 12h pivot bias
-            if price > highest_high[i] and bias > 0:
+            # Long entry: price breaks above Donchian high with bullish 1d trend
+            if price > highest_high[i] and price_vs_hma > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with bearish 12h pivot bias
-            elif price < lowest_low[i] and bias < 0:
+            # Short entry: price breaks below Donchian low with bearish 1d trend
+            elif price < lowest_low[i] and price_vs_hma < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
@@ -143,5 +143,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
