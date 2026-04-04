@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #3722: 12h Donchian(20) breakout + 1d EMA50 trend + volume spike
-HYPOTHESIS: 12h Donchian breakouts capture swing momentum with lower frequency than 4h, reducing trade count and fee drag. 1d EMA50 provides intermediate trend bias to filter false breakouts in both bull and bear markets. Volume spike (>2x average) confirms breakout authenticity. Target: 50-150 total trades over 4 years (12-37/year) with position size 0.25 to manage drawdown from 2022 crash while maintaining profitability.
+Experiment #3722: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation + ATR trailing stop
+HYPOTHESIS: 12h Donchian breakouts capture swing momentum with lower frequency than 4h, reducing fee drag. 1d EMA50 provides medium-term trend bias to filter false breakouts. Volume spike (>2.0x) confirms breakout strength. ATR-based trailing stop (2.5x) manages risk. This combination works in both bull (breakouts with trend) and bear (breakouts against trend filtered by EMA) regimes. Position size 0.25 manages drawdown from 2022 crash while allowing profit accumulation. Target: 75-150 trades over 4 years.
 """
 
 import numpy as np
