@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5271: 6h Donchian Breakout + 1d Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts aligned with 1d weekly pivot direction (price > weekly pivot = bullish bias, price < weekly pivot = bearish bias) and volume confirmation (volume > 1.5x 20-period average) capture strong momentum moves with filtered false breakouts. Weekly pivots provide structural support/resistance from higher timeframe, reducing whipsaws. Designed for 12-37 trades/year on 6h timeframe (50-150 total over 4 years) to minimize fee drag. Works in bull markets by buying breakouts above weekly pivot and in bear markets by selling breakdowns below weekly pivot, avoiding range-bound conditions where price oscillates around pivot.
+Experiment #5272: 12h Donchian(20) Breakout + 1d EMA Trend + Volume Spike
+HYPOTHESIS: On 12h timeframe, price breaking above/below the 20-period Donchian channel (highest high/lowest low) captures strong momentum moves. The 1d EMA50 acts as a regime filter (bullish when price > EMA50, bearish when price < EMA50) to avoid counter-trend trades. Volume confirmation (current volume > 1.5x 20-period average) ensures breakouts have participation. Designed for 12-25 trades/year on 12h timeframe (50-100 total over 4 years) to minimize fee drag. Works in bull markets by catching uptrend continuations and in bear markets by catching downtrend continuations, while avoiding false breakouts in low-volume or choppy conditions.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5271_6h_donchian20_1d_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_5272_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,27 +23,23 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === HTF: 1d data for weekly pivot calculation ===
+    # === HTF: 1d data for regime filter (EMA50) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 5:
-        # Calculate weekly pivot from prior week's OHLC (using last 5 trading days approximation)
-        # Weekly pivot = (Prior Week High + Prior Week Low + Prior Week Close) / 3
-        df_1d['weekly_high'] = df_1d['high'].rolling(window=5, min_periods=5).max().shift(1)
-        df_1d['weekly_low'] = df_1d['low'].rolling(window=5, min_periods=5).min().shift(1)
-        df_1d['weekly_close'] = df_1d['close'].shift(5)  # Close 5 days ago (prior week)
-        df_1d['weekly_pivot'] = (df_1d['weekly_high'] + df_1d['weekly_low'] + df_1d['weekly_close']) / 3.0
-        weekly_pivot = df_1d['weekly_pivot'].values
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    if len(df_1d) >= 50:
+        ema_50 = pd.Series(df_1d['close']).ewm(span=50, min_periods=50, adjust=False).mean().shift(1).values
+        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     else:
-        weekly_pivot_aligned = np.full(n, np.nan)
+        ema_50_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20) ===
+    # === 12h Indicators: Donchian Channel (20) ===
+    # Upper band: highest high over 20 periods
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
+    # Lower band: lowest low over 20 periods
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
-    # === 6h Indicators: Volume Confirmation ===
+    # === 12h Indicators: Volume Spike (current volume > 1.5x 20-period average) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = volume / vol_ma  # Current volume vs 20-period average
+    volume_spike = volume > (1.5 * vol_ma)
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -54,43 +50,39 @@ def generate_signals(prices):
     position_side = 0
     entry_price = 0.0
     
-    warmup = max(20, 20, 20)  # Donchian, volume MA warmup
+    warmup = max(20, 50)  # Donchian, EMA50 warmup
     
     for i in range(warmup, n):
-        # --- Session Filter: 00-24 UTC (6h timeframe, full day) ---
-        # No session filter - 6h candles already distributed throughout day
+        # --- Session Filter: 00-24 UTC (12h timeframe, less restrictive) ---
+        # 12h candles already filter to specific sessions, so we can use full day
+        # Optional: avoid low liquidity periods if needed
         
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_spike[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol_ok = vol_ratio[i] > 1.5  # Volume > 1.5x 20-period average
         
-        # --- Exit Logic: Close position when breakout fails or pivot reverses ---
+        # --- Exit Logic: Close position when price crosses opposite Donchian band or regime changes ---
         if in_position:
-            # Check for breakout failure (price re-enters Donchian channel)
-            breakout_long = price > donchian_high[i]
-            breakout_short = price < donchian_low[i]
-            
-            # Check pivot alignment
-            pivot_bullish = price > weekly_pivot_aligned[i]
-            pivot_bearish = price < weekly_pivot_aligned[i]
+            # Check regime consistency
+            regime_bullish = price > ema_50_aligned[i]
+            regime_bearish = price < ema_50_aligned[i]
             
             # Exit conditions:
-            # 1. Breakout fails (price re-enters channel)
-            # 2. Pivot direction reverses against position
+            # 1. Price crosses opposite Donchian band (mean reversion signal)
+            # 2. Regime changes (price crosses 1d EMA50)
             if position_side > 0:  # Long position
-                if (not breakout_long) or (not pivot_bullish):
+                if (price < donchian_low[i]) or (not regime_bullish):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short position
-                if (not breakout_short) or (not pivot_bearish):
+                if (price > donchian_high[i]) or (not regime_bearish):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -99,21 +91,24 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Donchian breakout conditions
-        breakout_long = price > donchian_high[i]
-        breakout_short = price < donchian_low[i]
+        # Donchian breakout
+        breakout_up = price > donchian_high[i]
+        breakout_down = price < donchian_low[i]
         
-        # Pivot direction from 1d weekly pivot
-        pivot_bullish = price > weekly_pivot_aligned[i]
-        pivot_bearish = price < weekly_pivot_aligned[i]
+        # Regime filter from 1d
+        regime_bullish = price > ema_50_aligned[i]
+        regime_bearish = price < ema_50_aligned[i]
         
-        # Entry conditions: Donchian breakout + pivot alignment + volume confirmation
-        if breakout_long and pivot_bullish and vol_ok:
+        # Volume confirmation
+        vol_confirm = volume_spike[i]
+        
+        # Entry conditions: Donchian breakout + regime match + volume confirmation
+        if breakout_up and regime_bullish and vol_confirm:
             in_position = True
             position_side = 1
             entry_price = close[i]
             signals[i] = SIZE
-        elif breakout_short and pivot_bearish and vol_ok:
+        elif breakout_down and regime_bearish and vol_confirm:
             in_position = True
             position_side = -1
             entry_price = close[i]
