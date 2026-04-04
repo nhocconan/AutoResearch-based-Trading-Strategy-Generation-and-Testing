@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4485: 12h Donchian(20) Breakout + 1d EMA50 Trend + Volume Confirmation
-HYPOTHESIS: 12h Donchian(20) breakouts aligned with 1d EMA50 trend direction and confirmed by volume (>2.0x average) capture medium-term momentum with reduced noise. The 1d EMA50 provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filter at 2.0x average ensures only high-conviction moves trigger entries. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+Experiment #4485: 12h Donchian(20) Breakout + 1d EMA50 Trend + Volume Confirmation + Chop Filter
+HYPOTHESIS: 12h Donchian(20) breakouts aligned with 1d EMA50 trend direction, confirmed by volume (>1.8x average) and only in non-choppy markets (Choppiness Index < 61.8) capture medium-term momentum with reduced whipsaws. The chop filter avoids sideways markets where breakouts fail. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4485_12h_donchian20_1d_ema50_vol_v1"
+name = "exp_4485_12h_donchian20_1d_ema50_vol_chop_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -50,6 +50,16 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
+    # === 12h Indicators: Choppiness Index(14) for regime filter ===
+    # CHOP = 100 * log10(sum(TR(14)) / (log10(N) * (max_high - min_low))) / log10(N)
+    # where N = period (14)
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    highest_high = high_series.rolling(window=14, min_periods=14).max().values
+    lowest_low = low_series.rolling(window=14, min_periods=14).min().values
+    chop_raw = 100 * np.log10(atr_sum[13:] / (np.log10(14) * (highest_high[13:] - lowest_low[13:]))) / np.log10(14)
+    chop = np.full(n, np.nan)
+    chop[13:] = chop_raw
+    
     # === Signals Initialization ===
     signals = np.zeros(n)
     SIZE = 0.25  # 25% position size
@@ -61,12 +71,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, EMA
+    warmup = max(20, 20, 14, 50, 14)  # Donchian, vol MA, ATR, EMA, chop
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(chop[i])):
             signals[i] = 0.0
             continue
         
@@ -102,10 +112,13 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 2.0x average) to filter noise
-        volume_confirm = vol_ratio[i] > 2.0
+        # Require volume confirmation (> 1.8x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.8
         
-        # 1d EMA50 bias: price > EMA = long bias, price < EMA = short bias
+        # Chop filter: only trade in trending markets (CHOP < 61.8)
+        chop_filter = chop[i] < 61.8
+        
+        # 1d EMA bias: price > EMA = long bias, price < EMA = short bias
         long_bias = price > ema_1d_aligned[i]
         short_bias = price < ema_1d_aligned[i]
         
@@ -113,11 +126,11 @@ def generate_signals(prices):
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
         breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
         
-        # Long conditions: upward breakout + long bias + volume
-        long_entry = breakout_up and long_bias and volume_confirm
+        # Long conditions: upward breakout + long bias + volume + chop filter
+        long_entry = breakout_up and long_bias and volume_confirm and chop_filter
         
-        # Short conditions: downward breakout + short bias + volume
-        short_entry = breakout_down and short_bias and volume_confirm
+        # Short conditions: downward breakout + short bias + volume + chop filter
+        short_entry = breakout_down and short_bias and volume_confirm and chop_filter
         
         if long_entry:
             in_position = True
