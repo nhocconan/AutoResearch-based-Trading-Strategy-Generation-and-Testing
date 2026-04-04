@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4406: 4h Donchian Breakout + Daily EMA Trend + Volume Confirmation
-HYPOTHESIS: 4h Donchian(20) breakouts aligned with daily EMA(50) trend direction (price above/below EMA = long/short bias) and confirmed by volume (>1.8x average) capture institutional momentum with minimal false signals. Daily EMA provides structural trend bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
+Experiment #4406: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation
+HYPOTHESIS: 4h Donchian(20) breakouts aligned with 1d EMA50 trend direction (price above/below EMA = long/short bias) and confirmed by volume (>1.8x average) capture institutional momentum with minimal false signals. 1d EMA provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
 """
 
 import numpy as np
@@ -23,10 +23,11 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1d EMA(50) for trend bias ===
+    # === Precompute HTF: 1d EMA50 for trend bias ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 50:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        close_1d = pd.Series(df_1d['close'].values)
+        ema_1d = close_1d.ewm(span=50, min_periods=50, adjust=False).mean().values
         ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
         ema_1d_aligned = np.full(n, np.nan)
