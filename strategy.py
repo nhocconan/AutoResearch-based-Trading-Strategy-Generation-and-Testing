@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #5854: 1h Donchian(20) breakout + 4h/1d EMA alignment + volume confirmation
-HYPOTHESIS: 1h Donchian breakouts aligned with 4h and 1d EMA trend direction capture 
-institutional flow while avoiding counter-trend whipsaws. 4h EMA(50) provides intermediate 
-trend, 1d EMA(200) provides long-term trend filter. Volume confirmation ensures breakout 
-strength. Session filter (08-20 UTC) avoids low-liquidity periods. Targets 60-150 trades 
-over 4 years by using tight entry conditions requiring multi-timeframe alignment.
+Experiment #5855: 6h Camarilla pivot reversal + 1d volume spike + chop regime filter
+HYPOTHESIS: Camarilla pivot levels (R3/S3, R4/S4) act as institutional support/resistance on 6h charts. 
+In ranging markets (CHOP > 61.8), price reverses at R3/S3 with volume confirmation. 
+In trending markets (CHOP < 38.2), breakouts at R4/S4 continue. Uses 1d Camarilla for structure 
+and 6h for execution. Works in bull markets (buy R3/S3 bounces, sell R4/S4 breakdowns) and bear 
+markets (sell R3/S3 rallies, buy R4/S4 breakdowns). Volume spike confirms institutional interest. 
+Chop regime filter ensures correct context. Targets 75-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5854_1h_donchian20_4h_1d_ema_vol_v1"
-timeframe = "1h"
+name = "exp_5855_6h_camarilla1d_vol_chop_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,84 +27,94 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 4h data for EMA(50) trend ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) >= 50:
-        ema_4h = pd.Series(df_4h['close']).ewm(span=50, adjust=False).mean().values
-        ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    else:
-        ema_4h_aligned = np.full(n, np.nan)
-    
-    # === HTF: 1d data for EMA(200) trend ===
+    # === HTF: 1d data for Camarilla pivot levels ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 200:
-        ema_1d = pd.Series(df_1d['close']).ewm(span=200, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    if len(df_1d) >= 2:
+        # Calculate Camarilla pivots from prior day's OHLC
+        # Camarilla formulas: based on previous day's range
+        prev_high = df_1d['high'].shift(1).values
+        prev_low = df_1d['low'].shift(1).values
+        prev_close = df_1d['close'].shift(1).values
+        
+        # Pivot point
+        pivot = (prev_high + prev_low + prev_close) / 3.0
+        # Range
+        rang = prev_high - prev_low
+        
+        # Camarilla levels
+        r4 = pivot + (rang * 1.1 / 2)
+        r3 = pivot + (rang * 1.1 / 4)
+        s3 = pivot - (rang * 1.1 / 4)
+        s4 = pivot - (rang * 1.1 / 2)
+        
+        # Align to 6h timeframe
+        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        r4_aligned = np.full(n, np.nan)
+        r3_aligned = np.full(n, np.nan)
+        s3_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
     
-    # === 1h Indicators: Donchian Channel (20-period) ===
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # === 1h Indicators: Volume confirmation ===
+    # === 6h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 1h Indicators: ATR(14) for trailing stop ===
+    # === 6h Indicators: Choppy market regime (Chopiness Index) ===
+    # Chop = 100 * log10(sum(ATR(14)) / (n * (HHV - LLV))) / log10(n)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_sum = pd.Series(tr).rolling(window=14, min_periods=14).sum().values
+    hhvl = pd.Series(high).rolling(window=14, min_periods=14).max().values - \
+           pd.Series(low).rolling(window=14, min_periods=14).min().values
+    chop = 100 * np.log10(atr_sum / np.where(hhvl > 0, hhvl, 1)) / np.log10(14)
+    chop = np.where(hhvl > 0, chop, 50.0)  # default to neutral when no range
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size (discrete level)
+    SIZE = 0.25  # 25% position size (discrete level)
     
     # Position tracking state variables
     in_position = False
     position_side = 0
     entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 20, 50, 200, 14)  # Donchian, volume avg, EMA4h, EMA1d, ATR
+    warmup = max(20, 14, 2)  # volume avg, chop, shift(1) for pivots
     
     for i in range(warmup, n):
-        # --- Session Filter: Trade only during active liquidity hours (08-20 UTC) ---
+        # --- Session Filter: Avoid low liquidity periods ---
         hour = hours[i]
-        if hour < 8 or hour > 20:
+        if 21 <= hour <= 23:
             signals[i] = 0.0
             continue
         
         # --- Data Validity Check ---
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(volume_ratio[i]) or np.isnan(chop[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or 
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic ---
+        # --- Exit Logic: reverse at opposite level or stoploss ---
         if in_position:
             if position_side > 0:  # Long position
-                highest_since_entry = max(highest_since_entry, high[i])
-                stop_price = highest_since_entry - 2.5 * atr[i]
-                # Exit: stoploss OR price breaks below 4h EMA (trend change)
-                if price <= stop_price or price <= ema_4h_aligned[i]:
+                # Exit: price reaches R4 (take profit) or breaks below S3 (stop and reverse)
+                if price >= r4_aligned[i] or price <= s3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short position
-                lowest_since_entry = min(lowest_since_entry, low[i])
-                stop_price = lowest_since_entry + 2.5 * atr[i]
-                # Exit: stoploss OR price breaks above 4h EMA (trend change)
-                if price >= stop_price or price >= ema_4h_aligned[i]:
+                # Exit: price reaches S4 (take profit) or breaks above R3 (stop and reverse)
+                if price <= s4_aligned[i] or price >= r3_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -112,30 +123,28 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        breakout_up = price > donchian_high[i-1]
-        breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.5
-        # Trend alignment: 4h EMA > 1d EMA for uptrend, < for downtrend
-        uptrend_aligned = ema_4h_aligned[i] > ema_1d_aligned[i]
-        downtrend_aligned = ema_4h_aligned[i] < ema_1d_aligned[i]
+        # Regime-based entry: chop > 61.8 = range (mean revert at R3/S3), chop < 38.2 = trend (breakout at R4/S4)
+        volume_confirmed = volume_ratio[i] > 1.8
         
-        # Entry conditions: breakout in direction of aligned 4h/1d trend with volume confirmation
-        long_setup = breakout_up and uptrend_aligned and volume_confirmed
-        short_setup = breakout_down and downtrend_aligned and volume_confirmed
+        if chop[i] > 61.8:  # Ranging market: mean revert at R3/S3
+            long_setup = price <= s3_aligned[i] and volume_confirmed
+            short_setup = price >= r3_aligned[i] and volume_confirmed
+        elif chop[i] < 38.2:  # Trending market: breakout at R4/S4
+            long_setup = price >= r4_aligned[i] and volume_confirmed
+            short_setup = price <= s4_aligned[i] and volume_confirmed
+        else:  # Neutral chop: no trade
+            long_setup = False
+            short_setup = False
         
         if long_setup:
             in_position = True
             position_side = 1
             entry_price = close[i]
-            highest_since_entry = high[i]
-            lowest_since_entry = low[i]
             signals[i] = SIZE
         elif short_setup:
             in_position = True
             position_side = -1
             entry_price = close[i]
-            highest_since_entry = high[i]
-            lowest_since_entry = low[i]
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
