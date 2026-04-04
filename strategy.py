@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #6300: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
+Experiment #6301: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
 HYPOTHESIS: Tight Donchian breakouts on 4h with 1d EMA50 trend filter and volume confirmation 
 capture institutional momentum with proper structure. The 1d EMA50 provides intermediate-term 
 trend bias that works in both bull (breakouts above EMA50 in uptrend) and bear (breakdowns below 
@@ -12,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6300_4h_donchian20_1d_ema_vol_v1"
+name = "exp_6301_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
