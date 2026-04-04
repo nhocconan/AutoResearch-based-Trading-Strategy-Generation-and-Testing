@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #2514: 1h Donchian(20) breakout + 4h EMA(50) trend + volume confirmation + session filter
-HYPOTHESIS: 1h timeframe with 4h trend filter reduces whipsaw vs pure 1h strategies. Donchian breakouts 
-capture institutional participation during trend acceleration. Volume confirmation ensures real interest. 
-Session filter (08-20 UTC) avoids low-liquidity Asian session noise. Discrete position sizing (0.20) 
-limits fee drag. Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+Experiment #2515: 6h Donchian(20) breakout + 1w trend + volume confirmation
+HYPOTHESIS: Donchian channel breakouts on 6h with weekly trend alignment and volume spikes 
+capture institutional participation during trend acceleration. Weekly trend filter avoids 
+counter-trend whipsaws in bear markets (2022) while allowing trend-following in bull markets 
+(2021, 2023-2024). Volume confirmation ensures breakouts have participation. Discrete 
+position sizing (0.25) limits fee drag. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2514_1h_donchian20_4h_ema_vol_session_v1"
-timeframe = "1h"
+name = "exp_2515_6h_donchian20_1w_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,16 +23,16 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 4h data for EMA trend (Call ONCE before loop) ===
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # === HTF: 1w data for trend filter (Call ONCE before loop) ===
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 4h EMA(50)
-    ema_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_4h = np.where(close_4h > ema_4h, 1, -1)
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
+    # Calculate 1w EMA(50) for trend
+    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1w = np.where(close_1w > ema_1w, 1, -1)
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # === 1h Indicators: Donchian(20) channels, Volume MA(20) ===
+    # === 6h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -41,14 +42,9 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === Session filter: 08-20 UTC (pre-compute before loop) ===
-    # open_time is already datetime64[ms], use DatetimeIndex.hour
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -60,13 +56,8 @@ def generate_signals(prices):
     warmup = 50  # sufficient for all indicators
     
     for i in range(warmup, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            continue
-        
         # --- Data Validity Check ---
-        if (np.isnan(trend_4h_aligned[i]) or
+        if (np.isnan(trend_1w_aligned[i]) or
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
@@ -112,8 +103,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 4h trend alignment for bias filter
-        trend_bias = trend_4h_aligned[i]
+        # Require 1w trend alignment for bias filter
+        trend_bias = trend_1w_aligned[i]
         
         # Volume confirmation: require volume spike (> 2.0x average)
         volume_spike = vol_ratio[i] > 2.0
