@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #2592: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: Donchian channel breakouts on 12h timeframe with daily EMA trend alignment and volume spikes 
-capture institutional participation during trend acceleration. Works in bull markets (breakouts with volume) 
-and bear markets (breakdowns with volume). Target 50-150 total trades over 4 years (12-37/year) to avoid 
-fee drag while maintaining statistical significance.
+Experiment #2593: 4h Donchian(20) breakout + 12h HMA trend + volume confirmation
+HYPOTHESIS: Donchian channel breakouts aligned with 12h Hull Moving Average trend capture 
+institutional participation with reduced whipsaw. Volume spikes confirm institutional interest. 
+Uses discrete sizing (0.25) and ATR-based stoploss to limit fee drag and drawdown. 
+Designed to generate 75-200 trades over 4 years (19-50/year) for statistical significance 
+while avoiding overtrading. Works in bull markets (breakouts with volume) and bear markets 
+(breakdowns with volume) by following the 12h trend bias.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2592_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_2593_4h_donchian20_12h_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,16 +24,27 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # === HTF: 12h data for HMA trend (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d EMA(50)
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # Calculate 12h HMA(21)
+    def hull_moving_average(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma_half = pd.Series(arr).ewm(span=half_period, adjust=False).mean().values
+        wma_full = pd.Series(arr).ewm(span=period, adjust=False).mean().values
+        raw_hma = 2 * wma_half - wma_full
+        hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
+        return hma
     
-    # === 12h Indicators: Donchian(20) channels, Volume MA(20) ===
+    hma_12h = hull_moving_average(close_12h, 21)
+    trend_12h = np.where(close_12h > hma_12h, 1, -1)
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
+    
+    # === 4h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -56,7 +69,7 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(trend_1d_aligned[i]) or
+        if (np.isnan(trend_12h_aligned[i]) or
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
@@ -102,8 +115,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1d trend alignment for bias filter
-        trend_bias = trend_1d_aligned[i]
+        # Require 12h trend alignment for bias filter
+        trend_bias = trend_12h_aligned[i]
         
         # Volume confirmation: require volume spike (> 2.0x average)
         volume_spike = vol_ratio[i] > 2.0
