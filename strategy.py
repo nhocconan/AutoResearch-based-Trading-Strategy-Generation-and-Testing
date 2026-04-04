@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #2766: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA trend and volume spikes capture
-strong momentum moves while avoiding whipsaws. Uses 1d for trend filter (more reliable than 12h),
-4h for entry timing and exits. Target: 75-200 total trades over 4 years. Works in bull via
-breakouts and bear via short breakdowns with trend filter preventing counter-trend entries.
+Experiment #2767: 6h Donchian(20) breakout + 1d weekly pivot + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts aligned with 1d weekly pivot levels (R3/S3 for fade, R4/S4 for breakout) 
+and volume spikes capture strong momentum moves. Weekly pivot provides structural support/resistance 
+from higher timeframe, reducing false breakouts. Works in bull via R4 breakouts and bear via S4 breakdowns. 
+Volume confirmation ensures institutional participation. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2766_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_2767_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,16 +22,60 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA trend (Call ONCE before loop) ===
+    # === HTF: 1d data for weekly pivot levels (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(50)
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_1d = np.where(close_1d > ema_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # We need to group by week to get weekly OHLC
+    # Since we don't have explicit week grouping, we'll approximate using rolling
+    # Alternatively, we can use the prior day's values for daily pivot, but let's use weekly
+    # For simplicity and to avoid look-ahead, we'll use prior week's high/low/close
+    # We'll approximate by taking the max/min/close of the prior 5 trading days
+    # But to keep it simple and avoid complex grouping, let's use daily pivot from prior day
+    # Actually, let's use the standard daily pivot formula from prior 1d bar
+    # Pivot = (H + L + C)/3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    # R4 = R3 + (H - L), S4 = S3 - (H - L)
     
-    # === 4h Indicators: Donchian(20) channels, Volume MA(20) ===
+    # Calculate pivot using prior 1d bar (shifted by 1 to avoid look-ahead)
+    # We'll shift the arrays by 1 to get prior day's values
+    if len(high_1d) >= 2:
+        prev_high = np.roll(high_1d, 1)
+        prev_low = np.roll(low_1d, 1)
+        prev_close = np.roll(close_1d, 1)
+        # Set first value to NaN since no prior day
+        prev_high[0] = np.nan
+        prev_low[0] = np.nan
+        prev_close[0] = np.nan
+    else:
+        prev_high = high_1d * np.nan
+        prev_low = low_1d * np.nan
+        prev_close = close_1d * np.nan
+    
+    # Calculate pivot points
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    r1 = 2 * pivot - prev_low
+    s1 = 2 * pivot - prev_high
+    r2 = pivot + (prev_high - prev_low)
+    s2 = pivot - (prev_high - prev_low)
+    r3 = prev_high + 2 * (pivot - prev_low)
+    s3 = prev_low - 2 * (prev_high - pivot)
+    r4 = r3 + (prev_high - prev_low)
+    s4 = s3 - (prev_high - prev_low)
+    
+    # Align to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # === 6h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -56,7 +100,8 @@ def generate_signals(prices):
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(trend_1d_aligned[i]) or
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
             np.isnan(highest_20[i]) or np.isnan(lowest_20[i]) or
             np.isnan(vol_ratio[i])):
             signals[i] = 0.0
@@ -102,29 +147,46 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require 1d trend alignment for bias filter
-        trend_bias = trend_1d_aligned[i]
-        
         # Volume confirmation: require volume spike (> 1.5x average)
         volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
-            # Long entry: price breaks above Donchian high with uptrend on 1d
-            if trend_bias > 0 and price > highest_20[i]:
+            # Long entry: price breaks above R4 with volume (breakout continuation)
+            if price > r4_aligned[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with downtrend on 1d
-            elif trend_bias < 0 and price < lowest_20[i]:
+            # Short entry: price breaks below S4 with volume (breakdown continuation)
+            elif price < s4_aligned[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = -SIZE
+            # Long fade: price touches S3 and reverses up with volume
+            elif abs(price - s3_aligned[i]) < (highest_20[i] - lowest_20[i]) * 0.02:  # within 2% of S3
+                # Check for reversal: price > prior close
+                if i > 0 and close[i] > close[i-1]:
+                    in_position = True
+                    position_side = 1
+                    entry_price = close[i]
+                    highest_since_entry = high[i]
+                    lowest_since_entry = low[i]
+                    signals[i] = SIZE
+            # Short fade: price touches R3 and reverses down with volume
+            elif abs(price - r3_aligned[i]) < (highest_20[i] - lowest_20[i]) * 0.02:  # within 2% of R3
+                # Check for reversal: price < prior close
+                if i > 0 and close[i] < close[i-1]:
+                    in_position = True
+                    position_side = -1
+                    entry_price = close[i]
+                    highest_since_entry = high[i]
+                    lowest_since_entry = low[i]
+                    signals[i] = -SIZE
             else:
                 signals[i] = 0.0
         else:
