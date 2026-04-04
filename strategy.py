@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #5108: 12h Donchian(20) Breakout + 1w HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with 1-week HMA(21) trend capture strong momentum with lower frequency than 4h strategies. 
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with 1-week HMA(21) trend capture strong momentum with lower trade frequency. 
 Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. 
 Designed for 12-37 trades/year on 12h timeframe to minimize fee drag. Works in bull markets (breakouts with trend) 
 and bear markets (breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
