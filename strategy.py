@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4227: 6h Donchian(20) breakout + 1d pivot direction + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts capture swing momentum when aligned with 1d Camarilla pivot direction (price > pivot for longs, < pivot for shorts) and confirmed by volume (>1.5x average). Uses 1d pivot for regime, 6h only for entry timing. ATR-based trailing stop (2.0x) for risk management. Position size 0.25 targets 75-150 total trades over 4 years (19-37/year). Works in bull via breakout continuation, in bear via shorting breakdowns.
+Experiment #4227: 6h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: 6h Donchian breakouts capture swing momentum when aligned with 1d Camarilla pivot levels (R3/S3 for fade, R4/S4 for continuation) and confirmed by volume (>1.8x average). Uses 1d pivot for structure, 6h for timing. ATR trailing stop (2.0x) manages risk. Position size 0.25 targets 50-150 total trades over 4 years (12-37/year). Works in bull via breakout continuation at R4/S4, in bear via fading at R3/S3 or shorting breakdowns.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4227_6h_donchian20_1d_pivot_vol_v1"
+name = "exp_4227_6h_donchian20_1d_camarilla_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,20 +23,17 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1d Camarilla Pivot Levels ===
+    # === Precompute HTF: 1d OHLC for Camarilla pivot ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 1:
-        # Calculate Camarilla pivots from previous day's OHLC
-        prev_close = df_1d['close'].shift(1).values
-        prev_high = df_1d['high'].shift(1).values
-        prev_low = df_1d['low'].shift(1).values
-        pivot = (prev_high + prev_low + prev_close) / 3.0
-        range_hl = prev_high - prev_low
-        r3 = pivot + range_hl * 1.1 / 2.0
-        s3 = pivot - range_hl * 1.1 / 2.0
-        r4 = pivot + range_hl * 1.1
-        s4 = pivot - range_hl * 1.1
-        # Align to 6h timeframe (shifted by 1 for completed day only)
+        typical_price = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+        pivot = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+        range_hl = df_1d['high'].values - df_1d['low'].values
+        r3 = pivot + 1.1 * range_hl / 2
+        s3 = pivot - 1.1 * range_hl / 2
+        r4 = pivot + 1.1 * range_hl
+        s4 = pivot - 1.1 * range_hl
+        # Align to 6h timeframe
         pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
         r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
         s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
@@ -122,32 +119,42 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume confirmation (> 1.8x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.8
         
         if volume_confirm:
             # Donchian breakout conditions (using previous bar's levels)
             breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
             breakout_dn = close[i] < donch_lower[i-1]  # Close below previous lower band
             
-            # 1d Pivot regime filter
-            price_above_pivot = price > pivot_aligned[i]
-            price_below_pivot = price < pivot_aligned[i]
+            # Price relative to Camarilla levels
+            price_above_r4 = price > r4_aligned[i]
+            price_below_s4 = price < s4_aligned[i]
+            price_between_r3_s4 = (price > r3_aligned[i]) and (price < r4_aligned[i])
+            price_between_s3_r4 = (price > s3_aligned[i]) and (price < s4_aligned[i])
+            price_below_s3 = price < s3_aligned[i]
+            price_above_r3 = price > r3_aligned[i]
             
-            # Long conditions: Donchian breakout up + price above pivot
-            long_entry = breakout_up and price_above_pivot
+            # Long conditions:
+            # 1. Breakout above R4 (strong continuation)
+            # 2. Fade from S3 (mean reversion in lower range)
+            long_continuation = breakout_up and price_above_r4
+            long_fade = breakout_up and price_between_s3_r4  # Pullback to S3 area then break up
             
-            # Short conditions: Donchian breakout down + price below pivot
-            short_entry = breakout_dn and price_below_pivot
+            # Short conditions:
+            # 1. Breakout below S4 (strong continuation)
+            # 2. Fade from R3 (mean reversion in upper range)
+            short_continuation = breakout_dn and price_below_s4
+            short_fade = breakout_dn and price_between_r3_s4  # Pullback to R3 area then break down
             
-            if long_entry:
+            if long_continuation or long_fade:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            elif short_entry:
+            elif short_continuation or short_fade:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
