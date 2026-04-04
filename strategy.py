@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3483: 4h Donchian Breakout + 12h/1d Trend Filter + Volume Spike + ATR Stop
-HYPOTHESIS: 4h Donchian(20) breakouts with volume confirmation and 12h/1d trend alignment capture medium-term momentum. 
+HYPOTHESIS: 4h Donchian(20) breakouts with volume confirmation and 12h/1d trend alignment capture medium-term momentum with controlled trade frequency.
 Uses 12h/1d for signal direction, 4h only for entry timing. Works in bull (trend continuation) and bear (mean reversion from extremes) via price channels.
 Target: 75-200 total trades over 4 years (19-50/year). Position size 0.25.
 """
