@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #4671: 6h Donchian(20) Breakout + 1d Camarilla Pivot Breakout Continuation
-HYPOTHESIS: 6h price breaking Donchian(20) channels (from prior 20 1d bars) with volume confirmation captures momentum.
-Breakouts above 1d Camarilla H4 (R3) or below L4 (S3) with volume confirm continuation. Works in bull (breakouts) and bear (breakdowns).
-Target: 12-37 trades/year on 6h timeframe.
+Experiment #4671: 6h Donchian(20) Breakout + 1d ATR-based Volatility Filter + Volume Spike
+HYPOTHESIS: 6h Donchian(20) breakouts filtered by 1d ATR(14) regime (high volatility = trend follow, low volatility = avoid) 
+and volume spike (>2x MA20) capture explosive moves in both bull and bear markets. 
+ATR filter prevents whipsaws in ranging/low volatility periods. Target: 12-37 trades/year on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4671_6h_donchian20_camarilla_breakout_v1"
+name = "exp_4671_6h_donchian20_atr_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -21,12 +21,12 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for Donchian and Camarilla
+    # Precompute HTF: 1d data for Donchian and ATR
     df_1d = get_htf_data(prices, '1d')
     
     # === 1d Indicators: Donchian(20) from prior 20 days ===
     if len(df_1d) >= 20:
-        # Use prior 20 days' high/low (shifted by 1)
+        # Use prior 20 days' high/low (shifted by 1 to avoid look-ahead)
         ph = np.concatenate([[np.nan] * 20, df_1d['high'].values[:-20]])  # prior 20 days high
         pl = np.concatenate([[np.nan] * 20, df_1d['low'].values[:-20]])   # prior 20 days low
         
@@ -37,31 +37,31 @@ def generate_signals(prices):
         donchian_high = np.full(len(df_1d), np.nan)
         donchian_low = np.full(len(df_1d), np.nan)
     
-    # === 1d Indicators: Camarilla Pivot Levels (from prior 1d OHLC) ===
-    if len(df_1d) >= 1:
-        # Prior day's OHLC (shifted by 1 to avoid look-ahead)
-        ph_1d = np.concatenate([[np.nan], df_1d['high'].values[:-1]])
-        pl_1d = np.concatenate([[np.nan], df_1d['low'].values[:-1]])
-        pc_1d = np.concatenate([[np.nan], df_1d['close'].values[:-1]])
-        
-        # Camarilla levels: based on prior day's range
-        rng = ph_1d - pl_1d
-        camarilla_h4 = pc_1d + 1.1 * rng / 4  # R3
-        camarilla_l4 = pc_1d - 1.1 * rng / 4  # S3
+    # === 1d Indicators: ATR(14) for volatility regime filter ===
+    if len(df_1d) >= 14:
+        # True Range calculation
+        tr1 = df_1d['high'].values[1:] - df_1d['low'].values[1:]
+        tr2 = np.abs(df_1d['high'].values[1:] - df_1d['close'].values[:-1])
+        tr3 = np.abs(df_1d['low'].values[1:] - df_1d['close'].values[:-1])
+        tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        atr_1d = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+        # ATR ratio: current ATR / ATR MA(50) to detect volatility expansion/contraction
+        atr_ma_50 = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
+        atr_ratio = np.ones(len(atr_1d))
+        atr_ratio[50:] = atr_1d[50:] / atr_ma_50[50:]
     else:
-        camarilla_h4 = camarilla_l4 = np.full(len(df_1d), np.nan)
+        atr_1d = np.full(len(df_1d), np.nan)
+        atr_ratio = np.full(len(df_1d), np.nan)
     
     # Align HTF indicators to 6h timeframe
     if len(donchian_high) > 0:
         dh_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
         dl_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-        camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-        camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+        atr_ratio_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio)
     else:
         dh_aligned = np.full(n, np.nan)
         dl_aligned = np.full(n, np.nan)
-        camarilla_h4_aligned = np.full(n, np.nan)
-        camarilla_l4_aligned = np.full(n, np.nan)
+        atr_ratio_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -86,12 +86,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 14)  # Volume MA, ATR warmup
+    warmup = max(20, 20, 14, 50)  # Donchian, Vol MA, ATR, ATR MA warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(dh_aligned[i]) or np.isnan(dl_aligned[i]) or 
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(atr_ratio_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -121,33 +121,17 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation for breakouts (>1.5x)
-        vol_breakout = vol_ratio[i] > 1.5
+        # Volatility filter: only trade when ATR ratio > 1.2 (expanding volatility)
+        vol_expansion = atr_ratio_aligned[i] > 1.2
         
-        # Breakout conditions: price breaks Donchian high/low with volume confirmation
-        breakout_long = price > dh_aligned[i] and vol_breakout
-        breakout_short = price < dl_aligned[i] and vol_breakout
+        # Volume filter: confirmation for breakouts (>2.0x)
+        vol_spike = vol_ratio[i] > 2.0
         
-        # Continuation breakout: price breaks Camarilla H4/L4 (R3/S3) with volume confirmation
-        continuation_long = price > camarilla_h4_aligned[i] and vol_breakout
-        continuation_short = price < camarilla_l4_aligned[i] and vol_breakout
+        # Breakout conditions: price breaks Donchian high/low with volume and volatility confirmation
+        breakout_long = price > dh_aligned[i] and vol_spike and vol_expansion
+        breakout_short = price < dl_aligned[i] and vol_spike and vol_expansion
         
-        # Priority: continuation breakouts > Donchian breakouts (stronger signal)
-        if continuation_long:
-            in_position = True
-            position_side = 1
-            entry_price = close[i]
-            highest_since_entry = high[i]
-            lowest_since_entry = low[i]
-            signals[i] = SIZE
-        elif continuation_short:
-            in_position = True
-            position_side = -1
-            entry_price = close[i]
-            highest_since_entry = high[i]
-            lowest_since_entry = low[i]
-            signals[i] = -SIZE
-        elif breakout_long:
+        if breakout_long:
             in_position = True
             position_side = 1
             entry_price = close[i]
