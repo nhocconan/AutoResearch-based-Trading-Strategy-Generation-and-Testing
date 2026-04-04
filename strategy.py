@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #6154: 1h Donchian(20) breakout + 4h/1d EMA filter + volume confirmation
-HYPOTHESIS: 1h Donchian breakouts aligned with 4h EMA20 (trend) and 1d EMA50 (regime) capture moves in both bull/bear markets.
-Volume >1.5x average confirms participation. ATR trailing stop manages risk. Session filter (08-20 UTC) reduces noise.
-Discrete sizing (0.20) minimizes fee churn. Target: 60-150 total trades over 4 years.
-Timeframe: 1h. HTF: 4h for trend, 1d for regime.
+Experiment #6154: 1h Donchian(20) breakout + 4h/1d EMA alignment + volume confirmation
+HYPOTHESIS: 1h Donchian breakouts aligned with 4h EMA20 trend and 1d EMA50 bias capture
+continuation moves while avoiding counter-trend whipsaws. Volume >1.5x average confirms
+strong participation. Session filter (08-20 UTC) reduces noise. Discrete sizing (0.20)
+limits fee drag. Target: 60-150 total trades over 4 years = 15-37/year for 1h.
 """
 
 import numpy as np
@@ -33,7 +33,7 @@ def generate_signals(prices):
     else:
         ema_4h_aligned = np.full(n, np.nan)
     
-    # === HTF: 1d data for EMA50 regime ===
+    # === HTF: 1d data for EMA50 bias ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 50:
         ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
@@ -68,10 +68,10 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 20, 50) + 1  # Donchian, volume avg, ATR, 4h EMA, 1d EMA + 1
+    warmup = max(20, 20, 20, 14, 50) + 1  # Donchian, volume avg, EMA, ATR + 1
     
     for i in range(warmup, n):
-        # --- Session Filter: Avoid low liquidity periods (trade 08-20 UTC) ---
+        # --- Session Filter: Avoid low liquidity periods (08-20 UTC active) ---
         hour = hours[i]
         if hour < 8 or hour > 20:
             signals[i] = 0.0
@@ -115,15 +115,13 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5  # Volume filter for stronger signals
         
-        # Multi-timeframe trend/regime filters:
-        # 4h EMA20: short-term trend direction
-        # 1d EMA50: medium-term regime (bull/bear)
+        # Multi-timeframe trend alignment: 4h EMA20 for short-term trend, 1d EMA50 for bias
         bullish_alignment = (price > ema_4h_aligned[i]) and (price > ema_1d_aligned[i])
         bearish_alignment = (price < ema_4h_aligned[i]) and (price < ema_1d_aligned[i])
         
         # Entry conditions:
-        # Long: breakout up with volume AND bullish alignment on both TFs
-        # Short: breakout down with volume AND bearish alignment on both TFs
+        # Long: breakout up with volume AND bullish alignment on both 4h and 1d
+        # Short: breakout down with volume AND bearish alignment on both 4h and 1d
         long_entry = breakout_up and volume_confirmed and bullish_alignment
         short_entry = breakout_down and volume_confirmed and bearish_alignment
         
