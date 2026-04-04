@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3828: 12h Donchian(20) breakout + 1w volume confirmation + chop regime filter
-HYPOTHESIS: 12h Donchian breakouts with 1w volume confirmation (>1.8x) and chop > 61.8 capture medium-term swings while filtering false breakouts in range markets. Volume spike indicates institutional participation, chop filter ensures trending conditions. Discrete sizing (0.25) minimizes fee drag. Target: 75-150 trades over 4 years.
+HYPOTHESIS: 12h Donchian breakouts capture medium-term swings with 1w volume (>1.8x) confirming institutional participation. Choppiness Index (14) > 61.8 filters range markets. Works in bull markets (breakouts above resistance) and bear markets (breakdowns below support). Discrete position sizing (0.25) minimizes fee drag. Target: 75-150 trades over 4 years.
 """
 
 import numpy as np
