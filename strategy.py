@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #2749: 4h Donchian(20) breakout + 1d EMA trend + volume confirmation
+Experiment #2749: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
 HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA trend and volume spikes capture
-institutional moves while avoiding whipsaws. Uses daily trend for bias, 4h for precise
-entry timing. Target: 75-200 total trades over 4 years (19-50/year).
+institutional participation while minimizing overtrading. Uses 1d for trend filter,
+4h for entry timing and stoploss. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
