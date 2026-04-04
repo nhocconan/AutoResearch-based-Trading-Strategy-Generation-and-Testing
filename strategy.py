@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #4495: 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: 6h Donchian(20) breakouts aligned with weekly pivot bias (price above/below weekly pivot) and confirmed by volume (>1.8x average) capture medium-term momentum with reduced noise. Weekly pivot provides structural bias from higher timeframe (1w), reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25. This timeframe (6h) has higher win rate than lower timeframes due to reduced noise and better alignment with institutional trading rhythms.
+Experiment #4496: 12h Donchian(20) Breakout + Daily Pivot Direction + Volume Confirmation
+HYPOTHESIS: 12h Donchian(20) breakouts aligned with daily pivot bias (price above/below daily pivot) and confirmed by volume (>2.0x average) capture medium-term momentum with reduced noise. Daily pivot provides structural bias from higher timeframe (1d), reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25. This timeframe (12h) has higher win rate than lower timeframes due to reduced noise and better alignment with institutional trading rhythms.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4495_6h_donchian20_1w_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_4496_12h_donchian20_1d_pivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,66 +23,37 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1d data for weekly pivot calculation ===
+    # === Precompute HTF: 1d data for daily pivot calculation ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 1:
-        # Calculate weekly pivot from prior week's OHLC (using 1d data)
-        # We need to resample 1d to weekly manually since we avoid resample in loop
-        # But we can use the 1d data to compute weekly OHLC for the prior completed week
-        # For simplicity, we'll use the prior week's Friday OHLC as proxy for weekly pivot
-        # However, to properly compute weekly pivot, we need to aggregate 1d to weekly
-        # Since we cannot resample in loop, we'll compute weekly pivot from 1d data by
-        # grouping by week number - but this requires datetime index
-        # Instead, we'll use a simpler approach: use prior 5-day (1-week) OHLC from 1d data
-        # This is approximate but avoids look-ahead and resampling
         high_1d = df_1d['high'].values
         low_1d = df_1d['low'].values
         close_1d = df_1d['close'].values
         
-        # Calculate rolling weekly OHLC from 1d data (5-day week)
-        # Weekly high = max of prior 5 daily highs
-        # Weekly low = min of prior 5 daily lows
-        # Weekly close = close of prior 5th day (Friday)
-        # Weekly open = open of prior 1st day (Monday) - we'll approximate with prior 5th day open
-        # For pivot, we need (weekly high + weekly low + weekly close) / 3
-        # We'll use: weekly high = max(high_1d[-5:]), weekly low = min(low_1d[-5:]), weekly close = close_1d[-1]
-        # But to avoid look-ahead, we shift by 5 days: use prior 5 days ending 6 days ago
-        # Actually, simpler: use prior week's complete OHLC
-        # We'll compute prior weekly pivot using 1d data with a 5-day lag
+        # Daily pivot = (prior day high + prior day low + prior day close) / 3
+        # Shift by 1 to use prior completed day's data (avoid look-ahead)
+        prior_high = np.concatenate([[np.nan], high_1d[:-1]])
+        prior_low = np.concatenate([[np.nan], low_1d[:-1]])
+        prior_close = np.concatenate([[np.nan], close_1d[:-1]])
+        daily_pivot = (prior_high + prior_low + prior_close) / 3.0
         
-        # Precompute arrays for weekly OHLC (5-day periods)
-        # We'll use pandas Series for rolling on 1d data, then align to 6h
-        high_1d_series = pd.Series(high_1d)
-        low_1d_series = pd.Series(low_1d)
-        close_1d_series = pd.Series(close_1d)
-        
-        # Weekly high = max of prior 5 daily highs (completed week)
-        weekly_high = high_1d_series.rolling(window=5, min_periods=5).max().shift(5).values
-        # Weekly low = min of prior 5 daily lows
-        weekly_low = low_1d_series.rolling(window=5, min_periods=5).min().shift(5).values
-        # Weekly close = close of prior 5th day (Friday)
-        weekly_close = close_1d_series.rolling(window=5, min_periods=5).apply(lambda x: x[-1], raw=True).shift(5).values
-        
-        # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
-        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-        
-        # Align to 6h timeframe
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+        # Align to 12h timeframe
+        daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
     else:
-        weekly_pivot_aligned = np.full(n, np.nan)
+        daily_pivot_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel(20) ===
+    # === 12h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume MA(20) for confirmation ===
+    # === 12h Indicators: Volume MA(20) for confirmation ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -100,12 +71,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 5*5)  # Donchian, vol MA, ATR, weekly pivot (5d*5=25)
+    warmup = max(20, 20, 14, 1)  # Donchian, vol MA, ATR, daily pivot
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(weekly_pivot_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(daily_pivot_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -141,12 +112,12 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = vol_ratio[i] > 2.0
         
-        # Weekly pivot bias: price > pivot = long bias, price < pivot = short bias
-        long_bias = price > weekly_pivot_aligned[i]
-        short_bias = price < weekly_pivot_aligned[i]
+        # Daily pivot bias: price > pivot = long bias, price < pivot = short bias
+        long_bias = price > daily_pivot_aligned[i]
+        short_bias = price < daily_pivot_aligned[i]
         
         # Donchian breakout conditions
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
