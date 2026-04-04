@@ -1,65 +1,54 @@
 #!/usr/bin/env python3
 """
-exp_6511_6h_donchian20_1d_pivot_vol_v1
-Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot levels as directional filter and volume confirmation.
-In bull markets: long when price > 1d pivot and breaks Donchian high with volume.
-In bear markets: short when price < 1d pivot and breaks Donchian low with volume.
-Uses 1d Camarilla pivots (calculated from prior 1d OHLC) to define institutional support/resistance.
-Volume confirmation ensures breakouts have conviction. Designed for low-frequency, high-conviction trades.
-Target: 75-150 total trades over 4 years (19-38/year) to minimize fee drag.
+exp_6514_1h_donchian20_4h_ema1d_vol_v1
+Hypothesis: 1h Donchian(20) breakout with 4h EMA trend filter and 1d EMA regime filter, volume confirmation.
+Uses 4h EMA(50) for intermediate trend direction and 1d EMA(200) for bull/bear regime.
+Donchian(20) breakout provides entry timing in the direction of 4h EMA trend, only when aligned with 1d EMA regime.
+Volume confirmation filters weak breakouts. Session filter (08-20 UTC) reduces noise trades.
+Designed to work in both bull and bear markets by requiring alignment between 4h trend and 1d regime.
+Target: 60-150 total trades over 4 years = 15-37/year for 1h.
 """
-
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6511_6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_6514_1h_donchian20_4h_ema1d_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+EMA_4H_PERIOD = 50
+EMA_1D_PERIOD = 200
 VOL_MA_PERIOD = 20
 VOL_THRESHOLD = 1.8  # volume must be 1.8x its 20-period MA
-SIGNAL_SIZE = 0.25   # 25% position size
+SIGNAL_SIZE = 0.20   # 20% position size
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for Camarilla pivots
+    # Load HTF data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Camarilla pivot levels (based on prior day's OHLC)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 4h EMA(50) for trend direction
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=EMA_4H_PERIOD, min_periods=EMA_4H_PERIOD, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Calculate 1d EMA(200) for regime filter
     close_1d = df_1d['close'].values
-    
-    # Camarilla levels: based on previous day's range
-    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low), etc.
-    # S4 = close - 1.5*(high-low), S3 = close - 1.1*(high-low), etc.
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    range_hl = high_1d - low_1d
-    
-    # Key levels: R3, S3 for fade; R4, S4 for breakout
-    r3 = close_1d + 1.1 * range_hl
-    s3 = close_1d - 1.1 * range_hl
-    r4 = close_1d + 1.5 * range_hl
-    s4 = close_1d - 1.5 * range_hl
-    
-    # Align to LTF (6h) with shift(1) for completed bars only
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_1D_PERIOD, min_periods=EMA_1D_PERIOD, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
     # Donchian channels (20-period)
     donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
@@ -68,43 +57,53 @@ def generate_signals(prices):
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_4H_PERIOD, EMA_1D_PERIOD, VOL_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if HTF data not available
-        if np.isnan(pivot_aligned[i]):
+        # Skip if not in trading session
+        if not in_session[i]:
+            signals[i] = 0.0
             continue
             
-        # Long conditions: price > pivot (bullish bias) + breaks above Donchian HIGH + volume spike
-        long_bias = close[i] > pivot_aligned[i]  # price above daily pivot (bullish)
+        # Skip if HTF data not available
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+            signals[i] = 0.0
+            continue
+        
+        # Determine trend and regime
+        uptrend_4h = close[i] > ema_4h_aligned[i]  # price above 4h EMA = bullish trend
+        downtrend_4h = close[i] < ema_4h_aligned[i]  # price below 4h EMA = bearish trend
+        bull_regime = close[i] > ema_1d_aligned[i]   # price above 1d EMA = bull regime
+        bear_regime = close[i] < ema_1d_aligned[i]   # price below 1d EMA = bear regime
+        
+        # Long conditions: price breaks above Donchian HIGH + 4h uptrend + bull regime + volume spike
         long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
         long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Short conditions: price < pivot (bearish bias) + breaks below Donchian LOW + volume spike
-        short_bias = close[i] < pivot_aligned[i]  # price below daily pivot (bearish)
+        # Short conditions: price breaks below Donchian LOW + 4h downtrend + bear regime + volume spike
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Exit conditions: pivot reversal or midpoint reversal
+        # Exit conditions: opposite 4h EMA cross
         if position == 1:  # long position
-            # Exit if price drops back below pivot (trend change)
-            exit_long = close[i] < pivot_aligned[i]
-            # Or if price drops below midpoint of channel
-            exit_long = exit_long or close[i] < (donchian_high[i-1] + donchian_low[i-1]) / 2
+            # Exit if price drops below 4h EMA (trend change)
+            exit_long = close[i] < ema_4h_aligned[i]
             if exit_long:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            # Exit if price rises back above pivot (trend change)
-            exit_short = close[i] > pivot_aligned[i]
-            # Or if price rises above midpoint of channel
-            exit_short = exit_short or close[i] > (donchian_high[i-1] + donchian_low[i-1]) / 2
+            # Exit if price rises above 4h EMA (trend change)
+            exit_short = close[i] > ema_4h_aligned[i]
             if exit_short:
                 signals[i] = 0.0
                 position = 0
@@ -112,11 +111,11 @@ def generate_signals(prices):
         
         # Enter new positions only if flat
         if position == 0:
-            if long_bias and long_breakout and long_volume:
+            if long_breakout and uptrend_4h and bull_regime and long_volume:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-            elif short_bias and short_breakout and short_volume:
+            elif short_breakout and downtrend_4h and bear_regime and short_volume:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
