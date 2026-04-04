@@ -29,7 +29,6 @@ def generate_signals(prices):
     # === HTF: 1d data for EMA(50) trend filter ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 50:
-        # Calculate EMA(50) on 1d close
         close_1d = df_1d['close'].values
         ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     else:
