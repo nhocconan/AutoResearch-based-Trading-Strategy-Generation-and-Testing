@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #5030: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Spike + ATR Stoploss
-HYPOTHESIS: On daily timeframe, Donchian(20) breakouts aligned with weekly HMA trend capture strong momentum with low frequency. Weekly HMA acts as trend filter: only take breakouts in trend direction. Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. Designed for 7-25 trades/year on 1d timeframe to minimize fee drag while maintaining statistical significance. Weekly HMA adapts to both bull (rising) and bear (falling) markets, allowing breakouts in prevailing trend direction.
+Experiment #5030: 1d Donchian(20) Breakout + 1w Weekly Pivot + Volume Spike + ATR Stoploss
+HYPOTHESIS: On daily timeframe, Donchian(20) breakouts aligned with weekly pivot levels (from 1w HTF) capture strong momentum with low frequency. Weekly pivot acts as structural filter: R4/S4 for breakout confirmation, R3/S3 for mean reversion failure signals. Volume > 2x average confirms institutional participation. ATR(14) trailing stop (2.5x) manages risk. Target: 30-100 trades over 4 years (7-25/year) to minimize fee drag while maintaining statistical significance. Weekly pivot provides multi-week structure that works in both bull (breakouts through R4) and bear (breakdowns through S4) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5030_1d_donchian20_1w_hma_vol_v1"
+name = "exp_5030_1d_donchian20_1w_weekly_pivot_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -19,86 +19,54 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1w data for HMA trend
+    # Precompute HTF: 1w data for weekly pivot levels (call ONCE before loop)
     df_1w = get_htf_data(prices, '1w')
     
-    # === 1w Indicators: HMA(21) for trend ===
-    if len(df_1w) >= 21:
-        # Hull Moving Average: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        n = 21
-        half_n = n // 2
-        sqrt_n = int(np.sqrt(n))
+    # === 1w Indicators: Weekly Pivot Points (using prior week's OHLC) ===
+    if len(df_1w) >= 1:  # Need at least one week of data
+        # For weekly pivot, we need prior week's H, L, C
+        # Since df_1w is already weekly data, we shift by 1 to get prior week
+        high_1w = df_1w['high'].values
+        low_1w = df_1w['low'].values
+        close_1w = df_1w['close'].values
         
-        # WMA helper
-        def wma(values, window):
-            if len(values) < window:
-                return np.full(len(values), np.nan)
-            weights = np.arange(1, window + 1)
-            return np.convolve(values, weights, mode='valid') / (window * (window + 1) / 2)
+        # Shift by 1 to use prior week's OHLC (no look-ahead)
+        high_prior = np.concatenate([[np.nan], high_1w[:-1]])
+        low_prior = np.concatenate([[np.nan], low_1w[:-1]])
+        close_prior = np.concatenate([[np.nan], close_1w[:-1]])
         
-        # Calculate WMA for full array
-        wma_full = np.full(n, np.nan)
-        for i in range(n-1, -1, -1):
-            if i < n-1:
-                wma_full[i] = wma_full[i+1]
-            if i >= n-1:
-                pass  # Will calculate properly below
+        # Weekly Pivot Point = (Prior Week H + L + C) / 3
+        pp = (high_prior + low_prior + close_prior) / 3.0
         
-        # Proper WMA calculation
-        wma_vals = np.full(n, np.nan)
-        for i in range(n):
-            if i >= half_n - 1:
-                start = i - half_n + 1
-                end = i + 1
-                if start >= 0:
-                    subset = close[start:end]
-                    weights = np.arange(1, len(subset) + 1)
-                    wma_vals[i] = np.dot(subset, weights) / (len(subset) * (len(subset) + 1) / 2)
+        # Weekly Support/Resistance Levels
+        rng = high_prior - low_prior
+        r1 = (2 * pp) - low_prior
+        s1 = (2 * pp) - high_prior
+        r2 = pp + rng
+        s2 = pp - rng
+        r3 = high_prior + 2 * (pp - low_prior)
+        s3 = low_prior - 2 * (high_prior - pp)
+        r4 = pp + 3 * rng
+        s4 = pp - 3 * rng
         
-        wma_half = np.full(n, np.nan)
-        for i in range(n):
-            if i >= half_n - 1:
-                start = i - half_n + 1
-                end = i + 1
-                if start >= 0:
-                    subset = close[start:end]
-                    weights = np.arange(1, len(subset) + 1)
-                    wma_half[i] = np.dot(subset, weights) / (len(subset) * (len(subset) + 1) / 2)
-        
-        wma_full = np.full(n, np.nan)
-        for i in range(n):
-            if i >= n - 1:
-                start = i - n + 1
-                end = i + 1
-                if start >= 0:
-                    subset = close[start:end]
-                    weights = np.arange(1, len(subset) + 1)
-                    wma_full[i] = np.dot(subset, weights) / (len(subset) * (len(subset) + 1) / 2)
-        
-        # HMA = WMA(2*WMA_half - WMA_full, sqrt_n)
-        hma_raw = 2 * wma_half - wma_full
-        hma_vals = np.full(n, np.nan)
-        for i in range(n):
-            if i >= sqrt_n - 1:
-                start = i - sqrt_n + 1
-                end = i + 1
-                if start >= 0:
-                    subset = hma_raw[start:end]
-                    weights = np.arange(1, len(subset) + 1)
-                    hma_vals[i] = np.dot(subset, weights) / (len(subset) * (len(subset) + 1) / 2)
-        
-        # Align to 1d timeframe
-        hma_aligned = align_htf_to_ltf(prices, df_1w, hma_vals)
-        hma_slope = np.diff(hma_aligned, prepend=hma_aligned[0])
+        # Align to 1d timeframe (weekly data aligned to daily bars)
+        pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+        r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+        s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+        r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+        s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     else:
-        hma_aligned = np.full(n, np.nan)
-        hma_slope = np.full(n, np.nan)
+        pp_aligned = np.full(n, np.nan)
+        r3_aligned = np.full(n, np.nan)
+        s3_aligned = np.full(n, np.nan)
+        r4_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
     
     # === 1d Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume confirmation (1.5x spike) ===
+    # === 1d Indicators: Volume confirmation (2x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -121,13 +89,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21)  # Donchian, Volume MA, ATR, HMA warmup
+    warmup = max(20, 20, 14)  # Donchian, Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(hma_aligned[i]) or np.isnan(hma_slope[i]) or
-            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -138,8 +106,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -147,8 +115,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -157,18 +125,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>1.5x)
-        vol_confirm = vol_ratio[i] > 1.5
+        # Volume filter: confirmation (>2.0x)
+        vol_confirm = vol_ratio[i] > 2.0
         
-        # Trend filter: HMA slope positive for long, negative for short
-        trend_long = hma_slope[i] > 0
-        trend_short = hma_slope[i] < 0
+        # Donchian breakout conditions with weekly pivot alignment
+        # Long: Donchian breakout above R4 (strong breakout) OR above R3 with volume (mean reversion fail)
+        # Short: Donchian breakdown below S4 (strong breakdown) OR below S3 with volume (mean reversion fail)
+        breakout_long = ((price >= high_roll[i]) and 
+                        ((price >= r4_aligned[i]) or  # Strong breakout through weekly R4
+                         ((price >= r3_aligned[i]) and vol_confirm)) and  # Fade failure at R3 with volume
+                        vol_confirm)
         
-        # Donchian breakout conditions with HMA trend alignment
-        # Long: Donchian breakout above high AND uptrend AND volume
-        # Short: Donchian breakdown below low AND downtrend AND volume
-        breakout_long = (price >= high_roll[i]) and trend_long and vol_confirm
-        breakout_short = (price <= low_roll[i]) and trend_short and vol_confirm
+        breakout_short = ((price <= low_roll[i]) and 
+                         ((price <= s4_aligned[i]) or  # Strong breakdown through weekly S4
+                          ((price <= s3_aligned[i]) and vol_confirm)) and  # Fade failure at S3 with volume
+                         vol_confirm)
         
         # Final entry conditions
         if breakout_long:
