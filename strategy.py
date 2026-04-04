@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #3911: 6h Donchian(20) breakout + 1d EMA-200 trend + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 1d EMA-200 trend capture major momentum moves while avoiding counter-trend whipsaw.
+Experiment #3912: 12h Donchian(20) breakout + 1d EMA-200 trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA-200 trend capture major momentum moves while avoiding counter-trend whipsaw.
 Volume > 1.8x MA(30) confirms institutional participation. ATR(14) trailing stop (2.0x) manages risk.
 Target: 75-150 trades over 4 years (19-37/year) with discrete sizing to minimize fee drag.
 Works in bull markets (price above 1d EMA) via long breakouts and bear markets (price below 1d EMA) via short breakdowns.
+Designed for 12h timeframe to reduce trade frequency and fee drag while maintaining statistical significance.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3911_6h_donchian20_1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_3912_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,17 +29,17 @@ def generate_signals(prices):
     ema_values = pd.Series(df_1d['close'].values).ewm(span=ema_period, adjust=False).mean().values
     ema_aligned = align_htf_to_ltf(prices, df_1d, ema_values)
     
-    # === 6h Indicators: Donchian Channel(20) for breakout ===
+    # === 12h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 6h Indicators: Volume MA(30) for spike detection ===
+    # === 12h Indicators: Volume MA(30) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=30, min_periods=30).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[30:] = volume[30:] / vol_ma[30:]
     
-    # === 6h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -134,5 +135,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
