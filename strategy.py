@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5279: 6h Donchian Breakout + 12h Volume Spike + 1d Choppiness Regime
-HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts capture momentum while 12h volume confirmation filters false breakouts. The 1d Choppiness Index (CHOP) acts as a regime filter: CHOP > 61.8 = ranging (avoid breakouts), CHOP < 38.2 = trending (favor breakouts). This combines structure (Donchian), conviction (volume), and market state (choppiness) to work in both bull and bear markets by only taking breakouts aligned with the trending regime. Designed for 12-25 trades/year on 6h timeframe (50-100 total over 4 years) to minimize fee drag. Uses discrete position sizing (0.25) to balance profit potential with drawdown control.
+Experiment #5280: 4h Donchian(20) Breakout + HMA(21) Trend + Volume Confirmation + ATR Stoploss
+HYPOTHESIS: On 4h timeframe, price breaking above/below the 20-period Donchian channel with HMA(21) trend alignment and volume > 1.5x average provides high-probability entries. In bull regime (price > 1d EMA50), we go long on upper breakout; in bear regime (price < 1d EMA50), we go short on lower breakout. Uses discrete position sizing (0.25) to balance profit potential with drawdown control. Designed for 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag. Works in bull markets by catching strong uptrends and in bear markets by catching strong downtrends, while avoiding ranging conditions where Donchian channel is narrow.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5279_6h_donchian_vol_chop_v1"
-timeframe = "6h"
+name = "exp_5280_4h_donchian20_hma_vol_1d_regime_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,56 +17,41 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # Precompute session hours once (open_time is already datetime64[ms])
-    hours = pd.DatetimeIndex(open_time).hour
-    
-    # === HTF: 12h data for volume confirmation ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 20:
-        vol_ma = pd.Series(df_12h['volume']).rolling(window=20, min_periods=20).mean().shift(1).values
-        vol_ma_aligned = align_htf_to_ltf(prices, df_12h, vol_ma)
-    else:
-        vol_ma_aligned = np.full(n, np.nan)
-    
-    # === HTF: 1d data for Choppiness Index regime filter ===
+    # === HTF: 1d data for regime filter (EMA50) ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 14:
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        close_1d = df_1d['close'].values
-        
-        # True Range
-        tr1 = np.abs(high_1d[1:] - low_1d[1:])
-        tr2 = np.abs(high_1d[1:] - close_1d[:-1])
-        tr3 = np.abs(low_1d[1:] - close_1d[:-1])
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr = np.concatenate([[np.nan], tr])  # First value NaN
-        
-        # ATR(14)
-        atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-        
-        # Highest high and lowest low over 14 periods
-        hh = pd.Series(high_1d).rolling(window=14, min_periods=14).max().values
-        ll = pd.Series(low_1d).rolling(window=14, min_periods=14).min().values
-        
-        # Choppiness Index: CHOP = 100 * log10(sum(atr)/log(hh-ll)) / log10(14)
-        sum_atr = pd.Series(atr).rolling(window=14, min_periods=14).sum().values
-        hh_ll = hh - ll
-        # Avoid division by zero or log of zero
-        chop_raw = np.where((hh_ll > 0) & (~np.isnan(hh_ll)), sum_atr / hh_ll, np.nan)
-        chop = 100 * np.log10(chop_raw) / np.log10(14)
-        chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    if len(df_1d) >= 50:
+        ema_50 = pd.Series(df_1d['close']).ewm(span=50, min_periods=50, adjust=False).mean().shift(1).values
+        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     else:
-        chop_aligned = np.full(n, np.nan)
+        ema_50_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20) ===
-    # Upper band: 20-period high
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
-    # Lower band: 20-period low
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
+    # === 4h Indicators: Donchian Channel (20) ===
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # === 4h Indicators: HMA(21) ===
+    def hma(arr, period):
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma2 = pd.Series(arr).ewm(span=half, adjust=False).mean().values
+        wma1 = pd.Series(arr).ewm(span=period, adjust=False).mean().values
+        raw = 2 * wma2 - wma1
+        return pd.Series(raw).ewm(span=sqrt, adjust=False).mean().values
+    
+    hma_21 = hma(close, 21)
+    
+    # === 4h Indicators: Volume Average (20) ===
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # === 4h Indicators: ATR(14) for stoploss ===
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First bar has no previous close
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # === Signals Initialization ===
     signals = np.zeros(n)
@@ -76,66 +61,80 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
+    stop_price = 0.0
     
-    warmup = max(20, 20, 14, 20)  # Donchian, volume MA, chop ATR
+    warmup = max(20, 21, 20, 50, 14)  # Donchian, HMA, Vol MA, EMA50, ATR
     
     for i in range(warmup, n):
-        # --- Session Filter: 00-24 UTC (6h timeframe, full day) ---
-        # 6h candles already cover major sessions
-        
         # --- Data Validity Check ---
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma_aligned[i]) or np.isnan(chop_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(hma_21[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
-        vol = volume[i]
         
-        # --- Exit Logic: Close position when Donchian reverses or chop regime changes ---
+        # --- Exit Logic: Stoploss or reversal ---
         if in_position:
-            # Check for Donchian reversal (price crosses opposite band)
+            # Check stoploss
             if position_side > 0:  # Long position
-                if price < donch_low[i]:  # Break below lower band
+                if price <= stop_price:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                else:
-                    signals[i] = SIZE
+                    continue
+                # Check for HMA trend reversal (price crosses below HMA)
+                if price < hma_21[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
             else:  # Short position
-                if price > donch_high[i]:  # Break above upper band
+                if price >= stop_price:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                else:
-                    signals[i] = -SIZE
+                    continue
+                # Check for HMA trend reversal (price crosses above HMA)
+                if price > hma_21[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                    continue
+            
+            # Continue holding position
+            signals[i] = SIZE if position_side > 0 else -SIZE
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: current 12h volume > 1.5 * 20-period MA
-        # Get the 12h volume-aligned value for this bar
-        # Since we aligned 12h data, we need to find the corresponding 12h bar
-        # Simpler: use volume ratio directly from aligned data
-        vol_ratio = vol / vol_ma_aligned[i] if vol_ma_aligned[i] > 0 else 0
-        vol_confirm = vol_ratio > 1.5
-        
-        # Choppiness regime: CHOP < 38.2 = trending (favor breakouts)
-        chop_trending = chop_aligned[i] < 38.2
-        
         # Donchian breakout
-        breakout_up = price > donch_high[i]
-        breakout_down = price < donch_low[i]
+        breakout_up = price > highest_high[i-1]  # Use previous bar's channel
+        breakout_down = price < lowest_low[i-1]   # Use previous bar's channel
         
-        # Entry conditions: breakout + volume confirmation + trending regime
-        if breakout_up and vol_confirm and chop_trending:
+        # HMA trend filter
+        hma_bullish = price > hma_21[i]
+        hma_bearish = price < hma_21[i]
+        
+        # Volume confirmation
+        vol_confirm = volume[i] > 1.5 * vol_ma[i]
+        
+        # Regime filter from 1d
+        regime_bullish = price > ema_50_aligned[i]
+        regime_bearish = price < ema_50_aligned[i]
+        
+        # Entry conditions
+        if breakout_up and hma_bullish and vol_confirm and regime_bullish:
             in_position = True
             position_side = 1
             entry_price = close[i]
+            stop_price = entry_price - 2.0 * atr[i]  # 2*ATR stoploss
             signals[i] = SIZE
-        elif breakout_down and vol_confirm and chop_trending:
+        elif breakout_down and hma_bearish and vol_confirm and regime_bearish:
             in_position = True
             position_side = -1
             entry_price = close[i]
+            stop_price = entry_price + 2.0 * atr[i]  # 2*ATR stoploss
             signals[i] = -SIZE
         else:
             signals[i] = 0.0
