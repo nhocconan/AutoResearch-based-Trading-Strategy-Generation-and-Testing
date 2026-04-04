@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #2543: 4h Donchian(20) breakout + 12h EMA trend + volume confirmation
-HYPOTHESIS: Donchian channel breakouts with 12h trend alignment and volume spikes capture 
-institutional participation during trend acceleration. Uses discrete position sizing (0.25) 
-to limit fee drag and ensure 75-200 total trades over 4 years. 12h HTF provides smoother 
-trend filter than 1d, reducing whipsaws in ranging markets while maintaining trend fidelity.
+HYPOTHESIS: Donchian channel breakouts with 12h EMA trend alignment and volume spikes capture 
+institutional participation during trend acceleration. Uses discrete position sizing (0.25) to 
+limit fee drag and ensure 75-200 total trades over 4 years. Works in bull markets (breakouts) 
+and bear markets (breakdowns) by following the 12h EMA trend filter.
 """
 
 import numpy as np
