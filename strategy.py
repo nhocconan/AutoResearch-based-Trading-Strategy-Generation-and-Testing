@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #3001: 4h Donchian Breakout + 1d HMA Trend + Volume Spike
-HYPOTHESIS: Donchian(20) breakouts on 4h capture medium-term trends. 1d HMA(21) provides
+Experiment #3002: 12h Donchian Breakout + 1d HMA Trend + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 12h capture multi-day trends. 1d HMA(21) provides
 trend filter: only take longs when price > HMA, shorts when price < HMA. Volume spike
-(>2.0x 20-period average) confirms breakout strength. This combination filters false
-breakouts in choppy markets while capturing strong trends. 4h timeframe balances
-trade frequency and fee drag. Target: 75-200 total trades over 4 years.
-Uses proper MTF loading with get_htf_data ONCE before loop and align_htf_to_ltf.
+(>2.0x 20-period average) confirms breakout strength. 12h timeframe targets 12-37 trades/year,
+minimizing fee drag while capturing strong trends in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3001_4h_donchian20_1d_hma_vol_v1"
-timeframe = "4h"
+name = "exp_3002_12h_donchian20_1d_hma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -43,12 +41,12 @@ def generate_signals(prices):
     hma_1d = calculate_hma(close_1d, 21)
     hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # === 4h Indicators: Donchian channels (20-period) ===
+    # === 12h Indicators: Donchian channels (20-period) ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 12h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
