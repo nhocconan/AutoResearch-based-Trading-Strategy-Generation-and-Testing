@@ -2,8 +2,8 @@
 """
 exp_6463_4h_donchian20_12h_ema_vol_v1
 Hypothesis: 4h Donchian(20) breakout with 12h EMA(50) trend filter and volume confirmation.
-Uses 12h EMA for better trend alignment in both bull/bear markets while avoiding overtrading.
-Volume confirmation filters false breakouts. Target: 75-200 trades over 4 years.
+Uses 12h EMA for faster adaptation to trend changes vs 1d EMA while still filtering counter-trend trades.
+Volume confirmation reduces false breakouts. Target: 75-200 trades over 4 years.
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
@@ -68,7 +68,7 @@ def generate_signals(prices):
         short_trend = close[i] < ema_12h_aligned[i]    # price below 12h EMA
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Exit conditions: ATR-based stoploss approximation
+        # Exit conditions: ATR-based stoploss (using 2*ATR approximation via price channels)
         # Simple approach: exit when price reverses halfway through the channel
         channel_width = donchian_high[i-1] - donchian_low[i-1]
         if position == 1:  # long position
