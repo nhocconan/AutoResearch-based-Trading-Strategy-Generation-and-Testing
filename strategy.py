@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 Experiment #4273: 4h Donchian(20) breakout + 12h HMA(21) trend + volume confirmation
-HYPOTHESIS: Donchian breakouts on 4h timeframe capture swing momentum when aligned with 12h HMA21 trend (price > HMA21 for longs, < HMA21 for shorts) and confirmed by volume (>2.5x average). Uses tighter volume filter (>2.5x) and reduced position size (0.20) to lower trade frequency from overtrading levels. ATR-based trailing stop (2.0x) for risk management. Works in bull via breakout continuation, in bear via shorting breakdowns. Novelty: Uses 12h HTF (as specified in experiment) to reduce noise while keeping trade count optimal.
+HYPOTHESIS: Donchian breakouts on 4h timeframe capture swing momentum when aligned with 12h HMA21 trend (price > HMA21 for longs, < HMA21 for shorts) and confirmed by volume (>2.0x average). Uses 12h HMA for smoother trend filter (less whipsaw than EMA) while maintaining sufficient trade frequency. ATR-based trailing stop (2.5x) for risk management. Position size 0.25 targets 75-200 total trades over 4 years (19-50/year). Works in bull via breakout continuation, in bear via shorting breakdowns. Novelty: Uses 12h HTF (as specified in experiment) to reduce noise while keeping trade count optimal.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4273_4h_donchian20_12h_hma_vol_v2"
+name = "exp_4273_4h_donchian20_12h_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -59,7 +59,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # Reduced position size to 20% to lower trade frequency
+    SIZE = 0.20  # Reduced from 0.25 to decrease trade frequency and fee drag
     
     # Position tracking state variables
     in_position = False
@@ -90,8 +90,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -99,8 +99,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -109,8 +109,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 2.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 2.5
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = vol_ratio[i] > 2.0
         
         if volume_confirm:
             # Donchian breakout conditions (using previous bar's levels)
