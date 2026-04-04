@@ -1,81 +1,103 @@
 #!/usr/bin/env python3
 """
-Experiment #4374: 1h Donchian Breakout + 4h/1d EMA Filter + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 1h aligned with 4h EMA(50) trend and 1d EMA(200) bias, confirmed by volume spikes (>1.8x average), capture institutional momentum while filtering noise. 4h/1d EMAs provide multi-timeframe trend alignment to work in both bull and bear markets. Volume confirmation ensures breakout conviction. Targets 60-150 total trades over 4 years (15-37/year) with position size 0.20 and session filter (08-20 UTC) to reduce noise.
+Experiment #4375: 6h Williams Alligator + Elder Ray + 1d Regime Filter
+HYPOTHESIS: Williams Alligator (jaw/teeth/lips) identifies trend phase on 6h, Elder Ray (bull/bear power) measures momentum strength, and 1d ADX regime filter ensures we only trade in strong trends (ADX>25) or mean-revert in ranges (ADX<20). This combination avoids whipsaws in sideways markets while capturing strong moves. Works in bull via buying dips in uptrends (teeth>jaw, bull power>0), in bear via selling rallies in downtrends (teeth<jaw, bear power<0). Position size 0.25 targets 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4374_1h_donchian20_4h_1d_ema_vol_v1"
-timeframe = "1h"
+name = "exp_4375_6h_alligator_elder_ray_1d_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     close = prices["close"].values.astype(np.float64)
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
-    volume = prices["volume"].values.astype(np.float64)
     open_time = prices["open_time"].values
     n = len(close)
     
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 4h EMA(50) for trend ===
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) >= 50:
-        close_4h = df_4h['close'].values
-        ema_4h = pd.Series(close_4h).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    else:
-        ema_4h_aligned = np.full(n, np.nan)
-    
-    # === Precompute HTF: 1d EMA(200) for long-term bias ===
+    # === Precompute HTF: 1d ADX for regime filter ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 200:
-        close_1d = df_1d['close'].values
-        ema_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    if len(df_1d) >= 30:
+        # Calculate ADX(14) on 1d
+        h_1d = df_1d['high'].values
+        l_1d = df_1d['low'].values
+        c_1d = df_1d['close'].values
+        
+        # True Range
+        tr1 = h_1d[1:] - l_1d[1:]
+        tr2 = np.abs(h_1d[1:] - c_1d[:-1])
+        tr3 = np.abs(l_1d[1:] - c_1d[:-1])
+        tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+        
+        # Directional Movement
+        up_move = h_1d[1:] - h_1d[:-1]
+        down_move = l_1d[:-1] - l_1d[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        # Smoothed TR, +DM, -DM
+        tr_ma = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
+        plus_dm_ma = pd.Series(plus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
+        minus_dm_ma = pd.Series(minus_dm).ewm(span=14, min_periods=14, adjust=False).mean().values
+        
+        # Directional Indicators
+        plus_di = 100 * plus_dm_ma / tr_ma
+        minus_di = 100 * minus_dm_ma / tr_ma
+        
+        # DX and ADX
+        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx_1d = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
+        adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        adx_1d_aligned = np.full(n, 20.0)  # Default to range regime if insufficient data
     
-    # === 1h Indicators: Donchian Channel(20) ===
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donch_upper = high_series.rolling(window=20, min_periods=20).max().values
-    donch_lower = low_series.rolling(window=20, min_periods=20).min().values
+    # === 6h Indicators: Williams Alligator (SMMA) ===
+    # Jaw: SMMA(13, 8), Teeth: SMMA(8, 5), Lips: SMMA(5, 3)
+    def smma(arr, period):
+        """Smoothed Moving Average"""
+        sma = pd.Series(arr).rolling(window=period, min_periods=period).mean().values
+        smma = np.full_like(arr, np.nan, dtype=np.float64)
+        smma[period-1] = sma[period-1]
+        for i in range(period, len(arr)):
+            if not np.isnan(smma[i-1]) and not np.isnan(sma[i]):
+                smma[i] = (smma[i-1] * (period-1) + sma[i]) / period
+            else:
+                smma[i] = np.nan
+        return smma
     
-    # === 1h Indicators: Volume MA(20) for confirmation ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
+    jaw = smma((high + low) / 2, 13)  # SMMA of median price, period 13
+    jaw = np.roll(jaw, 8)  # Shift 8 bars forward
     
-    # === 1h Indicators: ATR(14) for stoploss ===
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
+    teeth = smma((high + low) / 2, 8)   # SMMA of median price, period 8
+    teeth = np.roll(teeth, 5)   # Shift 5 bars forward
+    
+    lips = smma((high + low) / 2, 5)    # SMMA of median price, period 5
+    lips = np.roll(lips, 3)   # Shift 3 bars forward
+    
+    # === 6h Indicators: Elder Ray (Bull/Bear Power) ===
+    # Bull Power = High - EMA(13)
+    # Bear Power = Low - EMA(13)
+    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.20  # 20% position size
+    SIZE = 0.25  # 25% position size
     
-    # Position tracking state variables
-    in_position = False
-    position_side = 0
-    entry_price = 0.0
-    highest_since_entry = 0.0
-    lowest_since_entry = 0.0
-    
-    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
+    warmup = max(30, 13+8, 13)  # ADX, Alligator, EMA
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i])):
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(adx_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -85,68 +107,49 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        price = close[i]
+        # --- Regime Filter: 1d ADX ---
+        adx = adx_1d_aligned[i]
+        is_trending = adx > 25
+        is_ranging = adx < 20
         
-        # --- Exit Logic ---
-        if in_position:
-            # Update highest/lowest since entry for trailing stop
-            if position_side > 0:  # Long
-                highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.5 * atr[i]:
-                    in_position = False
-                    position_side = 0
-                    signals[i] = 0.0
+        # --- Alligator Signals ---
+        # Alligator asleep: jaws, teeth, lips intertwined (no clear trend)
+        alligator_asleep = (abs(jaw[i] - teeth[i]) < (teeth[i] - lips[i]) * 0.1) and \
+                           (abs(teeth[i] - lips[i]) < (jaw[i] - teeth[i]) * 0.1)
+        
+        # Alligator awake and trending up: lips > teeth > jaw
+        alligator_up = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        
+        # Alligator awake and trending down: lips < teeth < jaw
+        alligator_down = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        
+        # --- Elder Ray Signals ---
+        strong_bull = bull_power[i] > 0 and bull_power[i] > bear_power[i] * 2
+        strong_bear = bear_power[i] < 0 and abs(bear_power[i]) > bull_power[i] * 2
+        
+        # --- Entry Logic ---
+        if not alligator_asleep:
+            # In trending regime (ADX>25): follow Alligator + Elder Ray
+            if is_trending:
+                if alligator_up and strong_bull:
+                    signals[i] = SIZE  # Long
+                elif alligator_down and strong_bear:
+                    signals[i] = -SIZE  # Short
                 else:
-                    signals[i] = SIZE
-            else:  # Short
-                lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.5 * atr[i]:
-                    in_position = False
-                    position_side = 0
                     signals[i] = 0.0
+            # In ranging regime (ADX<20): fade extremes with Elder Ray
+            elif is_ranging:
+                if strong_bear and lips[i] < jaw[i]:  # Bear power but price below jaw (fade down)
+                    signals[i] = SIZE  # Long (mean reversion up)
+                elif strong_bull and lips[i] > jaw[i]:  # Bull power but price above jaw (fade up)
+                    signals[i] = -SIZE  # Short (mean reversion down)
                 else:
-                    signals[i] = -SIZE
-            continue
-        
-        # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
-        
-        # Multi-timeframe trend alignment
-        # 4h EMA(50): price > EMA = bullish bias, price < EMA = bearish bias
-        # 1d EMA(200): price > EMA = long-term bullish, price < EMA = long-term bearish
-        bullish_alignment = (price > ema_4h_aligned[i]) and (price > ema_1d_aligned[i])
-        bearish_alignment = (price < ema_4h_aligned[i]) and (price < ema_1d_aligned[i])
-        
-        # Donchian breakout conditions
-        breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
-        breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
-        
-        # Long conditions: upward breakout + bullish alignment + volume
-        long_entry = breakout_up and bullish_alignment and volume_confirm
-        
-        # Short conditions: downward breakout + bearish alignment + volume
-        short_entry = breakout_down and bearish_alignment and volume_confirm
-        
-        if long_entry:
-            in_position = True
-            position_side = 1
-            entry_price = close[i]
-            highest_since_entry = high[i]
-            lowest_since_entry = low[i]
-            signals[i] = SIZE
-        elif short_entry:
-            in_position = True
-            position_side = -1
-            entry_price = close[i]
-            highest_since_entry = high[i]
-            lowest_since_entry = low[i]
-            signals[i] = -SIZE
+                    signals[i] = 0.0
+            else:
+                # Transition regime (ADX 20-25): reduce position or wait
+                signals[i] = 0.0
         else:
+            # Alligator asleep: no clear trend, stay out
             signals[i] = 0.0
     
     return signals
-
-</think>
