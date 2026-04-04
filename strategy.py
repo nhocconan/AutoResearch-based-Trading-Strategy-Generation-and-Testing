@@ -1,128 +1,69 @@
 #!/usr/bin/env python3
 """
-exp_6615_6h_ichimoku_cloud_1d_trend_v2
-Hypothesis: 6h Ichimoku cloud breakout with 1d trend filter. Uses Ichimoku (Tenkan/Kijun/Senkou) on 6h for entry timing and 1d ADX for trend strength. 
-Only trades in direction of 1d ADX (>25) to avoid whipsaws in ranging markets. Uses Kumo (cloud) twist as early signal. 
-Discrete sizing (0.25) with ATR stoploss and max hold. Designed for 6h timeframe targeting 50-150 total trades over 4 years.
-Works in bull/bear by filtering trades with higher timeframe trend strength.
+exp_6616_12h_donchian20_1d_pivot_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d Camarilla pivot direction and volume confirmation.
+Uses 12h primary timeframe (target: 50-150 total trades over 4 years). 1d Camarilla pivots provide
+key support/resistance levels: break above R3/R4 favors longs, break below S3/S4 favors shorts.
+Volume ensures breakout conviction. Works in both bull and bear markets by trading breakouts
+in direction of daily pivot levels. Discrete sizing (0.25) minimizes fee churn. Includes ATR-based
+stoploss and max hold time to prevent overtrading.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6615_6h_ichimoku_cloud_1d_trend_v2"
-timeframe = "6h"
+name = "exp_6616_12h_donchian20_1d_pivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-ICHIMOKU_TENKAN = 9
-ICHIMOKU_KIJUN = 26
-ICHIMOKU_SENKOU_B = 52
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
+DONCHIAN_PERIOD = 20
+PIVOT_LOOKBACK = 1  # Use previous day's pivot
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5
+VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 12  # ~12 * 6h = 3 days
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 4  # ~4 * 12h = ~2 days
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for ADX trend filter
+    # Load HTF data ONCE before loop - using 1d for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d ADX for trend strength
+    # Calculate 1d Camarilla pivot levels (based on previous day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # True Range
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr_1d.ewm(span=ADX_PERIOD, adjust=False).mean().values
+    # Pivot point
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Camarilla levels
+    r3 = pivot + (high_1d - low_1d) * 1.1 / 4.0
+    r4 = pivot + (high_1d - low_1d) * 1.1 / 2.0
+    s3 = pivot - (high_1d - low_1d) * 1.1 / 4.0
+    s4 = pivot - (high_1d - low_1d) * 1.1 / 2.0
     
-    # Directional Movement
-    dm_plus = pd.Series(np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                                 np.maximum(high_1d - np.roll(high_1d, 1), 0), 0))
-    dm_minus = pd.Series(np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                                  np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0))
+    # Align to LTF (12h) with shift(1) for completed bars only
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Smoothed DM and TR
-    dm_plus_smooth = dm_plus.ewm(span=ADX_PERIOD, adjust=False).mean().values
-    dm_minus_smooth = dm_minus.ewm(span=ADX_PERIOD, adjust=False).mean().values
-    tr_smooth = tr_1d.ewm(span=ADX_PERIOD, adjust=False).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(span=ADX_PERIOD, adjust=False).mean().values
-    
-    # Align ADX to LTF (6h) with shift(1) for completed bars only
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Calculate LTF Ichimoku components
+    # Calculate LTF indicators
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan = (pd.Series(high).rolling(window=ICHIMOKU_TENKAN, min_periods=ICHIMOKU_TENKAN).max().values + 
-              pd.Series(low).rolling(window=ICHIMOKU_TENKAN, min_periods=ICHIMOKU_TENKAN).min().values) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun = (pd.Series(high).rolling(window=ICHIMOKU_KIJUN, min_periods=ICHIMOKU_KIJUN).max().values + 
-             pd.Series(low).rolling(window=ICHIMOKU_KIJUN, min_periods=ICHIMOKU_KIJUN).min().values) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 plotted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 plotted 26 periods ahead
-    senkou_b = (pd.Series(high).rolling(window=ICHIMOKU_SENKOU_B, min_periods=ICHIMOKU_SENKOU_B).max().values + 
-                pd.Series(low).rolling(window=ICHIMOKU_SENKOU_B, min_periods=ICHIMOKU_SENKOU_B).min().values) / 2
-    
-    # Align Senkou spans to current price (they are already plotted ahead)
-    senkou_a_aligned = align_htf_to_ltf(prices, prices, senkou_a)  # Using prices as dummy HTF since same TF
-    senkou_b_aligned = align_htf_to_ltf(prices, prices, senkou_b)
-    
-    # Current Kumo (cloud) boundaries - use current Senkou spans
-    upper_cloud = np.maximum(senkou_a_aligned, senkou_b_aligned)
-    lower_cloud = np.minimum(senkou_a_aligned, senkou_b_aligned)
-    
-    # Kumo twist detection: Senkou A crossing Senkou B
-    senkou_a_prev = pd.Series(senkou_a).shift(1).values
-    senkou_b_prev = pd.Series(senkou_b).shift(1).values
-    upper_cloud_prev = np.maximum(senkou_a_prev, senkou_b_prev)
-    lower_cloud_prev = np.minimum(senkou_a_prev, senkou_b_prev)
-    
-    # Kumo twist bullish: Senkou A crosses above Senkou B
-    kumo_twist_bullish = (senkou_a > senkou_b) & (senkou_a_prev <= senkou_b_prev)
-    # Kumo twist bearish: Senkou A crosses below Senkou B
-    kumo_twist_bearish = (senkou_a < senkou_b) & (senkou_a_prev >= senkou_b_prev)
-    
-    # Align Kumo twist signals
-    kumo_twist_bullish_aligned = align_htf_to_ltf(prices, prices, kumo_twist_bullish.astype(float))
-    kumo_twist_bearish_aligned = align_htf_to_ltf(prices, prices, kumo_twist_bearish.astype(float))
-    
-    # Price above/below cloud
-    price_above_cloud = close > upper_cloud
-    price_below_cloud = close < lower_cloud
-    
-    # Tenkan/Kijun cross
-    tenkan_prev = pd.Series(tenkan).shift(1).values
-    kijun_prev = pd.Series(kijun).shift(1).values
-    tk_cross_bullish = (tenkan > kijun) & (tenkan_prev <= kijun_prev)
-    tk_cross_bearish = (tenkan < kijun) & (tenkan_prev >= kijun_prev)
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
@@ -140,14 +81,14 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(ICHIMOKU_SENKOU_B, ADX_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, PIVOT_LOOKBACK, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if (np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]) or 
-            np.isnan(upper_cloud[i]) or np.isnan(lower_cloud[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -172,37 +113,35 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Only trade when 1d ADX indicates strong trend (>25)
-        strong_trend = adx_aligned[i] > ADX_THRESHOLD
+        # Determine bias from 1d Camarilla pivots
+        # Price above R3: bullish bias (favor longs on breakouts)
+        # Price below S3: bearish bias (favor shorts on breakdowns)
+        # Between R3 and S3: neutral (no new entries, only manage existing)
+        bullish_bias = close[i] > r3_aligned[i]
+        bearish_bias = close[i] < s3_aligned[i]
         
-        # Long conditions:
-        # 1. Price above cloud (bullish bias)
-        # 2. Tenkan/Kijun bullish cross OR Kumo twist bullish
-        # 3. Volume confirmation
-        # 4. Strong 1d trend
-        long_signal = (price_above_cloud[i] and 
-                      (tk_cross_bullish[i] or kumo_twist_bullish_aligned[i] > 0.5) and
-                      volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD and
-                      strong_trend)
+        # Long conditions: 
+        # 1. Break above Donchian HIGH (breakout)
+        # 2. Volume confirmation
+        # 3. Bullish bias from 1d Camarilla (above R3)
+        long_breakout = close[i] > donchian_high[i-1]
+        long_volume = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Short conditions:
-        # 1. Price below cloud (bearish bias)
-        # 2. Tenkan/Kijun bearish cross OR Kumo twist bearish
-        # 3. Volume confirmation
-        # 4. Strong 1d trend
-        short_signal = (price_below_cloud[i] and 
-                       (tk_cross_bearish[i] or kumo_twist_bearish_aligned[i] > 0.5) and
-                       volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD and
-                       strong_trend)
+        # 1. Break below Donchian LOW (breakdown)
+        # 2. Volume confirmation
+        # 3. Bearish bias from 1d Camarilla (below S3)
+        short_breakout = close[i] < donchian_low[i-1]
+        short_volume = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Enter new positions only if flat
         if position == 0:
-            if long_signal:
+            if long_breakout and long_volume and bullish_bias:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif short_signal:
+            elif short_breakout and short_volume and bearish_bias:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
