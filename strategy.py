@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5049: 4h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Spike + ATR Stoploss
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with weekly pivot levels (from 1d HTF) capture strong momentum with lower frequency. Weekly pivot acts as regime filter: R3/S3 for mean reversion, R4/S4 for breakout confirmation. Volume > 2x average confirms institutional participation. ATR(14) trailing stop (2.5x) manages risk. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Weekly pivot provides structural support/resistance that works in both bull (breakouts through R4) and bear (breakdowns through S4) markets.
+Experiment #5050: 1d Donchian(20) Breakout + 1w Weekly Pivot Direction + Volume Spike + ATR Stoploss
+HYPOTHESIS: On daily timeframe, Donchian(20) breakouts aligned with weekly pivot levels (from 1w HTF) capture strong momentum with lower frequency. Weekly pivot acts as regime filter: R3/S3 for mean reversion, R4/S4 for breakout confirmation. Volume > 2x average confirms institutional participation. ATR(14) trailing stop (2.5x) manages risk. Designed for 7-25 trades/year on 1d timeframe to minimize fee drag while maintaining statistical significance. Weekly pivot provides structural support/resistance that works in both bull (breakouts through R4) and bear (breakdowns through S4) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5049_4h_donchian20_1d_weekly_pivot_vol_v1"
-timeframe = "4h"
+name = "exp_5050_1d_donchian20_1w_weekly_pivot_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,48 +19,43 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for weekly pivot levels
-    df_1d = get_htf_data(prices, '1d')
+    # Precompute HTF: 1w data for weekly pivot levels
+    df_1w = get_htf_data(prices, '1w')
     
-    # === 1d Indicators: Weekly Pivot Points (using prior week's OHLC) ===
-    if len(df_1d) >= 5:  # Need at least a week of data
-        # Calculate weekly OHLC from daily data
-        # We'll use rolling window of 5 days to approximate weekly OHLC
-        # For true weekly pivot, we need prior week's H, L, C
-        high_5d = pd.Series(high).rolling(window=5, min_periods=5).max().values
-        low_5d = pd.Series(low).rolling(window=5, min_periods=5).min().values
-        close_5d = pd.Series(close).rolling(window=5, min_periods=5).last().values
+    # === 1w Indicators: Weekly Pivot Points (using prior week's OHLC) ===
+    if len(df_1w) >= 2:  # Need at least 2 weeks of data for prior week
+        # Calculate weekly OHLC from weekly data (already weekly)
+        # We need prior week's H, L, C
+        high_1w = df_1w['high'].values
+        low_1w = df_1w['low'].values
+        close_1w = df_1w['close'].values
+        
+        # Shift by 1 to get prior week's values (completed week only)
+        high_prior = np.concatenate([[np.nan], high_1w[:-1]])
+        low_prior = np.concatenate([[np.nan], low_1w[:-1]])
+        close_prior = np.concatenate([[np.nan], close_1w[:-1]])
         
         # Weekly Pivot Point = (Prior Week H + L + C) / 3
-        pp = (high_5d + low_5d + close_5d) / 3.0
+        pp = (high_prior + low_prior + close_prior) / 3.0
         
         # Weekly Support/Resistance Levels
-        # R1 = (2 * PP) - Prior Week L
-        # S1 = (2 * PP) - Prior Week H
-        # R2 = PP + (Prior Week H - Prior Week L)
-        # S2 = PP - (Prior Week H - Prior Week L)
-        # R3 = Prior Week H + 2*(PP - Prior Week L)
-        # S3 = Prior Week L - 2*(Prior Week H - PP)
-        # R4 = PP + 3*(Prior Week H - Prior Week L)
-        # S4 = PP - 3*(Prior Week H - Prior Week L)
-        rng = high_5d - low_5d
-        r1 = (2 * pp) - low_5d
-        s1 = (2 * pp) - high_5d
+        rng = high_prior - low_prior
+        r1 = (2 * pp) - low_prior
+        s1 = (2 * pp) - high_prior
         r2 = pp + rng
         s2 = pp - rng
-        r3 = high_5d + 2 * (pp - low_5d)
-        s3 = low_5d - 2 * (high_5d - pp)
+        r3 = high_prior + 2 * (pp - low_prior)
+        s3 = low_prior - 2 * (high_prior - pp)
         r4 = pp + 3 * rng
         s4 = pp - 3 * rng
         
-        # For breakout confirmation, we'll use R4/S4 levels
-        # For mean reversion fade, we'll use R3/S3 levels
-        # Align to 4h timeframe
-        pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+        # Align to 1d timeframe (weekly data already aligned via get_htf_data)
+        # Need to shift by 1 more to ensure we only use completed weekly bars
+        pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
+        r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+        s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+        r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+        s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     else:
         pp_aligned = np.full(n, np.nan)
         r3_aligned = np.full(n, np.nan)
@@ -68,16 +63,16 @@ def generate_signals(prices):
         r4_aligned = np.full(n, np.nan)
         s4_aligned = np.full(n, np.nan)
     
-    # === 4h Indicators: Donchian(20) channels ===
+    # === 1d Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation (2x spike) ===
+    # === 1d Indicators: Volume confirmation (2x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
