@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3937: 4h Donchian(20) breakout + 1d EMA-200 trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA-200 trend capture major trend moves with minimal whipsaws. Volume > 1.8x MA(20) confirms breakout strength. ATR(14) trailing stop (2.0x) manages risk. Discrete sizing (0.30) balances return and fee drag. Target: 100-180 trades over 4 years (25-45/year). Works in bull/bear via 1d EMA-200 trend filter which adapts to long-term market regime.
+Experiment #3938: 1d Donchian(20) breakout + 1w EMA-50 trend + volume confirmation
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA-50 trend capture major trend moves with minimal whipsaws. Volume > 2.0x MA(20) confirms breakout strength. ATR(14) trailing stop (2.0x) manages risk. Discrete sizing (0.25) balances return and fee drag. Target: 30-100 trades over 4 years (7-25/year). Works in bull/bear via 1w EMA-50 trend filter which adapts to long-term market regime.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3937_4h_donchian20_1d_ema200_vol_v1"
-timeframe = "4h"
+name = "exp_3938_1d_donchian20_1w_ema50_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,23 +19,23 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for EMA-200 trend ===
-    df_1d = get_htf_data(prices, '1d')
-    ema_period = 200
-    ema_values = pd.Series(df_1d['close'].values).ewm(span=ema_period, adjust=False).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_values)
+    # === HTF: 1w data for EMA-50 trend ===
+    df_1w = get_htf_data(prices, '1w')
+    ema_period = 50
+    ema_values = pd.Series(df_1w['close'].values).ewm(span=ema_period, adjust=False).mean().values
+    ema_aligned = align_htf_to_ltf(prices, df_1w, ema_values)
     
-    # === 4h Indicators: Donchian Channel(20) for breakout ===
+    # === 1d Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 1d Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 1d Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -44,7 +44,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.25  # 25% position size
     
     # Position tracking state variables
     in_position = False
@@ -98,11 +98,11 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) to filter noise
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume spike (> 2.0x average) to filter noise
+        volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Determine trend: bullish if price above 1d EMA-200, bearish if below
+            # Determine trend: bullish if price above 1w EMA-50, bearish if below
             bullish = price > ema_aligned[i]
             bearish = price < ema_aligned[i]
             
