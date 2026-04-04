@@ -3,8 +3,9 @@
 Experiment #2953: 4h Donchian Breakout + 12h HMA Trend + Volume Spike
 HYPOTHESIS: Donchian(20) breakouts on 4h timeframe capture medium-term trends with controlled trade frequency.
 12h HMA(21) provides trend filter: only take longs when price > HMA, shorts when price < HMA.
-Volume spike (>2.0x 20-period average) confirms breakout strength. ATR-based trailing stop (2.5x) manages risk.
-This combination avoids false breakouts in choppy markets while capturing strong trends. 4h timeframe targets 75-200 trades over 4 years.
+Volume spike (>2.0x 20-period average) confirms breakout strength. ATR-based trailing stop (2.5x ATR) manages risk.
+Target: 75-200 total trades over 4 years (19-50/year) with discrete position sizing (0.25) to minimize fee drag.
+Works in bull markets via trend-following breaks and bear markets via short breaks with trend filter.
 """
 
 import numpy as np
@@ -22,7 +23,7 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for HMA trend (Call ONCE before loop) ===
+    # === HTF: 12h data for HMA trend filter (Call ONCE before loop) ===
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
@@ -30,12 +31,12 @@ def generate_signals(prices):
     def hma(series, period):
         if len(series) < period:
             return np.full_like(series, np.nan)
-        half = period // 2
-        sqrt = int(np.sqrt(period))
-        wma2 = pd.Series(series).ewm(span=half, adjust=False).mean()
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma2 = pd.Series(series).ewm(span=half_period, adjust=False).mean()
         wma1 = pd.Series(series).ewm(span=period, adjust=False).mean()
-        raw = 2 * wma2 - wma1
-        hma_vals = pd.Series(raw).ewm(span=sqrt, adjust=False).mean()
+        diff = 2 * wma2 - wma1
+        hma_vals = pd.Series(diff).ewm(span=sqrt_period, adjust=False).mean()
         return hma_vals.values
     
     hma_12h = hma(close_12h, 21)
@@ -51,13 +52,11 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for stoploss ===
-    tr1 = pd.Series(high - low).values
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1))).values
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1))).values
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    # === 4h Indicators: ATR(14) for volatility and stoploss ===
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # === Signals Initialization ===
@@ -120,7 +119,7 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Get 12h HMA trend
+            # Get 12h HMA trend filter
             price_vs_hma = price - hma_12h_aligned[i]
             
             # Long entry: price breaks above Donchian high with bullish 12h trend
