@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #5804: 1d Donchian(20) breakout + 1w HMA(21) trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA trend capture strong continuation moves with minimal overtrading. Volume confirmation filters false breakouts. Weekly HMA provides robust trend filter that works in both bull (price > HMA) and bear (price < HMA) markets. Targets 30-100 trades over 4 years to minimize fee drag. ATR-based trailing stop manages risk. Uses discrete position sizing (0.25).
+Experiment #5804: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation + ATR stoploss
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly HMA(21) trend capture strong continuation moves in both bull and bear markets. Volume confirmation filters false breakouts. ATR-based trailing stop manages risk. Uses discrete position sizing (0.25) to minimize fee churn. Targets 30-100 trades over 4 years. Works in bull markets (breakouts with trend) and avoids false signals in bear via weekly HMA regime filter.
 """
 
 import numpy as np
@@ -26,16 +26,16 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     if len(df_1w) >= 21:
         # Calculate HMA(21) on weekly close
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        wma_half = pd.Series(df_1w['close'].values).ewm(span=half_len, adjust=False).mean().values
+        half_length = 21 // 2
+        sqrt_length = int(np.sqrt(21))
+        wma_half = pd.Series(df_1w['close'].values).ewm(span=half_length, adjust=False).mean().values
         wma_full = pd.Series(df_1w['close'].values).ewm(span=21, adjust=False).mean().values
         hma_21 = 2 * wma_half - wma_full
-        hma_21 = pd.Series(hma_21).ewm(span=sqrt_len, adjust=False).mean().values
+        hma_21 = pd.Series(hma_21).ewm(span=sqrt_length, adjust=False).mean().values
     else:
         hma_21 = np.full(len(df_1w), np.nan)
     
-    # Align 1w HMA(21) to 1d timeframe (shifted by 1 for completed 1w bars only)
+    # Align 1w HMA(21) to 1d timeframe (shifted by 1 for completed weekly bars only)
     hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
     
     # === 1d Indicators: Donchian Channel (20-period) ===
