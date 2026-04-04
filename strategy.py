@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
 """
-exp_6694_1h_trend_follow_4h_ema_v1
-Hypothesis: 1h timeframe strategy using 4h EMA for trend direction and 1h EMA crossovers for entry timing.
-Uses 4h EMA21 as primary trend filter (bullish when price > EMA21, bearish when price < EMA21).
-Entries occur on 1h when EMA9 crosses above/below EMA21 in the direction of the 4h trend.
-Volume confirmation (1.5x 20-period volume MA) reduces false breakouts.
-Session filter (08-20 UTC) avoids low-liquidity periods.
-Fixed position size of 0.20 to control risk and minimize fee churn.
-Designed to capture medium-term trends while minimizing trades (target: 60-150 over 4 years).
-Works in both bull and bear markets by following the 4h trend direction.
+exp_6696_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
+Uses 20-bar Donchian channels on 12h for breakout entries, filtered by 1-day EMA50 trend direction.
+Volume confirmation ensures breakouts have participation. ATR-based stoploss manages risk.
+Designed for 12h timeframe to capture medium-term swings with low frequency (target: 12-37 trades/year).
+Works in both bull and bear markets by following the 1-day trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6694_1h_trend_follow_4h_ema_v1"
-timeframe = "1h"
+name = "exp_6696_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-FAST_EMA = 9
-SLOW_EMA = 21
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+VOL_BASE_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
@@ -33,13 +30,13 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 4h for trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Load HTF data ONCE before loop - using 1d for EMA trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA21 for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=SLOW_EMA, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)  # auto shift(1)
+    # Calculate 1-day EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -47,9 +44,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Fast and slow EMA on 1h
-    ema_fast = pd.Series(close).ewm(span=FAST_EMA, adjust=False).mean().values
-    ema_slow = pd.Series(close).ewm(span=SLOW_EMA, adjust=False).mean().values
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
@@ -59,35 +56,20 @@ def generate_signals(prices):
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=ATR_PERIOD, adjust=False).mean().values
-    
-    # Pre-compute session filter (08-20 UTC)
-    # open_time is already datetime64[ms], use DatetimeIndex for .hour
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(SLOW_EMA, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE  # hold position outside session
-            else:
-                signals[i] = 0.0
-            continue
-            
-        # Skip if HTF data not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
+        # Skip if indicators not ready
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
         # Check stoploss
@@ -101,29 +83,25 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 continue
-        
-        # Determine 4h trend direction
-        # Bullish trend: price above 4h EMA21
-        # Bearish trend: price below 4h EMA21
-        bullish_trend = close[i] > ema_4h_aligned[i]
-        bearish_trend = close[i] < ema_4h_aligned[i]
-        
-        # EMA crossover signals on 1h
-        # Golden cross: fast EMA crosses above slow EMA
-        # Death cross: fast EMA crosses below slow EMA
-        golden_cross = ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]
-        death_cross = ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]
-        
+                
         # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma[i] * VOLUME_THRESHOLD
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        
+        # Determine trend direction from 1-day EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
+        
+        # Donchian breakout signals
+        long_breakout = close[i] > highest_high[i] and vol_confirmed
+        short_breakout = close[i] < lowest_low[i] and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if bullish_trend and golden_cross and vol_confirmed:
+            if long_breakout and uptrend:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-            elif bearish_trend and death_cross and vol_confirmed:
+            elif short_breakout and downtrend:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -134,3 +112,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
