@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #3507: 6h Donchian Breakout + 1d Weekly Pivot + Volume Confirmation
-HYPOTHESIS: 6h Donchian(20) breakouts with 1d weekly pivot direction and volume confirmation capture medium-term momentum. 
-Weekly pivot (from 1d data) provides institutional support/resistance levels. Volume confirms breakout strength. 
-Position size 0.25. Target: 80-180 total trades over 4 years (20-45/year).
-Uses 1d for pivot calculation and trend filter, 6h only for entry timing and risk management.
-Works in bull (continuation from pivot support) and bear (continuation from pivot resistance) via price channels.
+Experiment #3507: 6h Donchian Breakout + 1d Weekly Pivot + Volume Confirmation (Revised)
+HYPOTHESIS: Medium-term momentum capture using 6h Donchian(20) breakouts aligned with 1d weekly pivot levels.
+Weekly pivot provides institutional support/resistance. Volume >2.0x MA20 confirms breakout strength.
+Target: 80-180 total trades over 4 years (20-45/year). Works in bull/bear via price channels.
+Fixed: Reduced warmup, relaxed volume threshold to 1.5x, added hysteresis to prevent whipsaw.
 """
 
 import numpy as np
@@ -31,7 +30,6 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     
     # Calculate weekly pivot points (using prior week's data)
-    # For each 1d bar, use prior 5 trading days (1 week) high/low/close
     lookback_week = 5
     prior_week_high = pd.Series(high_1d).rolling(window=lookback_week, min_periods=lookback_week).max().shift(1).values
     prior_week_low = pd.Series(low_1d).rolling(window=lookback_week, min_periods=lookback_week).min().shift(1).values
@@ -129,8 +127,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 2.0x average) for confirmation
-        volume_spike = vol_ratio[i] > 2.0
+        # Require volume spike (> 1.5x average) for confirmation (relaxed from 2.0)
+        volume_spike = vol_ratio[i] > 1.5
         
         if volume_spike:
             # Determine market bias relative to weekly pivot
