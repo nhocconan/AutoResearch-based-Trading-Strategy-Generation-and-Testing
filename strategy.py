@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #6090: 1d Donchian(20) breakout + 1w EMA50 trend + volume confirmation + ATR stoploss
-HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA50 direction capture major swing moves with proper structure.
-Weekly EMA50 provides strong trend filter: price above EMA50 = bullish regime, below = bearish regime.
-Volume >1.5x average confirms institutional participation. Works in bull markets (breakouts above rising EMA50)
-and bear markets (breakdowns below falling EMA50) by only taking trades in trend direction.
+Experiment #6090: 1d Donchian(20) breakout + 1w EMA50 trend + volume confirmation + ATR trailing stop
+HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA50 direction capture major swing moves with proper structure. 
+Weekly EMA50 provides strong trend filter: price above EMA50 = bullish regime, below = bearish regime. 
+Volume >1.5x average confirms institutional participation. Works in bull markets (breakouts above rising EMA50) 
+and bear markets (breakdowns below falling EMA50) by only taking trades in trend direction. 
 Target: 30-100 trades over 4 years (7-25/year). Discrete sizing (0.25) minimizes fee drag.
 """
 
@@ -42,7 +42,7 @@ def generate_signals(prices):
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 1d Indicators: ATR(14) for stoploss ===
+    # === 1d Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
