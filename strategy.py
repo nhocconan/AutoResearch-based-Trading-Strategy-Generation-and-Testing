@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4514: 1h Donchian(20) Breakout + 4h HMA(21) Trend + Volume Confirmation
-HYPOTHESIS: 1h Donchian(20) breakouts aligned with 4h HMA(21) trend direction and confirmed by volume (>1.5x average) capture medium-term momentum with reduced noise. The 4h HMA provides a higher timeframe trend filter to avoid counter-trend trades, while volume confirmation ensures breakout conviction. Designed for 1h timeframe to target 60-150 total trades over 4 years (15-37/year) with position size 0.20. Session filter (08-20 UTC) reduces noise. Works in both bull and bear markets by only trading in direction of 4h HMA trend.
+Experiment #4514: 1h Donchian(20) Breakout + 4h/1d EMA Trend + Volume Confirmation + Session Filter
+HYPOTHESIS: 1h Donchian(20) breakouts aligned with 4h EMA(50) and 1d EMA(200) trend direction, confirmed by volume (>1.8x average) and restricted to active session (08-20 UTC), capture medium-term momentum while minimizing noise. Using higher timeframes (4h/1d) for signal direction prevents counter-trend trades, and volume confirmation ensures breakout conviction. Designed for 1h timeframe to target 60-150 total trades over 4 years (15-37/year) with position size 0.20. Works in both bull and bear markets by only trading in direction of higher timeframe EMAs.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4514_1h_donchian20_4h_hma_vol_v1"
+name = "exp_4514_1h_donchian20_4h_1d_ema_vol_session_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -17,27 +17,25 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # Precompute session hours once (open_time is already datetime64[ms])
-    hours = pd.DatetimeIndex(open_time).hour
-    
-    # Precompute HTF: 4h data for HMA(21)
+    # Precompute HTF: 4h data for EMA(50)
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) >= 21:
+    if len(df_4h) >= 50:
         close_4h = pd.Series(df_4h['close'].values)
-        # HMA(21) = WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
-        half_len = 21 // 2
-        sqrt_len = int(np.sqrt(21))
-        wma_half = close_4h.rolling(window=half_len, min_periods=half_len).mean()
-        wma_full = close_4h.rolling(window=21, min_periods=21).mean()
-        raw_hma = 2 * wma_half - wma_full
-        hma_4h = raw_hma.rolling(window=sqrt_len, min_periods=sqrt_len).mean()
-        hma_4h_vals = hma_4h.values
-        hma_4h_aligned = align_htf_to_ltf(prices, df_4h, hma_4h_vals)
+        ema_4h = close_4h.ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     else:
-        hma_4h_aligned = np.full(n, np.nan)
+        ema_4h_aligned = np.full(n, np.nan)
+    
+    # Precompute HTF: 1d data for EMA(200)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 200:
+        close_1d = pd.Series(df_1d['close'].values)
+        ema_1d = close_1d.ewm(span=200, min_periods=200, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    else:
+        ema_1d_aligned = np.full(n, np.nan)
     
     # === 1h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
@@ -57,6 +55,11 @@ def generate_signals(prices):
     tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
     atr = pd.Series(tr).ewm(span=14, min_periods=14, adjust=False).mean().values
     
+    # === Session filter: 08-20 UTC (active trading hours) ===
+    # open_time is already datetime64[ms], use DatetimeIndex for .hour
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     # === Signals Initialization ===
     signals = np.zeros(n)
     SIZE = 0.20  # 20% position size
@@ -68,17 +71,17 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21)  # Donchian, vol MA, ATR, 4h HMA data
+    warmup = max(20, 20, 14, 50, 200)  # Donchian, vol MA, ATR, 4h EMA, 1d EMA
     
     for i in range(warmup, n):
-        # --- Session Filter: 08-20 UTC ---
-        if not (8 <= hours[i] <= 20):
+        # --- Data Validity Check ---
+        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
+            np.isnan(atr[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
-        # --- Data Validity Check ---
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(hma_4h_aligned[i])):
+        # --- Session Check ---
+        if not in_session[i]:
             signals[i] = 0.0
             continue
         
@@ -108,21 +111,21 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.5x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.5
+        # Require volume confirmation (> 1.8x average) to filter noise
+        volume_confirm = vol_ratio[i] > 1.8
         
-        # 4h HMA trend: price above HMA = uptrend, below = downtrend
-        uptrend = price > hma_4h_aligned[i]
-        downtrend = price < hma_4h_aligned[i]
+        # Higher timeframe trend: price above both EMAs = uptrend, below both = downtrend
+        uptrend = price > ema_4h_aligned[i] and price > ema_1d_aligned[i]
+        downtrend = price < ema_4h_aligned[i] and price < ema_1d_aligned[i]
         
         # Donchian breakout conditions (using previous bar's levels to avoid look-ahead)
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
         breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
         
-        # Long conditions: upward breakout + uptrend + volume
+        # Long conditions: upward breakout + uptrend + volume + session
         long_entry = breakout_up and uptrend and volume_confirm
         
-        # Short conditions: downward breakout + downtrend + volume
+        # Short conditions: downward breakout + downtrend + volume + session
         short_entry = breakout_down and downtrend and volume_confirm
         
         if long_entry:
