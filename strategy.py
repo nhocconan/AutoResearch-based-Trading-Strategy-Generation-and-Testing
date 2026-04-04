@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #3953: 4h Donchian(20) breakout + 12h HMA(21) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h HMA-21 trend capture major swings with moderate frequency. Volume > 1.8x MA(20) confirms strength. ATR(14) trailing stop (2.0x) manages risk. Discrete sizing (0.30) balances return and fees. Target: 75-200 trades over 4 years (19-50/year). Works in bull/bear via 12h HMA-21 trend filter.
+Experiment #3954: 1h Donchian(20) breakout + 4h EMA-50 + 1d EMA-200 trend filter
+HYPOTHESIS: 1h Donchian breakouts aligned with 4h EMA-50 (trend) and 1d EMA-200 (regime) capture swings with optimal frequency. Volume > 1.3x MA(20) confirms strength. ATR(14) trailing stop (2.0x) manages risk. Session filter (08-20 UTC) reduces noise. Discrete sizing (0.20) minimizes fee drag. Target: 60-150 trades over 4 years (15-37/year). Works in bull/bear via multi-timeframe trend alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3953_4h_donchian20_12h_hma21_vol_v1"
-timeframe = "4h"
+name = "exp_3954_1h_donchian20_4h_ema50_1d_ema200_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,40 +17,35 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
+    open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 12h data for HMA-21 trend ===
-    df_12h = get_htf_data(prices, '12h')
-    hma_period = 21
-    # Calculate HMA: WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
-    half_period = hma_period // 2
-    sqrt_period = int(np.sqrt(hma_period))
+    # Pre-compute session hours for efficiency
+    hours = pd.DatetimeIndex(open_time).hour
     
-    def wma(values, period):
-        if period <= 0:
-            return np.full_like(values, np.nan)
-        weights = np.arange(1, period + 1)
-        return np.convolve(values, weights, mode='full')[-len(values):] / weights.sum()
+    # === HTF: 4h data for EMA-50 trend ===
+    df_4h = get_htf_data(prices, '4h')
+    ema_4h_period = 50
+    ema_4h_values = pd.Series(df_4h['close'].values).ewm(span=ema_4h_period, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_values)
     
-    # Pre-calculate HMA values
-    close_12h = df_12h['close'].values.astype(np.float64)
-    wma_half = wma(close_12h, half_period)
-    wma_full = wma(close_12h, hma_period)
-    hma_raw = 2 * wma_half - wma_full
-    hma_values = wma(hma_raw, sqrt_period)
-    hma_aligned = align_htf_to_ltf(prices, df_12h, hma_values)
+    # === HTF: 1d data for EMA-200 regime filter ===
+    df_1d = get_htf_data(prices, '1d')
+    ema_1d_period = 200
+    ema_1d_values = pd.Series(df_1d['close'].values).ewm(span=ema_1d_period, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_values)
     
-    # === 4h Indicators: Donchian Channel(20) for breakout ===
+    # === 1h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
     highest_high = pd.Series(high).rolling(window=lookback_dc, min_periods=lookback_dc).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_dc, min_periods=lookback_dc).min().values
     
-    # === 4h Indicators: Volume MA(20) for spike detection ===
+    # === 1h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 1h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -59,7 +54,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.30  # 30% position size
+    SIZE = 0.20  # 20% position size
     
     # Position tracking state variables
     in_position = False
@@ -68,12 +63,19 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20, hma_period)
+    warmup = max(lookback_dc + 1, 20, ema_4h_period, ema_1d_period)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(hma_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            signals[i] = 0.0
+            continue
+        
+        # --- Session Filter: 08-20 UTC ---
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             signals[i] = 0.0
             continue
         
@@ -113,18 +115,22 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.8x average) to filter noise
-        volume_spike = vol_ratio[i] > 1.8
+        # Require volume spike (> 1.3x average) to filter noise
+        volume_spike = vol_ratio[i] > 1.3
         
         if volume_spike:
-            # Determine trend: bullish if price above 12h HMA-21, bearish if below
-            bullish = price > hma_aligned[i]
-            bearish = price < hma_aligned[i]
+            # Determine 4h trend: bullish if price above 4h EMA-50, bearish if below
+            bullish_4h = price > ema_4h_aligned[i]
+            bearish_4h = price < ema_4h_aligned[i]
             
-            # Long entry: breakout above Donchian upper band in bullish regime
-            long_breakout = price > highest_high[i-1] and bullish
-            # Short entry: breakdown below Donchian lower band in bearish regime
-            short_breakout = price < lowest_low[i-1] and bearish
+            # Determine 1d regime: bullish if price above 1d EMA-200, bearish if below
+            bullish_1d = price > ema_1d_aligned[i]
+            bearish_1d = price < ema_1d_aligned[i]
+            
+            # Long entry: breakout above Donchian upper band in bullish 4h trend AND bullish 1d regime
+            long_breakout = price > highest_high[i-1] and bullish_4h and bullish_1d
+            # Short entry: breakdown below Donchian lower band in bearish 4h trend AND bearish 1d regime
+            short_breakout = price < lowest_low[i-1] and bearish_4h and bearish_1d
             
             if long_breakout and not short_breakout:
                 in_position = True
