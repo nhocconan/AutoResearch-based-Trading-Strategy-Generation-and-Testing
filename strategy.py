@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #2301: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
+Experiment #2300: 4h Donchian(20) breakout + 1d HMA trend + volume confirmation + ATR stoploss
 HYPOTHESIS: Donchian channel breakouts on 4h timeframe capture swing momentum with daily trend filter.
 - Primary: 4h Donchian(20) breakout with volume > 1.8x 20-bar average (strict to limit trades)
 - HTF: 1d HMA(21) trend filter (only trade in direction of higher timeframe trend)
@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2301_4h_donchian20_1d_hma_vol_v1"
+name = "exp_2300_4h_donchian20_1d_hma_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
