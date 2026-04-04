@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-exp_6556_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA50 as trend filter and volume confirmation.
+exp_6557_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 1d EMA50 as trend filter and volume confirmation.
 Uses 1d EMA50 for long-term trend identification that adapts to both bull/bear markets.
 Volume spike (2.0x 20-period MA) confirms breakout strength.
-Designed for 50-150 total trades over 4 years with discrete sizing (0.25) to minimize fee drag.
+Designed for 75-200 total trades over 4 years with discrete sizing (0.25) to minimize fee drag.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6556_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_6557_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -34,7 +34,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False).mean().values
     
-    # Align to LTF (12h) with shift(1) for completed bars only
+    # Align to LTF (4h) with shift(1) for completed bars only
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
