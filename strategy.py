@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #3062: 12h Donchian Breakout + Daily Pivot Direction + Volume Spike
-HYPOTHESIS: 12h Donchian(20) breakouts capture medium-term trends with lower trade frequency than 4h/6h. 
-Daily pivot direction (price vs 1d Camarilla pivot) filters for institutional bias: only take longs when 
-price > daily pivot (bullish bias), shorts when price < daily pivot (bearish bias). Volume spike (>2.0x 
-20-period average) confirms breakout strength. ATR-based trailing stop (2.5x) manages risk. Target: 
-50-150 total trades over 4 years (12-37/year). Designed to work in both bull (trend continuation) and 
-bear (mean reversion from extremes) markets by using price channels and volatility filters.
+Experiment #3063: 4h Donchian Breakout + 12h HMA Trend + Volume Spike + ATR Stop
+HYPOTHESIS: 4h Donchian(20) breakouts capture intermediate trends with controlled trade frequency. 
+12h HMA(21) confirms medium-term trend direction to avoid counter-trend entries. Volume spike (>2.0x 
+20-period average) validates breakout strength. ATR-based trailing stop (2.5x) manages risk. 
+Target: 75-200 total trades over 4 years (19-50/year). Works in bull markets via trend continuation 
+and in bear markets by avoiding false breakouts during reversals (HTF trend filter).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3062_12h_donchian20_1d_pivot_vol_v1"
-timeframe = "12h"
+name = "exp_3063_4h_donchian20_12h_hma_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,36 +23,36 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for daily pivot calculation (Call ONCE before loop) ===
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # === HTF: 12h data for HMA trend filter (Call ONCE before loop) ===
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate Daily Camarilla Pivot (based on previous day)
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Camarilla levels: R4 = P + 1.5*(H-L), S4 = P - 1.5*(H-L)
-    range_1d = high_1d - low_1d
-    r4_1d = pivot_1d + 1.5 * range_1d
-    s4_1d = pivot_1d - 1.5 * range_1d
+    # Calculate HMA(21) on 12h timeframe
+    def hma(series, period):
+        if len(series) < period:
+            return np.full_like(series, np.nan)
+        half_period = period // 2
+        sqrt_period = int(np.sqrt(period))
+        wma1 = pd.Series(series).ewm(span=half_period, adjust=False).mean().values
+        wma2 = pd.Series(series).ewm(span=period, adjust=False).mean().values
+        raw_hma = 2 * wma1 - wma2
+        hma_vals = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False).mean().values
+        return hma_vals
     
-    # Align 1d levels to 12h timeframe (shifted by 1 bar for completed day only)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    hma_12h = hma(close_12h, 21)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # === 12h Indicators: Donchian channels (20-period) ===
+    # === 4h Indicators: Donchian channels (20-period) ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # === 12h Indicators: Volume MA(20) for spike detection ===
+    # === 4h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 12h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 4h Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -76,8 +75,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(pivot_1d_aligned[i]) or np.isnan(r4_1d_aligned[i]) or
-            np.isnan(s4_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(hma_12h_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -121,19 +119,19 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Daily pivot bias: only long above pivot, short below pivot
-            price_vs_pivot = price - pivot_1d_aligned[i]
+            # HTF trend filter: only long when price > 12h HMA, short when price < 12h HMA
+            price_vs_hma = price - hma_12h_aligned[i]
             
-            # Long entry: price breaks above Donchian high with bullish daily bias
-            if price > highest_high[i] and price_vs_pivot > 0:
+            # Long entry: price breaks above Donchian high with bullish HTF trend
+            if price > highest_high[i] and price_vs_hma > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with bearish daily bias
-            elif price < lowest_low[i] and price_vs_pivot < 0:
+            # Short entry: price breaks below Donchian low with bearish HTF trend
+            elif price < lowest_low[i] and price_vs_hma < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
