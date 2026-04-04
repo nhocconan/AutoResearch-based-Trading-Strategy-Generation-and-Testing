@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #5051: 6h Elder Ray + 1d ADX Regime Filter + Volume Confirmation
-HYPOTHESIS: On 6h timeframe, Elder Ray (Bull Power/Bear Power) combined with 1d ADX regime filter captures trend strength with institutional confirmation. ADX > 25 on 1d filters for trending regimes (works in both bull/bear markets), while Elder Ray identifies exhaustion points. Volume > 1.5x average confirms participation. ATR-based trailing stop (2.0x) manages risk. Targets 12-37 trades/year on 6h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets via long signals when Bull Power > 0 and ADX trending, and in bear markets via short signals when Bear Power < 0 and ADX trending.
+Experiment #5052: 12h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Spike + ATR Stoploss
+HYPOTHESIS: On 12h timeframe, Donchian(20) breakouts aligned with weekly pivot levels (from 1d HTF) capture strong momentum with lower frequency. Weekly pivot acts as regime filter: R3/S3 for mean reversion, R4/S4 for breakout confirmation. Volume > 2x average confirms institutional participation. ATR(14) trailing stop (2.5x) manages risk. Designed for 12-37 trades/year on 12h timeframe to minimize fee drag while maintaining statistical significance. Weekly pivot provides structural support/resistance that works in both bull (breakouts through R4) and bear (breakdowns through S4) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5051_6h_elder_ray_1d_adx_regime_vol_v1"
-timeframe = "6h"
+name = "exp_5052_12h_donchian20_1d_weekly_pivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,56 +19,65 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for ADX regime filter
+    # Precompute HTF: 1d data for weekly pivot levels
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d Indicators: ADX(14) for regime filter ===
-    if len(df_1d) >= 14:
-        # True Range
-        tr1 = df_1d['high'][1:] - df_1d['low'][1:]
-        tr2 = np.abs(df_1d['high'][1:] - df_1d['close'][:-1])
-        tr3 = np.abs(df_1d['low'][1:] - df_1d['close'][:-1])
-        tr_1d = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    # === 1d Indicators: Weekly Pivot Points (using prior week's OHLC) ===
+    if len(df_1d) >= 5:  # Need at least a week of data
+        # Calculate weekly OHLC from daily data
+        # We'll use rolling window of 5 days to approximate weekly OHLC
+        # For true weekly pivot, we need prior week's H, L, C
+        high_5d = pd.Series(high).rolling(window=5, min_periods=5).max().values
+        low_5d = pd.Series(low).rolling(window=5, min_periods=5).min().values
+        close_5d = pd.Series(close).rolling(window=5, min_periods=5).last().values
         
-        # Directional Movement
-        dm_plus = np.where((df_1d['high'][1:] - df_1d['high'][:-1]) > (df_1d['low'][:-1] - df_1d['low'][1:]),
-                           np.maximum(df_1d['high'][1:] - df_1d['high'][:-1], 0), 0)
-        dm_plus = np.concatenate([[0], dm_plus])
-        dm_minus = np.where((df_1d['low'][:-1] - df_1d['low'][1:]) > (df_1d['high'][1:] - df_1d['high'][:-1]),
-                            np.maximum(df_1d['low'][:-1] - df_1d['low'][1:], 0), 0)
-        dm_minus = np.concatenate([[0], dm_minus])
+        # Weekly Pivot Point = (Prior Week H + L + C) / 3
+        pp = (high_5d + low_5d + close_5d) / 3.0
         
-        # Smoothed TR, DM+
-        tr_smooth = pd.Series(tr_1d).ewm(span=14, min_periods=14, adjust=False).mean().values
-        dm_plus_smooth = pd.Series(dm_plus).ewm(span=14, min_periods=14, adjust=False).mean().values
-        dm_minus_smooth = pd.Series(dm_minus).ewm(span=14, min_periods=14, adjust=False).mean().values
+        # Weekly Support/Resistance Levels
+        # R1 = (2 * PP) - Prior Week L
+        # S1 = (2 * PP) - Prior Week H
+        # R2 = PP + (Prior Week H - Prior Week L)
+        # S2 = PP - (Prior Week H - Prior Week L)
+        # R3 = Prior Week H + 2*(PP - Prior Week L)
+        # S3 = Prior Week L - 2*(Prior Week H - PP)
+        # R4 = PP + 3*(Prior Week H - Prior Week L)
+        # S4 = PP - 3*(Prior Week H - Prior Week L)
+        rng = high_5d - low_5d
+        r1 = (2 * pp) - low_5d
+        s1 = (2 * pp) - high_5d
+        r2 = pp + rng
+        s2 = pp - rng
+        r3 = high_5d + 2 * (pp - low_5d)
+        s3 = low_5d - 2 * (high_5d - pp)
+        r4 = pp + 3 * rng
+        s4 = pp - 3 * rng
         
-        # DI+ and DI-
-        di_plus = 100 * dm_plus_smooth / tr_smooth
-        di_minus = 100 * dm_minus_smooth / tr_smooth
-        
-        # DX and ADX
-        dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-        adx = pd.Series(dx).ewm(span=14, min_periods=14, adjust=False).mean().values
-        
-        # Align to 6h timeframe
-        adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+        # For breakout confirmation, we'll use R4/S4 levels
+        # For mean reversion fade, we'll use R3/S3 levels
+        # Align to 12h timeframe
+        pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+        r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+        s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+        r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+        s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     else:
-        adx_aligned = np.full(n, np.nan)
+        pp_aligned = np.full(n, np.nan)
+        r3_aligned = np.full(n, np.nan)
+        s3_aligned = np.full(n, np.nan)
+        r4_aligned = np.full(n, np.nan)
+        s4_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Elder Ray (Bull Power/Bear Power) ===
-    # Bull Power = High - EMA(13)
-    # Bear Power = Low - EMA(13)
-    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # === 12h Indicators: Donchian(20) channels ===
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation (1.5x spike) ===
+    # === 12h Indicators: Volume confirmation (2x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 6h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -86,12 +95,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(13, 20, 14, 14)  # EMA13, Volume MA, ATR, ADX warmup
+    warmup = max(20, 20, 14)  # Donchian, Volume MA, ATR warmup
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+            np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -102,8 +112,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -111,8 +121,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -121,27 +131,31 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>1.5x)
-        vol_confirm = vol_ratio[i] > 1.5
+        # Volume filter: confirmation (>2.0x)
+        vol_confirm = vol_ratio[i] > 2.0
         
-        # Regime filter: ADX > 25 indicates trending market
-        trending_regime = adx_aligned[i] > 25
+        # Donchian breakout conditions with weekly pivot alignment
+        # Long: Donchian breakout above R4 (strong breakout) OR above R3 with volume (mean reversion fail)
+        # Short: Donchian breakdown below S4 (strong breakdown) OR below S3 with volume (mean reversion fail)
+        breakout_long = ((price >= high_roll[i]) and 
+                        ((price >= r4_aligned[i]) or  # Strong breakout through weekly R4
+                         ((price >= r3_aligned[i]) and vol_confirm)) and  # Fade failure at R3 with volume
+                        vol_confirm)
         
-        # Elder Ray conditions
-        # Long: Bull Power > 0 (bulls in control) + trending regime + volume
-        # Short: Bear Power < 0 (bears in control) + trending regime + volume
-        long_signal = (bull_power[i] > 0) and trending_regime and vol_confirm
-        short_signal = (bear_power[i] < 0) and trending_regime and vol_confirm
+        breakout_short = ((price <= low_roll[i]) and 
+                         ((price <= s4_aligned[i]) or  # Strong breakdown through weekly S4
+                          ((price <= s3_aligned[i]) and vol_confirm)) and  # Fade failure at S3 with volume
+                         vol_confirm)
         
         # Final entry conditions
-        if long_signal:
+        if breakout_long:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif short_signal:
+        elif breakout_short:
             in_position = True
             position_side = -1
             entry_price = close[i]
