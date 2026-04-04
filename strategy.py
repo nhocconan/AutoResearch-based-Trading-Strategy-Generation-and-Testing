@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #5501: 4h Donchian(20) breakout + 1d EMA200 trend + volume confirmation
-HYPOTHESIS: On 4h timeframe, price breaking above/below the 20-period Donchian channel with 
+Experiment #5502: 12h Donchian(20) breakout + 1d EMA200 trend + volume confirmation
+HYPOTHESIS: On 12h timeframe, price breaking above/below the 20-period Donchian channel with 
 volume > 1.8x average and aligned with 1-day EMA200 trend captures strong momentum moves 
 while avoiding false breakouts. The 1d EMA200 provides long-term trend filter (more stable 
 than shorter EMAs), reducing whipsaws in both bull and bear markets. Discrete position sizing 
-(0.25) and ATR-based stoploss (2.0x ATR) control risk. Target: 19-50 trades/year (75-200 total 
+(0.25) and ATR-based stoploss (2.0x ATR) control risk. Target: 12-37 trades/year (50-150 total 
 over 4 years) to minimize fee drag while maintaining statistical significance. Works in bull 
 markets via breakouts above rising EMA200 alignment and in bear markets via short breakdowns 
 below falling EMA200 alignment.
@@ -15,8 +15,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5501_4h_donchian20_1d_ema200_vol_v1"
-timeframe = "4h"
+name = "exp_5502_12h_donchian20_1d_ema200_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,7 +34,7 @@ def generate_signals(prices):
     if len(df_1d) >= 200:
         # Calculate EMA200 on 1d close
         ema_200 = pd.Series(df_1d['close']).ewm(span=200, min_periods=200, adjust=False).mean().values
-        # Align to LTF (4h) with shift(1) for completed bars only
+        # Align to LTF (12h) with shift(1) for completed bars only
         ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
         # EMA trend: price above EMA200 = bullish, below = bearish
         price_above_ema = close > ema_200_aligned
@@ -44,18 +44,18 @@ def generate_signals(prices):
         price_above_ema = np.full(n, False)
         price_below_ema = np.full(n, False)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === 12h Indicators: Donchian Channel (20-period) ===
     # Upper band: 20-period high
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     # Lower band: 20-period low
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation ===
+    # === 12h Indicators: Volume confirmation ===
     # Average volume over 20 periods
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)  # Avoid division by zero
     
-    # === 4h Indicators: ATR(14) for stoploss ===
+    # === 12h Indicators: ATR(14) for stoploss ===
     # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
