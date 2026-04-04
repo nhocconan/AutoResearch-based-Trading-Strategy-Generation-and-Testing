@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #5629: 4h Donchian(20) breakout + 1d EMA200 trend + volume confirmation
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts with volume > 2.0x average and aligned 
-with 1d EMA200 trend (price > EMA200 = long bias, price < EMA200 = short bias) capture 
-high-probability trend continuation moves in both bull and bear markets. The 1d EMA200 
-provides a robust institutional trend filter that avoids counter-trend whipsaws. Volume 
+Experiment #5631: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation
+HYPOTHESIS: On 6h timeframe, Donchian(20) breakouts with volume > 1.8x average and aligned 
+with 1d weekly pivot bias (price > weekly pivot = long bias, price < weekly pivot = short bias) 
+capture high-probability trend continuation moves. The weekly pivot from 1d timeframe provides 
+institutional support/resistance levels that work in both bull and bear markets. Volume 
 confirmation validates breakout strength. ATR-based trailing stop (2.0x ATR) manages risk. 
-Discrete position sizing (0.25) minimizes fee churn. Target: 19-50 trades/year (75-200 total over 4 years).
+Discrete position sizing (0.25) minimizes fee churn. Target: 12-37 trades/year (50-150 total over 4 years).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5629_4h_donchian20_1d_ema200_vol_v1"
-timeframe = "4h"
+name = "exp_5631_6h_donchian20_1d_weekly_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,26 +27,39 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for EMA200 trend ===
+    # === HTF: 1d data for weekly pivot calculation ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 200:
-        close_1d = pd.Series(df_1d['close'].values)
-        ema200_1d = close_1d.ewm(span=200, min_periods=200, adjust=False).mean().values
+    if len(df_1d) >= 5:
+        # Calculate weekly pivot points (using prior week's OHLC)
+        # Weekly high, low, close from prior completed week
+        weekly_high = pd.Series(df_1d['high'].values).rolling(window=5, min_periods=5).max().shift(1)  # prior week
+        weekly_low = pd.Series(df_1d['low'].values).rolling(window=5, min_periods=5).min().shift(1)   # prior week
+        weekly_close = pd.Series(df_1d['close'].values).rolling(window=5, min_periods=5).last().shift(1) # prior week
+        
+        # Weekly pivot = (H + L + C) / 3
+        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+        # Weekly R1 = 2*P - L, S1 = 2*P - H
+        weekly_r1 = 2 * weekly_pivot - weekly_low
+        weekly_s1 = 2 * weekly_pivot - weekly_high
     else:
-        ema200_1d = np.full(len(df_1d), np.nan)
+        weekly_pivot = np.full(len(df_1d), np.nan)
+        weekly_r1 = np.full(len(df_1d), np.nan)
+        weekly_s1 = np.full(len(df_1d), np.nan)
     
-    # Align 1d EMA200 to 4h timeframe
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Align 1d weekly pivot levels to 6h timeframe
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot.values)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_1d, weekly_r1.values)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_1d, weekly_s1.values)
     
-    # === 4h Indicators: Donchian Channel (20-period) ===
+    # === 6h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation ===
+    # === 6h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 4h Indicators: ATR(14) for trailing stop ===
+    # === 6h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -65,7 +78,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 200)  # Donchian, volume avg, ATR, EMA200
+    warmup = max(20, 20, 14, 5)  # Donchian, volume avg, ATR, weekly lookback
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -77,7 +90,8 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema200_1d_aligned[i])):
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or
+            np.isnan(weekly_s1_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -88,8 +102,8 @@ def generate_signals(prices):
             if position_side > 0:  # Long position
                 highest_since_entry = max(highest_since_entry, high[i])
                 stop_price = highest_since_entry - 2.0 * atr[i]
-                # Exit: stoploss OR price breaks below EMA200 (trend reversal)
-                if price <= stop_price or price <= ema200_1d_aligned[i]:
+                # Exit: stoploss OR price breaks below weekly S1 (support)
+                if price <= stop_price or price <= weekly_s1_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -98,8 +112,8 @@ def generate_signals(prices):
             else:  # Short position
                 lowest_since_entry = min(lowest_since_entry, low[i])
                 stop_price = lowest_since_entry + 2.0 * atr[i]
-                # Exit: stoploss OR price breaks above EMA200 (trend reversal)
-                if price >= stop_price or price >= ema200_1d_aligned[i]:
+                # Exit: stoploss OR price breaks above weekly R1 (resistance)
+                if price >= stop_price or price >= weekly_r1_aligned[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -110,13 +124,13 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 2.0
+        volume_confirmed = volume_ratio[i] > 1.8
         
-        # EMA200 bias: long above EMA200, short below EMA200
-        long_bias = price > ema200_1d_aligned[i]
-        short_bias = price < ema200_1d_aligned[i]
+        # Pivot bias: long above weekly pivot, short below weekly pivot
+        long_bias = price > weekly_pivot_aligned[i]
+        short_bias = price < weekly_pivot_aligned[i]
         
-        # Entry conditions: breakout in direction of EMA200 trend with volume
+        # Entry conditions: breakout in direction of pivot bias with volume
         long_setup = breakout_up and volume_confirmed and long_bias
         short_setup = breakout_down and volume_confirmed and short_bias
         
@@ -138,5 +152,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
