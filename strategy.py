@@ -2,9 +2,9 @@
 """
 Experiment #2778: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
 HYPOTHESIS: Daily Donchian breakouts aligned with weekly EMA trend and volume spikes capture
-strong momentum moves while avoiding whipsaws. Uses 1d for entry/exit timing, 1w for trend filter.
-Target: 30-100 total trades over 4 years. Works in bull via breakouts and bear via short breakdowns
-with trend filter preventing counter-trend entries. Simple 3-condition logic to minimize fee drag.
+strong momentum moves while avoiding whipsaws. Weekly trend filter provides robust bias
+that works in both bull and bear markets by only allowing trend-aligned breakouts.
+Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
 """
 
 import numpy as np
@@ -131,3 +131,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
