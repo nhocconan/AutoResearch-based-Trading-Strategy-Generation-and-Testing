@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4474: 1h Donchian(20) Breakout + 4h EMA50 Trend + Volume Confirmation
-HYPOTHESIS: 1h Donchian(20) breakouts aligned with 4h EMA50 trend direction and confirmed by volume (>1.8x average) capture momentum with controlled frequency. Using 4h EMA for structural bias reduces whipsaws in both bull and bear markets. Session filter (08-20 UTC) and position size 0.20 limit fee drag. Targets 60-150 total trades over 4 years (15-37/year).
+Experiment #4474: 1h Donchian(20) Breakout + 4h EMA20 + 1d Volume Spike + Session Filter
+HYPOTHESIS: 1h Donchian(20) breakouts aligned with 4h EMA20 trend and confirmed by 1d volume (>2.0x average) capture momentum with reduced false signals. Session filter (08-20 UTC) avoids low-liquidity hours. Uses 4h for trend bias, 1d for volume confirmation, 1h for precise entry/exit timing. Targets 60-150 total trades over 4 years (15-37/year) with position size 0.20.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4474_1h_donchian20_4h_ema50_vol_v1"
+name = "exp_4474_1h_donchian20_4h_ema20_1d_vol_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -23,25 +23,29 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 4h EMA50 for trend bias ===
+    # === Precompute HTF: 4h EMA20 for trend bias ===
     df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) >= 50:
+    if len(df_4h) >= 20:
         close_4h = pd.Series(df_4h['close'].values)
-        ema_4h = close_4h.ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_4h = close_4h.ewm(span=20, min_periods=20, adjust=False).mean().values
         ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     else:
         ema_4h_aligned = np.full(n, np.nan)
+    
+    # === Precompute HTF: 1d Volume MA(20) for confirmation ===
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 20:
+        volume_1d = pd.Series(df_1d['volume'].values)
+        vol_ma_1d = volume_1d.rolling(window=20, min_periods=20).mean().values
+        vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    else:
+        vol_ma_1d_aligned = np.full(n, np.nan)
     
     # === 1h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     donch_upper = high_series.rolling(window=20, min_periods=20).max().values
     donch_lower = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # === 1h Indicators: Volume MA(20) for confirmation ===
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_ratio = np.ones(n)
-    vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
     # === 1h Indicators: ATR(14) for stoploss ===
     tr1 = high[1:] - low[1:]
@@ -61,12 +65,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50)  # Donchian, vol MA, ATR, EMA
+    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(ema_4h_aligned[i])):
+        if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(atr[i]) or
+            np.isnan(ema_4h_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -102,8 +106,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume confirmation (> 1.8x average) to filter noise
-        volume_confirm = vol_ratio[i] > 1.8
+        # Require volume confirmation (> 2.0x average) to filter noise
+        volume_confirm = volume[i] > 2.0 * vol_ma_1d_aligned[i]
         
         # 4h EMA bias: price > EMA = long bias, price < EMA = short bias
         long_bias = price > ema_4h_aligned[i]
