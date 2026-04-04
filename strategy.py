@@ -8,7 +8,7 @@ filter to avoid counter-trend trades. Discrete position sizing (0.25) and ATR-ba
 trailing stoploss (2.5x ATR) control risk. Target: 12-37 trades/year (50-150 total 
 over 4 years) to minimize fee drag while maintaining statistical significance. 
 Works in bull markets via breakouts above rising EMA and in bear markets via short 
-breakdowns below falling EMA. Uses proper MTF data loading with get_htf_data called ONCE.
+breakdowns below falling EMA.
 """
 
 import numpy as np
@@ -157,3 +157,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
