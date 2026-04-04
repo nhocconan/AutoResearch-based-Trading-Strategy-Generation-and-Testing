@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #4123: 4h Donchian(20) breakout + 12h EMA filter + volume confirmation + ATR trailing stop
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA trend capture institutional order flow while avoiding counter-trend whipsaws. Volume confirmation filters noise. ATR trailing stop manages risk. Designed for both bull and bear markets by using 12h EMA as dynamic trend filter. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #4123: 4h Donchian(20) breakout + 12h EMA filter + volume confirmation + ATR stoploss
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA trend capture institutional order flow while avoiding counter-trend whipsaws. 12h EMA provides smoother trend filter than 1h/4h but more responsive than 1d, reducing false signals in ranging markets. Volume confirmation (>1.5x average) ensures breakouts have conviction. ATR-based trailing stop (2.0) manages risk. Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 """
 
 import numpy as np
@@ -19,11 +19,11 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h EMA50 for trend filter ===
+    # === HTF: 12h EMA21 for trend filter ===
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) >= 1:
         close_12h = df_12h['close'].values
-        ema_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_12h = pd.Series(close_12h).ewm(span=21, min_periods=21, adjust=False).mean().values
         ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     else:
         ema_12h_aligned = np.full(n, np.nan)
@@ -56,7 +56,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 10, 50 + 10)  # DC lookback, vol MA buffer, EMA buffer
+    warmup = max(lookback_dc + 1, 20 + 10, 21 + 10)  # DC lookback, vol MA buffer, EMA buffer
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
