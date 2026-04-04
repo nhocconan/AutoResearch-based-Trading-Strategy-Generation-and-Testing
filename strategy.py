@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #3161: 4h Donchian Breakout + 1d EMA Trend + Volume Spike
-HYPOTHESIS: 4h Donchian(20) breakouts with 1d EMA(50) trend filter and volume confirmation (>2.0x 20-period average) capture medium-term trends while controlling trade frequency. ATR trailing stop (2.5x) manages risk. Position size 0.25. Designed to work in both bull (trend continuation) and bear (mean reversion from extremes) markets by using price channels and volatility filters. Target: 75-200 total trades over 4 years (19-50/year).
+HYPOTHESIS: 4h Donchian(20) breakouts with 1d EMA(50) trend filter and volume confirmation (>2.0x average) 
+capture medium-term trends with controlled frequency. ATR trailing stop (2.5x) manages risk. 
+Position size 0.25. Target: 75-200 total trades over 4 years (19-50/year). Designed for both bull 
+(trend continuation) and bear (mean reversion from extremes) markets using price channels and 
+volatility filters. Uses 1d HTF for trend alignment to avoid whipsaws.
 """
 
 import numpy as np
