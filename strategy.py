@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #3575: 6h Donchian Breakout + Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: 6h Donchian(20) breakouts with 1-week pivot direction and volume confirmation capture medium-term momentum in both bull and bear markets. Weekly pivot provides institutional support/resistance from prior week's price action. Volume confirms breakout authenticity. Position size 0.25. Target: 75-150 total trades over 4 years (19-37/year). Uses 1w for pivot calculation and trend filter, 6h only for entry timing and risk management.
+Experiment #3575: 6h Donchian Breakout + 1w/1d Pivot Direction + Volume Confirmation
+HYPOTHESIS: 6h Donchian(20) breakouts with 1d/1w pivot alignment capture institutional momentum. 
+Weekly pivot provides structural support/resistance; daily pivot refines intraday bias. 
+Volume confirmation filters weak breakouts. Position size 0.25. Target: 75-150 total trades over 4 years.
+Uses 1w/1d for pivot calculation and trend filter, 6h only for entry timing and risk management.
+Works in both bull/bear markets by aligning with higher-timeframe structure.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3575_6h_donchian20_1w_pivot_vol_v1"
+name = "exp_3575_6h_donchian20_1w1d_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -17,17 +21,34 @@ def generate_signals(prices):
     high = prices["high"].values.astype(np.float64)
     low = prices["low"].values.astype(np.float64)
     volume = prices["volume"].values.astype(np.float64)
-    open_time = prices["open_time"].values
     n = len(close)
     
-    # === HTF: 1w data for weekly pivot and trend filter (Call ONCE before loop) ===
+    # === HTF: 1d data for daily pivot and trend filter (Call ONCE before loop) ===
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # === HTF: 1w data for weekly pivot (Call ONCE before loop) ===
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot points (using prior week's data)
-    lookback_week = 1  # Use immediately prior completed week
+    # Calculate DAILY pivot points (using prior day's data)
+    prior_day_high = pd.Series(high_1d).shift(1).values
+    prior_day_low = pd.Series(low_1d).shift(1).values
+    prior_day_close = pd.Series(close_1d).shift(1).values
+    
+    # Daily pivot formula: P = (H + L + C) / 3
+    daily_pivot = (prior_day_high + prior_day_low + prior_day_close) / 3.0
+    # Resistance 1: R1 = 2*P - L
+    r1 = 2 * daily_pivot - prior_day_low
+    # Support 1: S1 = 2*P - H
+    s1 = 2 * daily_pivot - prior_day_high
+    
+    # Calculate WEEKLY pivot points (using prior week's data)
+    lookback_week = 5
     prior_week_high = pd.Series(high_1w).rolling(window=lookback_week, min_periods=lookback_week).max().shift(1).values
     prior_week_low = pd.Series(low_1w).rolling(window=lookback_week, min_periods=lookback_week).min().shift(1).values
     prior_week_close = pd.Series(close_1w).rolling(window=lookback_week, min_periods=lookback_week).mean().shift(1).values
@@ -35,20 +56,17 @@ def generate_signals(prices):
     # Weekly pivot formula: P = (H + L + C) / 3
     weekly_pivot = (prior_week_high + prior_week_low + prior_week_close) / 3.0
     # Resistance 1: R1 = 2*P - L
-    r1 = 2 * weekly_pivot - prior_week_low
+    r1_w = 2 * weekly_pivot - prior_week_low
     # Support 1: S1 = 2*P - H
-    s1 = 2 * weekly_pivot - prior_week_high
-    # Resistance 2: R2 = P + (H - L)
-    r2 = weekly_pivot + (prior_week_high - prior_week_low)
-    # Support 2: S2 = P - (H - L)
-    s2 = weekly_pivot - (prior_week_high - prior_week_low)
+    s1_w = 2 * weekly_pivot - prior_week_high
     
     # Align all pivot levels to 6h timeframe
+    daily_pivot_aligned = align_htf_to_ltf(prices, df_1d, daily_pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
+    r1_w_aligned = align_htf_to_ltf(prices, df_1w, r1_w)
+    s1_w_aligned = align_htf_to_ltf(prices, df_1w, s1_w)
     
     # === 6h Indicators: Donchian channels (20-period) for entry timing ===
     lookback_6h = 20
@@ -83,8 +101,9 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high_6h[i]) or np.isnan(lowest_low_6h[i]) or
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(daily_pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(weekly_pivot_aligned[i]) or np.isnan(r1_w_aligned[i]) or np.isnan(s1_w_aligned[i]) or
+            np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -128,21 +147,24 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Determine market bias relative to weekly pivot
-            price_vs_pivot = price - weekly_pivot_aligned[i]
+            # Determine market bias relative to BOTH daily and weekly pivot
+            price_vs_daily = price - daily_pivot_aligned[i]
+            price_vs_weekly = price - weekly_pivot_aligned[i]
             
-            # Long entry: price breaks above 6h Donchian high with bullish bias (above pivot)
+            # Long entry: price breaks above 6h Donchian high with bullish bias (above BOTH pivots)
             if (price > highest_high_6h[i] and 
-                price_vs_pivot > 0):  # Above weekly pivot = bullish bias
+                price_vs_daily > 0 and 
+                price_vs_weekly > 0):
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below 6h Donchian low with bearish bias (below pivot)
+            # Short entry: price breaks below 6h Donchian low with bearish bias (below BOTH pivots)
             elif (price < lowest_low_6h[i] and 
-                  price_vs_pivot < 0):  # Below weekly pivot = bearish bias
+                  price_vs_daily < 0 and 
+                  price_vs_weekly < 0):
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
