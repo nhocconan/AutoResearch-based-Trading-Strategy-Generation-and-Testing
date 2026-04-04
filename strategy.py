@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #6399: 6h Donchian(20) breakout + 12h volume spike + 1d EMA(50) trend filter
-HYPOTHESIS: 6h Donchian breakouts with volume confirmation (>2.0x 12h average volume) and 1d EMA(50) trend filter (price above/below EMA(50)) capture strong momentum while avoiding whipsaws. The 1d EMA provides higher-timeframe trend bias: price above 1d EMA = bullish bias (favor long breakouts), price below 1d EMA = bearish bias (favor short breakdowns). Volume confirmation filters false breakouts. 6h timeframe reduces trade frequency vs lower TFs, minimizing fee drag. Discrete sizing (0.25) balances profit potential and drawdown control. Target: 50-150 total trades over 4 years. Works in bull via breakouts with 1d EMA uptrend, in bear via short breakdowns with 1d EMA downtrend.
+Experiment #6400: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts with volume confirmation (>2.0x avg) and 1d EMA(50) trend filter (price above/below EMA(50)) capture strong momentum while avoiding whipsaws. The 1d EMA provides a higher-timeframe trend bias: price above 1d EMA = bullish bias (favor long breakouts), price below 1d EMA = bearish bias (favor short breakdowns). Volume confirmation filters false breakouts. Discrete sizing (0.25) balances profit potential and drawdown control. Target: 75-200 trades over 4 years. Works in bull via breakouts with 1d EMA uptrend, in bear via short breakdowns with 1d EMA downtrend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6399_6h_donchian20_12h_vol_1d_ema_v1"
-timeframe = "6h"
+name = "exp_6400_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,14 +22,6 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 12h data for volume average ===
-    df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 20:
-        avg_volume_12h = pd.Series(df_12h['volume'].values).rolling(window=20, min_periods=20).mean().values
-        avg_volume_12h_aligned = align_htf_to_ltf(prices, df_12h, avg_volume_12h)
-    else:
-        avg_volume_12h_aligned = np.full(n, np.nan)
-    
     # === HTF: 1d data for EMA(50) trend ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 50:
@@ -38,14 +30,15 @@ def generate_signals(prices):
     else:
         ema_1d_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20-period) ===
+    # === 4h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation (vs 12h average) ===
-    volume_ratio = volume / np.where(avg_volume_12h_aligned > 0, avg_volume_12h_aligned, 1)
+    # === 4h Indicators: Volume confirmation ===
+    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 6h Indicators: ATR(14) for trailing stop ===
+    # === 4h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -64,7 +57,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50, 20) + 1  # Donchian, volume avg, ATR, EMA lookback + 1
+    warmup = max(20, 20, 14, 50) + 1  # Donchian, volume avg, ATR, EMA lookback + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods (22:00-23:59 UTC) ---
@@ -115,7 +108,7 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 2.0  # Volume filter (>2x 12h average)
+        volume_confirmed = volume_ratio[i] > 2.0  # Volume filter
         
         # Entry logic based on 1d EMA trend:
         # Long: breakout up + volume + price > 1d EMA (uptrend bias)
