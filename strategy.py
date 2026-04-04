@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4136: 12h Donchian(20) breakout + 1d EMA trend filter + volume confirmation
-HYPOTHESIS: 12h Donchian breakouts aligned with 1d EMA50 trend direction capture strong momentum moves while avoiding counter-trend whipsaws. Volume confirmation filters low-conviction breakouts. Designed for 12h timeframe to minimize fee drag (target: 50-150 trades over 4 years). Works in bull markets via breakout continuation and in bear markets via mean reversion at pivot-like extremes when combined with EMA filter.
+Experiment #4136: 12h Donchian(20) breakout + 1d Camarilla pivot + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with 1d Camarilla pivot levels capture institutional order flow. Volume confirmation filters false breakouts. Uses tight entry conditions to limit trades to 50-150 total over 4 years. Works in both bull/bear as Camarilla adapts to volatility. Target: 75-150 total trades (19-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4136_12h_donchian20_1d_ema_vol_v1"
+name = "exp_4136_12h_donchian20_1d_camarilla_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -19,13 +19,27 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d EMA50 for trend filter ===
+    # === HTF: 1d Camarilla pivot levels ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 50:
-        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    if len(df_1d) >= 2:
+        high_1d = df_1d['high'].values
+        low_1d = df_1d['low'].values
+        close_1d = df_1d['close'].values
+        daily_range = high_1d - low_1d
+        # Camarilla levels: H3/L3 = close ± 1.1*range/2, H4/L4 = close ± 1.1*range
+        camarilla_h3 = close_1d + 1.1 * daily_range / 2
+        camarilla_l3 = close_1d - 1.1 * daily_range / 2
+        camarilla_h4 = close_1d + 1.1 * daily_range
+        camarilla_l4 = close_1d - 1.1 * daily_range
+        camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+        camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
+        camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+        camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
     else:
-        ema_1d_aligned = np.full(n, np.nan)
+        camarilla_h3_aligned = np.full(n, np.nan)
+        camarilla_l3_aligned = np.full(n, np.nan)
+        camarilla_h4_aligned = np.full(n, np.nan)
+        camarilla_l4_aligned = np.full(n, np.nan)
     
     # === 12h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -55,13 +69,14 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20 + 5, 14 + 5, 50 + 5)  # DC lookback, vol MA buffer, ATR buffer, EMA buffer
+    warmup = max(lookback_dc + 1, 20 + 5, 14 + 5)  # DC lookback, vol MA buffer, ATR buffer
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
             np.isnan(vol_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_1d_aligned[i])):
+            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or
+            np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -99,15 +114,17 @@ def generate_signals(prices):
             breakout_up = price > highest_high[i-1]
             breakout_down = price < lowest_low[i-1]
             
-            # Trend filter: price above/below 1d EMA50
-            above_ema = price > ema_1d_aligned[i]
-            below_ema = price < ema_1d_aligned[i]
+            # Camarilla pivot logic
+            at_h3 = abs(price - camarilla_h3_aligned[i]) < 0.1 * camarilla_h3_aligned[i]
+            at_l3 = abs(price - camarilla_l3_aligned[i]) < 0.1 * camarilla_l3_aligned[i]
+            above_h4 = price > camarilla_h4_aligned[i]
+            below_l4 = price < camarilla_l4_aligned[i]
             
-            # Long conditions: Donchian breakout up + above EMA (trend continuation)
-            long_entry = breakout_up and above_ema
+            # Long conditions: Donchian breakout up + above H4 (continuation) OR at L3 (mean reversion)
+            long_entry = (breakout_up and above_h4) or (breakout_up and at_l3)
             
-            # Short conditions: Donchian breakout down + below EMA (trend continuation)
-            short_entry = breakout_down and below_ema
+            # Short conditions: Donchian breakout down + below L4 (continuation) OR at H3 (mean reversion)
+            short_entry = (breakout_down and below_l4) or (breakout_down and at_h3)
             
             if long_entry:
                 in_position = True
@@ -129,5 +146,3 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
-
-</think>
