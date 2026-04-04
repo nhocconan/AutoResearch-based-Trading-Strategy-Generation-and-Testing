@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #5968: 12h Donchian(20) breakout + 1w/1d HTF trend filter + volume confirmation
-HYPOTHESIS: Donchian breakouts on 12h aligned with weekly/daily trend (price above/below EMA50) capture sustained moves with lower noise. 
-Weekly EMA50 provides structural bias for major trend direction, daily EMA50 confirms intermediate alignment. 
-Volume >1.5x average confirms breakout strength. ATR trailing stop (2.5x) manages risk. 
-Target: 50-150 trades over 4 years (12-37/year) to minimize fee drift. Works in both bull/bear: 
-HTF EMA filters prevent counter-trend entries, volume confirmation avoids false breakouts.
+Experiment #5970: 1d Donchian(20) breakout + 1w HMA trend + volume confirmation
+HYPOTHESIS: Donchian breakouts on daily timeframe aligned with weekly HMA trend capture sustained moves with lower noise.
+Weekly HMA provides structural bias (more reliable than EMAs in choppy markets). Volume >1.5x average confirms breakout strength.
+ATR trailing stop manages risk. Target: 30-100 trades over 4 years (7-25/year) to minimize fee drift. Works in both bull/bear:
+weekly HMA prevents counter-trend entries, volume confirmation avoids false breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5968_12h_donchian20_1w1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_5970_1d_donchian20_1w_hma_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,33 +25,34 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1w data for EMA50 trend filter ===
+    # === HTF: 1w data for HMA trend ===
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 1:
+    if len(df_1w) >= 21:
         close_1w = df_1w['close'].values
-        ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+        # HMA calculation: WMA(2*WMA(n/2) - WMA(n)), sqrt(n)
+        half_len = len(close_1w) // 2
+        sqrt_len = int(np.sqrt(len(close_1w)))
+        if half_len > 0 and sqrt_len > 0:
+            wma_half = pd.Series(close_1w).rolling(window=half_len, min_periods=half_len).mean()
+            wma_full = pd.Series(close_1w).rolling(window=len(close_1w), min_periods=len(close_1w)).mean()
+            raw_hma = 2 * wma_half - wma_full
+            hma_1w = pd.Series(raw_hma).rolling(window=sqrt_len, min_periods=sqrt_len).mean().values
+        else:
+            hma_1w = np.full(len(close_1w), np.nan)
+        # Align to 1d timeframe with shift(1) for completed weekly bars only
+        hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     else:
-        ema_1w_aligned = np.full(n, np.nan)
+        hma_1w_aligned = np.full(n, np.nan)
     
-    # === HTF: 1d data for EMA50 trend filter ===
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 1:
-        close_1d = df_1d['close'].values
-        ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    else:
-        ema_1d_aligned = np.full(n, np.nan)
-    
-    # === 12h Indicators: Donchian Channel (20-period) ===
+    # === 1d Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 12h Indicators: Volume confirmation ===
+    # === 1d Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 12h Indicators: ATR(14) for trailing stop ===
+    # === 1d Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -71,7 +71,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50, 50) + 1  # Donchian, volume avg, ATR, weekly EMA, daily EMA + 1
+    warmup = max(20, 20, 14, 21) + 1  # Donchian, volume avg, ATR, HMA warmup + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -83,7 +83,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(ema_1w_aligned[i]) or np.isnan(ema_1d_aligned[i])):
+            np.isnan(hma_1w_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -118,15 +118,15 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5
         
-        # HTF trend filter: price above/both EMAs for long, below/both for short
-        above_both_emas = price > ema_1w_aligned[i] and price > ema_1d_aligned[i]
-        below_both_emas = price < ema_1w_aligned[i] and price < ema_1d_aligned[i]
+        # Weekly HMA trend bias: price above/below weekly HMA
+        above_hma = price > hma_1w_aligned[i]
+        below_hma = price < hma_1w_aligned[i]
         
         # Entry conditions: 
-        # Long: breakout up with volume AND price above both weekly/daily EMA50
-        # Short: breakout down with volume AND price below both weekly/daily EMA50
-        long_setup = breakout_up and volume_confirmed and above_both_emas
-        short_setup = breakout_down and volume_confirmed and below_both_emas
+        # Long: breakout up with volume AND above weekly HMA
+        # Short: breakout down with volume AND below weekly HMA
+        long_setup = breakout_up and volume_confirmed and above_hma
+        short_setup = breakout_down and volume_confirmed and below_hma
         
         if long_setup:
             in_position = True
