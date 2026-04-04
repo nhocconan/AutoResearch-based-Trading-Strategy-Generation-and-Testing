@@ -111,11 +111,11 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.8
         
-        # EMA50 bias: long above EMA50, short below EMA50
+        # EMA trend bias: long above EMA50, short below EMA50
         long_bias = price > ema_50_aligned[i]
         short_bias = price < ema_50_aligned[i]
         
-        # Entry conditions: breakout in direction of EMA50 bias with volume
+        # Entry conditions: breakout in direction of EMA trend with volume
         long_setup = breakout_up and volume_confirmed and long_bias
         short_setup = breakout_down and volume_confirmed and short_bias
         
