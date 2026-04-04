@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-exp_6696_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
-Uses 20-bar Donchian channels on 12h for breakout entries, filtered by 1-day EMA50 trend direction.
-Volume confirmation ensures breakouts have participation. ATR-based stoploss manages risk.
-Designed for 12h timeframe to capture medium-term swings with low frequency (target: 12-37 trades/year).
-Works in both bull and bear markets by following the 1-day trend direction.
+exp_6697_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian channel breakout with 1-day EMA trend filter and volume confirmation.
+In trending markets (price > 1d EMA50), buy Donchian(20) breakouts with volume spike.
+In ranging markets (price near 1d EMA50), fade Donchian extremes toward EMA.
+ATR stoploss and discrete position sizing (0.25) minimize fee drag. Designed for 4h timeframe
+to target 75-200 trades over 4 years (19-50/year) with Sharpe > 0 in both bull and bear regimes.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6696_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_6697_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -23,20 +23,21 @@ VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
+EMA_DEVIATION_THRESHOLD = 0.02  # 2% deviation from EMA defines ranging
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA trend filter
+    # Load HTF data ONCE before loop - using 1d for EMA filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1-day EMA50 for trend filter
+    # Calculate 1-day EMA50
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -61,14 +62,16 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    bars_since_entry = 0
     
     # Start from warmup period
     start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not ready
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        bars_since_entry += 1
+        
+        # Skip if HTF data not available
+        if np.isnan(ema_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -77,34 +80,45 @@ def generate_signals(prices):
             if close[i] <= entry_price - ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= entry_price + ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
                 
+        # Determine market regime based on deviation from 1d EMA
+        ema_dev = abs(close[i] - ema_aligned[i]) / ema_aligned[i] if ema_aligned[i] != 0 else 0
+        ranging_market = ema_dev <= EMA_DEVIATION_THRESHOLD
+        trending_market = ema_dev > EMA_DEVIATION_THRESHOLD
+        uptrend = close[i] > ema_aligned[i]
+        downtrend = close[i] < ema_aligned[i]
+        
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend direction from 1-day EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Mean reversion signals (in ranging market)
+        long_mean_revert = ranging_market and (close[i] <= lowest_low[i])
+        short_mean_revert = ranging_market and (close[i] >= highest_high[i])
         
-        # Donchian breakout signals
-        long_breakout = close[i] > highest_high[i] and vol_confirmed
-        short_breakout = close[i] < lowest_low[i] and vol_confirmed
+        # Breakout signals (in trending market)
+        long_breakout = trending_market and uptrend and (close[i] > highest_high[i]) and vol_confirmed
+        short_breakout = trending_market and downtrend and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if long_breakout and uptrend:
+            if long_mean_revert or long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-            elif short_breakout and downtrend:
+                bars_since_entry = 0
+            elif short_mean_revert or short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         else:
@@ -112,5 +126,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
