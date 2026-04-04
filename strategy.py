@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #5459: 6h Donchian(20) breakout + 12h Camarilla pivot regime + volume confirmation
+Experiment #5459: 6h Donchian(20) breakout + 12h ADX trend filter + volume confirmation
 HYPOTHESIS: On 6h timeframe, price breaking above/below the 20-period Donchian channel with 
-volume > 2.0x average and aligned with the 12h Camarilla pivot regime (price between H3/L3 for continuation, 
-or breaking R4/S4 for acceleration) captures strong momentum moves with multi-timeframe structure confirmation. 
-Discrete position sizing (0.25) and ATR-based stoploss (2.0x ATR) control risk. Target: 12-37 trades/year 
-(50-150 total over 4 years) to minimize fee drag while maintaining statistical significance. 
-Works in bull markets via breakouts above rising Camarilla levels and in bear markets via short 
-breakdowns below falling levels, with volume filtering false breakouts.
+volume > 1.8x average and aligned with the 12h ADX > 25 (trending market) captures strong 
+momentum moves while avoiding choppy regimes. Discrete position sizing (0.25) and ATR-based 
+stoploss (2.0x ATR) control risk. Target: 12-37 trades/year (50-150 total over 4 years) 
+to minimize fee drag while maintaining statistical significance. Works in bull markets via 
+breakouts above rising ADX and in bear markets via short breakdowns below falling ADX.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5459_6h_donchian20_12h_camarilla_vol_v1"
+name = "exp_5459_6h_donchian20_12h_adx_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -28,39 +27,52 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 12h data for Camarilla pivot levels ===
+    # === HTF: 12h data for ADX(14) ===
     df_12h = get_htf_data(prices, '12h')
-    if len(df_12h) >= 1:
+    if len(df_12h) >= 14:
         high_12h = df_12h['high'].values
         low_12h = df_12h['low'].values
         close_12h = df_12h['close'].values
         
-        # Calculate Camarilla pivot levels for 12h
-        # Pivot = (H + L + C) / 3
-        pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-        # Range = H - L
-        range_12h = high_12h - low_12h
+        # True Range
+        tr1 = high_12h - low_12h
+        tr2 = np.abs(high_12h - np.roll(close_12h, 1))
+        tr3 = np.abs(low_12h - np.roll(close_12h, 1))
+        tr_12h = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr_12h[0] = tr1[0]
         
-        # Camarilla levels:
-        # H4 = pivot + (range * 1.1/2)
-        # H3 = pivot + (range * 1.1/4)
-        # L3 = pivot - (range * 1.1/4)
-        # L4 = pivot - (range * 1.1/2)
-        h4_12h = pivot_12h + (range_12h * 1.1 / 2)
-        h3_12h = pivot_12h + (range_12h * 1.1 / 4)
-        l3_12h = pivot_12h - (range_12h * 1.1 / 4)
-        l4_12h = pivot_12h - (range_12h * 1.1 / 2)
+        # Plus Directional Movement (+DM) and Minus Directional Movement (-DM)
+        up_move = high_12h - np.roll(high_12h, 1)
+        down_move = np.roll(low_12h, 1) - low_12h
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        # Smoothed TR, +DM, -DM using Wilder's smoothing (alpha = 1/period)
+        def WilderSmoothing(data, period):
+            result = np.full_like(data, np.nan)
+            if len(data) >= period:
+                result[period-1] = np.nansum(data[:period])
+                for i in range(period, len(data)):
+                    result[i] = result[i-1] - (result[i-1] / period) + data[i]
+            return result
+        
+        atr_12h = WilderSmoothing(tr_12h, 14)
+        plus_dm_smooth = WilderSmoothing(plus_dm, 14)
+        minus_dm_smooth = WilderSmoothing(minus_dm, 14)
+        
+        # Plus Directional Indicator (+DI) and Minus Directional Indicator (-DI)
+        plus_di_12h = np.where(atr_12h > 0, (plus_dm_smooth / atr_12h) * 100, 0)
+        minus_di_12h = np.where(atr_12h > 0, (minus_dm_smooth / atr_12h) * 100, 0)
+        
+        # Directional Index (DX) and ADX
+        dx_12h = np.where((plus_di_12h + minus_di_12h) > 0, 
+                          np.abs(plus_di_12h - minus_di_12h) / (plus_di_12h + minus_di_12h) * 100, 0)
+        adx_12h = WilderSmoothing(dx_12h, 14)
         
         # Align to LTF (6h) with shift(1) for completed bars only
-        h4_12h_aligned = align_htf_to_ltf(prices, df_12h, h4_12h) if len(h4_12h) > 0 else np.full(n, np.nan)
-        h3_12h_aligned = align_htf_to_ltf(prices, df_12h, h3_12h) if len(h3_12h) > 0 else np.full(n, np.nan)
-        l3_12h_aligned = align_htf_to_ltf(prices, df_12h, l3_12h) if len(l3_12h) > 0 else np.full(n, np.nan)
-        l4_12h_aligned = align_htf_to_ltf(prices, df_12h, l4_12h) if len(l4_12h) > 0 else np.full(n, np.nan)
+        adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h) if len(adx_12h) > 0 else np.full(n, np.nan)
     else:
-        h4_12h_aligned = np.full(n, np.nan)
-        h3_12h_aligned = np.full(n, np.nan)
-        l3_12h_aligned = np.full(n, np.nan)
-        l4_12h_aligned = np.full(n, np.nan)
+        adx_12h_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian Channel (20-period) ===
     # Upper band: 20-period high
@@ -93,7 +105,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 20, 14)  # Donchian, volume avg, ATR warmup
+    warmup = max(20, 20, 20, 14, 14+14+14)  # Donchian, volume avg, ATR warmup, ADX (14+14+14 for Wilder smoothing)
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -107,24 +119,17 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or 
-            np.isnan(h4_12h_aligned[i]) or np.isnan(h3_12h_aligned[i]) or 
-            np.isnan(l3_12h_aligned[i]) or np.isnan(l4_12h_aligned[i])):
+            np.isnan(adx_12h_aligned[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Camarilla regime classification ---
-        # Regime 1: Acceleration breakout (price > H4 or < L4)
-        # Regime 2: Continuation zone (price between H3 and L3)
-        # Regime 3: Extension zone (price between H4-H3 or L3-L4)
-        regime_acceleration_up = price > h4_12h_aligned[i]
-        regime_acceleration_down = price < l4_12h_aligned[i]
-        regime_continuation = (price > h3_12h_aligned[i]) & (price < l3_12h_aligned[i])
-        regime_extension_up = (price > h3_12h_aligned[i]) & (price < h4_12h_aligned[i])
-        regime_extension_down = (price > l4_12h_aligned[i]) & (price < l3_12h_aligned[i])
+        # --- ADX trend bias (using prior ADX only) ---
+        # Trend filter: ADX > 25 indicates trending market
+        adx_trending = adx_12h_aligned[i] > 25
         
-        # --- Exit Logic: Close position on stoploss or regime failure ---
+        # --- Exit Logic: Close position on stoploss or trend reversal ---
         if in_position:
             # Update highest/lowest since entry for trailing stop logic
             if position_side > 0:  # Long position
@@ -134,8 +139,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks below Donchian lower band (failed breakout)
-                # 3. Price moves into acceleration down regime (potential reversal)
-                if price <= stop_price or price <= donchian_low[i] or regime_acceleration_down:
+                # 3. ADX falls below 20 (trend weakening)
+                if price <= stop_price or price <= donchian_low[i] or adx_12h_aligned[i] < 20:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -148,8 +153,8 @@ def generate_signals(prices):
                 # Exit conditions:
                 # 1. Stoploss hit
                 # 2. Price breaks above Donchian upper band (failed breakout)
-                # 3. Price moves into acceleration up regime (potential reversal)
-                if price >= stop_price or price >= donchian_high[i] or regime_acceleration_up:
+                # 3. ADX falls below 20 (trend weakening)
+                if price >= stop_price or price >= donchian_high[i] or adx_12h_aligned[i] < 20:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -162,23 +167,18 @@ def generate_signals(prices):
         breakout_up = price > donchian_high[i-1]  # Break above previous period's high
         breakout_down = price < donchian_low[i-1]  # Break below previous period's low
         
-        # Volume confirmation: current volume > 2.0x average volume (stricter than 1.8x)
-        volume_confirmed = volume_ratio[i] > 2.0
+        # Volume confirmation: current volume > 1.8x average volume
+        volume_confirmed = volume_ratio[i] > 1.8
         
-        # Entry conditions: breakout with volume confirmation in favorable regime
-        # Long: breakout up in continuation, extension up, or acceleration up regime
-        # Short: breakout down in continuation, extension down, or acceleration down regime
-        long_regime_favorable = regime_continuation | regime_extension_up | regime_acceleration_up
-        short_regime_favorable = regime_continuation | regime_extension_down | regime_acceleration_down
-        
-        if breakout_up and volume_confirmed and long_regime_favorable:
+        # Entry conditions
+        if breakout_up and volume_confirmed and adx_trending:
             in_position = True
             position_side = 1
             entry_price = close[i]
             highest_since_entry = high[i]
             lowest_since_entry = low[i]
             signals[i] = SIZE
-        elif breakout_down and volume_confirmed and short_regime_favorable:
+        elif breakout_down and volume_confirmed and adx_trending:
             in_position = True
             position_side = -1
             entry_price = close[i]
