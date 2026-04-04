@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #6131: 6h Donchian(20) breakout + 1d ATR volatility regime + volume confirmation
-HYPOTHESIS: 6h Donchian breakouts aligned with 1d volatility regime (low ATR percentile = range, high = trend) 
-capture structural moves with minimal whipsaw. Low ATR periods indicate consolidation before breakout.
-Volume >1.3x average confirms participation. ATR trailing stop manages risk.
-Discrete sizing (0.25) minimizes fee churn. Target: 75-200 trades over 4 years.
-Timeframe: 6h. HTF: 1d for ATR regime calculation.
+Experiment #6132: 12h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
+HYPOTHESIS: 12h Donchian breakouts aligned with daily EMA50 trend capture structural moves with minimal whipsaw.
+Daily EMA50 provides medium-term bias: price above EMA50 = bullish, below = bearish.
+Volume >1.5x average confirms strong participation. ATR trailing stop manages risk.
+Discrete sizing (0.25) minimizes fee churn. Target: 75-150 trades over 4 years.
+Timeframe: 12h. HTF: 1d for EMA50 trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6131_6h_donchian20_1d_atr_regime_vol_v1"
-timeframe = "6h"
+name = "exp_6132_12h_donchian20_1d_ema50_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,40 +26,23 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for ATR volatility regime ===
+    # === HTF: 1d data for EMA50 trend ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 30:
-        # Calculate ATR(14) on 1d data
-        high_1d = df_1d['high'].values
-        low_1d = df_1d['low'].values
-        close_1d = df_1d['close'].values
-        
-        tr1 = high_1d - low_1d
-        tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-        tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-        tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr_1d[0] = tr1[0]
-        atr_1d = pd.Series(tr_1d).rolling(window=14, min_periods=14).mean().values
-        
-        # ATR percentile rank (30-day lookback) to identify volatility regime
-        atr_percentile = pd.Series(atr_1d).rolling(window=30, min_periods=10).apply(
-            lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-        ).values
-        # Regime: low volatility (<30th percentile) = range-bound, high volatility (>70th) = trending
-        volatility_regime = atr_percentile > 0.7  # High volatility regime = trending
-        volatility_regime_aligned = align_htf_to_ltf(prices, df_1d, volatility_regime)
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        volatility_regime_aligned = np.full(n, False)
+        ema_1d_aligned = np.full(n, np.nan)
     
-    # === 6h Indicators: Donchian Channel (20-period) ===
+    # === 12h Indicators: Donchian Channel (20-period) ===
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 6h Indicators: Volume confirmation ===
+    # === 12h Indicators: Volume confirmation ===
     avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_ratio = volume / np.where(avg_volume > 0, avg_volume, 1)
     
-    # === 6h Indicators: ATR(14) for trailing stop ===
+    # === 12h Indicators: ATR(14) for trailing stop ===
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -78,7 +61,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 30, 14) + 1  # Donchian, volume avg, ATR percentile, ATR + 1
+    warmup = max(20, 20, 50, 14) + 1  # Donchian, volume avg, EMA50, ATR + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -90,7 +73,7 @@ def generate_signals(prices):
         # --- Data Validity Check ---
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(volume_ratio[i]) or np.isnan(atr[i]) or
-            np.isnan(volatility_regime_aligned[i])):
+            np.isnan(ema_1d_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -123,14 +106,17 @@ def generate_signals(prices):
         # --- New Position Entry Logic ---
         breakout_up = price > donchian_high[i-1]
         breakout_down = price < donchian_low[i-1]
-        volume_confirmed = volume_ratio[i] > 1.3  # Volume filter for stronger signals
-        vol_regime = volatility_regime_aligned[i]  # Only trade in high volatility (trending) regime
+        volume_confirmed = volume_ratio[i] > 1.5  # Volume filter for stronger signals
+        
+        # Multi-timeframe trend filter: price relative to EMA50 from 1d data
+        bullish_bias = price > ema_1d_aligned[i]  # Above daily EMA50 = bullish
+        bearish_bias = price < ema_1d_aligned[i]  # Below daily EMA50 = bearish
         
         # Entry conditions:
-        # Long: breakout up with volume AND in high volatility regime
-        # Short: breakout down with volume AND in high volatility regime
-        long_entry = breakout_up and volume_confirmed and vol_regime
-        short_entry = breakout_down and volume_confirmed and vol_regime
+        # Long: breakout up with volume AND bullish bias above EMA50
+        # Short: breakout down with volume AND bearish bias below EMA50
+        long_entry = breakout_up and volume_confirmed and bullish_bias
+        short_entry = breakout_down and volume_confirmed and bearish_bias
         
         if long_entry:
             in_position = True
