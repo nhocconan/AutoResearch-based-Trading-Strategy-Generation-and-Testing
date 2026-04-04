@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 """
 exp_6472_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with daily EMA50 trend filter and volume confirmation.
-Uses 12h timeframe for lower trade frequency (target: 75-150 total over 4 years) and daily EMA for trend bias.
-Volume confirmation ensures breakouts have conviction. Works in both bull and bear markets by using EMA50 as adaptive trend filter.
+Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
+Uses daily EMA50 to determine bias: long only when price above daily EMA50,
+short only when below. Volume confirmation filters weak breakouts.
+Target: 50-150 trades over 4 years (12-37/year).
+Uses 12h timeframe to reduce trade frequency and fee drag while capturing
+medium-term trends. Works in both bull and bear markets by using EMA50 as
+adaptive trend filter and Donchian breakouts for momentum entries.
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
@@ -107,3 +111,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+}
