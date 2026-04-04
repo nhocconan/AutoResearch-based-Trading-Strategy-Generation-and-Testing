@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-exp_6466_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Uses 1d EMA for stronger trend alignment in both bull/bear markets. Volume confirmation filters false breakouts.
+exp_6467_6h_donchian20_1d_pivot_vol_v1
+Hypothesis: 6h Donchian(20) breakout with 1d pivot direction filter and volume confirmation.
+Uses daily pivot points (R1,R2,S1,S2) to determine bias: long only when price above daily pivot,
+short only when below. Volume confirmation filters weak breakouts.
 Target: 75-200 trades over 4 years (19-50/year).
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6466_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_6467_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 1.5  # volume must be 1.5x its 20-period MA
+VOL_THRESHOLD = 1.8  # volume must be 1.8x its 20-period MA
 SIGNAL_SIZE = 0.25   # 25% position size
 
 def generate_signals(prices):
@@ -27,11 +27,17 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    # Calculate 1d EMA(50) on close
-    close_1d = pd.Series(df_1d['close'].values)
-    ema_1d = close_1d.ewm(span=EMA_PERIOD, min_periods=EMA_PERIOD, adjust=False).mean().values
-    # Align to LTF (4h) with shift(1) for completed bars only
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate daily pivot points: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    # Align to LTF (6h) with shift(1) for completed bars only
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -51,21 +57,21 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available (first EMA_PERIOD bars)
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if pivot not available (first bar)
+        if np.isnan(pivot_aligned[i]):
             continue
             
-        # Long conditions: price breaks above Donchian HIGH + above 1d EMA + volume spike
+        # Long conditions: price breaks above Donchian HIGH + above daily pivot + volume spike
         long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
-        long_trend = close[i] > ema_1d_aligned[i]      # price above 1d EMA
+        long_bias = close[i] > pivot_aligned[i]        # price above daily pivot (bullish bias)
         long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Short conditions: price breaks below Donchian LOW + below 1d EMA + volume spike
+        # Short conditions: price breaks below Donchian LOW + below daily pivot + volume spike
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
-        short_trend = close[i] < ema_1d_aligned[i]     # price below 1d EMA
+        short_bias = close[i] < pivot_aligned[i]       # price below daily pivot (bearish bias)
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Exit conditions: ATR-based stoploss approximation
@@ -92,11 +98,11 @@ def generate_signals(prices):
         
         # Enter new positions only if flat
         if position == 0:
-            if long_breakout and long_trend and long_volume:
+            if long_breakout and long_bias and long_volume:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-            elif short_breakout and short_trend and short_volume:
+            elif short_breakout and short_bias and short_volume:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
