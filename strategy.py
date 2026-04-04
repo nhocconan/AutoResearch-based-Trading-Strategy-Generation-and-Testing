@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #4431: 6h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Confirmation
-HYPOTHESIS: 6h Donchian(20) breakouts aligned with 1d weekly pivot direction (price above/below weekly pivot) and confirmed by volume (>2.0x average) capture institutional momentum with minimal false signals. Weekly pivot provides structural bias from higher timeframe, reducing whipsaws in both bull and bear markets. Volume filters low-conviction moves. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
+Experiment #4431: 6h Donchian(20) Breakout + 1d Camarilla Pivot Continuation + Volume Filter
+HYPOTHESIS: 6h Donchian(20) breakouts aligned with 1d Camarilla pivot levels (R4/S4 for continuation, R3/S3 for fade) and confirmed by volume (>2.0x average) capture institutional breakout moves with minimal false signals. The 1d Camarilla provides key support/resistance from higher timeframe, reducing whipsaws. Volume filters low-conviction moves. Targets 50-150 total trades over 4 years (12-37/year) with position size 0.25.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_4431_6h_donchian20_1d_weekly_pivot_vol_v1"
+name = "exp_4431_6h_donchian20_1d_camarilla_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,27 +23,46 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 1d data for weekly pivot calculation ===
+    # === Precompute HTF: 1d Camarilla Pivot Levels ===
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) >= 5:
-        # Calculate weekly pivot from prior week's OHLC (using Friday's values as weekly close)
-        # For simplicity, use prior day's OHLC as proxy for weekly pivot (more frequent updates)
-        # Weekly pivot = (Prior Week High + Prior Week Low + Prior Week Close) / 3
-        # We'll approximate with prior day's values for more signals, but aligned properly
+    if len(df_1d) >= 2:
         high_1d = df_1d['high'].values
         low_1d = df_1d['low'].values
         close_1d = df_1d['close'].values
         
-        # Weekly high/low/close: use rolling window of 5 days (1 week) on daily data
-        weekly_high = pd.Series(high_1d).rolling(window=5, min_periods=5).max().shift(1).values  # shift(1) for prior week
-        weekly_low = pd.Series(low_1d).rolling(window=5, min_periods=5).min().shift(1).values
-        weekly_close = pd.Series(close_1d).rolling(window=5, min_periods=5).last().shift(1).values
+        # Calculate Camarilla levels for previous day
+        camarilla_r4 = np.zeros(len(close_1d))
+        camarilla_r3 = np.zeros(len(close_1d))
+        camarilla_s3 = np.zeros(len(close_1d))
+        camarilla_s4 = np.zeros(len(close_1d))
         
-        # Weekly pivot = (weekly_high + weekly_low + weekly_close) / 3
-        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+        for i in range(1, len(close_1d)):
+            # Use previous day's OHLC
+            phigh = high_1d[i-1]
+            plow = low_1d[i-1]
+            pclose = close_1d[i-1]
+            range_val = phigh - plow
+            
+            camarilla_r4[i] = pclose + range_val * 1.1 / 2
+            camarilla_r3[i] = pclose + range_val * 1.1 / 4
+            camarilla_s3[i] = pclose - range_val * 1.1 / 4
+            camarilla_s4[i] = pclose - range_val * 1.1 / 2
+        
+        # For first bar, use same day (will be overwritten quickly)
+        camarilla_r4[0] = camarilla_r4[1] if len(close_1d) > 1 else close_1d[0]
+        camarilla_r3[0] = camarilla_r3[1] if len(close_1d) > 1 else close_1d[0]
+        camarilla_s3[0] = camarilla_s3[1] if len(close_1d) > 1 else close_1d[0]
+        camarilla_s4[0] = camarilla_s4[1] if len(close_1d) > 1 else close_1d[0]
+        
+        camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+        camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+        camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+        camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     else:
-        weekly_pivot_aligned = np.full(n, np.nan)
+        camarilla_r4_aligned = np.full(n, np.nan)
+        camarilla_r3_aligned = np.full(n, np.nan)
+        camarilla_s3_aligned = np.full(n, np.nan)
+        camarilla_s4_aligned = np.full(n, np.nan)
     
     # === 6h Indicators: Donchian Channel(20) ===
     high_series = pd.Series(high)
@@ -74,12 +93,13 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 5)  # Donchian, vol MA, ATR, weekly pivot lookback
+    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(vol_ratio[i]) or
-            np.isnan(atr[i]) or np.isnan(weekly_pivot_aligned[i])):
+            np.isnan(atr[i]) or np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_s4_aligned[i])):
             signals[i] = 0.0
             continue
         
@@ -118,19 +138,22 @@ def generate_signals(prices):
         # Require volume confirmation (> 2.0x average) to filter noise
         volume_confirm = vol_ratio[i] > 2.0
         
-        # Weekly pivot bias: price > pivot = long bias, price < pivot = short bias
-        long_bias = price > weekly_pivot_aligned[i]
-        short_bias = price < weekly_pivot_aligned[i]
-        
         # Donchian breakout conditions
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
         breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
         
-        # Long conditions: upward breakout + long bias + volume
-        long_entry = breakout_up and long_bias and volume_confirm
+        # Camarilla conditions: R4/S4 for continuation breakout, R3/S3 for fade
+        # Long: breakout above R4 (strong continuation) OR bounce from S3 (mean reversion)
+        long_continuation = breakout_up and price > camarilla_r4_aligned[i]
+        long_mean_revert = close[i] < camarilla_s3_aligned[i] and price > camarilla_s3_aligned[i]  # bouncing off S3
         
-        # Short conditions: downward breakout + short bias + volume
-        short_entry = breakout_down and short_bias and volume_confirm
+        # Short: breakout below S4 (strong continuation) OR bounce from R3 (mean reversion)
+        short_continuation = breakout_down and price < camarilla_s4_aligned[i]
+        short_mean_revert = close[i] > camarilla_r3_aligned[i] and price < camarilla_r3_aligned[i]  # bouncing off R3
+        
+        # Combine conditions with volume confirmation
+        long_entry = (long_continuation or long_mean_revert) and volume_confirm
+        short_entry = (short_continuation or short_mean_revert) and volume_confirm
         
         if long_entry:
             in_position = True
