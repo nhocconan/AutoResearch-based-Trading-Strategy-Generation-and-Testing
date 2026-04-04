@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #5060: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Confirmation + ATR Stoploss
-HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 1d EMA(50) trend capture strong momentum with controlled frequency. 1d EMA acts as regime filter: price above EMA(50) favors longs, below favors shorts. Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. Designed for 19-50 trades/year on 4h timeframe to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns against trend).
+Experiment #5061: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stoploss
+HYPOTHESIS: On 4h timeframe, Donchian(20) breakouts aligned with 1d EMA(50) trend direction capture momentum with institutional volume confirmation (>2x average). EMA50 acts as trend filter: only long when price > EMA50, short when price < EMA50. This reduces false breakouts in ranging markets. ATR(14) trailing stop (2.5x) manages risk. Designed for 19-50 trades/year on 4h timeframe (75-200 total over 4 years) to minimize fee drag while maintaining statistical significance. Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_5060_4h_donchian20_1d_ema_vol_v1"
+name = "exp_5061_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,22 +19,23 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # Precompute HTF: 1d data for EMA(50) trend filter
+    # Precompute HTF: 1d data for EMA50 trend
     df_1d = get_htf_data(prices, '1d')
     
-    # === 1d Indicators: EMA(50) for trend regime ===
+    # === 1d Indicators: EMA50 for trend direction ===
     if len(df_1d) >= 50:
-        close_1d = df_1d['close'].values.astype(np.float64)
-        ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-        ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, min_periods=50, adjust=False).mean().values
     else:
-        ema_50_aligned = np.full(n, np.nan)
+        ema_1d = np.full(len(df_1d), np.nan)
+    
+    # Align EMA50 to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # === 4h Indicators: Donchian(20) channels ===
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 4h Indicators: Volume confirmation (1.5x spike) ===
+    # === 4h Indicators: Volume confirmation (2x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -62,7 +63,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -73,8 +74,8 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # Exit if price drops 2.0*ATR below highest since entry (trailing stop)
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry (trailing stop)
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -82,8 +83,8 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # Exit if price rises 2.0*ATR above lowest since entry (trailing stop)
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry (trailing stop)
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -92,17 +93,18 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>1.5x)
-        vol_confirm = vol_ratio[i] > 1.5
+        # Volume filter: confirmation (>2.0x)
+        vol_confirm = vol_ratio[i] > 2.0
         
-        # Trend filter: price vs 1d EMA(50)
-        price_vs_ema = price - ema_50_aligned[i]
+        # Trend filter: EMA50 direction
+        uptrend = price > ema_1d_aligned[i]
+        downtrend = price < ema_1d_aligned[i]
         
-        # Donchian breakout conditions with EMA trend alignment
-        # Long: Donchian breakout above AND price above EMA(50) (trend-following)
-        # Short: Donchian breakdown below AND price below EMA(50) (trend-following)
-        breakout_long = (price >= high_roll[i]) and (price_vs_ema > 0) and vol_confirm
-        breakout_short = (price <= low_roll[i]) and (price_vs_ema < 0) and vol_confirm
+        # Donchian breakout conditions with trend filter
+        # Long: Donchian breakout above + uptrend + volume
+        # Short: Donchian breakdown below + downtrend + volume
+        breakout_long = (price >= high_roll[i]) and uptrend and vol_confirm
+        breakout_short = (price <= low_roll[i]) and downtrend and vol_confirm
         
         # Final entry conditions
         if breakout_long:
@@ -123,3 +125,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
