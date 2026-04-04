@@ -1,44 +1,35 @@
 #!/usr/bin/env python3
 """
-exp_6741_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with daily EMA trend filter and volume confirmation.
-Breakouts in direction of daily EMA(50) are more likely to succeed. Volume confirms legitimacy.
-Designed for 4h timeframe to capture medium-term swings with ~19-50 trades/year (75-200 total over 4 years).
-Works in both bull and bear markets by using daily EMA as trend filter - avoids counter-trend breakouts.
+exp_6742_12h_donchian20_1d_vol_v1
+Hypothesis: 12h Donchian(20) breakout with daily volume confirmation and ATR stoploss.
+Designed for 12h timeframe to capture medium-term swings with ~12-37 trades/year (50-150 total over 4 years).
+Volume confirmation filters false breakouts. Works in both bull and bear markets by following price channels.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6741_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_6742_12h_donchian20_1d_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 6  # ~1 day (4h bars)
+MAX_HOLD_BARS = 8  # ~4 weeks (12h bars)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for daily EMA
+    # Load HTF data ONCE before loop - using 1d for context
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate daily EMA
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
-    
-    # Align to LTF (4h)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -66,16 +57,11 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-            continue
-            
         # Check stoploss
         if position == 1:  # long position
             if close[i] <= entry_price - ATR_STOP_MULTIPLIER * atr[i]:
@@ -100,14 +86,9 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend direction from daily EMA
-        # Uptrend: price > daily EMA, Downtrend: price < daily EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
-        
-        # Breakout signals in direction of daily trend
-        long_breakout = uptrend and (close[i] > highest_high[i]) and vol_confirmed
-        short_breakout = downtrend and (close[i] < lowest_low[i]) and vol_confirmed
+        # Donchian breakout signals with volume confirmation
+        long_breakout = (close[i] > highest_high[i]) and vol_confirmed
+        short_breakout = (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
