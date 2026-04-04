@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #3480: 4h Donchian Breakout + 1d Trend Filter + Volume Spike + ATR Stoploss
-HYPOTHESIS: 4h Donchian(20) breakouts with volume confirmation and 1d EMA50 trend alignment capture medium-term momentum with controlled trade frequency. Works in bull markets (trend continuation) and bear markets (mean reversion from extremes) via price channels. Target: 100-200 total trades over 4 years (25-50/year).
+Experiment #3480: 4h Donchian Breakout + 1d Trend + Volume Spike
+HYPOTHESIS: 4h Donchian(20) breakouts with volume confirmation and 1d trend alignment capture medium-term momentum. 
+Uses 1d for signal direction, 4h only for entry timing and structure. Works in bull (trend continuation) and bear 
+(mean reversion from extremes) via price channels. Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3480_4h_donchian20_1d_ema_vol_v1"
+name = "exp_3480_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -27,7 +29,7 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # === 4h Indicators: Donchian channels (20-period) for entry/exit ===
+    # === 4h Indicators: Donchian channels (20-period) for entry timing ===
     lookback = 20
     highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
     lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
@@ -37,7 +39,7 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 4h Indicators: ATR(14) for volatility and trailing stop ===
+    # === 4h Indicators: ATR(14) for volatility and stoploss ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -104,9 +106,11 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # 4h Donchian breakout with 1d EMA trend filter
+            # 4h Donchian breakout: long above highest, short below lowest
             price_vs_high = price - highest_high[i]
             price_vs_low = price - lowest_low[i]
+            
+            # 1d EMA trend filter: only long above EMA, short below EMA
             price_vs_ema = price - ema_1d_aligned[i]
             
             # Long entry: price breaks above 4h Donchian high with bullish 1d trend
