@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-exp_6531_6h_donchian20_1d_pivot_vol_v1
-Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot levels as directional filter and volume confirmation.
-Long when price > 1d EMA200 (bullish bias) and breaks above Donchian high with volume > 2.0x MA.
-Short when price < 1d EMA200 (bearish bias) and breaks below Donchian low with volume > 2.0x MA.
-Uses 1d EMA200 for trend bias and Camarilla levels only for exit logic (fade at R3/S3, breakout at R4/S4).
-Designed for low-frequency, high-conviction trades targeting 75-200 total trades over 4 years.
+exp_6532_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d EMA200 as trend filter and volume confirmation.
+Uses volume spike (2.0x) to confirm breakout strength. Designed for low-frequency, high-conviction trades
+targeting 50-150 total trades over 4 years on 12h timeframe. Works in bull/bear via EMA200 bias.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6531_6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_6532_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -28,34 +26,15 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA200 and Camarilla pivots
+    # Load HTF data ONCE before loop - using 1d for EMA200
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d EMA200
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False).mean().values
     
-    # Calculate 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla levels: based on previous day's range
-    # R4 = close + (high - low) * 1.1/2
-    # R3 = close + (high - low) * 1.1/4
-    # S3 = close - (high - low) * 1.1/4
-    # S4 = close - (high - low) * 1.1/2
-    camarilla_r4 = close_1d + (high_1d - low_1d) * 1.1 / 2
-    camarilla_r3 = close_1d + (high_1d - low_1d) * 1.1 / 4
-    camarilla_s3 = close_1d - (high_1d - low_1d) * 1.1 / 4
-    camarilla_s4 = close_1d - (high_1d - low_1d) * 1.1 / 2
-    
-    # Align to LTF (6h) with shift(1) for completed bars only
+    # Align to LTF (12h) with shift(1) for completed bars only
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -92,43 +71,24 @@ def generate_signals(prices):
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Exit conditions:
-        # 1. EMA reversal (trend change)
-        # 2. Camarilla fade: long exits at R3, short exits at S3
-        # 3. Camarilla breakout: reverse position if breaks R4/S4 with volume
+        # Exit conditions: EMA reversal or Donchian midpoint reversal
         if position == 1:  # long position
             # Exit if price drops back below EMA200 (trend change)
             exit_long = close[i] < ema_1d_aligned[i]
-            # Or if price drops to Camarilla R3 (fade level)
-            exit_long = exit_long or close[i] <= camarilla_r3_aligned[i]
-            # Reverse to short if breaks Camarilla R4 with volume (breakout failure)
-            reverse_short = (close[i] >= camarilla_r4_aligned[i] and 
-                           volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False)
+            # Or if price drops below Donchian midpoint
+            exit_long = exit_long or close[i] < (donchian_high[i-1] + donchian_low[i-1]) / 2
             if exit_long:
                 signals[i] = 0.0
                 position = 0
                 continue
-            elif reverse_short:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                continue
         elif position == -1:  # short position
             # Exit if price rises back above EMA200 (trend change)
             exit_short = close[i] > ema_1d_aligned[i]
-            # Or if price rises to Camarilla S3 (fade level)
-            exit_short = exit_short or close[i] >= camarilla_s3_aligned[i]
-            # Reverse to long if breaks Camarilla S4 with volume (breakout failure)
-            reverse_long = (close[i] <= camarilla_s4_aligned[i] and 
-                          volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False)
+            # Or if price rises above Donchian midpoint
+            exit_short = exit_short or close[i] > (donchian_high[i-1] + donchian_low[i-1]) / 2
             if exit_short:
                 signals[i] = 0.0
                 position = 0
-                continue
-            elif reverse_long:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
                 continue
         
         # Enter new positions only if flat
@@ -148,3 +108,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
