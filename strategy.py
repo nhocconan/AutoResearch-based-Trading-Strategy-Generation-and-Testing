@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #4373: 4h Donchian Breakout + 12h HMA Trend + Volume Confirmation
-HYPOTHESIS: Donchian(20) breakouts on 4h aligned with 12h HMA(21) trend (price > HMA = long bias, < HMA = short bias) and confirmed by volume spikes (>1.5x average) capture institutional momentum with proper timeframe alignment. The 12h HMA filters counter-trend breakouts, reducing false signals in choppy markets. Works in bull via upward breakouts with long bias, in bear via downward breakouts with short bias. Volume confirmation filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
+HYPOTHESIS: Donchian(20) breakouts on 4h aligned with 12h HMA(21) trend direction and confirmed by volume (>1.5x average) capture institutional momentum with fewer false signals. The 12h HMA acts as a higher-timeframe trend filter, reducing whipsaws in ranging markets. Works in bull via upward breakouts with uptrend bias, in bear via downward breakouts with downtrend bias. Volume confirmation filters low-conviction moves. Targets 75-200 total trades over 4 years (19-50/year) with position size 0.25.
 """
 
 import numpy as np
@@ -23,30 +23,37 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(open_time).hour
     
-    # === Precompute HTF: 12h HMA(21) for trend bias ===
+    # === Precompute HTF: 12h HMA(21) for trend filter ===
     df_12h = get_htf_data(prices, '12h')
     if len(df_12h) >= 21:
         # Hull Moving Average: HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
-        def wma(values, window):
-            weights = np.arange(1, window + 1)
-            return np.convolve(values, weights, 'valid') / weights.sum()
+        def wma(arr, period):
+            if len(arr) < period:
+                return np.full_like(arr, np.nan)
+            weights = np.arange(1, period + 1)
+            return np.convolve(arr, weights / weights.sum(), mode='valid')
         
-        close_12h = df_12h['close'].values
-        half_len = len(close_12h) // 2
-        sqrt_len = int(np.sqrt(len(close_12h)))
+        close_series = pd.Series(df_12h['close'].values)
+        n_12h = len(close_series)
+        half_n = n_12h // 2
+        sqrt_n = int(np.sqrt(n_12h))
         
-        if half_len > 0 and sqrt_len > 0:
-            wma_half = wma(close_12h, half_len)
-            wma_full = wma(close_12h, len(close_12h))
-            # Align arrays: 2*WMA(half) - WMA(full)
-            raw_hma = 2 * wma_half[-len(wma_full):] - wma_full
-            hma_12h = wma(raw_hma, sqrt_len)
-            # Pad beginning with NaN
-            hma_12h_padded = np.full(len(close_12h), np.nan)
-            hma_12h_padded[-len(hma_12h):] = hma_12h
-            hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_padded)
-        else:
-            hma_12h_aligned = np.full(n, np.nan)
+        wma_half = wma(close_series.values, half_n)
+        wma_full = wma(close_series.values, n_12h)
+        wma_double_half = 2 * wma_half
+        
+        # Align lengths
+        min_len = min(len(wma_double_half), len(wma_full))
+        diff = wma_double_half[-min_len:] - wma_full[-min_len:]
+        hma_12h = wma(diff, sqrt_n)
+        
+        # Pad to match original length
+        hma_padded = np.full(n_12h, np.nan)
+        hma_padded[-len(hma_12h):] = hma_12h
+        hma_12h_values = hma_padded
+        
+        # Align to LTF and shift by 1 for completed bars only
+        hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h_values)
     else:
         hma_12h_aligned = np.full(n, np.nan)
     
@@ -79,7 +86,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 21)  # Donchian, vol MA, ATR, HMA
+    warmup = max(20, 20, 14)  # Donchian, vol MA, ATR
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
@@ -123,19 +130,19 @@ def generate_signals(prices):
         # Require volume confirmation (> 1.5x average) to filter noise
         volume_confirm = vol_ratio[i] > 1.5
         
-        # 12h HMA trend bias: price > HMA = long bias, price < HMA = short bias
-        long_bias = price > hma_12h_aligned[i]
-        short_bias = price < hma_12h_aligned[i]
+        # 12h HMA trend: rising = uptrend, falling = downtrend
+        hma_rising = hma_12h_aligned[i] > hma_12h_aligned[i-1]
+        hma_falling = hma_12h_aligned[i] < hma_12h_aligned[i-1]
         
         # Donchian breakout conditions
         breakout_up = close[i] > donch_upper[i-1]  # Close above previous upper band
         breakout_down = close[i] < donch_lower[i-1]  # Close below previous lower band
         
-        # Long conditions: upward breakout + long bias + volume
-        long_entry = breakout_up and long_bias and volume_confirm
+        # Long conditions: upward breakout + uptrend + volume
+        long_entry = breakout_up and hma_rising and volume_confirm
         
-        # Short conditions: downward breakout + short bias + volume
-        short_entry = breakout_down and short_bias and volume_confirm
+        # Short conditions: downward breakout + downtrend + volume
+        short_entry = breakout_down and hma_falling and volume_confirm
         
         if long_entry:
             in_position = True
@@ -155,3 +162,5 @@ def generate_signals(prices):
             signals[i] = 0.0
     
     return signals
+
+</think>
