@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #2962: 12h Donchian Breakout + Daily Pivot Direction + Volume Spike
-HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture medium-term trends with lower trade frequency.
-Daily pivot (from 1d data) provides directional bias: only take long breakouts
-when daily pivot shows bullish bias (price > daily pivot), and short breakouts
-when bearish (price < daily pivot). Volume spike (>2.0x 20-period average)
-confirms breakout strength. This combination filters false breakouts in choppy
-markets while capturing strong trends in both bull and bear regimes. 12h timeframe
-reduces fee drag and improves generalization. Target: 50-150 total trades over 4 years.
+Experiment #2962: 12h Donchian Breakout + Daily Trend Filter + Volume Spike
+HYPOTHESIS: Donchian(20) breakouts on 12h timeframe capture medium-term trends with lower fee drag.
+Daily trend filter (price > EMA50 for long, price < EMA50 for short) provides regime alignment.
+Volume spike (>2.0x 20-period average) confirms breakout strength. This combination filters false
+breakouts while capturing strong trends in both bull and bear markets. 12h timeframe targets 50-150
+total trades over 4 years (12-37/year) to minimize fee drag and improve generalization.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2962_12h_donchian20_1d_pivot_vol_v1"
+name = "exp_2962_12h_donchian20_1d_trend_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,16 +23,15 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for daily pivot calculation (Call ONCE before loop) ===
+    # === HTF: 1d data for EMA50 trend filter (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot: (High + Low + Close) / 3 for each day
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    # Calculate EMA50 on daily close
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
     # Align to 12h timeframe (shifted by 1 for completed bars only)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # === 12h Indicators: Donchian channels (20-period) ===
     lookback = 20
@@ -63,7 +60,7 @@ def generate_signals(prices):
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(pivot_aligned[i]) or np.isnan(vol_ratio[i])):
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
@@ -110,19 +107,19 @@ def generate_signals(prices):
         volume_spike = vol_ratio[i] > 2.0
         
         if volume_spike:
-            # Get daily pivot bias
-            price_vs_pivot = price - pivot_aligned[i]
+            # Get daily trend filter
+            price_vs_ema = price - ema50_1d_aligned[i]
             
-            # Long entry: price breaks above Donchian high with bullish daily bias
-            if price > highest_high[i] and price_vs_pivot > 0:
+            # Long entry: price breaks above Donchian high with bullish daily trend
+            if price > highest_high[i] and price_vs_ema > 0:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below Donchian low with bearish daily bias
-            elif price < lowest_low[i] and price_vs_pivot < 0:
+            # Short entry: price breaks below Donchian low with bearish daily trend
+            elif price < lowest_low[i] and price_vs_ema < 0:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
