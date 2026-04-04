@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #6160: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA(50) trend capture strong momentum moves.
-The 1d EMA(50) acts as a dynamic trend filter: price above EMA = bullish bias, below = bearish bias.
-Volume >1.5x average confirms institutional participation. ATR trailing stop manages risk.
+Experiment #6160: 4h Donchian(20) breakout + 1d EMA50 trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 1d EMA50 trend capture structural moves.
+Price above 1d EMA50 = bullish bias (favor longs), below = bearish bias (favor shorts).
+Volume >1.5x average confirms strong participation. ATR trailing stop manages risk.
 Discrete sizing (0.25) minimizes fee churn. Target: 75-200 trades over 4 years.
-Timeframe: 4h. HTF: 1d for EMA(50) trend.
+Timeframe: 4h. HTF: 1d for EMA50 trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_6160_4h_donchian20_1d_ema_vol_v1"
+name = "exp_6160_4h_donchian20_1d_ema50_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -26,7 +26,7 @@ def generate_signals(prices):
     # Precompute session hours once (open_time is already datetime64[ms])
     hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # === HTF: 1d data for EMA(50) trend ===
+    # === HTF: 1d data for EMA50 trend ===
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) >= 50:
         ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
@@ -61,7 +61,7 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(20, 20, 14, 50) + 1  # Donchian, volume avg, ATR, EMA + 1
+    warmup = max(20, 20, 14, 50) + 1  # Donchian, volume avg, ATR, EMA50 + 1
     
     for i in range(warmup, n):
         # --- Session Filter: Avoid low liquidity periods ---
@@ -108,13 +108,13 @@ def generate_signals(prices):
         breakout_down = price < donchian_low[i-1]
         volume_confirmed = volume_ratio[i] > 1.5  # Volume filter for stronger signals
         
-        # Multi-timeframe trend filter: price relative to 1d EMA(50)
-        bullish_bias = price > ema_1d_aligned[i]  # Above EMA = bullish
-        bearish_bias = price < ema_1d_aligned[i]  # Below EMA = bearish
+        # Multi-timeframe trend filter: price relative to 1d EMA50
+        bullish_bias = price > ema_1d_aligned[i]  # Above EMA50 = bullish
+        bearish_bias = price < ema_1d_aligned[i]  # Below EMA50 = bearish
         
         # Entry conditions:
-        # Long: breakout up with volume AND bullish bias above EMA
-        # Short: breakout down with volume AND bearish bias below EMA
+        # Long: breakout up with volume AND bullish bias above EMA50
+        # Short: breakout down with volume AND bearish bias below EMA50
         long_entry = breakout_up and volume_confirmed and bullish_bias
         short_entry = breakout_down and volume_confirmed and bearish_bias
         
