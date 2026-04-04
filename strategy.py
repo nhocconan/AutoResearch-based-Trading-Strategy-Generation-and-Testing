@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #3953: 4h Donchian(20) breakout + 12h EMA-50 trend + volume confirmation
-HYPOTHESIS: 4h Donchian breakouts aligned with 12h EMA-50 trend capture major swings with optimal frequency. Volume > 1.5x MA(20) confirms strength. ATR(14) trailing stop (2.0x) manages risk. Discrete sizing (0.25) reduces fee drag. Target: 75-200 trades over 4 years (19-50/year). Works in bull/bear via 12h EMA-50 trend filter.
+Experiment #3953: 4h Donchian(20) breakout + 12h HMA(21) trend + volume confirmation
+HYPOTHESIS: 4h Donchian breakouts aligned with 12h HMA-21 trend capture major swings with moderate frequency. Volume > 1.8x MA(20) confirms strength. ATR(14) trailing stop (2.0x) manages risk. Discrete sizing (0.30) balances return and fees. Target: 75-200 trades over 4 years (19-50/year). Works in bull/bear via 12h HMA-21 trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_3953_4h_donchian20_12h_ema50_vol_v1"
+name = "exp_3953_4h_donchian20_12h_hma21_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,11 +19,26 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 12h data for EMA-50 trend ===
+    # === HTF: 12h data for HMA-21 trend ===
     df_12h = get_htf_data(prices, '12h')
-    ema_period = 50
-    ema_values = pd.Series(df_12h['close'].values).ewm(span=ema_period, adjust=False).mean().values
-    ema_aligned = align_htf_to_ltf(prices, df_12h, ema_values)
+    hma_period = 21
+    # Calculate HMA: WMA(2*WMA(n/2) - WMA(n)), sqrt(n))
+    half_period = hma_period // 2
+    sqrt_period = int(np.sqrt(hma_period))
+    
+    def wma(values, period):
+        if period <= 0:
+            return np.full_like(values, np.nan)
+        weights = np.arange(1, period + 1)
+        return np.convolve(values, weights, mode='full')[-len(values):] / weights.sum()
+    
+    # Pre-calculate HMA values
+    close_12h = df_12h['close'].values.astype(np.float64)
+    wma_half = wma(close_12h, half_period)
+    wma_full = wma(close_12h, hma_period)
+    hma_raw = 2 * wma_half - wma_full
+    hma_values = wma(hma_raw, sqrt_period)
+    hma_aligned = align_htf_to_ltf(prices, df_12h, hma_values)
     
     # === 4h Indicators: Donchian Channel(20) for breakout ===
     lookback_dc = 20
@@ -44,7 +59,7 @@ def generate_signals(prices):
     
     # === Signals Initialization ===
     signals = np.zeros(n)
-    SIZE = 0.25  # 25% position size
+    SIZE = 0.30  # 30% position size
     
     # Position tracking state variables
     in_position = False
@@ -53,12 +68,12 @@ def generate_signals(prices):
     highest_since_entry = 0.0
     lowest_since_entry = 0.0
     
-    warmup = max(lookback_dc + 1, 20, ema_period)
+    warmup = max(lookback_dc + 1, 20, hma_period)
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
-            np.isnan(ema_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
+            np.isnan(hma_aligned[i]) or np.isnan(vol_ratio[i]) or np.isnan(atr[i])):
             signals[i] = 0.0
             continue
         
@@ -98,13 +113,13 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Require volume spike (> 1.5x average) to filter noise
-        volume_spike = vol_ratio[i] > 1.5
+        # Require volume spike (> 1.8x average) to filter noise
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
-            # Determine trend: bullish if price above 12h EMA-50, bearish if below
-            bullish = price > ema_aligned[i]
-            bearish = price < ema_aligned[i]
+            # Determine trend: bullish if price above 12h HMA-21, bearish if below
+            bullish = price > hma_aligned[i]
+            bearish = price < hma_aligned[i]
             
             # Long entry: breakout above Donchian upper band in bullish regime
             long_breakout = price > highest_high[i-1] and bullish
