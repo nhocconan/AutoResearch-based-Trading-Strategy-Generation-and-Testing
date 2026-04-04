@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #2511: 6h Camarilla Pivot Fade/Breakout + Volume Confirmation
-HYPOTHESIS: Camarilla pivot levels from 1d HTF provide institutional support/resistance zones.
-Fade at R3/S3 (mean reversion in range) and breakout continuation at R4/S4 (trend acceleration).
-Volume confirmation filters low-probability breakouts. Works in both bull/bear markets by
-adapting to regime (range vs trend) via price action at pivot levels. Targets 50-150 trades
-over 4 years with discrete sizing (0.25) to minimize fee drag.
+Experiment #2511: 6h Camarilla Pivot + Volume Spike + Trend Filter
+HYPOTHESIS: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) 
+combined with volume confirmation and 1d trend filter captures institutional 
+participation at key levels. Works in both bull and bear markets by fading extremes 
+in ranging conditions and continuing breaks in trending markets. Targets 75-150 
+total trades over 4 years with discrete sizing (0.25) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2511_6h_camarilla_pivot_v1"
+name = "exp_2511_6h_camarilla1d_vol_trend_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -23,29 +23,34 @@ def generate_signals(prices):
     volume = prices["volume"].values.astype(np.float64)
     n = len(close)
     
-    # === HTF: 1d data for Camarilla pivot levels (Call ONCE before loop) ===
+    # === HTF: 1d data for Camarilla pivots and trend (Call ONCE before loop) ===
     df_1d = get_htf_data(prices, '1d')
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for 1d
-    # Pivot = (H + L + C) / 3
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    # Range = H - L
-    range_1d = high_1d - low_1d
-    # Camarilla levels
-    r4_1d = close_1d + range_1d * 1.1 / 2
-    r3_1d = close_1d + range_1d * 1.1 / 4
-    s3_1d = close_1d - range_1d * 1.1 / 4
-    s4_1d = close_1d - range_1d * 1.1 / 2
+    # Calculate 1d EMA(50) for trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Align HTF levels to LTF (6h)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Calculate Camarilla pivot levels from previous 1d bar
+    # Camarilla: R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4)
+    #          S3 = C - ((H-L) * 1.1/4), S4 = C - ((H-L) * 1.1/2)
+    # where C = (H+L+Close)/3 (typical price)
+    typical_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    camarilla_r4 = typical_1d + (range_1d * 1.1 / 2.0)
+    camarilla_r3 = typical_1d + (range_1d * 1.1 / 4.0)
+    camarilla_s3 = typical_1d - (range_1d * 1.1 / 4.0)
+    camarilla_s4 = typical_1d - (range_1d * 1.1 / 2.0)
+    
+    # Align Camarilla levels to 6h timeframe (shifted by 1 for completed 1d bar)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
     
     # === 6h Indicators: Volume MA(20) for spike detection ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,51 +65,59 @@ def generate_signals(prices):
     in_position = False
     position_side = 0
     entry_price = 0.0
+    highest_since_entry = 0.0
+    lowest_since_entry = 0.0
     
-    warmup = 50  # sufficient for HTF and volume MA
+    warmup = 50  # sufficient for all indicators
     
     for i in range(warmup, n):
         # --- Data Validity Check ---
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or
-            np.isnan(s4_aligned[i]) or np.isnan(vol_ratio[i])):
+        if (np.isnan(trend_1d_aligned[i]) or
+            np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
+            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ratio[i])):
             signals[i] = 0.0
             continue
         
         price = close[i]
         
-        # --- Exit Logic: Trailing stop at 2*ATR using Donchian width proxy ---
+        # --- Exit Logic ---
         if in_position:
-            # Calculate ATR proxy from recent 6h price action
-            lookback = min(20, i)
-            if lookback >= 2:
-                recent_high = np.max(high[i-lookback:i+1])
-                recent_low = np.min(low[i-lookback:i+1])
-                atr_estimate = (recent_high - recent_low) * 0.15
-            else:
-                atr_estimate = 0.0
-            
+            # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
-                # Exit if price drops 2*ATR below entry
-                if price < entry_price - 2.0 * atr_estimate:
+                highest_since_entry = max(highest_since_entry, high[i])
+                # Exit if price drops 2*ATR below highest since entry (using Donchian width as ATR proxy)
+                # Approximate ATR from 6h range
+                atr_estimate = (high[i] - low[i]) * 0.15
+                if price < highest_since_entry - 2.0 * atr_estimate:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price reaches opposite Camarilla level (mean reversion)
-                elif price >= r3_aligned[i]:
+                # Exit if price reaches Camarilla S3 (mean reversion target) or breaks S4 (stop)
+                elif price <= s3_aligned[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                elif price < s4_aligned[i]:  # Stop loss if breaks S4
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
                 else:
                     signals[i] = SIZE
             else:  # Short
-                # Exit if price rises 2*ATR above entry
-                if price > entry_price + 2.0 * atr_estimate:
+                lowest_since_entry = min(lowest_since_entry, low[i])
+                # Exit if price rises 2*ATR above lowest since entry
+                atr_estimate = (high[i] - low[i]) * 0.15
+                if price > lowest_since_entry + 2.0 * atr_estimate:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price reaches opposite Camarilla level (mean reversion)
-                elif price <= s3_aligned[i]:
+                # Exit if price reaches Camarilla R3 (mean reversion target) or breaks R4 (stop)
+                elif price >= r3_aligned[i]:
+                    in_position = False
+                    position_side = 0
+                    signals[i] = 0.0
+                elif price > r4_aligned[i]:  # Stop loss if breaks R4
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -113,35 +126,46 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume confirmation: require volume spike (> 1.8x average)
-        volume_spike = vol_ratio[i] > 1.8
+        # Require 1d trend alignment for bias filter
+        trend_bias = trend_1d_aligned[i]
         
-        if volume_spike:
-            # Fade at R3/S3: price rejects extreme levels (mean reversion in range)
-            if abs(price - r3_aligned[i]) < (r4_aligned[i] - r3_aligned[i]) * 0.1:
-                # Price near R3, expect reversal down
+        # Volume confirmation: require volume spike (> 1.5x average)
+        volume_spike = vol_ratio[i] > 1.5
+        
+        if volume_spike and trend_bias != 0:
+            # Mean reversion entries at R3/S3 in ranging/weak trend conditions
+            # Long: price drops to S3 with volume spike in uptrend
+            if trend_bias > 0 and price <= s3_aligned[i]:
+                in_position = True
+                position_side = 1
+                entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
+                signals[i] = SIZE
+            # Short: price rises to R3 with volume spike in downtrend
+            elif trend_bias < 0 and price >= r3_aligned[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = -SIZE
-            elif abs(price - s3_aligned[i]) < (s3_aligned[i] - s4_aligned[i]) * 0.1:
-                # Price near S3, expect reversal up
+            # Breakout entries at R4/S4 with strong trend alignment
+            # Long: price breaks above R4 with volume spike in uptrend
+            elif trend_bias > 0 and price >= r4_aligned[i]:
                 in_position = True
                 position_side = 1
                 entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Breakout continuation at R4/S4: price breaks extreme levels with volume
-            elif price > r4_aligned[i]:
-                # Break above R4, expect continuation up
-                in_position = True
-                position_side = 1
-                entry_price = close[i]
-                signals[i] = SIZE
-            elif price < s4_aligned[i]:
-                # Break below S4, expect continuation down
+            # Short: price breaks below S4 with volume spike in downtrend
+            elif trend_bias < 0 and price <= s4_aligned[i]:
                 in_position = True
                 position_side = -1
                 entry_price = close[i]
+                highest_since_entry = high[i]
+                lowest_since_entry = low[i]
                 signals[i] = -SIZE
             else:
                 signals[i] = 0.0
