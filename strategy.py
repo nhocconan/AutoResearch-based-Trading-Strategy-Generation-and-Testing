@@ -2,7 +2,7 @@
 """
 Experiment #5104: 1d Donchian(20) Breakout + 1w HMA Trend + Volume Spike + ATR Stoploss
 HYPOTHESIS: On 1d timeframe, Donchian(20) breakouts aligned with 1w HMA(21) trend capture strong momentum. 
-Volume > 1.5x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. 
+Volume > 1.8x average confirms participation. ATR(14) trailing stop (2.0x) manages risk. 
 Designed for 7-25 trades/year on 1d timeframe to minimize fee drag. Works in bull markets (breakouts with trend) 
 and bear markets (breakdowns with trend). Uses discrete position sizing (0.25) to minimize fee churn.
 """
@@ -53,7 +53,7 @@ def generate_signals(prices):
     high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # === 1d Indicators: Volume confirmation (1.5x spike) ===
+    # === 1d Indicators: Volume confirmation (1.8x spike) ===
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
@@ -111,8 +111,8 @@ def generate_signals(prices):
             continue
         
         # --- New Position Entry Logic ---
-        # Volume filter: confirmation (>1.5x)
-        vol_confirm = vol_ratio[i] > 1.5
+        # Volume filter: confirmation (>1.8x)
+        vol_confirm = vol_ratio[i] > 1.8
         
         # Donchian breakout conditions with 1w HMA trend filter
         # Long: Donchian breakout above + price > 1w HMA (uptrend)
