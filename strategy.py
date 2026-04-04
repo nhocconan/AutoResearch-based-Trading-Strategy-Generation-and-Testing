@@ -2,10 +2,11 @@
 """
 exp_6478_1d_donchian20_1w_ema_vol_v1
 Hypothesis: Daily Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation.
-Uses 1w EMA50 to determine bias: long only when price above weekly EMA50,
+Uses weekly EMA50 to determine bias: long only when price above weekly EMA50,
 short only when below. Volume confirmation filters weak breakouts.
-Target: 30-100 trades over 4 years (7-25/year). Works in both bull and bear markets
-by using weekly EMA50 as adaptive trend filter and Donchian breakouts for momentum entries.
+Designed for 1d timeframe to generate 30-100 trades over 4 years (7-25/year).
+Works in both bull and bear markets by using weekly EMA50 as adaptive trend filter
+and Donchian breakouts for momentum entries.
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
@@ -29,7 +30,7 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    # Calculate 1w EMA50
+    # Calculate weekly EMA50
     close_1w = df_1w['close'].values
     ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, min_periods=EMA_PERIOD, adjust=False).mean().values
     # Align to LTF (1d) with shift(1) for completed bars only
