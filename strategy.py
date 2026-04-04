@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #2646: 4h Donchian(20) breakout + 1d EMA(50) trend + volume spike (2.0x) + ATR trailing stop
+Experiment #2646: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation + ATR stoploss
 HYPOTHESIS: 4h Donchian breakouts with 1d trend alignment and volume spikes capture 
-institutional participation while minimizing overtrading. Uses 1d for signal direction, 
-4h only for entry timing and risk management. Target: 75-200 total trades over 4 years.
-Uses ATR-based trailing stop (2.0x ATR) for risk control and discrete position sizing (0.25).
+institutional participation across market regimes. Using 4h primary timeframe targets 
+optimal trade frequency (19-50/year) to minimize fee drift while maintaining statistical 
+significance. Volume confirmation ensures breakout validity. ATR-based trailing stop 
+manages risk in volatile conditions.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_2646_4h_donchian20_1d_ema_vol_atr_v1"
+name = "exp_2646_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,7 +32,7 @@ def generate_signals(prices):
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # === 4h Indicators: Donchian(20) channels, Volume MA(20), ATR(14) ===
+    # === 4h Indicators: Donchian(20) channels, Volume MA(20) ===
     # Donchian channels (20-period high/low)
     highest_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
@@ -41,12 +42,12 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # True Range and ATR(14)
-    tr1 = np.abs(high - low)
+    # === ATR(14) for volatility-based stoploss ===
+    tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First bar: no previous close
+    tr[0] = tr1[0]  # First TR is just high-low
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # === Signals Initialization ===
@@ -76,12 +77,12 @@ def generate_signals(prices):
             # Update highest/lowest since entry for trailing stop
             if position_side > 0:  # Long
                 highest_since_entry = max(highest_since_entry, high[i])
-                # ATR trailing stop: exit if price drops 2.0*ATR below highest since entry
-                if price < highest_since_entry - 2.0 * atr[i]:
+                # Exit if price drops 2.5*ATR below highest since entry
+                if price < highest_since_entry - 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks below Donchian low (structure break)
+                # Exit if price breaks below Donchian low (mean reversion)
                 elif price < lowest_20[i]:
                     in_position = False
                     position_side = 0
@@ -90,12 +91,12 @@ def generate_signals(prices):
                     signals[i] = SIZE
             else:  # Short
                 lowest_since_entry = min(lowest_since_entry, low[i])
-                # ATR trailing stop: exit if price rises 2.0*ATR above lowest since entry
-                if price > lowest_since_entry + 2.0 * atr[i]:
+                # Exit if price rises 2.5*ATR above lowest since entry
+                if price > lowest_since_entry + 2.5 * atr[i]:
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price breaks above Donchian high (structure break)
+                # Exit if price breaks above Donchian high (mean reversion)
                 elif price > highest_20[i]:
                     in_position = False
                     position_side = 0
@@ -112,8 +113,8 @@ def generate_signals(prices):
             signals[i] = 0.0
             continue
         
-        # Volume confirmation: require volume spike (> 2.0x average)
-        volume_spike = vol_ratio[i] > 2.0
+        # Volume confirmation: require volume spike (> 1.8x average)
+        volume_spike = vol_ratio[i] > 1.8
         
         if volume_spike:
             # Long entry: price breaks above Donchian high with uptrend on 1d
