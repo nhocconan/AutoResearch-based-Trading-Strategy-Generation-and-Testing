@@ -2,9 +2,9 @@
 """
 exp_6546_4h_donchian20_1d_ema_vol_v1
 Hypothesis: 4h Donchian(20) breakout with 1d EMA200 as trend filter and volume confirmation.
-Uses 1d EMA200 for strong trend filter that works in both bull/bear markets.
-Volume spike (2.0x 20-period MA) confirms breakout strength.
-Designed for 75-200 total trades over 4 years with discrete sizing (0.25) to minimize fee drag.
+Uses 1d EMA for stronger trend filter (less whipsaw) vs shorter HTF, reducing false breakouts.
+Volume > 1.5x MA confirms breakout strength. Discrete sizing 0.25 to control risk and fees.
+Designed for 75-200 trades over 4 years (19-50/year).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -17,10 +17,10 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 200          # 1d EMA200 for strong trend filter
+EMA_PERIOD = 200
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 2.0      # volume must be 2.0x its 20-period MA
-SIGNAL_SIZE = 0.25       # 25% position size
+VOL_THRESHOLD = 1.5  # volume must be 1.5x its MA for confirmation
+SIGNAL_SIZE = 0.25   # 25% position size
 
 def generate_signals(prices):
     n = len(prices)
@@ -55,7 +55,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
