@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #3624: 1d Donchian(20) breakout + 1w EMA trend + volume confirmation
-HYPOTHESIS: Buy breakouts above 20-day high in bullish weekly trend, sell breakdowns below 20-day low in bearish weekly trend. Volume spike confirms momentum. Works in bull markets (trend continuation) and bear markets (trend continuation short). Position size 0.25. Target: 75-150 total trades over 4 years (19-37/year). Uses 1w for trend filter and 1d for entry/exit.
+HYPOTHESIS: 1d Donchian breakouts capture strong momentum moves. 1w EMA(21) filters for higher-timeframe trend alignment. Volume spike (>1.8x 20-bar MA) confirms breakout strength. Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend). Position size 0.25. Target: 75-150 total trades over 4 years (19-37/year). Uses 1w for trend filter and 1d for entry/exit timing.
 """
 
 import numpy as np
@@ -27,7 +27,7 @@ def generate_signals(prices):
     ema_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # === 1d Indicators: Donchian Channel(20) for breakouts ===
+    # === 1d Indicators: Donchian(20) channels ===
     lookback_donchian = 20
     highest_high = pd.Series(high).rolling(window=lookback_donchian, min_periods=lookback_donchian).max().values
     lowest_low = pd.Series(low).rolling(window=lookback_donchian, min_periods=lookback_donchian).min().values
@@ -37,7 +37,7 @@ def generate_signals(prices):
     vol_ratio = np.ones(n)
     vol_ratio[20:] = volume[20:] / vol_ma[20:]
     
-    # === 1d Indicators: ATR(14) for volatility and stoploss ===
+    # === 1d Indicators: ATR(14) for volatility and trailing stop ===
     tr1 = high[1:] - low[1:]
     tr2 = np.abs(high[1:] - close[:-1])
     tr3 = np.abs(low[1:] - close[:-1])
@@ -76,8 +76,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price re-enters Donchian channel (mean reversion in chop)
-                elif price < highest_high[i-1]:  # Below previous period's high
+                # Exit if price re-enters Donchian channel (take profit)
+                elif price < highest_high[i - lookback_donchian]:  # below upper band of lookback period
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -90,8 +90,8 @@ def generate_signals(prices):
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
-                # Exit if price re-enters Donchian channel (mean reversion in chop)
-                elif price > lowest_low[i-1]:  # Above previous period's low
+                # Exit if price re-enters Donchian channel (take profit)
+                elif price > lowest_low[i - lookback_donchian]:  # above lower band of lookback period
                     in_position = False
                     position_side = 0
                     signals[i] = 0.0
@@ -107,8 +107,8 @@ def generate_signals(prices):
             # Determine trend bias from 1w EMA
             bullish_bias = ema_1w_aligned[i] > close_1w[-1] if len(close_1w) > 0 else ema_1w_aligned[i] > price  # fallback
             
-            # Long entry: price breaks above 20-day high in bullish weekly trend
-            if (price > highest_high[i-1] and  # Breakout above Donchian high
+            # Long entry: price breaks above Donchian upper band in bullish 1w trend
+            if (price > highest_high[i - 1] and  # break above previous period's high
                 bullish_bias):
                 in_position = True
                 position_side = 1
@@ -116,8 +116,8 @@ def generate_signals(prices):
                 highest_since_entry = high[i]
                 lowest_since_entry = low[i]
                 signals[i] = SIZE
-            # Short entry: price breaks below 20-day low in bearish weekly trend
-            elif (price < lowest_low[i-1] and  # Breakdown below Donchian low
+            # Short entry: price breaks below Donchian lower band in bearish 1w trend
+            elif (price < lowest_low[i - 1] and  # break below previous period's low
                   not bullish_bias):
                 in_position = True
                 position_side = -1
