@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-exp_6464_1d_donchian20_1w_ema_vol_v1
-Hypothesis: Daily Donchian(20) breakout with weekly EMA(50) trend filter and volume confirmation.
-Uses weekly EMA for stronger trend filtering on daily timeframe, reducing whipsaws in bear markets.
-Volume confirmation ensures breakouts have conviction. Target: 30-100 trades over 4 years.
-Works in both bull (breakouts with volume) and bear (weekly EMA filter prevents counter-trend entries).
+exp_6465_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+Uses daily EMA for strong trend alignment and 12h timeframe to minimize fee drag.
+Volume confirmation filters false breakouts. Target: 50-150 trades over 4 years.
 """
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6464_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_6465_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -26,13 +25,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    # Calculate 1w EMA(50) on close
-    close_1w = pd.Series(df_1w['close'].values)
-    ema_1w = close_1w.ewm(span=EMA_PERIOD, min_periods=EMA_PERIOD, adjust=False).mean().values
-    # Align to LTF (1d) with shift(1) for completed bars only
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Load HTF data ONCE before loop (1d)
+    df_1d = get_htf_data(prices, '1d')
+    # Calculate 1d EMA(50) on close
+    close_1d = pd.Series(df_1d['close'].values)
+    ema_1d = close_1d.ewm(span=EMA_PERIOD, min_periods=EMA_PERIOD, adjust=False).mean().values
+    # Align to LTF (12h) with shift(1) for completed bars only
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -56,20 +55,20 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if EMA not available (first EMA_PERIOD bars)
-        if np.isnan(ema_1w_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]):
             continue
             
-        # Long conditions: price breaks above Donchian HIGH + above 1w EMA + volume spike
+        # Long conditions: price breaks above Donchian HIGH + above 1d EMA + volume spike
         long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
-        long_trend = close[i] > ema_1w_aligned[i]     # price above 1w EMA
+        long_trend = close[i] > ema_1d_aligned[i]      # price above 1d EMA
         long_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Short conditions: price breaks below Donchian LOW + below 1w EMA + volume spike
+        # Short conditions: price breaks below Donchian LOW + below 1d EMA + volume spike
         short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
-        short_trend = close[i] < ema_1w_aligned[i]    # price below 1w EMA
+        short_trend = close[i] < ema_1d_aligned[i]     # price below 1d EMA
         short_volume = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Exit conditions: ATR-based stoploss approximation using price channels
+        # Exit conditions: ATR-based stoploss approximation
         # Simple approach: exit when price reverses halfway through the channel
         channel_width = donchian_high[i-1] - donchian_low[i-1]
         if position == 1:  # long position
