@@ -1,28 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #9555: 6h 1-Week Momentum + Daily Volume Filter.
-Hypothesis: On 6h timeframe, price above 1-week high for 2+ consecutive bars with volume above 
-20-period moving average indicates strong momentum continuation. This works in both bull and bear 
-markets because it captures trending moves regardless of direction. Targets 80-160 total trades 
-over 4 years (20-40/year) by requiring both momentum and volume confirmation.
+Experiment #9557: 4h Donchian Breakout + Volume Confirmation + ATR Stop.
+Hypothesis: Donchian(20) breakouts on 4h timeframe with volume confirmation and ATR-based stop loss 
+provide robust trend-following signals that work in both bull and bear markets. 
+Targeting 75-200 total trades over 4 years (19-50/year) by requiring volume surge and 
+using 4h/1d multi-timeframe alignment to reduce false breakouts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9555_6h_1w_momentum_volume_filter"
-timeframe = "6h"
+name = "exp_9557_4h_donchian_breakout_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-WEEK_HIGH_PERIOD = 5  # 5 days = 1 week (for 1d data)
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
-MIN_CONSECUTIVE_BARS = 2
-SIGNAL_SIZE = 0.25
+DONCHIAN_PERIOD = 20
+VOLUME_SPIKE_MULTIPLIER = 1.5
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+SIGNAL_SIZE = 0.25
+
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -38,24 +42,25 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for 1-week high calculation)
+    # Load HTF data ONCE before loop (1d for trend filter)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1-week high (highest high over past 5 days)
-    high_1d = df_1d['high'].values
-    week_high = pd.Series(high_1d).rolling(window=WEEK_HIGH_PERIOD, min_periods=WEEK_HIGH_PERIOD).max().values
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Align 1-week high to 6h timeframe
-    week_high_aligned = align_htf_to_ltf(prices, df_1d, week_high)
-    
-    # Calculate LTF indicators (6h)
+    # Calculate LTF indicators (4h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume moving average for filter
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    # Donchian channels
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    
+    # Volume moving average for spike detection
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -66,11 +71,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WEEK_HIGH_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + MIN_CONSECUTIVE_BARS
+    start = max(DONCHIAN_PERIOD, 20, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(week_high_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -86,20 +91,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Momentum condition: price above 1-week high for MIN_CONSECUTIVE_BARS consecutive bars
-        if i >= MIN_CONSECUTIVE_BARS:
-            momentum_up = all(close[i-j] > week_high_aligned[i-j] for j in range(MIN_CONSECUTIVE_BARS))
-            momentum_down = all(close[i-j] < week_high_aligned[i-j] for j in range(MIN_CONSECUTIVE_BARS))
-        else:
-            momentum_up = False
-            momentum_down = False
+        # Volume spike confirmation
+        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Volume filter: current volume above threshold * moving average
-        volume_filter = volume[i] > (VOLUME_THRESHOLD * volume_ma[i]) if not np.isnan(volume_ma[i]) else False
+        # Trend filter: price above/below 1d EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
+        
+        # Breakout conditions with volume confirmation
+        breakout_long = close[i] >= donchian_upper[i] and volume_spike and uptrend
+        breakout_short = close[i] <= donchian_lower[i] and volume_spike and downtrend
         
         # Entry conditions
-        long_entry = momentum_up and volume_filter
-        short_entry = momentum_down and volume_filter
+        long_entry = breakout_long
+        short_entry = breakout_short
         
         # Generate signals
         if position == 0:
@@ -121,3 +126,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</lyra>
