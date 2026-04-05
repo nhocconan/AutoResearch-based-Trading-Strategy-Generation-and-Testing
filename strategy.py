@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #11193: 4h Donchian Breakout with 12h Trend and Volume Confirmation
-Hypothesis: Donchian(20) breakouts on 4h capture strong directional moves with proper trend alignment from 12h timeframe.
-Volume confirmation ensures institutional participation. Works in bull (breakouts continue) and bear (breakouts reverse quickly)
-by using 12h trend filter. Target: 75-200 trades over 4 years. Uses discrete position sizing to minimize fee churn.
+Hypothesis: 4h Donchian(20) breakouts capture strong directional moves with 12h EMA for trend bias.
+Volume confirmation ensures institutional participation. Works in bull (breakouts continue) and
+bear (breakouts reverse quickly) by using 12h trend filter. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 21  # 12h EMA for trend filter
+TREND_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -26,7 +26,7 @@ ATR_STOP_MULTIPLIER = 2.0
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    lower = pd.Series(high).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
 def calculate_ema(close, period):
@@ -128,4 +128,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</0>
