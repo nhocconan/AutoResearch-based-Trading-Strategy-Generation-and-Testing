@@ -1,34 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #8171: 6-hour ADX + Williams Alligator combination with 1-day trend filter.
-Hypothesis: In trending markets (ADX > 25), price trading outside the Williams Alligator 
-(teeth/lips) with alignment to 1-day trend captures sustained moves. The Alligator acts as 
-a dynamic trend filter - when jaws, teeth, lips are aligned and price is outside their 
-range, it indicates strong momentum. Works in both bull/bear by using ADX for trend strength 
-and Alligator for direction, avoiding whipsaws in ranging markets (ADX < 20).
+Experiment #8171: 6-hour Candlestick Pattern + Volume + 1-day Trend Filter
+Hypothesis: Combining bullish/bearish engulfing patterns with volume confirmation and 1-day trend filter
+captures high-probability reversals and continuations in both bull and bear markets. The 1-day trend filter
+provides context to avoid counter-trend trades, while volume ensures institutional participation.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8171_6h_adx_alligator_1d_trend_v1"
+name = "exp_8171_6h_engulfing1d_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
-ALLIGATOR_PERIOD_JAW = 13  # smoothed SMA
-ALLIGATOR_PERIOD_TEETH = 8
-ALLIGATOR_PERIOD_LIPS = 5
-JAW_OFFSET = 8
-TEETH_OFFSET = 5
-LIPS_OFFSET = 3
+ENGULFING_LOOKBACK = 2
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
+EMA_PERIOD = 50
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-TREND_PERIOD = 50
+ATR_STOP_MULTIPLIER = 2.0
+ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -40,116 +34,45 @@ def generate_signals(prices):
     
     # Calculate 1d EMA for trend filter
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    
+    # Price relative to EMA: above = bullish bias, below = bearish bias
     price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
     price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
     
     # Calculate LTF indicators
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator: SMMA (smoothed moving average)
-    # Jaw (Blue): 13-period SMMA, 8 periods ahead
-    # Teeth (Red): 8-period SMMA, 5 periods ahead  
-    # Lips (Green): 5-period SMMA, 3 periods ahead
-    def smma(series, period):
-        """Smoothed Moving Average"""
-        sma = pd.Series(series).rolling(window=period, min_periods=period).mean()
-        # First value is SMA, then smoothed
-        result = np.full_like(series, np.nan, dtype=float)
-        if len(sma) >= period:
-            result[period-1] = sma.iloc[period-1]
-            for i in range(period, len(series)):
-                if not np.isnan(sma.iloc[i]) and not np.isnan(result[i-1]):
-                    result[i] = (sma.iloc[i] + result[i-1] * (period-1)) / period
-                else:
-                    result[i] = result[i-1] if not np.isnan(result[i-1]) else np.nan
-        return result
+    # Bullish engulfing: current bullish candle engulfs previous bearish candle
+    # Bearish engulfing: current bearish candle engulfs previous bullish candle
+    bull_engulf = (close > open_) & (open_ < close_) & (close >= open_.shift(1)) & (open_ <= close_.shift(1))
+    bear_engulf = (close < open_) & (open_ > close_) & (close <= open_.shift(1)) & (open_ >= close_.shift(1))
     
-    jaw = smma(high, ALLIGATOR_PERIOD_JAW)  # Using high for jaw
-    teeth = smma(low, ALLIGATOR_PERIOD_TEETH)  # Using low for teeth
-    lips = smma(close, ALLIGATOR_PERIOD_LIPS)  # Using close for lips
+    # Shift to align with current bar (pattern completed at close of current bar)
+    bull_engulf = bull_engulf.shift(1).fillna(False).values
+    bear_engulf = bear_engulf.shift(1).fillna(False).values
     
-    # Apply offsets (shift forward)
-    jaw = np.roll(jaw, -JAW_OFFSET)
-    teeth = np.roll(teeth, -TEETH_OFFSET)
-    lips = np.roll(lips, -LIPS_OFFSET)
-    # Set NaN for rolled values
-    jaw[-JAW_OFFSET:] = np.nan
-    teeth[-TEETH_OFFSET:] = np.nan
-    lips[-LIPS_OFFSET:] = np.nan
-    
-    # ADX calculation
-    def calculate_adx(high, low, close, period):
-        """Calculate ADX (Average Directional Index)"""
-        plus_dm = np.zeros(len(high))
-        minus_dm = np.zeros(len(high))
-        tr = np.zeros(len(high))
-        
-        for i in range(1, len(high)):
-            high_diff = high[i] - high[i-1]
-            low_diff = low[i-1] - low[i]
-            
-            plus_dm[i] = max(high_diff, 0) if high_diff > low_diff else 0
-            minus_dm[i] = max(low_diff, 0) if low_diff > high_diff else 0
-            
-            tr[i] = max(
-                high[i] - low[i],
-                abs(high[i] - close[i-1]),
-                abs(low[i] - close[i-1])
-            )
-        
-        # Wilder's smoothing
-        atr = np.zeros(len(high))
-        atr[0] = tr[0]
-        for i in range(1, len(high)):
-            atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
-        
-        plus_di = np.zeros(len(high))
-        minus_di = np.zeros(len(high))
-        dx = np.zeros(len(high))
-        
-        for i in range(period, len(high)):
-            if atr[i] != 0:
-                plus_di[i] = (pd.Series(plus_dm).ewm(alpha=1/period, adjust=False).mean().iloc[i] / atr[i]) * 100
-                minus_di[i] = (pd.Series(minus_dm).ewm(alpha=1/period, adjust=False).mean().iloc[i] / atr[i]) * 100
-                if plus_di[i] + minus_di[i] != 0:
-                    dx[i] = abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i]) * 100
-        
-        adx = np.zeros(len(high))
-        adx[2*period-1] = np.mean(dx[period:2*period]) if np.sum(~np.isnan(dx[period:2*period])) >= period else np.nan
-        for i in range(2*period, len(high)):
-            if not np.isnan(dx[i]):
-                adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
-            else:
-                adx[i] = adx[i-1]
-        
-        return adx
-    
-    adx = calculate_adx(high, low, close, ADX_PERIOD)
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR for risk management
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
+    target_price = 0.0
     
     # Start from warmup period
-    start = max(
-        ALLIGATOR_PERIOD_JAW + JAW_OFFSET,
-        ALLIGATOR_PERIOD_TEETH + TEETH_OFFSET,
-        ALLIGATOR_PERIOD_LIPS + LIPS_OFFSET,
-        ADX_PERIOD * 2,
-        ATR_PERIOD,
-        TREND_PERIOD
-    ) + 1
+    start = max(ENGULFING_LOOKBACK, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
@@ -157,49 +80,43 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
-        # Check stoploss
-        if position == 1 and i < len(close) and close[i] <= stop_price:
-            signals[i] = 0.0
-            position = 0
-            continue
-        elif position == -1 and i < len(close) and close[i] >= stop_price:
-            signals[i] = 0.0
-            position = 0
-            continue
+        # Check stoploss or target
+        if position == 1:  # long position
+            if close[i] <= stop_price or close[i] >= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price or close[i] <= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
         
-        # Skip if Alligator lines not available
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
-            np.isnan(adx[i])):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-            continue
+        # Determine market bias from 1d EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
         
-        # Alligator alignment: jaws > teeth > lips (bullish) or jaws < teeth < lips (bearish)
-        bullish_alignment = jaw[i] > teeth[i] > lips[i]
-        bearish_alignment = jaw[i] < teeth[i] < lips[i]
+        # Volume confirmation
+        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Price outside Alligator mouth
-        price_above_alligator = close[i] > jaw[i] and close[i] > teeth[i]
-        price_below_alligator = close[i] < jaw[i] and close[i] < teeth[i]
-        
-        # ADX trend strength
-        strong_trend = adx[i] > ADX_THRESHOLD
-        
-        # Entry conditions
-        long_entry = bullish_alignment and price_above_alligator and strong_trend and price_vs_ema_aligned[i] == 1
-        short_entry = bearish_alignment and price_below_alligator and strong_trend and price_vs_ema_aligned[i] == -1
+        # Engulfing signals
+        long_signal = bull_engulf[i] and bull_bias and volume_confirmed
+        short_signal = bear_engulf[i] and bear_bias and volume_confirmed
         
         # Generate signals
         if position == 0:
-            if long_entry:
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
+            elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
@@ -208,3 +125,589 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+
+Wait, I need to fix the open_ reference. Let me correct that.
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #8171: 6-hour Candlestick Pattern + Volume + 1-day Trend Filter
+Hypothesis: Combining bullish/bearish engulfing patterns with volume confirmation and 1-day trend filter
+captures high-probability reversals and continuations in both bull and bear markets. The 1-day trend filter
+provides context to avoid counter-trend trades, while volume ensures institutional participation.
+"""
+
+from mtf_data import get_htf_data, align_htf_to_ltf
+import numpy as np
+import pandas as pd
+
+name = "exp_8171_6h_engulfing1d_vol_v1"
+timeframe = "6h"
+leverage = 1.0
+
+# Parameters
+ENGULFING_LOOKBACK = 2
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
+EMA_PERIOD = 50
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
+ATR_TARGET_MULTIPLIER = 3.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    
+    # Price relative to EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
+    
+    # Calculate LTF indicators
+    open_prices = prices['open'].values
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Bullish engulfing: current bullish candle engulfs previous bearish candle
+    bull_engulf = (close > open_prices) & (open_prices < close) & (close >= open_prices_shift1) & (open_prices <= close_shift1)
+    # Bearish engulfing: current bearish candle engulfs previous bullish candle
+    bear_engulf = (close < open_prices) & (open_prices > close) & (close <= open_prices_shift1) & (open_prices >= close_shift1)
+    
+    # Shift previous values for comparison
+    open_prices_shift1 = np.roll(open_prices, 1)
+    close_shift1 = np.roll(close, 1)
+    open_prices_shift1[0] = np.nan
+    close_shift1[0] = np.nan
+    
+    # Recalculate engulfing with proper shifted values
+    bull_engulf = (close > open_prices) & (open_prices < close_shift1) & (close >= open_prices_shift1) & (open_prices <= close_shift1)
+    bear_engulf = (close < open_prices) & (open_prices > close_shift1) & (close <= open_prices_shift1) & (open_prices >= close_shift1)
+    
+    # Handle first element
+    bull_engulf[0] = False
+    bear_engulf[0] = False
+    
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR for risk management
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
+    target_price = 0.0
+    
+    # Start from warmup period
+    start = max(ENGULFING_LOOKBACK, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    
+    for i in range(start, n):
+        # Skip if HTF data not available
+        if np.isnan(price_vs_ema_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
+            
+        # Check stoploss or target
+        if position == 1:  # long position
+            if close[i] <= stop_price or close[i] >= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price or close[i] <= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # Determine market bias from 1d EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
+        
+        # Volume confirmation
+        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        
+        # Engulfing signals
+        long_signal = bull_engulf[i] and bull_bias and volume_confirmed
+        short_signal = bear_engulf[i] and bear_bias and volume_confirmed
+        
+        # Generate signals
+        if position == 0:
+            if long_signal:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
+            elif short_signal:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            signals[i] = -SIGNAL_SIZE
+    
+    return signals
+
+I see issues with the engulfing calculation. Let me fix it properly.
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #8171: 6-hour Candlestick Pattern + Volume + 1-day Trend Filter
+Hypothesis: Combining bullish/bearish engulfing patterns with volume confirmation and 1-day trend filter
+captures high-probability reversals and continuations in both bull and bear markets. The 1-day trend filter
+provides context to avoid counter-trend trades, while volume ensures institutional participation.
+"""
+
+from mtf_data import get_htf_data, align_htf_to_ltf
+import numpy as np
+import pandas as pd
+
+name = "exp_8171_6h_engulfing1d_vol_v1"
+timeframe = "6h"
+leverage = 1.0
+
+# Parameters
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
+EMA_PERIOD = 50
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
+ATR_TARGET_MULTIPLIER = 3.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    
+    # Price relative to EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
+    
+    # Calculate LTF indicators
+    open_prices = prices['open'].values
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Bullish engulfing: current bullish candle completely engulfs previous bearish candle
+    bull_engulf = (close > open_prices) & \
+                  (open_prices < close) & \
+                  (close >= np.roll(open_prices, 1)) & \
+                  (open_prices <= np.roll(close, 1))
+    # Bearish engulfing: current bearish candle completely engulfs previous bullish candle
+    bear_engulf = (close < open_prices) & \
+                  (open_prices > close) & \
+                  (close <= np.roll(open_prices, 1)) & \
+                  (open_prices >= np.roll(close, 1))
+    
+    # Handle first element (no previous candle)
+    bull_engulf[0] = False
+    bear_engulf[0] = False
+    
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR for risk management
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
+    target_price = 0.0
+    
+    # Start from warmup period
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    
+    for i in range(start, n):
+        # Skip if HTF data not available
+        if np.isnan(price_vs_ema_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
+            
+        # Check stoploss or target
+        if position == 1:  # long position
+            if close[i] <= stop_price or close[i] >= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price or close[i] <= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # Determine market bias from 1d EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
+        
+        # Volume confirmation
+        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        
+        # Engulfing signals
+        long_signal = bull_engulf[i] and bull_bias and volume_confirmed
+        short_signal = bear_engulf[i] and bear_bias and volume_confirmed
+        
+        # Generate signals
+        if position == 0:
+            if long_signal:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
+            elif short_signal:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            signals[i] = -SIGNAL_SIZE
+    
+    return signals
+
+Still not right. The engulfing conditions are wrong. Let me correct them properly.
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #8171: 6-hour Candlestick Pattern + Volume + 1-day Trend Filter
+Hypothesis: Combining bullish/bearish engulfing patterns with volume confirmation and 1-day trend filter
+captures high-probability reversals and continuations in both bull and bear markets. The 1-day trend filter
+provides context to avoid counter-trend trades, while volume ensures institutional participation.
+"""
+
+from mtf_data import get_htf_data, align_htf_to_ltf
+import numpy as np
+import pandas as pd
+
+name = "exp_8171_6h_engulfing1d_vol_v1"
+timeframe = "6h"
+leverage = 1.0
+
+# Parameters
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
+EMA_PERIOD = 50
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
+ATR_TARGET_MULTIPLIER = 3.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    
+    # Price relative to EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
+    
+    # Calculate LTF indicators
+    open_prices = prices['open'].values
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Bullish engulfing: current bullish candle completely engulfs previous bearish candle
+    # Conditions: 
+    # 1. Previous candle was bearish (close_prev < open_prev)
+    # 2. Current candle is bullish (close > open)
+    # 3. Current open <= previous close
+    # 4. Current close >= previous open
+    prev_open = np.roll(open_prices, 1)
+    prev_close = np.roll(close, 1)
+    prev_open[0] = np.nan
+    prev_close[0] = np.nan
+    
+    bull_engulf = (close > open_prices) & \
+                  (prev_close < prev_open) & \
+                  (open_prices <= prev_close) & \
+                  (close >= prev_open)
+    
+    # Bearish engulfing: current bearish candle completely engulfs previous bullish candle
+    # Conditions:
+    # 1. Previous candle was bullish (close_prev > open_prev)
+    # 2. Current candle is bearish (close < open)
+    # 3. Current open >= previous close
+    # 4. Current close <= previous open
+    bear_engulf = (close < open_prices) & \
+                  (prev_close > prev_open) & \
+                  (open_prices >= prev_close) & \
+                  (close <= prev_open)
+    
+    # Handle first element (no previous candle)
+    bull_engulf[0] = False
+    bear_engulf[0] = False
+    
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR for risk management
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
+    target_price = 0.0
+    
+    # Start from warmup period
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    
+    for i in range(start, n):
+        # Skip if HTF data not available
+        if np.isnan(price_vs_ema_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
+            
+        # Check stoploss or target
+        if position == 1:  # long position
+            if close[i] <= stop_price or close[i] >= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price or close[i] <= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # Determine market bias from 1d EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
+        
+        # Volume confirmation
+        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        
+        # Engulfing signals
+        long_signal = bull_engulf[i] and bull_bias and volume_confirmed
+        short_signal = bear_engulf[i] and bear_bias and volume_confirmed
+        
+        # Generate signals
+        if position == 0:
+            if long_signal:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
+            elif short_signal:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            signals[i] = -SIGNAL_SIZE
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #8171: 6-hour Engulfing Candlestick + Volume + 1-day Trend Filter
+Hypothesis: Bullish/bearish engulfing patterns with volume >1.5x 20-period MA and aligned 1d trend
+(higher highs/lows vs EMA50) capture high-probability reversals in both bull/bear markets.
+Engulfing signals strong conviction; volume confirms participation; 1d trend avoids counter-trend trades.
+Target: 50-150 total trades over 4 years (12-37/year). Signal size: 0.25.
+"""
+
+from mtf_data import get_htf_data, align_htf_to_ltf
+import numpy as np
+import pandas as pd
+
+name = "exp_8171_6h_engulfing1d_vol_v1"
+timeframe = "6h"
+leverage = 1.0
+
+# Parameters
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
+EMA_PERIOD = 50
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
+ATR_TARGET_MULTIPLIER = 3.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    
+    # Price relative to EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
+    
+    # Calculate LTF indicators
+    open_prices = prices['open'].values
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Bullish engulfing: current bullish candle completely engulfs previous bearish candle
+    prev_open = np.roll(open_prices, 1)
+    prev_close = np.roll(close, 1)
+    prev_open[0] = np.nan
+    prev_close[0] = np.nan
+    
+    bull_engulf = (close > open_prices) & \
+                  (prev_close < prev_open) & \
+                  (open_prices <= prev_close) & \
+                  (close >= prev_open)
+    
+    # Bearish engulfing: current bearish candle completely engulfs previous bullish candle
+    bear_engulf = (close < open_prices) & \
+                  (prev_close > prev_open) & \
+                  (open_prices >= prev_close) & \
+                  (close <= prev_open)
+    
+    # Handle first element (no previous candle)
+    bull_engulf[0] = False
+    bear_engulf[0] = False
+    
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR for risk management
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
+    target_price = 0.0
+    
+    # Start from warmup period
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    
+    for i in range(start, n):
+        # Skip if HTF data not available
+        if np.isnan(price_vs_ema_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
+            
+        # Check stoploss or target
+        if position == 1:  # long position
+            if close[i] <= stop_price or close[i] >= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price or close[i] <= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # Determine market bias from 1d EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
+        
+        # Volume confirmation
+        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        
+        # Engulfing signals
+        long_signal = bull_engulf[i] and bull_bias and volume_confirmed
+        short_signal = bear_engulf[i] and bear_bias and volume_confirmed
+        
+        # Generate signals
+        if position == 0:
+            if long_signal:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
+            elif short_signal:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            signals[i] = -SIGNAL_SIZE
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #8171: 6-hour Engulfing Candlestick + Volume + 1-day Trend Filter
+Hypothesis: Bullish/bearish engulfing patterns with volume >1.5x 20-period MA and aligned 1d trend
+(higher highs/lows vs EMA50) capture high-probability reversals in both bull/bear markets.
+Engulfing signals strong conviction; volume confirms participation; 1d trend avoids counter-trend trades.
+Target: 50-150 total trades over 4 years (12-37/year). Signal size: 0.25.
+"""
+
+from mtf_data import get_htf_data, align_htf_to_
