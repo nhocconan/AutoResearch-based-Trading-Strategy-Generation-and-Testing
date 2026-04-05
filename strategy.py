@@ -1,54 +1,44 @@
 #!/usr/bin/env python3
 """
-Experiment #8631: 6h Camarilla Pivot + Volume Spike + Regime Filter
-Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance.
-In ranging markets (Choppiness > 61.8), fade at R3/S3 levels with volume confirmation.
-In trending markets (Choppiness < 38.2), breakout continuation at R4/S4 levels.
-Volume spike (>2x 20-period mean) confirms institutional participation.
-Target: 75-150 trades over 4 years (19-38/year) to balance frequency and edge.
-Works in bull/bear via regime adaptation.
+Experiment #8634: 1h RSI mean reversion + 4h/1d trend filter + volume confirmation.
+Hypothesis: Mean reversion on 1h works in both bull and bear markets when filtered by higher timeframe trend.
+In bull markets, we take long reversals from oversold; in bear markets, we take short reversals from overbought.
+Using 4h for trend direction and 1d for trend strength reduces false signals.
+Volume confirmation ensures institutional participation. Targets 60-150 trades over 4 years (15-37/year).
 """
 
-from mtf_data import get_athf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8631_6h_camarilla_pivot_vol_regime_v1"
-timeframe = "6h"
+name = "exp_8634_1h_rsi_meanrev_4h_1d_trend_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_PERIOD = 1  # Use previous day's OHLC
-CHOPPINESS_PERIOD = 14
-CHOPPINESS_THRESHOLD_TREND = 38.2
-CHOPPINESS_THRESHOLD_RANGE = 61.8
-VOLUME_SPIKE_MULTIPLIER = 2.0
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
+TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-SIGNAL_SIZE = 0.25
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_choppiness(high, low, close, period):
-    """Choppiness Index: higher = ranging, lower = trending"""
-    atr = []
-    tr = np.maximum(np.maximum(high - low, np.abs(high - np.roll(close, 1))), 
-                    np.abs(low - np.roll(close, 1)))
-    for i in range(len(close)):
-        if i < period:
-            atr.append(np.nan)
-        else:
-            sum_tr = np.nansum(tr[i-period+1:i+1])
-            highest = np.nanmax(high[i-period+1:i+1])
-            lowest = np.nanmin(low[i-period+1:i+1])
-            if highest == lowest:
-                chop = 50
-            else:
-                chop = 100 * np.log10(sum_tr / (highest - lowest)) / np.log10(period)
-            atr.append(chop)
-    return np.array(atr)
+def calculate_rsi(close, period):
+    """Calculate RSI using Wilder's smoothing"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_atr(high, low, close, period):
-    """ATR using Wilder's smoothing"""
+    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -58,41 +48,40 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels from previous day
-    # R4 = C + ((H-L) * 1.1/2), R3 = C + ((H-L) * 1.1/4), etc.
-    # S4 = C - ((H-L) * 1.1/2), S3 = C - ((H-L) * 1.1/4), etc.
+    # Calculate 4h EMA for trend direction
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
+    # 1 = bullish (price above EMA), -1 = bearish (price below EMA)
+    trend_4h = np.where(close_4h > ema_4h, 1, -1)
+    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
+    
+    # Calculate 1d EMA for trend strength (avoid choppy markets)
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    ema_1d = pd.Series(close_1d).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
+    # Distance from EMA as strength indicator
+    dist_1d = (close_1d - ema_1d) / ema_1d
+    # Normalize to [-1, 1] range for consistent scaling
+    dist_1d_clipped = np.clip(dist_1d, -0.2, 0.2)  # Clip to reasonable range
+    trend_strength_1d = dist_1d_clipped / 0.2  # Scale to [-1, 1]
+    trend_strength_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_strength_1d)
     
-    # Camarilla levels (using previous day's values)
-    camarilla_r4 = close_1d + ((high_1d - low_1d) * 1.1 / 2)
-    camarilla_r3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
-    camarilla_s3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
-    camarilla_s4 = close_1d - ((high_1d - low_1d) * 1.1 / 2)
-    
-    # Align to 6s timeframe (shifted by 1 day for lookback)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # Calculate LTF indicators
+    # Calculate LTF indicators (1h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Choppiness index (regime filter)
-    chop = calculate_choppiness(high, low, close, CHOPPINESS_PERIOD)
+    # RSI for mean reversion
+    rsi = calculate_rsi(close, RSI_PERIOD)
     
-    # Volume moving average for spike detection
+    # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR for risk management
@@ -104,12 +93,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(CHOPPINESS_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(RSI_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or \
-           np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]):
+        if np.isnan(trend_4h_aligned[i]) or np.isnan(trend_strength_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -125,41 +113,44 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market regime
-        is_ranging = chop[i] > CHOPPINESS_THRESHOLD_RANGE
-        is_trending = chop[i] < CHOPPINESS_THRESHOLD_TREND
+        # Determine market bias from 4h EMA
+        bull_bias = trend_4h_aligned[i] == 1   # 4h price above EMA50
+        bear_bias = trend_4h_aligned[i] == -1  # 4h price below EMA50
+        
+        # Use 1d trend strength to filter choppy markets
+        strong_trend = abs(trend_strength_1d_aligned[i]) > 0.3  # At least 30% of max strength
+        
+        # RSI mean reversion conditions
+        rsi_oversold = rsi[i] < RSI_OVERSOLD
+        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
         
         # Volume confirmation
-        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
+        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Initialize signal
-        signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        # Entry conditions
+        # Long: bullish trend + oversold RSI + volume + strong trend
+        long_entry = bull_bias and rsi_oversold and volume_confirmed and strong_trend
+        # Short: bearish trend + overbought RSI + volume + strong trend
+        short_entry = bear_bias and rsi_overbought and volume_confirmed and strong_trend
         
-        # Entry logic based on regime
-        if position == 0:  # Only enter new positions when flat
-            if is_ranging and volume_spike:
-                # Ranging market: fade at R3/S3
-                if close[i] <= r3_aligned[i]:  # Sell at R3 resistance
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                elif close[i] >= s3_aligned[i]:  # Buy at S3 support
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif is_trending and volume_spike:
-                # Trending market: breakout continuation at R4/S4
-                if close[i] >= r4_aligned[i]:  # Buy breakout above R4
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                elif close[i] <= s4_aligned[i]:  # Sell breakdown below S4
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+        # Generate signals
+        if position == 0:
+            if long_entry:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif short_entry:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            signals[i] = -SIGNAL_SIZE
     
     return signals
+</p>
