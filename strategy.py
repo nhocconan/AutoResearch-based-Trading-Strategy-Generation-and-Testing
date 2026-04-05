@@ -1,28 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #10642: 12h Donchian Breakout + Daily Trend + Volume Spike
-Hypothesis: 12-hour Donchian(20) breakouts in the direction of daily EMA50 trend with volume confirmation
-provide high-probability trend continuation trades in both bull and bear markets.
-The 12-hour timeframe reduces noise while capturing major trends, and daily trend filter
-ensures alignment with higher timeframe momentum. Volume spikes confirm institutional interest.
-Target: 50-150 total trades over 4 years (12-37/year).
+Experiment #10643: 4h Donchian Breakout + 12h Trend + Volume Spike + Volatility Filter
+Hypothesis: 4h Donchian(20) breakouts aligned with 12h EMA trend, confirmed by volume spikes and volatility filters, 
+provide robust trend-following signals across market regimes. Designed to limit trades (75-200/4 years) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10642_12h_donchian_breakout_daily_trend_volume_v1"
-timeframe = "12h"
+name = "exp_10643_4h_donchian_12h_trend_volume_volatility_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
-DAILY_EMA_PERIOD = 50
+VOLUME_SPIKE_MULTIPLIER = 2.0
+VOLATILITY_PERIOD = 14
+VOLATILITY_THRESHOLD = 0.015  # 1.5% daily volatility minimum
+EMA_TREND_PERIOD = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
@@ -43,22 +42,28 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_volatility(close, period):
+    """Calculate rolling volatility as std of returns"""
+    returns = np.diff(np.log(close), prepend=0)
+    vol = pd.Series(returns).rolling(window=period, min_periods=period).std().values
+    return vol
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for trend filter
-    df_daily = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily EMA for trend direction
-    daily_close = df_daily['close'].values
-    daily_ema = calculate_ema(daily_close, DAILY_EMA_PERIOD)
+    # Calculate 12h EMA for trend direction
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, EMA_TREND_PERIOD)
     
-    # Align daily EMA to 12h timeframe
-    daily_ema_aligned = align_htf_to_ltf(prices, df_daily, daily_ema)
+    # Align 12h EMA to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -73,17 +78,20 @@ def generate_signals(prices):
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
+    # Volatility filter (minimum volatility to avoid choppy markets)
+    volatility = calculate_volatility(close, VOLATILITY_PERIOD)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, 20) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND_PERIOD, 20) + 1
     
     for i in range(start, n):
-        # Skip if daily EMA not available
-        if np.isnan(daily_ema_aligned[i]):
+        # Skip if 12h EMA not available
+        if np.isnan(ema_12h_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -99,20 +107,23 @@ def generate_signals(prices):
                 position = 0
                 continue
         
+        # Volatility filter: only trade when volatility is sufficient
+        vol_filter = volatility[i] >= VOLATILITY_THRESHOLD if not np.isnan(volatility[i]) else False
+        
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below daily EMA
-        above_daily_ema = close[i] > daily_ema_aligned[i]
-        below_daily_ema = close[i] < daily_ema_aligned[i]
+        # Trend filter: price above/below 12h EMA
+        above_ema = close[i] > ema_12h_aligned[i]
+        below_ema = close[i] < ema_12h_aligned[i]
         
         # Breakout conditions
         bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
         bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
         
-        # Entry conditions: breakout in direction of daily trend with volume
-        long_entry = bullish_breakout and above_daily_ema and volume_spike
-        short_entry = bearish_breakout and below_daily_ema and volume_spike
+        # Entry conditions: breakout in direction of 12h trend with volume and volatility
+        long_entry = bullish_breakout and above_ema and volume_spike and vol_filter
+        short_entry = bearish_breakout and below_ema and volume_spike and vol_filter
         
         # Generate signals
         if position == 0:
@@ -134,4 +145,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</response>
