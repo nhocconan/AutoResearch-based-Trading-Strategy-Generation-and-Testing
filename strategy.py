@@ -1,37 +1,49 @@
 #!/usr/bin/env python3
 """
-Experiment #11146: 4h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: Donchian(20) breakouts capture strong directional moves. Daily EMA provides trend bias,
-and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 trades over 4 years.
+Experiment #11151: 6h Ichimoku Cloud Breakout with 1d Kumo Filter
+Hypothesis: Ichimoku captures momentum and support/resistance. Daily Kumo (cloud) provides trend bias.
+Breakouts above/below Kumo with TK cross in same direction capture strong moves. Works in bull (cloud acts as support)
+and bear (cloud acts as resistance) by using 1d cloud filter. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11146_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_11151_6h_ichimoku_kumo_1d_filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-DAILY_EMA_PERIOD = 21
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+TENKAN_PERIOD = 9
+KIJUN_PERIOD = 26
+SENKOU_B_PERIOD = 52
+KUMO_SHIFT = 26
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_ichimoku(high, low, close):
+    """Calculate Ichimoku components"""
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan = (pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
+              pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun = (pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
+             pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2).shift(KUMO_SHIFT)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_b = ((pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
+                 pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2).shift(KUMO_SHIFT)
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind
+    chikou = pd.Series(close).shift(-KUMO_SHIFT)
+    
+    return tenkan.values, kijun.values, senkou_a.values, senkou_b.values, chikou.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -44,24 +56,59 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend
-    ema_daily = calculate_ema(df_daily['close'].values, DAILY_EMA_PERIOD)
-    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
+    # Calculate daily Kumo (cloud) for trend filter
+    # We need daily high, low for Senkou Span A/B
+    d_high = df_daily['high'].values
+    d_low = df_daily['low'].values
+    d_close = df_daily['close'].values
     
-    # Calculate 4h indicators
+    # Daily Ichimoku components (using same periods)
+    d_tenkan = (pd.Series(d_high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
+                pd.Series(d_low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
+    d_kijun = (pd.Series(d_high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
+               pd.Series(d_low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
+    d_senkou_a = ((d_tenkan + d_kijun) / 2).shift(KUMO_SHIFT)
+    d_senkou_b = ((pd.Series(d_high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
+                   pd.Series(d_low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2).shift(KUMO_SHIFT)
+    
+    # Daily Kumo edges (cloud top and bottom)
+    d_kumo_top = np.maximum(d_senkou_a.values, d_senkou_b.values)
+    d_kumo_bottom = np.minimum(d_senkou_a.values, d_senkou_b.values)
+    
+    # Align daily Kumo to 6h timeframe
+    d_kumo_top_aligned = align_htf_to_ltf(prices, df_daily, d_kumo_top)
+    d_kumo_bottom_aligned = align_htf_to_ltf(prices, df_daily, d_kumo_bottom)
+    
+    # Calculate 6h Ichimoku
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    tenkan, kijun, senkou_a, senkou_b, chikou = calculate_ichimoku(high, low, close)
+    
+    # 6h Kumo edges
+    kumo_top = np.maximum(senkou_a, senkou_b)
+    kumo_bottom = np.minimum(senkou_a, senkou_b)
+    
+    # TK Cross signals
+    tk_cross_up = (tenkan > kijun) & (np.roll(tenkan, 1) <= np.roll(kijun, 1))  # Tenkan crosses above Kijun
+    tk_cross_down = (tenkan < kijun) & (np.roll(tenkan, 1) >= np.roll(kijun, 1))  # Tenkan crosses below Kijun
+    
+    # Price relative to Kumo
+    price_above_kumo = close > kumo_top
+    price_below_kumo = close < kumo_bottom
+    
+    # Daily trend filter: price relative to daily Kumo
+    price_above_daily_kumo = close > d_kumo_top_aligned
+    price_below_daily_kumo = close < d_kumo_bottom_aligned
+    
+    # ATR for stops
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -70,11 +117,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_B_PERIOD, KUMO_SHIFT) * 2  # Extra buffer for Ichimoku
     
     for i in range(start, n):
-        # Skip if daily EMA not available
-        if np.isnan(ema_daily_aligned[i]):
+        # Skip if daily Kumo not available
+        if np.isnan(d_kumo_top_aligned[i]) or np.isnan(d_kumo_bottom_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,29 +140,23 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout conditions
-        breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
-        breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
-        
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
-        
-        # Trend filter (daily)
-        uptrend_daily = close[i] > ema_daily_aligned[i]
-        downtrend_daily = close[i] < ema_daily_aligned[i]
-        
         # Entry conditions
-        long_entry = breakout_up and volume_ok and uptrend_daily
-        short_entry = breakout_down and volume_ok and downtrend_daily
+        # Long: price above both Kumo AND TK cross up OR strong bullish alignment
+        long_condition = (price_above_kumo[i] and price_above_daily_kumo[i] and 
+                         (tk_cross_up[i] or (tenkan[i] > kijun[i] and tenkan[i-1] > kijun[i-1])))
+        
+        # Short: price below both Kumo AND TK cross down OR strong bearish alignment
+        short_condition = (price_below_kumo[i] and price_below_daily_kumo[i] and 
+                          (tk_cross_down[i] or (tenkan[i] < kijun[i] and tenkan[i-1] < kijun[i-1])))
         
         # Generate signals
         if position == 0:
-            if long_entry:
+            if long_condition:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
+            elif short_condition:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
