@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #8833: 4h Donchian(20) breakout + 12h EMA(50) trend + volume confirmation + ATR stoploss.
-Hypothesis: 4h timeframe balances trade frequency (target 20-50/year) with enough data for reliable signals.
-12h EMA provides trend filter to avoid counter-trend trades. Volume confirmation ensures institutional participation.
-ATR-based stops manage risk. Designed to work in both bull and bear markets by following the trend.
-Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag while maintaining statistical validity.
+Experiment #8833: 4h Donchian breakout + 12h trend filter + volume confirmation + ATR stoploss.
+Hypothesis: Donchian breakouts capture momentum bursts, while 12h EMA filter ensures alignment with intermediate trend.
+Volume confirmation filters breakouts requiring participation. Targets 75-200 trades over 4 years (19-50/year).
+Works in bull markets via breakouts and in bear via short breakdowns with trend filter preventing counter-trend trades.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8833_4h_donchian20_12h_ema_vol_v1"
+name = "exp_8833_4h_donchian20_12h_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
