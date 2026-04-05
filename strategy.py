@@ -1,6 +1,7 @@
+# 2025-06-20
 #!/usr/bin/env python3
 """
-Experiment #8598: 1d Donchian breakout + 1w trend filter + volume confirmation + ATR stoploss.
+Experiment #8604: 1d Donchian breakout + 1w trend filter + volume confirmation + ATR stoploss.
 Hypothesis: Daily timeframe reduces trade frequency to combat fee drag while capturing major trends.
 Using 1-week trend filter (EMA50) ensures alignment with multi-week momentum, avoiding counter-trend trades.
 Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk.
@@ -11,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8598_1d_donchian20_1w_trend_vol_v1"
+name = "exp_8604_1d_donchian20_1w_trend_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
