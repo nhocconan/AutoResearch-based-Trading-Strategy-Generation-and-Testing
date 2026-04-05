@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 """
-exp_7408_12h_donchian20_1w_1d_vol_v1
-Hypothesis: 12-hour Donchian(20) breakout with weekly trend filter and daily volume confirmation.
-Weekly trend filter (price vs 50-week EMA) reduces whipsaw in sideways markets.
-Daily volume confirmation ensures breakouts have institutional backing.
-Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag.
+exp_7408_12h_donchian20_1w_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with weekly EMA(50) trend filter and volume confirmation.
+Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drift.
 Works in bull/bear via weekly EMA filter: only long when above weekly EMA, short when below.
 """
 
@@ -12,40 +10,34 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7408_12h_donchian20_1w_1d_vol_v1"
+name = "exp_7408_12h_donchian20_1w_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-WEEKLY_EMA_PERIOD = 50
-DAILY_VOL_MA_PERIOD = 20
+EMA_PERIOD = 50
+VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 6  # 3 days max hold for 12h timeframe
+MAX_HOLD_BARS = 4
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
+    # Load HTF data ONCE before loop - using weekly for EMA trend
     df_1w = get_htf_data(prices, '1w')
-    df_1d = get_htf_data(prices, '1d')
     
     # Calculate weekly EMA
     close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=WEEKLY_EMA_PERIOD, adjust=False, min_periods=WEEKLY_EMA_PERIOD).mean().values
-    
-    # Calculate daily volume MA
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).ewm(span=DAILY_VOL_MA_PERIOD, adjust=False, min_periods=DAILY_VOL_MA_PERIOD).mean().values
+    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
     # Align to LTF (12h)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -56,6 +48,9 @@ def generate_signals(prices):
     # Donchian channels
     highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
     lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Volume MA for confirmation
+    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
     # ATR for stoploss
     tr1 = pd.Series(high - low)
@@ -70,13 +65,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, DAILY_VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]):
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -102,7 +97,7 @@ def generate_signals(prices):
             continue
             
         # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma_1d_aligned[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma_1d_aligned[i]) else False
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Determine market regime based on weekly EMA
         above_ema = close[i] > ema_1w_aligned[i]
@@ -112,14 +107,18 @@ def generate_signals(prices):
         continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
         continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
         
+        # Breakout retest entries (pullback to breakout level with volume)
+        retest_long = above_ema and (close[i] <= highest_high[i-1] * 1.005) and (close[i] >= lowest_low[i-1]) and vol_confirmed
+        retest_short = below_ema and (close[i] >= lowest_low[i-1] * 0.995) and (close[i] <= highest_high[i-1]) and vol_confirmed
+        
         # Enter new positions only if flat
         if position == 0:
-            if continuation_long:
+            if continuation_long or retest_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif continuation_short:
+            elif continuation_short or retest_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
