@@ -1,45 +1,30 @@
-#!/usr/bin/env python3
-"""
-Experiment #10075: 6h Camarilla Pivot + Weekly Trend + Volume Spike
-Hypothesis: Camarilla pivot levels from 1d provide high-probability reversal zones at R3/S3 (fade) 
-and breakout continuation signals at R4/S4. Combined with weekly trend filter (EMA40) and volume
-confirmation, this strategy captures both mean-reversion and trend continuation moves. 
-Works in bull markets (buy R3/S3 bounces, break R4/S4) and bear markets (sell R3/S3 rallies, 
-break R4/S4 down). Volume filters reduce false signals. Target: 75-150 total trades over 4 years.
-"""
+# 10076: 12h Donchian Breakout + Daily Trend + Volume Spike
+# Hypothesis: 12h Donchian(20) breakouts in the direction of daily trend (EMA40) with volume confirmation
+# provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
+# and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
+# Target: 50-150 total trades over 4 years (12-37/year) as per experiment guidelines.
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10075_6h_camarilla_pivot_weekly_trend_volume_v1"
-timeframe = "6h"
+name = "exp_10076_12h_donchian_breakout_daily_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
-# Parameters
-PIVOT_LOOKBACK = 1
-WEEKLY_EMA_PERIOD = 40
+# Parameters - tuned for 12h timeframe to achieve target trade frequency
+DONCHIAN_PERIOD = 20
+VOLUME_SPIKE_MULTIPLIER = 1.8  # Higher threshold to reduce trades
+DAILY_EMA_PERIOD = 40
 SIGNAL_SIZE = 0.25
-VOLUME_SPIKE_MULTIPLIER = 1.5
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MIN_HOLD_BARS = 4  # Minimum 4 bars (~1 day) holding period
 
-def calculate_camarilla_pivot(high, low, close):
-    """Calculate Camarilla pivot levels for the period"""
-    range_val = high - low
-    if range_val == 0:
-        return close, close, close, close, close, close, close, close
-    pivot = (high + low + close) / 3.0
-    r4 = close + range_val * 1.1 / 2
-    r3 = close + range_val * 1.1 / 4
-    r2 = close + range_val * 1.1 / 6
-    r1 = close + range_val * 1.1 / 12
-    s1 = close - range_val * 1.1 / 12
-    s2 = close - range_val * 1.1 / 6
-    s3 = close - range_val * 1.1 / 4
-    s4 = close - range_val * 1.1 / 2
-    return r4, r3, r2, r1, pivot, s1, s2, s3, s4
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -56,67 +41,27 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for Camarilla pivots
+    # Load daily data ONCE before loop for trend filter
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivots for each daily bar
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
+    # Calculate daily EMA for trend direction
     daily_close = df_daily['close'].values
+    daily_ema = calculate_ema(daily_close, DAILY_EMA_PERIOD)
     
-    r4_d = np.full_like(daily_close, np.nan)
-    r3_d = np.full_like(daily_close, np.nan)
-    r2_d = np.full_like(daily_close, np.nan)
-    r1_d = np.full_like(daily_close, np.nan)
-    p_d = np.full_like(daily_close, np.nan)
-    s1_d = np.full_like(daily_close, np.nan)
-    s2_d = np.full_like(daily_close, np.nan)
-    s3_d = np.full_like(daily_close, np.nan)
-    s4_d = np.full_like(daily_close, np.nan)
+    # Align daily EMA to 12h timeframe
+    daily_ema_aligned = align_htf_to_ltf(prices, df_daily, daily_ema)
     
-    for i in range(len(daily_close)):
-        r4, r3, r2, r1, p, s1, s2, s3, s4 = calculate_camarilla_pivot(
-            daily_high[i], daily_low[i], daily_close[i]
-        )
-        r4_d[i] = r4
-        r3_d[i] = r3
-        r2_d[i] = r2
-        r1_d[i] = r1
-        p_d[i] = p
-        s1_d[i] = s1
-        s2_d[i] = s2
-        s3_d[i] = s3
-        s4_d[i] = s4
-    
-    # Align daily Camarilla levels to 6h timeframe
-    r4_6h = align_htf_to_ltf(prices, df_daily, r4_d)
-    r3_6h = align_htf_to_ltf(prices, df_daily, r3_d)
-    r2_6h = align_htf_to_ltf(prices, df_daily, r2_d)
-    r1_6h = align_htf_to_ltf(prices, df_daily, r1_d)
-    p_6h = align_htf_to_ltf(prices, df_daily, p_d)
-    s1_6h = align_htf_to_ltf(prices, df_daily, s1_d)
-    s2_6h = align_htf_to_ltf(prices, df_daily, s2_d)
-    s3_6h = align_htf_to_ltf(prices, df_daily, s3_d)
-    s4_6h = align_htf_to_ltf(prices, df_daily, s4_d)
-    
-    # Load weekly data ONCE before loop for trend filter
-    df_weekly = get_htf_data(prices, '1w')
-    
-    # Calculate weekly EMA for trend direction
-    weekly_close = df_weekly['close'].values
-    weekly_ema = calculate_ema(weekly_close, WEEKLY_EMA_PERIOD)
-    
-    # Align weekly EMA to 6h timeframe
-    weekly_ema_6h = align_htf_to_ltf(prices, df_weekly, weekly_ema)
-    
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Donchian channels
+    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -128,16 +73,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
-    bars_held = 0
     
     # Start from warmup period
-    start = max(20, WEEKLY_EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, 20) + 1
     
     for i in range(start, n):
-        bars_held += 1
-        
-        # Skip if data not available
-        if np.isnan(weekly_ema_6h[i]) or np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]):
+        # Skip if daily EMA not available
+        if np.isnan(daily_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -146,54 +88,40 @@ def generate_signals(prices):
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
-                bars_held = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
-                bars_held = 0
                 continue
         
-        # Volume spike confirmation
+        # Volume spike confirmation (higher threshold to reduce trades)
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        above_weekly_ema = close[i] > weekly_ema_6h[i]
-        below_weekly_ema = close[i] < weekly_ema_6h[i]
+        # Trend filter: price above/below daily EMA
+        above_daily_ema = close[i] > daily_ema_aligned[i]
+        below_daily_ema = close[i] < daily_ema_aligned[i]
         
-        # Camarilla levels
-        r3 = r3_6h[i]
-        s3 = s3_6h[i]
-        r4 = r4_6h[i]
-        s4 = s4_6h[i]
+        # Breakout conditions
+        bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
+        bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
         
-        # Fade at R3/S3 (mean reversion)
-        fade_long = close[i] <= s3 and close[i] > s4 and volume_spike
-        fade_short = close[i] >= r3 and close[i] < r4 and volume_spike
-        
-        # Breakout at R4/S4 (trend continuation)
-        breakout_long = close[i] > r4 and above_weekly_ema and volume_spike
-        breakout_short = close[i] < s4 and below_weekly_ema and volume_spike
-        
-        # Entry conditions
-        long_entry = fade_long or breakout_long
-        short_entry = fade_short or breakout_short
+        # Entry conditions: breakout in direction of daily trend with volume
+        long_entry = bullish_breakout and above_daily_ema and volume_spike
+        short_entry = bearish_breakout and below_daily_ema and volume_spike
         
         # Generate signals
         if position == 0:
-            if long_entry and bars_held >= MIN_HOLD_BARS:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                bars_held = 0
-            elif short_entry and bars_held >= MIN_HOLD_BARS:
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                bars_held = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
