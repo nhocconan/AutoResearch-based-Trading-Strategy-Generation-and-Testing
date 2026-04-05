@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
 """
-exp_7340_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Uses discrete position sizing (0.0, ±0.25) to minimize fee churn. Tight entry conditions
-require: price beyond Donchian channel, aligned with 1d EMA trend, and volume > 1.5x 20-period MA.
-Includes ATR-based stoploss (2.5x ATR) and time-based exit (max 10 bars). Designed for
-lower trade frequency to avoid overtrading while maintaining edge in both bull and bear markets.
+exp_7342_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+Targets 50-150 trades over 4 years (12-37/year) by using higher timeframe and strict discrete sizing.
+Uses 1d EMA for trend regime and 12h volume for confirmation. Designed to work in both bull and bear markets.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7340_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7342_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5  # Increased to reduce false signals
+VOL_BASE_THRESHOLD = 1.5  # Volume must be 1.5x MA for confirmation
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # ~40 hours
+MAX_HOLD_BARS = 8  # ~4 days (8 * 12h = 96h)
 
 def generate_signals(prices):
     n = len(prices)
@@ -38,7 +36,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align to LTF (4h)
+    # Align to LTF (12h)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -105,19 +103,22 @@ def generate_signals(prices):
         above_ema = close[i] > ema_1d_aligned[i]
         below_ema = close[i] < ema_1d_aligned[i]
         
-        # Strict entry conditions: only trade in direction of 1d trend with volume confirmation
+        # Continuation breakouts in trending market
+        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
+        
+        # Breakout retest entries (pullback to breakout level with volume)
+        retest_long = above_ema and (close[i] <= highest_high[i-1] * 1.005) and (close[i] >= lowest_low[i-1]) and vol_confirmed
+        retest_short = below_ema and (close[i] >= lowest_low[i-1] * 0.995) and (close[i] <= highest_high[i-1]) and vol_confirmed
+        
+        # Enter new positions only if flat
         if position == 0:
-            # Long: price breaks above Donchian high, above 1d EMA, volume confirmed
-            long_entry = above_ema and (close[i] > highest_high[i]) and vol_confirmed
-            # Short: price breaks below Donchian low, below 1d EMA, volume confirmed
-            short_entry = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
-            
-            if long_entry:
+            if continuation_long or retest_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif short_entry:
+            elif continuation_short or retest_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
