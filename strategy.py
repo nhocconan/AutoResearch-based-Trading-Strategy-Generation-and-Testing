@@ -1,25 +1,23 @@
 #!/usr/bin/env python3
 """
-exp_7526_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
-In bull markets (price > 1d EMA200): long breakout above 4h Donchian upper.
-In bear markets (price < 1d EMA200): short breakdown below 4h Donchian lower.
-Volume must be above 20-period average to confirm breakout strength.
-Uses ATR-based stoploss and target-based exits.
-Targets 75-200 trades over 4 years (19-50/year) with strict breakout conditions.
+exp_7527_6d_donchian20_1w_pivot_vol_v1
+Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
+Long when: price > weekly pivot point + breakout above 6h Donchian upper + volume confirmation.
+Short when: price < weekly pivot point + breakdown below 6h Donchian lower + volume confirmation.
+Uses weekly pivot points (calculated from prior week's H/L/C) as trend filter.
+Targets 50-150 total trades over 4 years (12-37/year) with strict breakout conditions.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7526_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7527_6d_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_TREND = 200
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5  # volume must be 1.5x average
 SIGNAL_SIZE = 0.25
@@ -29,16 +27,18 @@ ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop (weekly data)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA200 for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
+    # Calculate weekly pivot points: P = (H + L + C) / 3
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -67,11 +67,11 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1d_200_aligned[i]):
+        if np.isnan(pivot_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -87,9 +87,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market regime
-        bull_regime = close[i] > ema_1d_200_aligned[i]   # price above 1d EMA200
-        bear_regime = close[i] < ema_1d_200_aligned[i]   # price below 1d EMA200
+        # Determine market regime based on weekly pivot
+        above_pivot = close[i] > pivot_1w_aligned[i]   # price above weekly pivot
+        below_pivot = close[i] < pivot_1w_aligned[i]   # price below weekly pivot
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -99,8 +99,8 @@ def generate_signals(prices):
         lower_breakout = (low[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
         # Entry conditions
-        long_entry = bull_regime and upper_breakout and volume_confirmed
-        short_entry = bear_regime and lower_breakout and volume_confirmed
+        long_entry = above_pivot and upper_breakout and volume_confirmed
+        short_entry = below_pivot and lower_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
@@ -124,4 +124,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</...truncated>
+</lymph>
