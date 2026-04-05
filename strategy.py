@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #8835: 6h Camarilla pivot + volume confirmation + weekly trend filter
-Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance.
-Fade at R3/S3 (mean reversion in range), breakout continuation at R4/S4 (trend following).
-Weekly trend filter ensures alignment with higher timeframe momentum. Volume confirmation
-filters for institutional participation. Targets 50-150 trades over 4 years.
-Works in both bull/bear: mean reversion in ranges, trend following in breaks.
+Experiment #8836: 12h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
+Hypothesis: 12h timeframe balances trend capture with manageable trade frequency.
+Using 1-day trend filter (EMA50) ensures alignment with daily momentum.
+Volume confirmation filters breakouts requiring institutional participation.
+ATR-based stops manage risk. Targets 50-150 trades over 4 years (12-37/year).
+Works in both bull (breakouts with volume) and bear (trend filter avoids counter-trend).
 """
 
-from mtf_data import get_athf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8835_6h_camarilla_pivot_vol_wtrend_v1"
-timeframe = "6h"
+name = "exp_8836_12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_PERIOD = 1  # Daily pivot
+DONCHIAN_PERIOD = 20
+TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-TREND_PERIOD = 50  # Weekly EMA for trend filter
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
@@ -40,49 +40,26 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
-    
-    # Price relative to 1w EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_1w > ema_1w, 1, 
-                     np.where(close_1w < ema_1w, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
-    
-    # Calculate Camarilla levels from daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA for trend filter
     close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
     
-    # Camarilla formula: 
-    # H4 = Close + 1.5 * (High - Low)
-    # L4 = Close - 1.5 * (High - Low)
-    # H3 = Close + 1.125 * (High - Low)
-    # L3 = Close - 1.125 * (High - Low)
-    # H2 = Close + 0.75 * (High - Low)
-    # L2 = Close - 0.75 * (High - Low)
-    # H1 = Close + 0.5 * (High - Low)
-    # L1 = Close - 0.5 * (High - Low)
-    pivot_range = high_1d - low_1d
-    r4 = close_1d + 1.5 * pivot_range
-    r3 = close_1d + 1.125 * pivot_range
-    s3 = close_1d - 1.125 * pivot_range
-    s4 = close_1d - 1.5 * pivot_range
+    # Price relative to 1d EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_1d > ema_1d, 1, 
+                     np.where(close_1d < ema_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
     
-    # Align Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Calculate LTF indicators (6h)
+    # Calculate LTF indicators (12h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Donchian channels
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -96,11 +73,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(price_vs_ema_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        if np.isnan(price_vs_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -116,23 +93,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1w EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1w price above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1w price below EMA50
+        # Determine market bias from 1d EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d price above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d price below EMA50
+        
+        # Donchian breakout conditions
+        long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
+        short_breakout = close[i] < donchian_low[i-1]  # Break below previous period's low
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Camarilla-based entry logic
-        # Fade at R3/S3 (mean reversion), breakout at R4/S4 (continuation)
-        fade_long = (not bull_bias) and close[i] <= r3_aligned[i] and close[i] > s3_aligned[i] and volume_confirmed
-        fade_short = (not bear_bias) and close[i] >= s3_aligned[i] and close[i] < r3_aligned[i] and volume_confirmed
-        breakout_long = bull_bias and close[i] > r4_aligned[i-1] and volume_confirmed
-        breakout_short = bear_bias and close[i] < s4_aligned[i-1] and volume_confirmed
-        
         # Entry conditions
-        long_entry = fade_long or breakout_long
-        short_entry = fade_short or breakout_short
+        long_entry = bull_bias and long_breakout and volume_confirmed
+        short_entry = bear_bias and short_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
@@ -154,3 +128,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</x>
