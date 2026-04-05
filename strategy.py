@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11532_12h_donchian20_1d_ema_vol_v1"
+name = "exp_11532_12h_donchian20_1d_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -18,10 +18,10 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 DAILY_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0  # Increased to reduce trades
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5  # Slightly wider stop to reduce premature exits
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
@@ -97,7 +97,7 @@ def generate_signals(prices):
         breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
         breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # Volume confirmation (increased threshold)
+        # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter (daily)
@@ -130,6 +130,7 @@ def generate_signals(prices):
     return signals
 
 </think>
+
 #!/usr/bin/env python3
 """
 Experiment #11532: 12h Donchian Breakout with 1d Trend and Volume Confirmation
@@ -142,7 +143,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11532_12h_donchian20_1d_ema_vol_v1"
+name = "exp_11532_12h_donchian20_1d_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -150,10 +151,10 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 DAILY_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0  # Increased to reduce trades
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5  # Slightly wider stop to reduce premature exits
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
@@ -229,7 +230,7 @@ def generate_signals(prices):
         breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
         breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # Volume confirmation (increased threshold)
+        # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter (daily)
