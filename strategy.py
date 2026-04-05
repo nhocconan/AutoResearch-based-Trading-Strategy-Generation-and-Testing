@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #11268: 12h Donchian Breakout with 1w Trend and Volume Confirmation
-Hypothesis: Donchian(20) breakouts capture strong directional moves. Weekly EMA provides trend bias,
-and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1w trend filter. Target: 50-150 trades over 4 years.
+Hypothesis: Donchian(20) breakouts capture strong directional moves. Weekly EMA provides robust trend bias
+to avoid false breakouts, and volume filter ensures institutional participation. Works in bull markets by
+riding trends and in bear markets by quickly reversing on failed breakouts. Target: 50-150 trades over 4 years.
 """
 
 import numpy as np
@@ -128,3 +128,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</max_tokens>
