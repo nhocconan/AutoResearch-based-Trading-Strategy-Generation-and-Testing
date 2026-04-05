@@ -1,31 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #9737: 4h Donchian Breakout + Volume Confirmation + 1d Trend Filter
-Hypothesis: Donchian(20) breakouts on 4h timeframe, confirmed by volume spikes 
-and filtered by 1d EMA trend, provide high-probability trend continuation signals.
-Works in bull markets (long breakouts above rising EMA) and bear markets 
-(short breakdowns below falling EMA). Targets 75-200 total trades over 4 years 
-(19-50/year) to balance opportunity and cost.
+Experiment #9738: 1d Donchian Breakout + Weekly EMA + Volume Confirmation.
+Hypothesis: On daily timeframe, Donchian(20) breakouts above the weekly EMA(21) 
+with volume confirmation capture strong trends in both bull and bear markets. 
+Weekly EMA acts as a trend filter to avoid counter-trend trades. 
+Target: 50-150 total trades over 4 years (12-38/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9737_4h_donchian_breakout_volume_trend_v1"
-timeframe = "4h"
+name = "exp_9738_1d_donchian_weekly_ema_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 2.0
-EMA_TREND_PERIOD = 50
-SIGNAL_SIZE = 0.25
+EMA_PERIOD = 21
+VOLUME_SPIKE_MULTIPLIER = 1.8
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
+SIGNAL_SIZE = 0.25
+
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
+    """Calculate ATR"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -33,33 +42,29 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for trend filter)
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop (weekly for EMA trend filter)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA for trend filter
-    ema_1d = calculate_ema(df_1d['close'].values, EMA_TREND_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly EMA for trend filter
+    weekly_close = df_1w['close'].values
+    ema_1w = calculate_ema(weekly_close, EMA_PERIOD)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate LTF indicators (4h)
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Donchian channels
+    donch_upper, donch_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
-    # Volume moving average for spike detection
+    # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR for risk management
@@ -71,14 +76,14 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_TREND_PERIOD, 20) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if trend filter not available
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
-            
+        
         # Check stoploss
         if position == 1:  # long position
             if close[i] <= stop_price:
@@ -91,20 +96,23 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume spike confirmation
+        # Volume confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions
-        breakout_up = high[i] >= highest_high[i-1]  # Current high breaks above previous period's high
-        breakout_down = low[i] <= lowest_low[i-1]   # Current low breaks below previous period's low
+        # Trend filter: price above/below weekly EMA
+        above_weekly_ema = close[i] > ema_1w_aligned[i]
+        below_weekly_ema = close[i] < ema_1w_aligned[i]
         
-        # Trend filter: 1d EMA slope
-        ema_rising = ema_1d_aligned[i] > ema_1d_aligned[i-1]
-        ema_falling = ema_1d_aligned[i] < ema_1d_aligned[i-1]
+        # Entry conditions
+        long_entry = (donch_upper[i] > 0 and  # Valid upper band
+                      close[i] >= donch_upper[i] and 
+                      above_weekly_ema and 
+                      volume_spike)
         
-        # Entry conditions: breakout in direction of trend + volume confirmation
-        long_entry = breakout_up and ema_rising and volume_spike
-        short_entry = breakout_down and ema_falling and volume_spike
+        short_entry = (donch_lower[i] > 0 and  # Valid lower band
+                       close[i] <= donch_lower[i] and 
+                       below_weekly_ema and 
+                       volume_spike)
         
         # Generate signals
         if position == 0:
@@ -126,4 +134,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</>
