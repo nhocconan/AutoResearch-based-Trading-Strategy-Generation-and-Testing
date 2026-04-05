@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #8132: 12-hour Donchian breakout with 1-day trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA 
-and aligned daily trend (price above/below daily EMA50) captures sustained moves with 
-appropriate frequency for 12h timeframe. Uses daily timeframe for stronger trend context 
-than 1w, reducing whipsaw while targeting 50-150 trades over 4 years.
+Experiment #8133: 4-hour Donchian breakout with 12-hour trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.5x 20-period MA 
+and aligned 12h trend (price above/below 12h EMA50) captures sustained moves with 
+appropriate frequency for 4h timeframe. Uses 12h timeframe for trend context to reduce 
+whipsaw while targeting 75-200 trades over 4 years. Works in bull (long breakouts) and 
+bear (short breakdowns) by following higher timeframe trend.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8132_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_8133_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -31,15 +32,15 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate 12h EMA
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
     # Price relative to EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
+    price_vs_ema = np.where(close_12h > ema_12h, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_12h, price_vs_ema)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -88,9 +89,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1d EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
+        # Determine market bias from 12h EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 12h close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 12h close below EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -125,3 +126,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</trading_agent_trading_agent.py>
