@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #8780: 4h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Using 4h timeframe with 1d trend filter balances trade frequency and signal quality.
-Donchian(20) breakouts capture breakouts, 1d EMA filter ensures trend alignment, volume confirms institutional interest.
-ATR-based stops manage risk. Targets 75-200 trades over 4 years to avoid fee drag while maintaining statistical validity.
+Experiment #8781: 4h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
+Hypothesis: 4h timeframe captures meaningful trends while limiting trade frequency.
+Using 1-day trend filter (EMA50) ensures alignment with daily momentum, avoiding counter-trend trades.
+Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk.
+Targets 75-200 trades over 4 years (19-50/year) to balance opportunity with fee impact.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8780_4h_donchian20_1d_trend_vol_v1"
+name = "exp_8781_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -126,3 +127,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</x>
