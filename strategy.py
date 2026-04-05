@@ -1,17 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #10442: 12h Donchian Breakout + Daily Trend + Volume Spike
-Hypothesis: Donchian(20) breakouts in the direction of daily trend (EMA50) with volume confirmation
-provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
-and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
-Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+Experiment #10445: 12h Donchian Breakout + Daily Trend + Volume Spike
+Hypothesis: Donchian(20) breakouts on 12h timeframe in the direction of daily trend (EMA50) with volume confirmation provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA) and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts. Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10442_12h_donchian_breakout_daily_trend_volume_v1"
+name = "exp_10445_12h_donchian_breakout_daily_trend_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
