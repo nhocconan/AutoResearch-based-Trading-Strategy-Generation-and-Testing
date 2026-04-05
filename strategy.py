@@ -1,94 +1,74 @@
 #!/usr/bin/env python3
 """
-Experiment #8191: 6-hour timeframe with 1-day HTF - Camarilla pivot levels with volume confirmation
-Hypothesis: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) from daily timeframe
-provide institutional-grade support/resistance levels. Price rejecting at R3/S3 with volume confirms mean reversion,
-while breaking R4/S4 with volume indicates institutional breakout. This dual approach works in both trending 
-and ranging markets by adapting to price action at key levels. Target 50-150 trades over 4 years.
+Experiment #8191: 6-hour Ichimoku Cloud breakout with 1-day trend filter.
+Hypothesis: In strong trends (bull/bear), price breaks above/below Kumo (cloud) on 6h 
+with Tenkan/Kijun cross confirming momentum. The 1-day trend filter ensures we only 
+trade in the direction of the higher timeframe trend, reducing false signals during 
+range-bound periods. Ichimoku provides dynamic support/resistance that adapts to 
+volatility, working in both bull and bear markets. Target: 50-150 total trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8191_6h_camarilla1d_vol_v1"
+name = "exp_8191_6h_ichimoku1d_trend_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-PIVOT_LOOKBACK = 1  # Use previous day's pivot
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+TENKAN_PERIOD = 9
+KIJUN_PERIOD = 26
+SENKOU_B_PERIOD = 52
+KUMO_SHIFT = 26
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close"""
-    pivot = (high + low + close) / 3
-    range_val = high - low
-    
-    # Camarilla levels
-    r4 = close + range_val * 1.1 / 2
-    r3 = close + range_val * 1.1 / 4
-    r2 = close + range_val * 1.1 / 6
-    r1 = close + range_val * 1.1 / 12
-    
-    s1 = close - range_val * 1.1 / 12
-    s2 = close - range_val * 1.1 / 6
-    s3 = close - range_val * 1.1 / 4
-    s4 = close - range_val * 1.1 / 2
-    
-    return r1, r2, r3, r4, s1, s2, s3, s4, pivot
+ATR_STOP_MULTIPLIER = 2.5
+ATR_TARGET_MULTIPLIER = 3.5
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data (1d) ONCE before loop
+    # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels for each day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA for trend filter
     close_1d = df_1d['close'].values
-    
-    # Initialize arrays for Camarilla levels
-    r1 = np.full_like(close_1d, np.nan)
-    r2 = np.full_like(close_1d, np.nan)
-    r3 = np.full_like(close_1d, np.nan)
-    r4 = np.full_like(close_1d, np.nan)
-    s1 = np.full_like(close_1d, np.nan)
-    s2 = np.full_like(close_1d, np.nan)
-    s3 = np.full_like(close_1d, np.nan)
-    s4 = np.full_like(close_1d, np.nan)
-    pivot = np.full_like(close_1d, np.nan)
-    
-    # Calculate pivots for each day (starting from index 1 to use previous day)
-    for i in range(1, len(close_1d)):
-        r1[i], r2[i], r3[i], r4[i], s1[i], s2[i], s3[i], s4[i], pivot[i] = \
-            calculate_camarilla(high_1d[i-1], low_1d[i-1], close_1d[i-1])
-    
-    # Align Camarilla levels to 6h timeframe
-    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
-    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
-    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
-    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
     
     # Calculate LTF indicators
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Volume moving average
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    # Ichimoku components
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
+                  pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
+                 pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2).shift(KUMO_SHIFT)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_b = ((pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
+                 pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2).shift(KUMO_SHIFT)
+    
+    # Current Kumo (cloud) boundaries - use unshifted values for current cloud
+    senkou_a_current = (tenkan_sen + kijun_sen) / 2
+    senkou_b_current = (pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
+                        pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a_current, senkou_b_current)
+    cloud_bottom = np.minimum(senkou_a_current, senkou_b_current)
+    
+    # TK Cross
+    tk_cross = tenkan_sen - kijun_sen
     
     # ATR for risk management
     tr1 = pd.Series(high - low)
@@ -101,72 +81,59 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
+    target_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_B_PERIOD, KUMO_SHIFT) + 1
     
     for i in range(start, n):
-        # Skip if Camarilla data not available
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or 
-            np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or
-            np.isnan(volume_ma[i])):
+        # Skip if HTF data not available
+        if np.isnan(price_vs_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
-        # Check stoploss
+        # Check stoploss or target
         if position == 1:  # long position
-            if close[i] <= stop_price:
+            if close[i] <= stop_price or close[i] >= target_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            if close[i] >= stop_price:
+            if close[i] >= stop_price or close[i] <= target_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        # Determine market bias from 1d EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
         
-        # Price levels
-        r3_level = r3_6h[i]
-        s3_level = s3_6h[i]
-        r4_level = r4_6h[i]
-        s4_level = s4_6h[i]
+        # Price above/below cloud
+        price_above_cloud = close[i] > cloud_top[i]
+        price_below_cloud = close[i] < cloud_bottom[i]
         
-        # Mean reversion signals at R3/S3
-        # Long when price rejects S3 with volume
-        long_mean_rev = (close[i] <= s3_level * 1.005 and  # Near S3
-                         close[i] > s3_level and           # Above S3
-                         volume_confirmed)
+        # TK Cross signals
+        tk_cross_up = (tk_cross.iloc[i] > 0) and (tk_cross.iloc[i-1] <= 0) if i > 0 else False
+        tk_cross_down = (tk_cross.iloc[i] < 0) and (tk_cross.iloc[i-1] >= 0) if i > 0 else False
         
-        # Short when price rejects R3 with volume
-        short_mean_rev = (close[i] >= r3_level * 0.995 and  # Near R3
-                          close[i] < r3_level and           # Below R3
-                          volume_confirmed)
+        # Entry conditions
+        long_entry = bull_bias and price_above_cloud and tk_cross_up
+        short_entry = bear_bias and price_below_cloud and tk_cross_down
         
-        # Breakout signals at R4/S4
-        # Long when price breaks R4 with volume
-        long_breakout = (close[i] >= r4_level and
-                         volume_confirmed)
-        
-        # Short when price breaks S4 with volume
-        short_breakout = (close[i] <= s4_level and
-                          volume_confirmed)
-        
-        # Entry logic: mean reversion in range, breakout in trend
-        # Simple approach: use both, let market decide
+        # Generate signals
         if position == 0:
-            if long_mean_rev or long_breakout:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_mean_rev or short_breakout:
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
@@ -175,3 +142,482 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #8191: 6-hour Ichimoku Cloud breakout with 1-day trend filter.
+Hypothesis: In strong trends (bull/bear), price breaks above/below Kumo (cloud) on 6h 
+with Tenkan/Kijun cross confirming momentum. The 1-day trend filter ensures we only 
+trade in the direction of the higher timeframe trend, reducing false signals during 
+range-bound periods. Ichimoku provides dynamic support/resistance that adapts to 
+volatility, working in both bull and bear markets. Target: 50-150 total trades over 4 years.
+"""
+
+from mtf_data import get_htf_data, align_htf_to_ltf
+import numpy as np
+import pandas as pd
+
+name = "exp_8191_6h_ichimoku1d_trend_v1"
+timeframe = "6h"
+leverage = 1.0
+
+# Parameters
+TENKAN_PERIOD = 9
+KIJUN_PERIOD = 26
+SENKOU_B_PERIOD = 52
+KUMO_SHIFT = 26
+SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.5
+ATR_TARGET_MULTIPLIER = 3.5
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
+    
+    # Calculate LTF indicators
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    # Ichimoku components
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
+                  pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
+                 pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2).shift(KUMO_SHIFT)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_b = ((pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
+                 pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2).shift(KUMO_SHIFT)
+    
+    # Current Kumo (cloud) boundaries - use unshifted values for current cloud
+    senkou_a_current = (tenkan_sen + kijun_sen) / 2
+    senkou_b_current = (pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
+                        pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a_current, senkou_b_current)
+    cloud_bottom = np.minimum(senkou_a_current, senkou_b_current)
+    
+    # TK Cross
+    tk_cross = tenkan_sen - kijun_sen
+    
+    # ATR for risk management
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
+    target_price = 0.0
+    
+    # Start from warmup period
+    start = max(TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_B_PERIOD, KUMO_SHIFT) + 1
+    
+    for i in range(start, n):
+        # Skip if HTF data not available
+        if np.isnan(price_vs_ema_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
+            
+        # Check stoploss or target
+        if position == 1:  # long position
+            if close[i] <= stop_price or close[i] >= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price or close[i] <= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # Determine market bias from 1d EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
+        
+        # Price above/below cloud
+        price_above_cloud = close[i] > cloud_top[i]
+        price_below_cloud = close[i] < cloud_bottom[i]
+        
+        # TK Cross signals
+        tk_cross_up = (tk_cross.iloc[i] > 0) and (tk_cross.iloc[i-1] <= 0) if i > 0 else False
+        tk_cross_down = (tk_cross.iloc[i] < 0) and (tk_cross.iloc[i-1] >= 0) if i > 0 else False
+        
+        # Entry conditions
+        long_entry = bull_bias and price_above_cloud and tk_cross_up
+        short_entry = bear_bias and price_below_cloud and tk_cross_down
+        
+        # Generate signals
+        if position == 0:
+            if long_entry:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
+            elif short_entry:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            signals[i] = -SIGNAL_SIZE
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #8191: 6-hour Ichimoku Cloud breakout with 1-day trend filter.
+Hypothesis: In strong trends (bull/bear), price breaks above/below Kumo (cloud) on 6h 
+with Tenkan/Kijun cross confirming momentum. The 1-day trend filter ensures we only 
+trade in the direction of the higher timeframe trend, reducing false signals during 
+range-bound periods. Ichimoku provides dynamic support/resistance that adapts to 
+volatility, working in both bull and bear markets. Target: 50-150 total trades over 4 years.
+"""
+
+from mtf_data import get_htf_data, align_htf_to_ltf
+import numpy as np
+import pandas as pd
+
+name = "exp_8191_6h_ichimoku1d_trend_v1"
+timeframe = "6h"
+leverage = 1.0
+
+# Parameters
+TENKAN_PERIOD = 9
+KIJUN_PERIOD = 26
+SENKOU_B_PERIOD = 52
+KUMO_SHIFT = 26
+SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.5
+ATR_TARGET_MULTIPLIER = 3.5
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
+    
+    # Calculate LTF indicators
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    # Ichimoku components
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
+                  pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
+                 pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2).shift(KUMO_SHIFT)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_b = ((pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
+                 pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2).shift(KUMO_SHIFT)
+    
+    # Current Kumo (cloud) boundaries - use unshifted values for current cloud
+    senkou_a_current = (tenkan_sen + kijun_sen) / 2
+    senkou_b_current = (pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
+                        pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a_current, senkou_b_current)
+    cloud_bottom = np.minimum(senkou_a_current, senkou_b_current)
+    
+    # TK Cross
+    tk_cross = tenkan_sen - kijun_sen
+    
+    # ATR for risk management
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
+    target_price = 0.0
+    
+    # Start from warmup period
+    start = max(TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_B_PERIOD, KUMO_SHIFT) + 1
+    
+    for i in range(start, n):
+        # Skip if HTF data not available
+        if np.isnan(price_vs_ema_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
+            
+        # Check stoploss or target
+        if position == 1:  # long position
+            if close[i] <= stop_price or close[i] >= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price or close[i] <= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # Determine market bias from 1d EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
+        
+        # Price above/below cloud
+        price_above_cloud = close[i] > cloud_top[i]
+        price_below_cloud = close[i] < cloud_bottom[i]
+        
+        # TK Cross signals
+        tk_cross_up = (tk_cross.iloc[i] > 0) and (tk_cross.iloc[i-1] <= 0) if i > 0 else False
+        tk_cross_down = (tk_cross.iloc[i] < 0) and (tk_cross.iloc[i-1] >= 0) if i > 0 else False
+        
+        # Entry conditions
+        long_entry = bull_bias and price_above_cloud and tk_cross_up
+        short_entry = bear_bias and price_below_cloud and tk_cross_down
+        
+        # Generate signals
+        if position == 0:
+            if long_entry:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
+            elif short_entry:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            signals[i] = -SIGNAL_SIZE
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #8191: 6-hour Ichimoku Cloud breakout with 1-day trend filter.
+Hypothesis: In strong trends (bull/bear), price breaks above/below Kumo (cloud) on 6h 
+with Tenkan/Kijun cross confirming momentum. The 1-day trend filter ensures we only 
+trade in the direction of the higher timeframe trend, reducing false signals during 
+range-bound periods. Ichimoku provides dynamic support/resistance that adapts to 
+volatility, working in both bull and bear markets. Target: 50-150 total trades over 4 years.
+"""
+
+from mtf_data import get_htf_data, align_htf_to_ltf
+import numpy as np
+import pandas as pd
+
+name = "exp_8191_6h_ichimoku1d_trend_v1"
+timeframe = "6h"
+leverage = 1.0
+
+# Parameters
+TENKAN_PERIOD = 9
+KIJUN_PERIOD = 26
+SENKOU_B_PERIOD = 52
+KUMO_SHIFT = 26
+SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.5
+ATR_TARGET_MULTIPLIER = 3.5
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
+    
+    # Calculate LTF indicators
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    
+    # Ichimoku components
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
+                  pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
+                 pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan_sen + kijun_sen) / 2).shift(KUMO_SHIFT)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_b = ((pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
+                 pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2).shift(KUMO_SHIFT)
+    
+    # Current Kumo (cloud) boundaries - use unshifted values for current cloud
+    senkou_a_current = (tenkan_sen + kijun_sen) / 2
+    senkou_b_current = (pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
+                        pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2
+    
+    # Cloud top and bottom
+    cloud_top = np.maximum(senkou_a_current, senkou_b_current)
+    cloud_bottom = np.minimum(senkou_a_current, senkou_b_current)
+    
+    # TK Cross
+    tk_cross = tenkan_sen - kijun_sen
+    
+    # ATR for risk management
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
+    target_price = 0.0
+    
+    # Start from warmup period
+    start = max(TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_B_PERIOD, KUMO_SHIFT) + 1
+    
+    for i in range(start, n):
+        # Skip if HTF data not available
+        if np.isnan(price_vs_ema_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
+            
+        # Check stoploss or target
+        if position == 1:  # long position
+            if close[i] <= stop_price or close[i] >= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price or close[i] <= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # Determine market bias from 1d EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
+        
+        # Price above/below cloud
+        price_above_cloud = close[i] > cloud_top[i]
+        price_below_cloud = close[i] < cloud_bottom[i]
+        
+        # TK Cross signals
+        tk_cross_up = (tk_cross.iloc[i] > 0) and (tk_cross.iloc[i-1] <= 0) if i > 0 else False
+        tk_cross_down = (tk_cross.iloc[i] < 0) and (tk_cross.iloc[i-1] >= 0) if i > 0 else False
+        
+        # Entry conditions
+        long_entry = bull_bias and price_above_cloud and tk_cross_up
+        short_entry = bear_bias and price_below_cloud and tk_cross_down
+        
+        # Generate signals
+        if position == 0:
+            if long_entry:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
+            elif short_entry:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            signals[i] = -SIGNAL_SIZE
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #8191: 6-hour Ichimoku Cloud breakout with 1-day trend filter.
+Hypothesis: In strong trends (bull/bear), price breaks above/below Kumo (cloud) on 6h 
+with Tenkan/Kijun cross confirming momentum. The 1-day trend filter ensures we only 
+trade in the direction of the higher timeframe trend, reducing false signals during 
+range-bound periods. Ichimoku provides dynamic support/resistance that adapts to 
+volatility, working in both bull and bear markets. Target: 50-150 total trades over 4 years.
+"""
+
+from mtf_data import get_htf_data, align_htf_to_ltf
+import numpy as np
+import pandas as pd
+
+name = "exp_8191_6h_ichimoku1d_trend_v1"
+timeframe = "6h"
+leverage = 1.0
+
+# Parameters
+TENKAN_PERIOD = 9
+KIJUN_PERIOD = 26
+SENKOU_B_PERIOD = 52
+KUMO_SHIFT = 26
+SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.5
+ATR_TARGET_MULTIPLIER = 3.5
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_
