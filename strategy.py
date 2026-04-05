@@ -1,96 +1,88 @@
 #!/usr/bin/env python3
 """
-Experiment #9718: 1d Donchian Breakout + Volume Spike + Weekly Trend Filter
-Hypothesis: Daily Donchian(20) breakouts with volume confirmation and weekly trend filter
-(HMA21 > HMA50 for uptrend, HMA21 < HMA50 for downtrend) provide high-probability
-trend-following signals. Targets 30-100 total trades over 4 years (7-25/year) to
-minimize fee drag while capturing major moves. Works in bull (breakouts above upper band)
-and bear (breakdowns below lower band) with trend filter preventing counter-trend trades.
+Experiment #9719: 6h Bollinger Band Mean Reversion with Volume Spike and Regime Filter.
+Hypothesis: Bollinger Band mean reversion (touching bands) combined with volume spikes 
+and regime filtering (ADX < 25 for mean reversion) provides high-probability reversals 
+in ranging markets, while avoiding trend-following losses in strong trends. 
+Works in bull/bear markets via mean reversion at extremes. Targets 75-150 total trades.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9718_1d_donchian_breakout_volume_weekly_trend_v1"
-timeframe = "1d"
+name = "exp_9719_6h_bb_meanrev_volume_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+BB_PERIOD = 20
+BB_STD = 2.0
 VOLUME_SPIKE_MULTIPLIER = 2.0
-HMA_FAST = 21
-HMA_SLOW = 50
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_hma(arr, period):
-    """Hull Moving Average"""
-    n = int(period)
-    if n < 1:
-        return arr
-    half = n // 2
-    sqrt_n = int(np.sqrt(n))
-    
-    # WMA of half period
-    weights_half = np.arange(1, half + 1)
-    wma_half = np.convolve(arr, weights_half, 'valid') / weights_half.sum()
-    
-    # WMA of full period
-    weights_full = np.arange(1, n + 1)
-    wma_full = np.convolve(arr, weights_full, 'valid') / weights_full.sum()
-    
-    # Raw HMA
-    hma_raw = 2 * wma_half - wma_full
-    
-    # Final WMA of sqrt period
-    weights_sqrt = np.arange(1, sqrt_n + 1)
-    hma = np.convolve(hma_raw, weights_sqrt, 'valid') / weights_sqrt.sum()
-    
-    # Pad to original length
-    hma_padded = np.full_like(arr, np.nan)
-    hma_padded[n-1:] = hma
-    return hma_padded
-
-def calculate_atr(high, low, close, period):
-    """ATR using Wilder's smoothing"""
+def calculate_true_range(high, low, close):
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = tr1[0]  # First value
+    return tr
+
+def calculate_adx(high, low, close, period):
+    tr = calculate_true_range(high, low, close)
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    plus_dm[0] = 0
+    minus_dm[0] = 0
+    
+    # Wilder's smoothing
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / (atr + 1e-10)
+    
+    dx = np.where((plus_di + minus_di) != 0, 
+                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
+
+def calculate_atr(high, low, close, period):
+    tr = calculate_true_range(high, low, close)
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
+
+def calculate_bbands(close, period, std_dev):
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = sma + (std * std_dev)
+    lower = sma - (std * std_dev)
+    return upper, lower, sma
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (weekly for trend filter)
-    df_weekly = get_htf_data(prices, '1w')
-    
-    # Calculate weekly HMA for trend filter
-    weekly_close = df_weekly['close'].values
-    hma_fast = calculate_hma(weekly_close, HMA_FAST)
-    hma_slow = calculate_hma(weekly_close, HMA_SLOW)
-    
-    # Align weekly HMA to daily timeframe
-    hma_fast_aligned = align_htf_to_ltf(prices, df_weekly, hma_fast)
-    hma_slow_aligned = align_htf_to_ltf(prices, df_weekly, hma_slow)
-    
-    # Calculate daily indicators
+    # Calculate LTF indicators (6h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
+    volume = volumes = prices['volume'].values  # Fix: use correct column
     
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Bollinger Bands
+    bb_upper, bb_lower, bb_middle = calculate_bbands(close, BB_PERIOD, BB_STD)
     
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ADX for regime filtering
+    adx = calculate_adx(high, low, close, ADX_PERIOD)
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -101,14 +93,9 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, 20) + 1
+    start = max(BB_PERIOD, 20, ADX_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly trend data not available
-        if np.isnan(hma_fast_aligned[i]) or np.isnan(hma_slow_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-            continue
-            
         # Check stoploss
         if position == 1:  # long position
             if close[i] <= stop_price:
@@ -121,29 +108,24 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Weekly trend filter: HMA21 > HMA50 = uptrend, HMA21 < HMA50 = downtrend
-        uptrend = hma_fast_aligned[i] > hma_slow_aligned[i]
-        downtrend = hma_fast_aligned[i] < hma_slow_aligned[i]
-        
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions
-        breakout_up = high[i] >= highest_high[i]  # Price breaks above Donchian upper band
-        breakout_down = low[i] <= lowest_low[i]   # Price breaks below Donchian lower band
+        # Regime filter: only trade mean reversion in low volatility (ADX < 25)
+        low_volatility = adx[i] < ADX_THRESHOLD
         
-        # Entry conditions
-        long_entry = uptrend and volume_spike and breakout_up
-        short_entry = downtrend and volume_spike and breakout_down
+        # Mean reversion signals: touch Bollinger Bands with volume spike
+        long_signal = low_volatility and volume_spike and close[i] <= bb_lower[i]
+        short_signal = low_volatility and volume_spike and close[i] >= bb_upper[i]
         
         # Generate signals
         if position == 0:
-            if long_entry:
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
+            elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
