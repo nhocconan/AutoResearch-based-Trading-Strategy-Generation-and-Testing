@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Experiment #8804: 1d Donchian breakout + 1w trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Daily timeframe with weekly trend filter reduces trade frequency to combat fee drag while capturing major trends.
-Using 1-week trend filter (SMA50) ensures alignment with multi-week momentum, avoiding counter-trend trades.
+Hypothesis: Daily timeframe reduces trade frequency to combat fee drag while capturing major trends.
+Using 1-week trend filter (EMA50) ensures alignment with multi-week momentum, avoiding counter-trend trades.
 Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk.
 Targets 30-100 trades over 4 years (7-25/year) to minimize fee impact while maintaining statistical validity.
 """
@@ -41,14 +41,14 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1w SMA for trend filter
+    # Calculate 1w EMA for trend filter
     close_1w = df_1w['close'].values
-    sma_1w = pd.Series(close_1w).rolling(window=TREND_PERIOD, min_periods=TREND_PERIOD).mean().values
+    ema_1w = pd.Series(close_1w).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
     
-    # Price relative to 1w SMA: above = bullish bias, below = bearish bias
-    price_vs_sma = np.where(close_1w > sma_1w, 1, 
-                     np.where(close_1w < sma_1w, -1, 0))  # 1=bullish, -1=bearish, 0=at SMA
-    price_vs_sma_aligned = align_htf_to_ltf(prices, df_1w, price_vs_sma)
+    # Price relative to 1w EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_1w > ema_1w, 1, 
+                     np.where(close_1w < ema_1w, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
     
     # Calculate LTF indicators (daily)
     high = prices['high'].values
@@ -76,7 +76,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(price_vs_sma_aligned[i]):
+        if np.isnan(price_vs_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -92,9 +92,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1w SMA
-        bull_bias = price_vs_sma_aligned[i] == 1   # 1w price above SMA50
-        bear_bias = price_vs_sma_aligned[i] == -1  # 1w price below SMA50
+        # Determine market bias from 1w EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1w price above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1w price below EMA50
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
@@ -127,5 +127,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
 </x>
