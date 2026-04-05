@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #7655: 6-hour Donchian(20) breakout with 1-week and 1-day trend filters and volume confirmation.
-Hypothesis: On 6h timeframe, trade breakouts of Donchian channels only when aligned with weekly and daily trends.
-In weekly uptrend (price > weekly EMA50) and daily uptrend (price > daily EMA50): long on breakout above upper band.
-In weekly downtrend (price < weekly EMA50) and daily downtrend (price < daily EMA50): short on breakdown below lower band.
-Volume must exceed 1.5x average to confirm breakout strength.
-Uses 6h timeframe targeting 50-150 total trades over 4 years (12-37/year).
+Experiment #7656: 12-hour Donchian(20) breakout with 1-day EMA50 trend filter and volume confirmation.
+Hypothesis: In bull markets (price > 1d EMA50), go long on breakout above 12h Donchian upper.
+In bear markets (price < 1d EMA50), go short on breakdown below 12h Donchian lower.
+Volume must be above 1.3x average to confirm breakout strength.
+ATR-based stoploss (2x) and target (3x) for risk management.
+Designed for 50-150 total trades over 4 years (12-37/year) to avoid fee drag.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7655_6h_donchian20_1w1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_7656_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 EMA_TREND = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.3  # volume must be 1.3x average
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -28,19 +28,13 @@ ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w_50 = pd.Series(close_1w).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_1w_50_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_50)
-    
-    # Calculate daily EMA50 for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
     ema_1d_50 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
     ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
@@ -76,7 +70,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1w_50_aligned[i]) or np.isnan(ema_1d_50_aligned[i]):
+        if np.isnan(ema_1d_50_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -92,9 +86,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market regime (both weekly and daily must agree)
-        bull_regime = (close[i] > ema_1w_50_aligned[i]) and (close[i] > ema_1d_50_aligned[i])
-        bear_regime = (close[i] < ema_1w_50_aligned[i]) and (close[i] < ema_1d_50_aligned[i])
+        # Determine market regime
+        bull_regime = close[i] > ema_1d_50_aligned[i]   # price above 1d EMA50
+        bear_regime = close[i] < ema_1d_50_aligned[i]   # price below 1d EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
