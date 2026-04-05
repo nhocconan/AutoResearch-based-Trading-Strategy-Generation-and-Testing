@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #8864: 1D Donchian Breakout with 1W Trend Filter + Volume Confirmation + ATR Stop Loss
+Experiment #8864: 1d Donchian breakout + 1w trend filter + volume confirmation + ATR stoploss.
 Hypothesis: Daily timeframe reduces trade frequency to combat fee drag while capturing major trends.
-Using 1-week EMA50 trend filter ensures alignment with multi-week momentum, avoiding counter-trend trades.
+Using 1-week trend filter (EMA50) ensures alignment with multi-week momentum, avoiding counter-trend trades.
 Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk.
-Target: 30-100 trades over 4 years (7-25/year) to minimize fee impact while maintaining statistical validity.
+Targets 30-100 trades over 4 years (7-25/year) to minimize fee impact while maintaining statistical validity.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -19,10 +19,10 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
