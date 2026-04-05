@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #9044: 1d Donchian breakout + 1w trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Donchian breakouts on daily capture multi-day trends; 1w EMA filter ensures directional alignment; volume confirms institutional participation. Targets 30-100 total trades over 4 years (7-25/year) to minimize fee decay. Works in bull (breakouts) and bear (filtered shorts) via 1w trend filter.
+Hypothesis: Daily Donchian breakouts capture multi-day trends; weekly EMA filter ensures directional alignment; volume confirms institutional participation. Targets 30-100 total trades over 4 years (7-25/year) to balance opportunity and cost. Works in bull (breakouts) and bear (filtered shorts) by only trading in direction of weekly trend.
 """
 
 import numpy as np
@@ -14,7 +14,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_PERIOD = 30
+TREND_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
@@ -90,8 +90,8 @@ def generate_signals(prices):
                 continue
         
         # Determine market bias from 1w EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1w price above EMA30
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1w price below EMA30
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1w price above EMA20
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1w price below EMA20
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
