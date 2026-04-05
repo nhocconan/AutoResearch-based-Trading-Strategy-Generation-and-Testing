@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #9851: 6h Donchian Breakout + Daily Pivot + Volume Spike
-Hypothesis: Donchian(20) breakouts in the direction of daily pivot support/resistance levels
-with volume confirmation capture high-probability trend continuation trades. Pivot levels
-provide natural support/resistance, reducing false breakouts in both bull and bear markets.
-Target: 75-150 total trades over 4 years (19-38/year).
+Experiment #9853: 4h Donchian Breakout + 12h Trend + Volume Spike
+Hypothesis: Donchian(20) breakouts in the direction of 12h EMA(40) with volume confirmation
+provide high-probability trend continuation trades. Works in bull markets (breakouts above 12h EMA)
+and bear markets (breakdowns below 12h EMA). Volume filters reduce false breakouts.
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9851_6h_donchian_breakout_daily_pivot_volume_v1"
-timeframe = "6h"
+name = "exp_9853_4h_donchian_breakout_12h_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_SPIKE_MULTIPLIER = 1.5
+TREND_EMA_PERIOD = 40
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -41,42 +42,22 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_pivot_points(high, low, close):
-    """Calculate daily pivot points: P, R1, R2, R3, S1, S2, S3"""
-    P = (high + low + close) / 3
-    R1 = 2 * P - low
-    S1 = 2 * P - high
-    R2 = P + (high - low)
-    S2 = P - (high - low)
-    R3 = high + 2 * (P - low)
-    S3 = low - 2 * (high - P)
-    return P, R1, R2, R3, S1, S2, S3
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for pivot levels
-    df_daily = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily pivot points
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
-    daily_close = df_daily['close'].values
+    # Calculate 12h EMA for trend direction
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
     
-    P, R1, R2, R3, S1, S2, S3 = calculate_pivot_points(daily_high, daily_low, daily_close)
+    # Align 12h EMA to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Align daily pivot levels to 6h timeframe
-    P_aligned = align_htf_to_ltf(prices, df_daily, P)
-    R1_aligned = align_htf_to_ltf(prices, df_daily, R1)
-    R2_aligned = align_htf_to_ltf(prices, df_daily, R2)
-    R3_aligned = align_htf_to_ltf(prices, df_daily, R3)
-    S1_aligned = align_htf_to_ltf(prices, df_daily, S1)
-    S2_aligned = align_htf_to_ltf(prices, df_daily, S2)
-    S3_aligned = align_htf_to_ltf(prices, df_daily, S3)
-    
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -97,11 +78,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, 20) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, 20) + 1
     
     for i in range(start, n):
-        # Skip if daily pivots not available
-        if np.isnan(P_aligned[i]):
+        # Skip if 12h EMA not available
+        if np.isnan(ema_12h_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -120,17 +101,17 @@ def generate_signals(prices):
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Pivot-based directional bias
-        above_pivot = close[i] > P_aligned[i]
-        below_pivot = close[i] < P_aligned[i]
+        # Trend filter: price above/below 12h EMA
+        above_ema = close[i] > ema_12h_aligned[i]
+        below_ema = close[i] < ema_12h_aligned[i]
         
         # Breakout conditions
         bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
         bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
         
-        # Entry conditions: breakout in direction of pivot bias with volume
-        long_entry = bullish_breakout and above_pivot and volume_spike
-        short_entry = bearish_breakout and below_pivot and volume_spike
+        # Entry conditions: breakout in direction of 12h trend with volume
+        long_entry = bullish_breakout and above_ema and volume_spike
+        short_entry = bearish_breakout and below_ema and volume_spike
         
         # Generate signals
         if position == 0:
@@ -152,3 +133,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</think>
