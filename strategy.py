@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #8843: 4h Donchian breakout + 12h trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Combining 4h price channel breakouts with 12h trend alignment and volume confirmation
-captures strong momentum moves while minimizing false signals. The 4h timeframe balances trade
-frequency (target: 75-200 total over 4 years) to reduce fee drag, while the 12h trend filter
-ensures alignment with medium-term momentum. Volume confirmation requires institutional
-participation. ATR-based stops manage risk. Works in both bull (long breakouts in uptrend) and
-bear (short breakouts in downtrend) markets.
+Experiment #8843: 4h Donchian breakout + 12h trend + volume + ATR stoploss.
+Hypothesis: 4h timeframe balances trade frequency and signal quality. Using 12h EMA for trend
+filter ensures alignment with intermediate-term momentum. Donchian breakouts capture
+directional moves, volume confirmation filters for institutional participation,
+and ATR stops manage risk. Targets 75-200 trades over 4 years (19-50/year) to
+balance statistical validity with fee minimization.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -129,4 +128,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</x>
