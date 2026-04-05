@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #10855: 6h Donchian Breakout with Weekly Pivot Direction and Volume Confirmation
-Hypothesis: 6-hour Donchian(20) breakouts in the direction of weekly trend (price above/below weekly pivot),
-confirmed by volume spikes, provide high-probability trades. Weekly pivot acts as dynamic support/resistance.
-Designed to work in bull markets (breakouts above pivot) and bear markets (breakdowns below pivot).
-Target: 100-200 total trades over 4 years (25-50/year) on 6h timeframe.
+Experiment #10855: 6h Donchian Breakout with Weekly Trend and Volume Confirmation
+Hypothesis: Donchian(20) breakouts in the direction of weekly trend with volume confirmation
+provide high-probability trades on 6h timeframe. Works in bull markets (trend continuation)
+and bear markets (avoiding false breakouts via weekly trend filter). Target: 50-150 total trades
+over 4 years (12-37/year) on 6h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10855_6h_donchian20_weekly_pivot_vol_v1"
+name = "exp_10855_6h_donchian20_weekly_trend_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -21,14 +21,21 @@ VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-PIVOT_LOOKBACK = 5  # days for weekly pivot calculation
+ATR_STOP_MULTIPLIER = 2.0
+WEEKLY_EMA_PERIOD = 50
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    upper = np.full_like(high, np.nan)
+    lower = np.full_like(low, np.nan)
+    for i in range(period-1, len(high)):
+        upper[i] = np.max(high[i-period+1:i+1])
+        lower[i] = np.min(low[i-period+1:i+1])
     return upper, lower
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -39,12 +46,6 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_weekly_pivot(high, low, close):
-    """Calculate weekly pivot point (standard: (H+L+C)/3)"""
-    # For weekly data, we calculate pivot from weekly OHLC
-    pivot = (high + low + close) / 3.0
-    return pivot
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -53,12 +54,9 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot from weekly OHLC
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
-    weekly_pivot = calculate_weekly_pivot(weekly_high, weekly_low, weekly_close)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    # Calculate weekly EMA for trend
+    weekly_ema = calculate_ema(df_weekly['close'].values, WEEKLY_EMA_PERIOD)
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
     
     # Calculate 6h indicators
     high = prices['high'].values
@@ -67,11 +65,8 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # Session filter: 00-23 UTC (always on for 6h - reduced frequency already filters noise)
-    # Using all hours since 6h has lower frequency
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,11 +74,19 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, WEEKLY_EMA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly pivot not available
-        if np.isnan(weekly_pivot_aligned[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(weekly_ema_aligned[i]):
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Skip if Donchian or volume MA not available
+        if np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -103,19 +106,19 @@ def generate_signals(prices):
                 continue
         
         # Breakout conditions
-        breakout_up = (not np.isnan(upper[i-1]) and close[i] > upper[i-1])
-        breakout_down = (not np.isnan(lower[i-1]) and close[i] < lower[i-1])
+        breakout_up = close[i] > upper[i-1] if i > 0 and not np.isnan(upper[i-1]) else False
+        breakout_down = close[i] < lower[i-1] if i > 0 and not np.isnan(lower[i-1]) else False
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Weekly pivot position
-        above_pivot = close[i] > weekly_pivot_aligned[i]
-        below_pivot = close[i] < weekly_pivot_aligned[i]
+        # Weekly trend filter
+        weekly_uptrend = close[i] > weekly_ema_aligned[i]
+        weekly_downtrend = close[i] < weekly_ema_aligned[i]
         
-        # Entry conditions: breakout in direction of weekly pivot
-        long_entry = breakout_up and volume_ok and above_pivot
-        short_entry = breakout_down and volume_ok and below_pivot
+        # Entry conditions
+        long_entry = breakout_up and volume_ok and weekly_uptrend
+        short_entry = breakout_down and volume_ok and weekly_downtrend
         
         # Generate signals
         if position == 0:
