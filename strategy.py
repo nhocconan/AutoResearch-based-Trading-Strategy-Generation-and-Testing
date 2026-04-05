@@ -1,17 +1,11 @@
-#!/usr/bin/env python3
-"""
-Experiment #10657: 4h Donchian Breakout + Daily Trend + Volume Spike
-Hypothesis: 4-hour Donchian(20) breakouts in the direction of daily EMA50 trend with volume confirmation
-provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
-and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
-Target: 75-200 total trades over 4 years (19-50/year).
-"""
+# 10657: 4h Donchian Breakout + 1d Trend + Volume Spike
+# Hypothesis: 4-hour Donchian(20) breakouts in the direction of daily EMA50 trend with volume confirmation provide high-probability trend continuation trades. This strategy aims to capture medium-term trends in both bull and bear markets by combining price breakouts with trend alignment and volume filters to reduce false signals. The 4h timeframe balances signal frequency with manageable transaction costs, targeting 75-200 trades over 4 years.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10657_4h_donchian_breakout_daily_trend_volume_v1"
+name = "exp_10657_4h_donchian_breakout_1d_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -133,4 +127,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</max>
