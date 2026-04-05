@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-exp_7420_4h_donchian20_1d_ema_vol_v2
+exp_7421_4h_donchian20_1d_ema_vol_v2
 Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Improved version with reduced trade frequency by tightening volume confirmation and adding volatility filter.
+Improved version: reduces trade frequency by requiring volume > 2.5x MA and adding a 6-hour minimum hold.
 Designed for low trade frequency (target: 75-200 total over 4 years) to minimize fee drag.
 Works in bull/bear via 1d EMA filter: only long when above 1d EMA, short when below.
 """
@@ -11,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7420_4h_donchian20_1d_ema_vol_v2"
+name = "exp_7421_4h_donchian20_1d_ema_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,11 +19,12 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.5  # Increased for fewer trades
+VOL_BASE_THRESHOLD = 2.5  # Increased from 2.0 to reduce false signals
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 12  # Increased for fewer trades
+MAX_HOLD_BARS = 12  # Increased from 8 to reduce trade frequency
+MIN_HOLD_BARS = 6   # New: minimum 6 bars (24h) before allowing exit
 
 def generate_signals(prices):
     n = len(prices)
@@ -90,32 +91,41 @@ def generate_signals(prices):
                 bars_since_entry = 0
                 continue
                 
-        # Time-based exit
+        # Minimum hold period - cannot exit before this
+        if bars_since_entry < MIN_HOLD_BARS:
+            signals[i] = position * SIGNAL_SIZE
+            continue
+            
+        # Time-based exit (only after minimum hold)
         if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
             signals[i] = 0.0
             position = 0
             bars_since_entry = 0
             continue
             
-        # Volume confirmation with higher threshold
+        # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Determine market regime based on 1d EMA
         above_ema = close[i] > ema_1d_aligned[i]
         below_ema = close[i] < ema_1d_aligned[i]
         
-        # Only trade strong breakouts with volume confirmation
+        # Continuation breakouts in trending market
         continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
         continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
         
+        # Breakout retest entries (pullback to breakout level with volume)
+        retest_long = above_ema and (close[i] <= highest_high[i-1] * 1.005) and (close[i] >= lowest_low[i-1]) and vol_confirmed
+        retest_short = below_ema and (close[i] >= lowest_low[i-1] * 0.995) and (close[i] <= highest_high[i-1]) and vol_confirmed
+        
         # Enter new positions only if flat
         if position == 0:
-            if continuation_long:
+            if continuation_long or retest_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif continuation_short:
+            elif continuation_short or retest_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -127,3 +137,4 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+</response>
