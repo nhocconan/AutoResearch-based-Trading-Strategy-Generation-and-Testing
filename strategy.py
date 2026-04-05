@@ -1,34 +1,44 @@
 #!/usr/bin/env python3
 """
-Experiment #10494: 1h Momentum + 4h Trend + 1d Volume Spike
-Hypothesis: 1h momentum entries aligned with 4h trend and 1d volume confirmation
-provide high-probability trend continuation trades. Uses 4h/1d for signal direction
-and 1h only for entry timing to reduce noise. Target: 60-150 total trades over 4 years.
-Works in bull markets (momentum with trend) and bear markets (mean reversion in range).
+Experiment #10494: 1h Momentum with 4h/1d Trend Filter and Volume Spike
+Hypothesis: In ranging/bear markets (2025-2026), momentum reversals on 1h timeframe 
+with 4h trend alignment and 1d volume confirmation provide edge. Uses RSI(2) for 
+short-term mean reversion, filtered by 4h EMA50 trend and 1d volume spike. 
+Targets 15-37 trades/year (60-150 total over 4 years) by requiring confluence 
+of multiple filters to avoid overtrading. Works in both bull (trend continuation) 
+and bear (mean reversion in range) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10494_1h_momentum_4h_trend_1d_volume_v1"
+name = "exp_10494_1h_momentum_4h1d_trend_volume_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-MOMENTUM_PERIOD = 10
-MOMENTUM_THRESHOLD = 0.02
-TREND_PERIOD = 21
-VOLUME_SPIKE_MULTIPLIER = 1.8
+RSI_PERIOD = 2
+RSI_OVERBOUGHT = 85
+RSI_OVERSOLD = 15
+EMA40_PERIOD = 50
+VOLUME_SPIKE_MULTIPLIER = 2.0
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 SESSION_START_HOUR = 8
 SESSION_END_HOUR = 20
 
-def calculate_momentum(close, period):
-    """Calculate price momentum as percent change"""
-    return pd.Series(close).pct_change(period).values
+def calculate_rsi(close, period):
+    """Calculate RSI"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -50,14 +60,19 @@ def generate_signals(prices):
     
     # Load 4h data ONCE before loop for trend filter
     df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = calculate_ema(close_4h, TREND_PERIOD)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
     # Load 1d data ONCE before loop for volume filter
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 4h EMA for trend direction
+    close_4h = df_4h['close'].values
+    ema_4h = calculate_ema(close_4h, EMA40_PERIOD)
+    # Align 4h EMA to 1h timeframe
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Calculate 1d volume average for spike detection
     volume_1d = df_1d['volume'].values
     volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    # Align 1d volume MA to 1h timeframe
     volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
     
     # Calculate 1h indicators
@@ -66,10 +81,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    momentum = calculate_momentum(close, MOMENTUM_PERIOD)
+    # RSI(2) for short-term momentum
+    rsi = calculate_rsi(close, RSI_PERIOD)
+    
+    # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Pre-calculate session hours
+    # Session filter (08-20 UTC)
     hours = prices.index.hour
     
     signals = np.zeros(n)
@@ -78,22 +96,28 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(MOMENTUM_PERIOD, TREND_PERIOD, 20) + 1
+    start = max(RSI_PERIOD, EMA40_PERIOD, 20) + 1
     
     for i in range(start, n):
-        # Session filter: only trade 08:00-20:00 UTC
+        # Session filter: only trade 08-20 UTC
         hour = hours[i]
         if hour < SESSION_START_HOUR or hour > SESSION_END_HOUR:
-            signals[i] = 0.0
-            position = 0
-            continue
-        
-        # Skip if 4h EMA not available
-        if np.isnan(ema_4h_aligned[i]):
-            signals[i] = 0.0
-            position = 0
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
             continue
             
+        # Skip if 4h EMA or 1d volume MA not available
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]):
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.0
+            continue
+        
         # Check stoploss
         if position == 1:  # long position
             if close[i] <= stop_price:
@@ -106,20 +130,22 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume spike confirmation (1d)
-        volume_spike = volume[i] > (volume_ma_1d_aligned[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma_1d_aligned[i]) else False
+        # Volume spike condition: current 1h volume > 2.0 * 1d average volume (scaled)
+        # Scale 1d volume to hourly approximation: divide by ~6.7 (24h/6 4h bars in day, but using 24 for conservative)
+        volume_scaled = volume_ma_1d_aligned[i] / 4.0  # approximate hourly volume from daily
+        volume_spike = volume[i] > (volume_scaled * VOLUME_SPIKE_MULTIPLIER)
         
-        # Trend filter: price above/below 4h EMA
-        above_ema = close[i] > ema_4h_aligned[i]
-        below_ema = close[i] < ema_4h_aligned[i]
+        # RSI extreme conditions
+        rsi_oversold = rsi[i] < RSI_OVERSOLD
+        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
         
-        # Momentum conditions
-        mom_up = momentum[i] > MOMENTUM_THRESHOLD if not np.isnan(momentum[i]) else False
-        mom_down = momentum[i] < -MOMENTUM_THRESHOLD if not np.isnan(momentum[i]) else False
+        # Trend filter: price vs 4h EMA
+        price_above_ema = close[i] > ema_4h_aligned[i]
+        price_below_ema = close[i] < ema_4h_aligned[i]
         
         # Entry conditions
-        long_entry = mom_up and above_ema and volume_spike
-        short_entry = mom_down and below_ema and volume_spike
+        long_entry = rsi_oversold and price_above_ema and volume_spike
+        short_entry = rsi_overbought and price_below_ema and volume_spike
         
         # Generate signals
         if position == 0:
