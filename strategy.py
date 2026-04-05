@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 exp_7526_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
+Hypothesis: 4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
 In bull markets (price > 1d EMA200): long breakout above 4h Donchian upper.
 In bear markets (price < 1d EMA200): short breakdown below 4h Donchian lower.
 Volume must be above 20-period average to confirm breakout strength.
@@ -124,3 +124,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</...truncated>
