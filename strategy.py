@@ -1,82 +1,58 @@
 #!/usr/bin/env python3
 """
-exp_7215_6h_ichimoku_kijun_regime_v1
-Hypothesis: 6h Ichimoku Kijun-Sen (base line) with 1d/1w trend regime filter for ETH/BTC/SOL.
-In strong uptrend (price > 1w Kumo top): long on pullback to Kijun-Sen with volume confirmation.
-In strong downtrend (price < 1w Kumo bottom): short on rally to Kijun-Sen with volume confirmation.
-In ranging (price inside 1w Kumo): fade at Kumo edges with volume confirmation.
-Uses weekly Ichimoku for regime and 6h Kijun-Sen for dynamic support/resistance.
-Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by adapting to weekly Ichimoku-defined trend regime.
+exp_7216_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+In trending markets (price > EMA): breakout continuation. In ranging markets (price near EMA): 
+mean reversion at Donchian extremes. Designed for 12h timeframe to capture swings with 
+12-37 trades/year (50-150 total over 4 years). Volume confirmation reduces false breakouts.
+ATR-based stoploss manages risk. Works in both bull and bear markets by adapting to EMA-defined trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7215_6h_ichimoku_kijun_regime_v1"
-timeframe = "6h"
+name = "exp_7216_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-KIJUN_PERIOD = 26          # Base line period
-TENKAN_PERIOD = 9          # Conversion line period
-SENKOU_SPAN_B_PERIOD = 52  # Leading span B period
-KUMO_SHIFT = 26            # Kumo cloud forward shift
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 8          # ~2 days (8 * 6h = 48h)
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 8  # ~8 * 12h = 4 days
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1w for Ichimoku regime
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop - using 1d for EMA trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w Ichimoku components
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d EMA
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Tenkan-sen (Conversion Line): (highest high + lowest low)/2 for past 9 periods
-    tenkan_sen = (pd.Series(high_1w).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
-                  pd.Series(low_1w).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
+    # Align to LTF (12h)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Kijun-sen (Base Line): (highest high + lowest low)/2 for past 26 periods
-    kijun_sen = (pd.Series(high_1w).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
-                 pd.Series(low_1w).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(KUMO_SHIFT)
-    
-    # Senkou Span B (Leading Span B): (highest high + lowest low)/2 for past 52 periods shifted 26 periods ahead
-    senkou_span_b = ((pd.Series(high_1w).rolling(window=SENKOU_SPAN_B_PERIOD, min_periods=SENKOU_SPAN_B_PERIOD).max() + 
-                      pd.Series(low_1w).rolling(window=SENKOU_SPAN_B_PERIOD, min_periods=SENKOU_SPAN_B_PERIOD).min()) / 2).shift(KUMO_SHIFT)
-    
-    # Align 1w Ichimoku to 6h
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1w, tenkan_sen.values)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_1w, kijun_sen.values)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_a.values)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1w, senkou_span_b.values)
-    
-    # Kumo (cloud) boundaries: Senkou Span A and B
-    kumo_top = np.maximum(senkou_span_a_aligned, senkou_span_b_aligned)
-    kumo_bottom = np.minimum(senkou_span_a_aligned, senkou_span_b_aligned)
-    
-    # Calculate LTF indicators (6h)
+    # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h Kijun-sen (base line) for dynamic support/resistance
-    kijun_sen_6h = (pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
-                    pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Volume MA for confirmation
+    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
     # ATR for stoploss
     tr1 = pd.Series(high - low)
@@ -91,13 +67,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(KIJUN_PERIOD, TENKAN_PERIOD, SENKOU_SPAN_B_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + KUMO_SHIFT
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]):
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -123,48 +99,33 @@ def generate_signals(prices):
             continue
             
         # Volume confirmation
-        vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().iloc[i]
-        vol_confirmed = not np.isnan(vol_ma) and volume[i] > vol_ma * VOL_BASE_THRESHOLD
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on weekly Kumo
-        price_above_kumo = close[i] > kumo_top[i]
-        price_below_kumo = close[i] < kumo_bottom[i]
-        price_in_kumo = (close[i] >= kumo_bottom[i]) & (close[i] <= kumo_top[i])
+        # Determine market regime based on EMA
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
+        near_ema = np.abs(close[i] - ema_1d_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of EMA
         
-        # 6h price relative to 6h Kijun-sen (dynamic support/resistance)
-        price_above_kijun = close[i] > kijun_sen_6h.iloc[i]
-        price_below_kijun = close[i] < kijun_sen_6h.iloc[i]
+        # Fade at extremes in ranging market (near EMA)
+        fade_long = near_ema and (close[i] <= lowest_low[i]) and vol_confirmed
+        fade_short = near_ema and (close[i] >= highest_high[i]) and vol_confirmed
         
-        # Entry logic
-        if position == 0:  # flat - look for new entries
-            # Strong uptrend: price above weekly Kumo -> long on pullback to 6h Kijun-sen
-            if price_above_kumo and price_below_kijun and vol_confirmed:
+        # Continuation breakouts in trending market
+        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
+        
+        # Enter new positions only if flat
+        if position == 0:
+            if fade_long or continuation_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            # Strong downtrend: price below weekly Kumo -> short on rally to 6h Kijun-sen
-            elif price_below_kumo and price_above_kijun and vol_confirmed:
+            elif fade_short or continuation_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 bars_since_entry = 0
-            # Ranging: price inside weekly Kumo -> fade at Kumo edges
-            elif price_in_kumo:
-                # Long near Kumo bottom (support)
-                if close[i] <= kumo_bottom[i] * 1.001 and vol_confirmed:  # within 0.1% of Kumo bottom
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                # Short near Kumo top (resistance)
-                elif close[i] >= kumo_top[i] * 0.999 and vol_confirmed:   # within 0.1% of Kumo top
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                else:
-                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         else:
