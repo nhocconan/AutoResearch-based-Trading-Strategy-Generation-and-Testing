@@ -1,74 +1,58 @@
 #!/usr/bin/env python3
 """
-Experiment #8155: 6-hour 1-week pivot-based reversal with 1-day volume confirmation.
-Hypothesis: Price rejection at weekly resistance (R3/R4) or support (S3/S4) with 
-volume exhaustion (volume < 0.5x 1d MA) on 6h timeframe captures reversals in both 
-bull and bear markets. Uses 1d volume to filter for low-volume exhaustion moves 
-that often precede reversals, working across market regimes.
+Experiment #8156: 12-hour Donchian breakout with 1-day trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA 
+and aligned 1d trend (price above/below 1d EMA50) captures sustained moves while avoiding 
+whipsaw in both bull and bear markets. The 1d trend filter provides stronger trend context 
+than shorter timeframes, reducing false breakouts during consolidation periods.
 """
 
-from mtf_data import get_ath_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8155_6h_1w_pivot_1d_vol_reversal_v1"
-timeframe = "6h"
+name = "exp_8156_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-PIVOT_LOOKBACK = 5  # days for weekly pivot calculation
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 0.5  # volume < 50% of MA indicates exhaustion
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
+EMA_PERIOD = 50
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_pivot_points(high, low, close):
-    """Calculate classic pivot points: P = (H+L+C)/3, then support/resistance levels"""
-    P = (high + low + close) / 3.0
-    R1 = 2*P - low
-    S1 = 2*P - high
-    R2 = P + (high - low)
-    S2 = P - (high - low)
-    R3 = high + 2*(P - low)
-    S3 = low - 2*(high - P)
-    R4 = R3 + (high - low)
-    S4 = S3 - (high - low)
-    return P, R1, R2, R3, R4, S1, S2, S3, S4
+ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop: 1w for pivots, 1d for volume
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points using prior week's OHLC
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d EMA
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    P, R1, R2, R3, R4, S1, S2, S3, S4 = calculate_pivot_points(high_1w, low_1w, close_1w)
-    
-    # Align pivot levels to 6t timeframe (shifted by 1 week for no look-ahead)
-    P_aligned = align_htf_to_ltf(prices, df_1w, P)
-    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
-    R4_aligned = align_htf_to_ltf(prices, df_1w, R4)
-    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
-    S4_aligned = align_htf_to_ltf(prices, df_1w, S4)
-    
-    # Calculate 1d volume moving average for exhaustion filter
-    volume_1d = df_1d['volume'].values
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    # Price relative to EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
     
     # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Price channel (Donchian)
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR for risk management
     tr1 = pd.Series(high - low)
@@ -81,66 +65,58 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
+    target_price = 0.0
     
     # Start from warmup period
-    start = max(len(df_1w), len(df_1d), ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(P_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]):
+        if np.isnan(price_vs_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
-        # Check stoploss
+        # Check stoploss or target
         if position == 1:  # long position
-            if close[i] <= stop_price:
+            if close[i] <= stop_price or close[i] >= target_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            if close[i] >= stop_price:
+            if close[i] >= stop_price or close[i] <= target_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Volume exhaustion: volume < 50% of 1d MA indicates selling/buying climax
-        volume_exhausted = volume[i] < (volume_ma_1d_aligned[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma_1d_aligned[i]) else False
+        # Determine market bias from 1d EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
         
-        # Reversal signals at weekly pivot extremes
-        # Short rejection at resistance (R3/R4) with volume exhaustion
-        resistance_rejection = (
-            (close[i] < R3_aligned[i]) and 
-            (high[i] >= R3_aligned[i]) and 
-            volume_exhausted
-        ) or (
-            (close[i] < R4_aligned[i]) and 
-            (high[i] >= R4_aligned[i]) and 
-            volume_exhausted
-        )
+        # Volume confirmation
+        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Long rejection at support (S3/S4) with volume exhaustion
-        support_rejection = (
-            (close[i] > S3_aligned[i]) and 
-            (low[i] <= S3_aligned[i]) and 
-            volume_exhausted
-        ) or (
-            (close[i] > S4_aligned[i]) and 
-            (low[i] <= S4_aligned[i]) and 
-            volume_exhausted
-        )
+        # Breakout conditions - require close beyond channel bands to avoid wicks
+        upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
+        lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
+        
+        # Entry conditions
+        long_entry = bull_bias and upper_breakout and volume_confirmed
+        short_entry = bear_bias and lower_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
-            if resistance_rejection:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-            elif support_rejection:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
+            elif short_entry:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
