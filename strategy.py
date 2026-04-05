@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 exp_7275_6h_donchian20_1w_pivot_v1
-Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
-In bull markets (price above weekly pivot): long breakouts at Donchian high, short fade at Donchian low.
-In bear markets (price below weekly pivot): short breakouts at Donchian low, long fade at Donchian high.
-Uses weekly pivot for trend regime and 6h volume for confirmation.
+Hypothesis: 6h Donchian(20) breakout with 1w pivot point direction filter and volume confirmation.
+Uses weekly pivot points (calculated from prior week OHLC) to determine bias:
+- Price above weekly pivot = long bias, look for Donchian breakouts long
+- Price below weekly pivot = short bias, look for Donchian breakdowns short
+Volume confirmation required to avoid false breakouts.
 Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by adapting to pivot-defined trend regime.
+Works in both bull and bear markets by adapting to weekly pivot-defined regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -31,29 +32,17 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1w for pivot calculation
+    # Load HTF data ONCE before loop - using 1w for pivot points
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot points (using prior week's OHLC)
+    # Calculate weekly pivot points: (H + L + C) / 3
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
-    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
-    r4_1w = r3_1w + (high_1w - low_1w)
-    s4_1w = s3_1w - (high_1w - low_1w)
     
     # Align to LTF (6h)
     pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -115,48 +104,28 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on weekly pivot
+        # Determine bias based on weekly pivot
         above_pivot = close[i] > pivot_1w_aligned[i]
         below_pivot = close[i] < pivot_1w_aligned[i]
         
-        # Fade at S3/R3 in ranging market (near pivot)
-        fade_long = (close[i] <= lowest_low[i]) and vol_confirmed and (close[i] >= s3_1w_aligned[i])
-        fade_short = (close[i] >= highest_high[i]) and vol_confirmed and (close[i] <= r3_1w_aligned[i])
-        
-        # Breakout continuation at S4/R4 in trending market
-        breakout_long = (close[i] > highest_high[i]) and vol_confirmed and (close[i] >= r4_1w_aligned[i])
-        breakout_short = (close[i] < lowest_low[i]) and vol_confirmed and (close[i] <= s4_1w_aligned[i])
+        # Breakout signals with bias filter
+        breakout_long = (close[i] > highest_high[i]) and vol_confirmed and above_pivot
+        breakout_short = (close[i] < lowest_low[i]) and vol_confirmed and below_pivot
         
         # Enter new positions only if flat
         if position == 0:
-            if above_pivot:
-                # Bull regime: long breakouts, short fades
-                if breakout_long or fade_short:
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                elif fade_long or breakout_short:
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                else:
-                    signals[i] = 0.0
+            if breakout_long:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+            elif breakout_short:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                bars_since_entry = 0
             else:
-                # Bear regime: short breakouts, long fades
-                if breakout_short or fade_long:
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                elif fade_short or breakout_long:
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                else:
-                    signals[i] = 0.0
+                signals[i] = 0.0
         else:
             # Hold current position
             signals[i] = position * SIGNAL_SIZE
