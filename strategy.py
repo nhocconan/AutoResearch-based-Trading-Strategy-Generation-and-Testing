@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #11293: 4h Donchian Breakout with 12h Trend and Volume Confirmation
-Hypothesis: Donchian(20) breakouts on 4h timeframe capture strong directional moves. 
-12h EMA provides trend bias to avoid counter-trend trades, and volume filter ensures 
-institutional participation. Works in bull markets (breakouts continue) and bear 
-markets (breakouts reverse quickly) by using 12h trend filter. Target: 75-200 trades 
-over 4 years.
+Hypothesis: 4h Donchian(20) breakouts capture strong directional moves. 12h EMA provides trend bias,
+and volume filter ensures institutional participation. Works in bull (breakouts continue) and
+bear (breakouts reverse quickly) by using 12h trend filter. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
@@ -18,7 +16,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 21
+TWELVE_H_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -53,7 +51,7 @@ def generate_signals(prices):
     df_12h = get_htf_data(prices, '12h')
     
     # Calculate 12h EMA for trend
-    ema_12h = calculate_ema(df_12h['close'].values, TREND_EMA_PERIOD)
+    ema_12h = calculate_ema(df_12h['close'].values, TWELVE_H_EMA_PERIOD)
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Calculate 4h indicators
@@ -72,7 +70,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TWELVE_H_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if 12h EMA not available
@@ -136,11 +134,9 @@ def generate_signals(prices):
 #!/usr/bin/env python3
 """
 Experiment #11293: 4h Donchian Breakout with 12h Trend and Volume Confirmation
-Hypothesis: Donchian(20) breakouts on 4h timeframe capture strong directional moves. 
-12h EMA provides trend bias to avoid counter-trend trades, and volume filter ensures 
-institutional participation. Works in bull markets (breakouts continue) and bear 
-markets (breakouts reverse quickly) by using 12h trend filter. Target: 75-200 trades 
-over 4 years.
+Hypothesis: 4h Donchian(20) breakouts capture strong directional moves. 12h EMA provides trend bias,
+and volume filter ensures institutional participation. Works in bull (breakouts continue) and
+bear (breakouts reverse quickly) by using 12h trend filter. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
@@ -153,7 +149,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 21
+TWELVE_H_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -188,7 +184,7 @@ def generate_signals(prices):
     df_12h = get_htf_data(prices, '12h')
     
     # Calculate 12h EMA for trend
-    ema_12h = calculate_ema(df_12h['close'].values, TREND_EMA_PERIOD)
+    ema_12h = calculate_ema(df_12h['close'].values, TWELVE_H_EMA_PERIOD)
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Calculate 4h indicators
@@ -207,7 +203,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TWELVE_H_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if 12h EMA not available
@@ -265,5 +261,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
-</think>
