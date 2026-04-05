@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-exp_7023_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-In bull markets (price > 1d EMA50): long breakouts only. In bear markets (price < 1d EMA50): short breakouts only.
-1d EMA50 provides intermediate-term trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
+exp_7023_4h_donchian20_12h_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation.
+In bull markets (price > 12h EMA): long breakouts only. In bear markets (price < 12h EMA): short breakouts only.
+12h EMA provides intermediate-term trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
 Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
-Works in both bull and bear markets by aligning with 1d trend direction.
+Works in both bull and bear markets by aligning with 12h trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7023_4h_donchian20_1d_ema_vol_v1"
+name = "exp_7023_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,15 +31,15 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - using 12h for EMA
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA50
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate 12h EMA50
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
     # Align to LTF (4h)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -73,7 +73,7 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(ema_12h_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -101,13 +101,13 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend direction from 1d EMA50
-        daily_uptrend = close[i] > ema_1d_aligned[i]
-        daily_downtrend = close[i] < ema_1d_aligned[i]
+        # Determine trend direction from 12h EMA50
+        weekly_uptrend = close[i] > ema_12h_aligned[i]
+        weekly_downtrend = close[i] < ema_12h_aligned[i]
         
-        # Breakout signals aligned with 1d trend
-        long_breakout = daily_uptrend and (close[i] > highest_high[i]) and vol_confirmed
-        short_breakout = daily_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
+        # Breakout signals aligned with 12h trend
+        long_breakout = weekly_uptrend and (close[i] > highest_high[i]) and vol_confirmed
+        short_breakout = weekly_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
@@ -128,5 +128,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
