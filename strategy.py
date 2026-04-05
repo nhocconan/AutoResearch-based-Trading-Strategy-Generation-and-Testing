@@ -1,28 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #8555: 6h Donchian breakout + 1d ADX trend filter + volume confirmation.
-Hypothesis: 6h timeframe balances trend capture with lower frequency than lower TFs. 
-ADX filter ensures trades only in trending regimes (ADX>25), avoiding chop. 
-Volume confirms institutional participation. Targets 75-200 total trades over 4 years.
+Experiment #8559: 6h Donchian breakout + 12h pivot reversal + volume confirmation.
+Hypothesis: Combines trend-following breakouts (Donchian) with counter-trend reversals at extreme pivot levels (R4/S4) from higher timeframe.
+Uses 12h pivots for context and volume to filter false breakouts. Works in both bull/bear by adapting to pivot levels.
+Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity with fee minimization.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_alt_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8555_6h_donchian20_adx_vol_v1"
+name = "exp_8559_6h_donchian20_12h_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
+PIVOT_LOOKBACK = 10  # periods for pivot calculation
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_pivots(high, low, close):
+    """Calculate classic pivot points and support/resistance levels"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    r4 = r3 + (high - low)
+    s4 = s3 - (high - low)
+    return pivot, r1, r2, r3, r4, s1, s2, s3, s4
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -33,48 +45,35 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_adx(high, low, close, period):
-    """Calculate ADX (Average Directional Index)"""
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    
-    # Directional Movement
-    plus_dm = high - np.roll(high, 1)
-    minus_dm = np.roll(low, 1) - low
-    plus_dm = np.where((plus_dm > minus_dm) & (plus_dm > 0), plus_dm, 0)
-    minus_dm = np.where((minus_dm > plus_dm) & (minus_dm > 0), minus_dm, 0)
-    
-    # Smooth TR, +DM, -DM
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean() / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean() / atr
-    
-    # DX and ADX
-    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    
-    return adx.values
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d ADX for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, ADX_PERIOD)
+    # Calculate 12h pivot points
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # ADX > threshold indicates trending market
-    adx_trending = adx_1d > ADX_THRESHOLD
-    adx_trending_aligned = align_htf_to_ltf(prices, df_1d, adx_trending)
+    # Initialize pivot arrays
+    pivot_vals = np.full(len(close_12h), np.nan)
+    r4_vals = np.full(len(close_12h), np.nan)
+    s4_vals = np.full(len(close_12h), np.nan)
+    
+    # Calculate pivots for each 12h bar
+    for i in range(len(close_12h)):
+        p, r1, r2, r3, r4, s1, s2, s3, s4 = calculate_pivots(high_12h[i], low_12h[i], close_12h[i])
+        pivot_vals[i] = p
+        r4_vals[i] = r4
+        s4_vals[i] = s4
+    
+    # Align pivot data to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_vals)
+    r4_aligned = align_htf_to_ltf(prices, df_12h, r4_vals)
+    s4_aligned = align_htf_to_ltf(prices, df_12h, s4_vals)
     
     # Calculate LTF indicators (6h)
     high = prices['high'].values
@@ -98,11 +97,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, ADX_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, PIVOT_LOOKBACK, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(adx_trending_aligned[i]):
+        if np.isnan(pivot_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -118,8 +117,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market condition from 1d ADX
-        trending = adx_trending_aligned[i]  # True if ADX > 25
+        # Pivot-based conditions
+        near_r4 = close[i] >= r4_aligned[i] * 0.995  # Within 0.5% of R4
+        near_s4 = close[i] <= s4_aligned[i] * 1.005  # Within 0.5% of S4
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
@@ -128,9 +128,17 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry conditions - only trade in trending markets
-        long_entry = trending and long_breakout and volume_confirmed
-        short_entry = trending and short_breakout and volume_confirmed
+        # Entry logic: 
+        # - Fade at extreme pivot levels (R4/S4) with volume
+        # - Continue breakout trend when not at extremes
+        fade_long = near_s4 and volume_confirmed  # Buy near S4 with volume
+        fade_short = near_r4 and volume_confirmed  # Sell near R4 with volume
+        breakout_long = not near_r4 and long_breakout and volume_confirmed  # Breakout unless at R4
+        breakout_short = not near_s4 and short_breakout and volume_confirmed  # Breakdown unless at S4
+        
+        # Combine signals
+        long_entry = fade_long or breakout_long
+        short_entry = fade_short or breakout_short
         
         # Generate signals
         if position == 0:
