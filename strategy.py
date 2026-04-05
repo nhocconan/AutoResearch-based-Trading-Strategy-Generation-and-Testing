@@ -1,46 +1,53 @@
 #!/usr/bin/env python3
 """
-exp_7186_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-In trending markets (price > EMA50): continuation breakouts in breakout direction.
-In ranging markets (price near EMA50): mean reversion at Donchian extremes with volume confirmation.
-Uses 1d EMA for trend regime and 4h volume for confirmation.
-Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
-Works in both bull and bear markets by adapting to EMA-defined trend regime.
+exp_7187_6h_donchian20_1d_pivot_v1
+Hypothesis: 6h Donchian(20) breakout with 1d pivot direction filter for regime.
+In trending markets (price above/below 1d pivot): continuation breakouts in breakout direction.
+In ranging markets (price near 1d pivot): mean reversion at Donchian extremes with volume confirmation.
+Uses 1d pivot points for trend regime and 6h volume for confirmation.
+Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
+Works in both bull and bear markets by adapting to pivot-defined trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7186_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7187_6h_donchian20_1d_pivot_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 20  # ~20 * 4h = ~3.3 days
+ATR_STOP_MULTIPLIER = 2.0
+MAX_HOLD_BARS = 8  # ~8*6h = 32h (~1.3 days)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA trend
+    # Load HTF data ONCE before loop - using 1d for pivot points
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA
+    # Calculate 1d pivot points (standard: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align to LTF (4h)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Pivot point calculation
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    r1_1d = 2 * pivot_1d - low_1d  # First resistance
+    s1_1d = 2 * pivot_1d - high_1d  # First support
+    
+    # Align to LTF (6h)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -68,13 +75,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(pivot_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -102,18 +109,18 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on EMA
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
-        near_ema = np.abs(close[i] - ema_1d_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of EMA
+        # Determine market regime based on pivot
+        above_pivot = close[i] > pivot_1d_aligned[i]
+        below_pivot = close[i] < pivot_1d_aligned[i]
+        near_pivot = np.abs(close[i] - pivot_1d_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of pivot
         
-        # Fade at extremes in ranging market (near EMA)
-        fade_long = near_ema and (close[i] <= lowest_low[i]) and vol_confirmed
-        fade_short = near_ema and (close[i] >= highest_high[i]) and vol_confirmed
+        # Fade at extremes in ranging market (near pivot)
+        fade_long = near_pivot and (close[i] <= lowest_low[i]) and vol_confirmed
+        fade_short = near_pivot and (close[i] >= highest_high[i]) and vol_confirmed
         
         # Continuation breakouts in trending market
-        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
-        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
+        continuation_long = above_pivot and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_pivot and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
@@ -134,3 +141,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
