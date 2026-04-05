@@ -1,41 +1,56 @@
 #!/usr/bin/env python3
 """
-exp_7513_4h_donchian20_12h_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-Long when price breaks above 4h upper Donchian + 12h EMA50 up + volume > 1.5x average.
-Short when price breaks below 4h lower Donchian + 12h EMA50 down + volume > 1.5x average.
-Uses ATR-based stoploss and position sizing of 0.25. Targets 75-200 trades over 4 years.
-Designed to work in both bull and bear markets by following the 12h trend.
+exp_7514_1h_4h_1d_rsi_trend_v2
+Hypothesis: Tightened 1h RSI mean reversion with 4h trend filter and 1d regime filter.
+Increases profit targets and tightens stops to reduce trade frequency while maintaining edge.
+Target: 100-200 total trades over 4 years (25-50/year) for 1h timeframe.
+Uses Bollinger Bands for dynamic exits and volume confirmation to filter false signals.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7513_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7514_1h_4h_1d_rsi_trend_v2"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_TREND = 50
-VOLUME_MULTIPLIER = 1.5
-SIGNAL_SIZE = 0.25
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 75
+RSI_OVERSOLD = 25
+BB_PERIOD = 20
+BB_STD = 2.0
+EMA_TREND = 200
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 3.0
+VOLUME_MA = 20
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h_50 = pd.Series(close_12h).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_12h_50_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_50)
+    # Calculate 4h RSI for trend filter
+    close_4h = df_4h['close'].values
+    delta_4h = np.diff(close_4h, prepend=close_4h[0])
+    gain_4h = np.where(delta_4h > 0, delta_4h, 0)
+    loss_4h = np.where(delta_4h < 0, -delta_4h, 0)
+    avg_gain_4h = pd.Series(gain_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    avg_loss_4h = pd.Series(loss_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    rs_4h = avg_gain_4h / (avg_loss_4h + 1e-10)
+    rsi_4h = 100 - (100 / (1 + rs_4h))
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    
+    # Calculate 1d EMA200 for regime filter
+    close_1d = df_1d['close'].values
+    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -43,12 +58,23 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    high_roll = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    low_roll = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # 1h RSI for entry
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
-    # Average volume
-    avg_volume = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Bollinger Bands for dynamic exits
+    sma_bb = pd.Series(close).rolling(window=BB_PERIOD, min_periods=BB_PERIOD).mean().values
+    std_bb = pd.Series(close).rolling(window=BB_PERIOD, min_periods=BB_PERIOD).std().values
+    bb_upper = sma_bb + BB_STD * std_bb
+    bb_lower = sma_bb - BB_STD * std_bb
+    
+    # Volume filter
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA, min_periods=VOLUME_MA).mean().values
     
     # ATR for stoploss
     tr1 = pd.Series(high - low)
@@ -62,14 +88,14 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_TREND, ATR_PERIOD) + 1
+    start = max(RSI_PERIOD, BB_PERIOD, EMA_TREND, VOLUME_MA, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_12h_50_aligned[i]):
+        if np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_1d_200_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
-        
+            
         # Check stoploss
         if position == 1:  # long position
             if close[i] <= entry_price - ATR_STOP_MULTIPLIER * atr[i]:
@@ -82,29 +108,40 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine trend direction
-        uptrend = ema_12h_50_aligned[i] > ema_12h_50_aligned[i-1] if i > 0 else False
-        downtrend = ema_12h_50_aligned[i] < ema_12h_50_aligned[i-1] if i > 0 else False
+        # Determine market regime
+        above_ema200 = close[i] > ema_1d_200_aligned[i]  # bull regime
+        below_ema200 = close[i] < ema_1d_200_aligned[i]  # bear regime
+        strong_uptrend_4h = rsi_4h_aligned[i] > 55       # 4h bullish threshold
+        strong_downtrend_4h = rsi_4h_aligned[i] < 45     # 4h bearish threshold
         
         # Volume confirmation
-        vol_confirm = volume[i] > VOLUME_MULTIPLIER * avg_volume[i] if not np.isnan(avg_volume[i]) else False
+        volume_ok = volume[i] > volume_ma[i] if not np.isnan(volume_ma[i]) else True
         
-        # Entry conditions
+        # Entry conditions with tighter thresholds
         long_entry = (
-            close[i] > high_roll[i-1] and  # break above upper Donchian
-            uptrend and                    # 12h EMA50 rising
-            vol_confirm                    # volume confirmation
+            above_ema200 and           # bull regime
+            strong_uptrend_4h and      # 4h bullish
+            rsi[i] < RSI_OVERSOLD and  # oversold
+            volume_ok                  # volume confirmation
         )
         
         short_entry = (
-            close[i] < low_roll[i-1] and   # break below lower Donchian
-            downtrend and                  # 12h EMA50 falling
-            vol_confirm                    # volume confirmation
+            below_ema200 and           # bear regime
+            strong_downtrend_4h and    # 4h bearish
+            rsi[i] > RSI_OVERBOUGHT and # overbought
+            volume_ok                  # volume confirmation
         )
         
-        # Exit conditions
-        long_exit = close[i] < low_roll[i-1]  # break below lower Donchian
-        short_exit = close[i] > high_roll[i-1]  # break above upper Donchian
+        # Exit conditions using Bollinger Bands for profit targets
+        long_exit = (
+            close[i] >= bb_upper[i] or      # hit upper BB
+            rsi[i] > 60                     # RSI overbought
+        )
+        
+        short_exit = (
+            close[i] <= bb_lower[i] or     # hit lower BB
+            rsi[i] < 40                    # RSI oversold
+        )
         
         # Generate signals
         if position == 0:
