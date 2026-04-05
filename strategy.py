@@ -1,66 +1,54 @@
 #!/usr/bin/env python3
 """
-exp_7495_6d_donchian20_1w_pivot_vol_v1
-Hypothesis: 6d Donchian(20) breakout with 1-week pivot direction and volume confirmation.
-- Long when price breaks above Donchian(20) high, price > 1w pivot point, and volume > 1.5x 20-period average
-- Short when price breaks below Donchian(20) low, price < 1w pivot point, and volume > 1.5x 20-period average
-- Uses 1-week pivot points calculated from prior week's high/low/close
-- Filters out low-volume breakouts to avoid false signals
-- Targets 50-150 total trades over 4 years (12-37/year) with strict breakout conditions
+exp_7496_12h_1d_donchian_vol
+Hypothesis: 12h Donchian channel breakout with 1d EMA trend filter and volume confirmation.
+In bull markets (price > 1d EMA200): buy breakouts above 12h Donchian high.
+In bear markets (price < 1d EMA200): sell breakouts below 12h Donchian low.
+Volume must be above 1.5x average to confirm breakout strength.
+Targets 50-150 trades over 4 years (12-37/year) with strict breakout conditions.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7495_6d_donchian20_1w_pivot_vol_v1"
-timeframe = "6d"
+name = "exp_7496_12h_1d_donchian_vol"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+EMA_TREND = 200
 VOLUME_MULTIPLIER = 1.5
-VOLUME_AVG_PERIOD = 20
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_pivot_points(high, low, close):
-    """Calculate pivot points: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    return pivot, r1, s1
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1-week pivot points (using prior week's data)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d EMA200 for regime filter
+    close_1d = df_1d['close'].values
+    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
-    pivot_1w, r1_1w, s1_1w = calculate_pivot_points(high_1w, low_1w, close_1w)
-    # Pivot points are for the week that just completed, so we use them for current week
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    
-    # Calculate LTF indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
+    # 12h Donchian channels
     donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
     donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Volume average
-    volume_avg = pd.Series(volume).rolling(window=VOLUME_AVG_PERIOD, min_periods=VOLUME_AVG_PERIOD).mean().values
+    # Volume average for confirmation
+    vol_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR for stoploss
     tr1 = pd.Series(high - low)
@@ -74,11 +62,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_AVG_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(pivot_1w_aligned[i]):
+        if np.isnan(ema_1d_200_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -94,25 +82,29 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume condition: current volume > VOLUME_MULTIPLIER * average volume
-        volume_condition = volume[i] > VOLUME_MULTIPLIER * volume_avg[i]
+        # Determine market regime
+        above_ema200 = close[i] > ema_1d_200_aligned[i]  # bull regime
+        below_ema200 = close[i] < ema_1d_200_aligned[i]  # bear regime
+        
+        # Volume confirmation
+        vol_confirmed = volume[i] > VOLUME_MULTIPLIER * vol_avg[i] if not np.isnan(vol_avg[i]) else False
         
         # Breakout conditions
         bullish_breakout = (
-            close[i] > donchian_high[i] and  # price breaks above Donchian high
-            close[i] > pivot_1w_aligned[i] and  # price above weekly pivot
-            volume_condition  # volume confirmation
+            above_ema200 and           # bull regime
+            high[i] > donchian_high[i] and  # break above Donchian high
+            vol_confirmed              # volume confirmation
         )
         
         bearish_breakout = (
-            close[i] < donchian_low[i] and  # price breaks below Donchian low
-            close[i] < pivot_1w_aligned[i] and  # price below weekly pivot
-            volume_condition  # volume confirmation
+            below_ema200 and           # bear regime
+            low[i] < donchian_low[i] and  # break below Donchian low
+            vol_confirmed              # volume confirmation
         )
         
-        # Exit conditions: return to pivot point
-        long_exit = close[i] <= pivot_1w_aligned[i]
-        short_exit = close[i] >= pivot_1w_aligned[i]
+        # Exit conditions - reverse signal or stoploss
+        long_exit = below_ema200  # exit long when trend turns bearish
+        short_exit = above_ema200  # exit short when trend turns bullish
         
         # Generate signals
         if position == 0:
