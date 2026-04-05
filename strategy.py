@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Experiment #10331: 6h Donchian Breakout + Daily Trend + Volume Spike
 # Hypothesis: Donchian(20) breakouts in the direction of daily trend (EMA50) with volume confirmation
