@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #11634: 1h Donchian Breakout with 4h Trend and Daily Volume Confirmation
+Experiment #11634: 1h Donchian Breakout with 4h Trend and 1d Volume Confirmation
 Hypothesis: 1h Donchian(20) breakouts capture short-term momentum. 4h EMA provides trend bias,
-and daily volume filter ensures institutional participation. Session filter (08-20 UTC) reduces noise.
-Target: 60-150 total trades over 4 years = 15-37/year for 1h.
-Works in bull (breakouts continue) and bear (breakouts reverse quickly) by using 4h trend filter.
+and 1d volume filter ensures institutional participation. Uses session filter (08-20 UTC) to reduce noise.
+Target: 60-150 total trades over 4 years = 15-37/year for 1h. Works in bull (breakouts continue) and bear
+(breakouts reverse quickly) by using 4h trend filter. Small position size (0.20) manages drawdown.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11634_1h_donchian20_4h_ema_dvol_v1"
+name = "exp_11634_1h_donchian20_4h_trend_1d_vol_sess_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -48,17 +48,16 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h and 1d data ONCE before loop
+    # Load 4h data ONCE before loop
     df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
     # Calculate 4h EMA for trend
     ema_4h = calculate_ema(df_4h['close'].values, TREND_EMA_PERIOD)
     ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     # Calculate 1d volume MA
-    volume_1d = df_1d['volume'].values
-    volume_1d_ma = pd.Series(volume_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    volume_1d_ma = pd.Series(df_1d['volume'].values).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     volume_1d_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_1d_ma)
     
     # Calculate 1h indicators
@@ -70,28 +69,29 @@ def generate_signals(prices):
     donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = prices.index.hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
+    # Pre-compute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    
     # Start from warmup period
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Session filter: 08-20 UTC
-        if hours[i] < 8 or hours[i] > 20:
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
         
-        # Skip if 4h EMA or 1d volume MA not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(volume_1d_ma_aligned[i]):
+        # Skip if 4h EMA not available
+        if np.isnan(ema_4h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -114,7 +114,7 @@ def generate_signals(prices):
         breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
         breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # Volume confirmation (daily)
+        # Volume confirmation (1d)
         volume_ok = volume[i] > (volume_1d_ma_aligned[i] * VOLUME_THRESHOLD) if not np.isnan(volume_1d_ma_aligned[i]) else False
         
         # Trend filter (4h)
