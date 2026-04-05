@@ -1,47 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #9614: 1h Momentum Reversal with 4h/1d Trend Filter.
-Hypothesis: In strong trends (4h/1d), pullbacks to key moving averages on 1h offer high-probability 
-continuation entries. Uses 4h EMA50 for trend direction, 1d EMA200 for long-term bias, and 
-1h RSI(14) for oversold/overbought entries. Targets 60-150 trades over 4 years (15-37/year) 
-to minimize fee drag. Works in bull (buy pullbacks in uptrend) and bear (sell rallies in downtrend).
+Experiment #9615: 6h Donchian Breakout + Weekly Trend + Volume Confirmation
+Hypothesis: Donchian(20) breakouts on 6h timeframe, filtered by weekly trend direction (from 1w close vs 4-week ago close) 
+and confirmed by volume spikes, capture medium-term trends while avoiding whipsaws. 
+Weekly trend filter ensures we only take longs in uptrends and shorts in downtrends, 
+working in both bull (breakout continuation) and bear (breakdown continuation) markets.
+Targets 100-200 total trades over 4 years (25-50/year) for optimal balance.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
-name = "exp_9614_1h_momentum_reversal_4h1d_trend_v1"
-timeframe = "1h"
+name = "exp_9615_6h_donchian_breakout_weekly_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-EMA50_PERIOD = 50
-EMA200_PERIOD = 200
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-SIGNAL_SIZE = 0.20
+DONCHIAN_PERIOD = 20
+VOLUME_SPIKE_MULTIPLIER = 1.5
+WEEKLY_TREND_LOOKBACK = 4  # 4 weeks ago
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
-def calculate_rsi(close, period):
-    """Calculate RSI"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR"""
+    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -51,29 +41,34 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 250:
+    if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop (weekly for trend filter)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA50 for trend direction
-    close_4h = df_4h['close'].values
-    ema50_4h = calculate_ema(close_4h, EMA50_PERIOD)
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    # Calculate weekly trend: close > close 4 weeks ago = uptrend
+    weekly_close = df_1w['close'].values
+    weekly_trend_up = weekly_close >= np.roll(weekly_close, WEEKLY_TREND_LOOKBACK)
+    weekly_trend_down = weekly_close <= np.roll(weekly_close, WEEKLY_TREND_LOOKBACK)
     
-    # Calculate 1d EMA200 for long-term bias
-    close_1d = df_1d['close'].values
-    ema200_1d = calculate_ema(close_1d, EMA200_PERIOD)
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Align weekly trend to 6h timeframe
+    weekly_trend_up_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_up.astype(float))
+    weekly_trend_down_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend_down.astype(float))
     
-    # Calculate 1h indicators
+    # Calculate LTF indicators (6h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    rsi = calculate_rsi(close, RSI_PERIOD)
+    # Donchian channels
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    
+    # Volume moving average for spike detection
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -82,14 +77,14 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA50_PERIOD, EMA200_PERIOD, RSI_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, 20) + WEEKLY_TREND_LOOKBACK + 1
     
     for i in range(start, n):
-        # Skip if HTF data not available
-        if np.isnan(ema50_4h_aligned[i]) or np.isnan(ema200_1d_aligned[i]):
+        # Skip if weekly trend data not available
+        if np.isnan(weekly_trend_up_aligned[i]) or np.isnan(weekly_trend_down_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
-        
+            
         # Check stoploss
         if position == 1:  # long position
             if close[i] <= stop_price:
@@ -102,15 +97,16 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Trend filters
-        uptrend_4h = close[i] > ema50_4h_aligned[i]
-        uptrend_1d = close[i] > ema200_1d_aligned[i]
-        downtrend_4h = close[i] < ema50_4h_aligned[i]
-        downtrend_1d = close[i] < ema200_1d_aligned[i]
+        # Volume spike confirmation
+        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Entry conditions: pullbacks in trend
-        long_entry = uptrend_4h and uptrend_1d and rsi[i] <= RSI_OVERSOLD
-        short_entry = downtrend_4h and downtrend_1d and rsi[i] >= RSI_OVERBOUGHT
+        # Breakout conditions
+        bullish_breakout = close[i] > donchian_upper[i]
+        bearish_breakout = close[i] < donchian_lower[i]
+        
+        # Entry conditions with weekly trend filter
+        long_entry = bullish_breakout and weekly_trend_up_aligned[i] > 0.5 and volume_spike
+        short_entry = bearish_breakout and weekly_trend_down_aligned[i] > 0.5 and volume_spike
         
         # Generate signals
         if position == 0:
