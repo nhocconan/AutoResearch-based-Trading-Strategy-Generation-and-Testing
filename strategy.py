@@ -1,14 +1,13 @@
-# USAGE: python3 strategy.py
+# 2025-06-23
 #!/usr/bin/env python3
 """
 Experiment #9322: 12h Donchian breakout + daily trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Donchian breakouts capture trends; daily EMA filter ensures directional alignment; volume confirms institutional participation.
-Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost. Works in bull (breakouts) and bear (filtered shorts).
+Hypothesis: Donchian breakouts capture trends on 12h timeframe; daily EMA filter ensures directional alignment; volume confirms institutional participation. Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost. Works in bull (breakouts) and bear (filtered shorts).
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
 name = "exp_9322_12h_donchian20_1d_trend_vol_v1"
 timeframe = "12h"
