@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 exp_7145_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter + volume confirmation.
-In trending markets (price > EMA50): take breakout entries in breakout direction.
-In ranging markets (price near EMA50): fade extremes with volume confirmation.
-Uses 1d EMA for trend regime and 12h volume for confirmation.
+Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+In trending markets (price > EMA50): continuation breakouts in breakout direction.
+In ranging markets (price near EMA50): mean reversion at Donchian extremes with volume confirmation.
 Designed for 12h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
+Uses volume spike (>1.5x 20-period MA) for confirmation to avoid false breakouts.
+ATR-based stoploss (2.5x ATR) and max hold of 10 bars (~5 days) to manage risk.
 Works in both bull and bear markets by adapting to EMA-defined trend regime.
 """
 
@@ -25,7 +26,7 @@ VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # ~5 days (10 * 12h)
+MAX_HOLD_BARS = 10  # ~10*12h = 5 days
 
 def generate_signals(prices):
     n = len(prices)
