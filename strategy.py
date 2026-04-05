@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 """
-Experiment #8805: 12h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Daily trend filter reduces counter-trend trades while Donchian breakout on 12h captures medium-term momentum.
-Volume confirmation ensures breakouts have institutional participation. ATR stops manage risk.
-Targets 50-150 trades over 4 years (12-37/year) to minimize fee impact while maintaining statistical validity.
-Works in both bull and bear markets via trend filter alignment.
+Experiment #8806: 4h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
+Hypothesis: Combining 4h Donchian breakouts with daily trend filter captures strong momentum moves while avoiding counter-trend trades.
+Volume confirmation ensures institutional participation. Designed for 75-200 trades over 4 years to balance edge and fee drag.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8805_12h_donchian20_1d_trend_vol_v1"
-timeframe = "12h"
+name = "exp_8806_4h_donchian20_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -50,7 +48,7 @@ def generate_signals(prices):
                      np.where(close_1d < ema_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
     price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
     
-    # Calculate LTF indicators (12h)
+    # Calculate LTF indicators (4h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
