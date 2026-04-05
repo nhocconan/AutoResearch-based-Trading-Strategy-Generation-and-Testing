@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #11475: 6h Donchian Breakout with Weekly Pivot and Volume Confirmation
-Hypothesis: Donchian(20) breakouts on 6h capture significant momentum. Weekly pivot (1w high/low) provides
-institutional reference levels - breakouts above weekly high or below weekly low with volume confirmation
-indicate strong institutional participation. Works in bull (continuation above weekly high) and bear
-(continuation below weekly low). Target: 75-200 total trades over 4 years.
+Experiment #11477: 4h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Donchian(20) breakouts capture strong directional moves. Daily EMA provides trend bias,
+and volume filter ensures institutional participation. Works in bull (breakouts continue) and
+bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11475_6h_donchian20_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_11477_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-WEEKLY_LOOKBACK = 5  # weeks for pivot calculation
+DAILY_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -48,22 +47,14 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for pivot points
-    df_weekly = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate weekly high and low for pivot reference
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_high_shifted = np.roll(weekly_high, 1)
-    weekly_low_shifted = np.roll(weekly_low, 1)
-    weekly_high_shifted[0] = np.nan
-    weekly_low_shifted[0] = np.nan
+    # Calculate daily EMA for trend
+    ema_daily = calculate_ema(df_daily['close'].values, DAILY_EMA_PERIOD)
+    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
-    # Align weekly pivot to 6h timeframe
-    weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, weekly_high_shifted)
-    weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, weekly_low_shifted)
-    
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -79,11 +70,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, WEEKLY_LOOKBACK, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly data not available
-        if np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]):
+        # Skip if daily EMA not available
+        if np.isnan(ema_daily_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -109,13 +100,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Weekly pivot filter: break above weekly high or below weekly low
-        break_above_weekly = high[i] > weekly_high_aligned[i]
-        break_below_weekly = low[i] < weekly_low_aligned[i]
+        # Trend filter (daily)
+        uptrend_daily = close[i] > ema_daily_aligned[i]
+        downtrend_daily = close[i] < ema_daily_aligned[i]
         
         # Entry conditions
-        long_entry = breakout_up and volume_ok and break_above_weekly
-        short_entry = breakout_down and volume_ok and break_below_weekly
+        long_entry = breakout_up and volume_ok and uptrend_daily
+        short_entry = breakout_down and volume_ok and downtrend_daily
         
         # Generate signals
         if position == 0:
