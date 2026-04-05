@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-exp_7536_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
-In bull markets (price > 1d EMA200): long breakout above 12h Donchian upper.
-In bear markets (price < 1d EMA200): short breakdown below 12h Donchian lower.
+exp_7538_1d_1w_donchian20_1d_ema_vol_v1
+Hypothesis: Daily Donchian(20) breakout with weekly EMA200 trend filter and volume confirmation.
+In bull markets (price > weekly EMA200): long breakout above daily Donchian upper.
+In bear markets (price < weekly EMA200): short breakdown below daily Donchian lower.
 Volume must be above 20-period average to confirm breakout strength.
 Uses ATR-based stoploss and target-based exits.
-Targets 50-150 total trades over 4 years (12-37/year) with strict breakout conditions.
+Targets 30-100 trades over 4 years (7-25/year) with strict breakout conditions.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7536_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_7538_1d_1w_donchian20_1d_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_TREND = 200
+WEEKLY_EMA_TREND = 200
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5  # volume must be 1.5x average
 SIGNAL_SIZE = 0.25
@@ -33,12 +33,12 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA200 for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
+    # Calculate weekly EMA200 for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w_200 = pd.Series(close_1w).ewm(span=WEEKLY_EMA_TREND, adjust=False, min_periods=WEEKLY_EMA_TREND).mean().values
+    ema_1w_200_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_200)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -67,11 +67,11 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1d_200_aligned[i]):
+        if np.isnan(ema_1w_200_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -88,8 +88,8 @@ def generate_signals(prices):
                 continue
         
         # Determine market regime
-        bull_regime = close[i] > ema_1d_200_aligned[i]   # price above 1d EMA200
-        bear_regime = close[i] < ema_1d_200_aligned[i]   # price below 1d EMA200
+        bull_regime = close[i] > ema_1w_200_aligned[i]   # price above weekly EMA200
+        bear_regime = close[i] < ema_1w_200_aligned[i]   # price below weekly EMA200
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
