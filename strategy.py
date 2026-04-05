@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #8468: 12h Donchian breakout + 1w trend filter + volume confirmation + ATR stoploss.
-Hypothesis: 12-hour timeframe captures swing momentum with lower frequency than lower timeframes,
-reducing fee drag while maintaining enough trades for statistical validity. Weekly trend filter
-ensures alignment with multi-week momentum to avoid counter-trend trades. Volume confirmation
-requires institutional participation. Targets 50-150 trades over 4 years (12-37/year).
-Works in bull markets via trend-following breakouts and in bear via short breakouts.
+Experiment #8467: 6h Donchian breakout + daily Camarilla pivot + volume confirmation
+Hypothesis: Daily Camarilla pivot levels (R3/S3 fade, R4/S4 breakout) provide institutional reference points. 
+Combined with 6h Donchian breakouts and volume confirmation, this creates a regime-aware strategy 
+that fades extreme reversions at S3/R3 and continues breaks beyond S4/R4. Works in both bull/bear 
+markets by adapting to price action relative to daily pivot structure.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_athf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8468_12h_donchian20_1w_trend_vol_v1"
-timezone = "12h"
+name = "exp_8467_6h_donchian20_1d_camarilla_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_PERIOD = 50
+CAMARILLA_LOOKBACK = 1  # Use previous day's OHLC
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -34,24 +33,53 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_camarilla(high, low, close):
+    """
+    Calculate Camarilla pivot levels for given OHLC
+    R4 = Close + (High-Low) * 1.1/2
+    R3 = Close + (High-Low) * 1.1/4
+    S3 = Close - (High-Low) * 1.1/4
+    S4 = Close - (High-Low) * 1.1/2
+    """
+    range_hl = high - low
+    r4 = close + range_hl * 1.1 / 2
+    r3 = close + range_hl * 1.1 / 4
+    s3 = close - range_hl * 1.1 / 4
+    s4 = close - range_hl * 1.1 / 2
+    return r3, r4, s3, s4
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
+    # Calculate daily Camarilla levels from previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Price relative to 1w EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_1w > ema_1w, 1, 
-                     np.where(close_1w < ema_1w, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
+    # Shift by 1 to use only completed daily bars (no look-ahead)
+    r3, r4, s3, s4 = calculate_camarilla(high_1d, low_1d, close_1d)
+    r3 = np.roll(r3, 1)
+    r4 = np.roll(r4, 1)
+    s3 = np.roll(s3, 1)
+    s4 = np.roll(s4, 1)
+    # Set first value to NaN (no previous day)
+    r3[0] = np.nan
+    r4[0] = np.nan
+    s3[0] = np.nan
+    s4[0] = np.nan
     
-    # Calculate LTF indicators (12h)
+    # Align Camarilla levels to 6h timeframe
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Calculate LTF indicators (6h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -73,11 +101,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(price_vs_ema_aligned[i]):
+        if np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -93,20 +121,23 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1w EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1w price above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1w price below EMA50
+        # Price action relative to Camarilla levels
+        price = close[i]
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
-        short_breakout = close[i] < donchian_low[i-1]  # Break below previous period's low
+        # Fade at S3/R3 (mean reversion)
+        fade_long = price <= s3_aligned[i]  # At or below S3 - potential bounce
+        fade_short = price >= r3_aligned[i]  # At or above R3 - potential rejection
+        
+        # Breakout continuation beyond S4/R4 (trend follow)
+        breakout_long = price >= r4_aligned[i]  # Above R4 - bullish breakout
+        breakout_short = price <= s4_aligned[i]  # Below S4 - bearish breakdown
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry conditions
-        long_entry = bull_bias and long_breakout and volume_confirmed
-        short_entry = bear_bias and short_breakout and volume_confirmed
+        # Entry conditions: fade at S3/R3 OR breakout beyond S4/R4 with volume
+        long_entry = (fade_long or breakout_long) and volume_confirmed
+        short_entry = (fade_short or breakout_short) and volume_confirmed
         
         # Generate signals
         if position == 0:
