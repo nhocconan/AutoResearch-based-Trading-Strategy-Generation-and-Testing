@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
 """
-exp_7503_4h_donchian20_1d_volume_v2
-Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR stoploss. 
-Goes long when price breaks above 4h Donchian high with above-average volume,
-goes short when price breaks below 4h Donchian low with above-average volume.
-Trades only when price is above/below 1d EMA200 to align with higher timeframe trend.
-Designed for low trade frequency (target: 75-200 total over 4 years) with clear trend-following logic
-that works in both bull and bear markets by following the 1d trend.
+exp_7503_4h_donchian20_12h_ema_vol_v1
+Hypothesis: 4h Donchian breakout with 12h EMA trend filter and volume confirmation.
+In bull markets (price > 12h EMA200): buy breakout above Donchian(20) high with volume spike.
+In bear markets (price < 12h EMA200): sell breakout below Donchian(20) low with volume spike.
+Targets 75-200 total trades over 4 years (19-50/year) with strict breakout + volume conditions.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7503_4h_donchian20_1d_volume_v2"
+name = "exp_7503_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
 EMA_TREND = 200
+VOLUME_MA = 20
+VOLUME_MULTIPLIER = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def generate_signals(prices):
     n = len(prices)
@@ -31,12 +30,12 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA200 for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
+    # Calculate 12h EMA200 for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h_200 = pd.Series(close_12h).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_12h_200_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_200)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -45,11 +44,11 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Donchian channels
-    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Volume moving average
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    # Volume filter
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA, min_periods=VOLUME_MA).mean().values
     
     # ATR for stoploss
     tr1 = pd.Series(high - low)
@@ -63,11 +62,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, EMA_TREND, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA, ATR_PERIOD)
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1d_200_aligned[i]):
+        if np.isnan(ema_12h_200_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -83,29 +82,33 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market regime from 1d EMA200
-        above_ema200 = close[i] > ema_1d_200_aligned[i]  # bull regime
-        below_ema200 = close[i] < ema_1d_200_aligned[i]  # bear regime
+        # Determine market regime
+        above_ema200 = close[i] > ema_12h_200_aligned[i]  # bull regime
+        below_ema200 = close[i] < ema_12h_200_aligned[i]  # bear regime
+        
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i-1]  # break above previous period's high
+        breakout_down = close[i] < lowest_low[i-1]  # break below previous period's low
         
         # Volume confirmation
-        volume_above_avg = volume[i] > volume_ma[i]
+        volume_spike = volume[i] > VOLUME_MULTIPLIER * volume_ma[i]
         
         # Entry conditions
         long_entry = (
-            above_ema200 and              # bull regime
-            close[i] > donchian_high[i] and  # break above Donchian high
-            volume_above_avg              # volume confirmation
+            above_ema200 and           # bull regime
+            breakout_up and            # Donchian breakout up
+            volume_spike               # volume confirmation
         )
         
         short_entry = (
-            below_ema200 and              # bear regime
-            close[i] < donchian_low[i] and  # break below Donchian low
-            volume_above_avg              # volume confirmation
+            below_ema200 and           # bear regime
+            breakout_down and          # Donchian breakout down
+            volume_spike               # volume confirmation
         )
         
-        # Exit conditions - reverse signal on opposite breakout
-        long_exit = close[i] < donchian_low[i]  # exit long if breaks below Donchian low
-        short_exit = close[i] > donchian_high[i]  # exit short if breaks above Donchian high
+        # Exit conditions
+        long_exit = close[i] < lowest_low[i]  # exit when price breaks below Donchian low
+        short_exit = close[i] > highest_high[i]  # exit when price breaks above Donchian high
         
         # Generate signals
         if position == 0:
