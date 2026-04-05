@@ -19,11 +19,11 @@ leverage = 1.0
 # Parameters
 DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0
+VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 30  # ~30 days
+MAX_HOLD_BARS = 30  # 30 days
 EMA_PERIOD = 50
 
 def generate_signals(prices):
