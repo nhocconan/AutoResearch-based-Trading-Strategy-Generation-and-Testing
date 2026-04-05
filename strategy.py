@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #10741: 4h Donchian Breakout + Daily Trend + Volume Spike
-Hypothesis: 4-hour Donchian(20) breakouts in the direction of daily EMA20 trend with volume confirmation
+Experiment #10741: 4h Donchian Breakout + 1d Trend + Volume Spike
+Hypothesis: 4-hour Donchian(20) breakouts in the direction of daily EMA50 trend with volume confirmation
 provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
 and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
 Target: 75-200 total trades over 4 years (19-50/year) on 4H timeframe.
@@ -18,7 +18,7 @@ leverage = 1.0
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_SPIKE_MULTIPLIER = 1.5
-DAILY_EMA_PERIOD = 20
+DAILY_EMA_PERIOD = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
