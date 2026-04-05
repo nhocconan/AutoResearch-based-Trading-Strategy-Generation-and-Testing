@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-exp_7540_4h_donchian20_1d_ema_vol_v1
+exp_7541_4h_donchian20_1d_ema_vol_v1
 Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
 In bull markets (price > 1d EMA200): long breakout above 4h Donchian upper.
 In bear markets (price < 1d EMA200): short breakdown below 4h Donchian lower.
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7540_4h_donchian20_1d_ema_vol_v1"
+name = "exp_7541_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
