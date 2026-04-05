@@ -2,11 +2,11 @@
 """
 exp_7273_4h_donchian20_12h_ema_vol_v1
 Hypothesis: 4h Donchian(20) breakout with 12h EMA(50) trend filter and volume confirmation.
-Uses 12h EMA for trend regime (more responsive than 1d but smoother than 4h).
+Uses 12h EMA for trend regime to reduce noise vs 1d EMA, allowing more timely entries.
 In trending markets (price > EMA): continuation breakouts in breakout direction.
 In ranging markets (price near EMA): mean reversion at Donchian extremes with volume confirmation.
 Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
-Volume confirmation reduces false breakouts. Works in both bull and bear markets by adapting to EMA-defined trend regime.
+Works in both bull and bear markets by adapting to EMA-defined trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
