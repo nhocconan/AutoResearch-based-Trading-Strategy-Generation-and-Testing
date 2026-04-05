@@ -1,37 +1,51 @@
 #!/usr/bin/env python3
 """
-Experiment #10615: 6h Donchian Breakout + Daily Trend + Volume Spike
-Hypothesis: 6-hour Donchian(20) breakouts in the direction of daily EMA50 trend with volume confirmation provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA) and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #10619: 6h Williams Alligator + Elder Ray + 12h Trend Filter
+Hypothesis: Combine Williams Alligator for trend detection, Elder Ray for momentum strength,
+and 12h trend filter to avoid counter-trend trades. Works in bull markets (Alligator mouth up),
+bear markets (mouth down), and ranges (mouth closed, Elder Ray near zero). Target: 80-120 total trades.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10615_6h_donchian_breakout_daily_trend_volume_v1"
+name = "exp_10619_6h_williams_alligator_elder_ray_12h_trend_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
-DAILY_EMA_PERIOD = 50
+ALLIGATOR_JAW_PERIOD = 13
+ALLIGATOR_TEETH_PERIOD = 8
+ALLIGATOR_LIPS_PERIOD = 5
+ELDER_RAY_PERIOD = 13
+TREND_FILTER_PERIOD = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_alligator_jaw(high, low, period):
+    median = (high + low) / 2
+    return pd.Series(median).rolling(window=period, min_periods=period).mean().shift(8).values
+
+def calculate_alligator_teeth(high, low, period):
+    median = (high + low) / 2
+    return pd.Series(median).rolling(window=period, min_periods=period).mean().shift(5).values
+
+def calculate_alligator_lips(high, low, period):
+    median = (high + low) / 2
+    return pd.Series(median).rolling(window=period, min_periods=period).mean().shift(3).values
+
+def calculate_elder_ray(high, low, close, period):
+    ema = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean()
+    bull_power = high - ema.values
+    bear_power = low - ema.values
+    return bull_power, bear_power
 
 def calculate_ema(close, period):
-    """Calculate EMA"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -44,27 +58,28 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for trend filter
-    df_daily = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily EMA for trend direction
-    daily_close = df_daily['close'].values
-    daily_ema = calculate_ema(daily_close, DAILY_EMA_PERIOD)
+    # Calculate 12h EMA for trend direction
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, TREND_FILTER_PERIOD)
     
-    # Align daily EMA to 6h timeframe
-    daily_ema_aligned = align_htf_to_ltf(prices, df_daily, daily_ema)
+    # Align 12h EMA to 6h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Donchian channels
-    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    # Williams Alligator
+    jaw = calculate_alligator_jaw(high, low, ALLIGATOR_JAW_PERIOD)
+    teeth = calculate_alligator_teeth(high, low, ALLIGATOR_TEETH_PERIOD)
+    lips = calculate_alligator_lips(high, low, ALLIGATOR_LIPS_PERIOD)
     
-    # Volume moving average for spike detection
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Elder Ray
+    bull_power, bear_power = calculate_elder_ray(high, low, close, ELDER_RAY_PERIOD)
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -75,11 +90,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, 20) + 1
+    start = max(ALLIGATOR_JAW_PERIOD + 8, ALLIGATOR_TEETH_PERIOD + 5, 
+                ALLIGATOR_LIPS_PERIOD + 3, ELDER_RAY_PERIOD, TREND_FILTER_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily EMA not available
-        if np.isnan(daily_ema_aligned[i]):
+        # Skip if 12h EMA not available
+        if np.isnan(ema_12h_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -95,20 +111,33 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume spike confirmation
-        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
+        # Alligator conditions: mouth direction
+        # Mouth up: lips > teeth > jaw (bullish alignment)
+        # Mouth down: lips < teeth < jaw (bearish alignment)
+        # Mouth closed: intertwined (no clear trend)
+        lips_val = lips[i]
+        teeth_val = teeth[i]
+        jaw_val = jaw[i]
         
-        # Trend filter: price above/below daily EMA
-        above_daily_ema = close[i] > daily_ema_aligned[i]
-        below_daily_ema = close[i] < daily_ema_aligned[i]
+        mouth_up = (lips_val > teeth_val) and (teeth_val > jaw_val)
+        mouth_down = (lips_val < teeth_val) and (teeth_val < jaw_val)
         
-        # Breakout conditions
-        bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
-        bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
+        # Elder Ray: bull/bear power strength
+        bull_val = bull_power[i]
+        bear_val = bear_power[i]
         
-        # Entry conditions: breakout in direction of daily trend with volume
-        long_entry = bullish_breakout and above_daily_ema and volume_spike
-        short_entry = bearish_breakout and below_daily_ema and volume_spike
+        # Strong bull: bull power positive and rising
+        # Strong bear: bear power negative and falling (more negative)
+        strong_bull = bull_val > 0 and (i == start or bull_val > bull_power[i-1])
+        strong_bear = bear_val < 0 and (i == start or bear_val < bear_power[i-1])
+        
+        # Trend filter: price relative to 12h EMA
+        above_12h_ema = close[i] > ema_12h_aligned[i]
+        below_12h_ema = close[i] < ema_12h_aligned[i]
+        
+        # Entry conditions
+        long_entry = mouth_up and strong_bull and above_12h_ema
+        short_entry = mouth_down and strong_bear and below_12h_ema
         
         # Generate signals
         if position == 0:
