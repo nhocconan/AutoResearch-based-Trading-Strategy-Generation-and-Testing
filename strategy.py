@@ -1,55 +1,48 @@
 #!/usr/bin/env python3
 """
-exp_7516_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian channel breakout with 1d EMA trend filter and volume confirmation.
-Goes long when price breaks above 20-period upper band in bull regime (price > 1d EMA200),
-short when breaks below lower band in bear regime (price < 1d EMA200).
-Volume must be above 20-period average to confirm breakout.
-Designed for 50-150 total trades over 4 years with strict breakout conditions.
-Works in bull via long breakouts, bear via short breakdowns.
+exp_7517_4h_donchian20_1d_volume_v1
+Hypothesis: 4h Donchian channel breakout with 1d volume confirmation.
+Long when price breaks above 4h 20-period high with above-average 1d volume.
+Short when price breaks below 4h 20-period low with above-average 1d volume.
+Uses volume filter to avoid false breakouts. Targets 80-120 trades over 4 years (20-30/year).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7516_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_7517_4h_donchian20_1d_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_TREND = 200
-VOLUME_MA_PERIOD = 20
+VOLUME_MULTIPLIER = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 30:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA200 for regime filter
-    close_1d = df_1d['close'].values
-    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
+    # Calculate 1d average volume
+    volume_1d = df_1d['volume'].values
+    vol_avg_1d = pd.Series(volume_1d).rolling(window=20, min_periods=10).mean().values
+    vol_avg_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_1d)
     
-    # Calculate LTF indicators
-    close = prices['close'].values
+    # Calculate 4h Donchian channels
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # Donchian channels (20-period high/low)
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Volume moving average
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    # Donchian high and low
+    donch_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donch_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # ATR for stoploss
     tr1 = pd.Series(high - low)
@@ -63,11 +56,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, 20) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1d_200_aligned[i]):
+        if np.isnan(vol_avg_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -83,20 +76,26 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market regime
-        bull_regime = close[i] > ema_1d_200_aligned[i]   # price above 1d EMA200
-        bear_regime = close[i] < ema_1d_200_aligned[i]   # price below 1d EMA200
-        
-        # Volume confirmation
-        volume_ok = volume[i] > volume_ma[i] if not np.isnan(volume_ma[i]) else False
-        
-        # Breakout conditions
-        upper_break = high[i] > highest_high[i-1] if i > 0 and not np.isnan(highest_high[i-1]) else False
-        lower_break = low[i] < lowest_low[i-1] if i > 0 and not np.isnan(lowest_low[i-1]) else False
+        # Volume confirmation: current 1d volume > average
+        # Get current 1d volume (aligned)
+        vol_1d_current = df_1d['volume'].values
+        vol_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_1d_current)
+        volume_ok = vol_1d_aligned[i] > vol_avg_1d_aligned[i] * VOLUME_MULTIPLIER
         
         # Entry conditions
-        long_entry = bull_regime and upper_break and volume_ok
-        short_entry = bear_regime and lower_break and volume_ok
+        long_entry = (
+            close[i] > donch_high[i-1] and  # break above Donchian high (previous bar)
+            volume_ok                       # volume confirmation
+        )
+        
+        short_entry = (
+            close[i] < donch_low[i-1] and   # break below Donchian low (previous bar)
+            volume_ok                       # volume confirmation
+        )
+        
+        # Exit conditions: opposite Donchian break
+        long_exit = close[i] < donch_low[i-1]
+        short_exit = close[i] > donch_high[i-1]
         
         # Generate signals
         if position == 0:
@@ -111,8 +110,16 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            signals[i] = SIGNAL_SIZE  # hold position
+            if long_exit:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = SIGNAL_SIZE
         elif position == -1:
-            signals[i] = -SIGNAL_SIZE  # hold position
+            if short_exit:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -SIGNAL_SIZE
     
     return signals
