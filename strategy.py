@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 """
-exp_6993_4h_donchian20_12h_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-In bull markets (price > 12h EMA50): long breakouts only. In bear markets (price < 12h EMA50): short breakouts only.
-12h EMA50 provides intermediate-term trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
-Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
-Works in both bull and bear markets by aligning with 12h trend direction.
+exp_6994_1h_donchian20_4h_ema_vol_v1
+Hypothesis: 1h Donchian(20) breakout with 4h EMA50 trend filter and volume confirmation.
+In bull markets (price > 4h EMA50): long breakouts only. In bear markets (price < 4h EMA50): short breakouts only.
+4h EMA50 provides intermediate-term trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
+Designed for 1h timeframe with session filter (08-20 UTC) to reduce noise trades.
+Target: 60-150 total trades over 4 years = 15-37/year by using tight entry conditions.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6993_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_6994_1h_donchian20_4h_ema_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 30  # ~30 * 4h = 120h = 5 days
+MAX_HOLD_BARS = 24  # ~1 day (1h bars)
 EMA_PERIOD = 50
 
 def generate_signals(prices):
@@ -31,15 +31,19 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 12h for EMA
-    df_12h = get_htf_data(prices, '12h')
+    # Pre-compute session hours (08-20 UTC) - open_time is already datetime64[ms]
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Load HTF data ONCE before loop - using 4h for EMA
+    df_4h = get_htf_data(prices, '4h')
     
-    # Align to LTF (4h)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 4h EMA50
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    
+    # Align to LTF (1h)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -72,8 +76,8 @@ def generate_signals(prices):
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if HTF data not available
-        if np.isnan(ema_12h_aligned[i]):
+        # Skip if outside trading session or HTF data not available
+        if not in_session[i] or np.isnan(ema_4h_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -95,19 +99,19 @@ def generate_signals(prices):
         if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
             signals[i] = 0.0
             position = 0
-            bars_since_entry = 0
+                bars_since_entry = 0
             continue
             
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend direction from 12h EMA50
-        weekly_uptrend = close[i] > ema_12h_aligned[i]
-        weekly_downtrend = close[i] < ema_12h_aligned[i]
+        # Determine trend direction from 4h EMA50
+        bullish = close[i] > ema_4h_aligned[i]
+        bearish = close[i] < ema_4h_aligned[i]
         
-        # Breakout signals aligned with 12h trend
-        long_breakout = weekly_uptrend and (close[i] > highest_high[i]) and vol_confirmed
-        short_breakout = weekly_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
+        # Breakout signals aligned with 4h trend
+        long_breakout = bullish and (close[i] > highest_high[i]) and vol_confirmed
+        short_breakout = bearish and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
