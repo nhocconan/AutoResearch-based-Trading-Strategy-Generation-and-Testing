@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 exp_7150_1d_donchian20_1w_hma_v2
-Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter and volume confirmation.
+Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter + volume confirmation.
 In trending markets (price > 1w HMA): trade continuation breakouts.
-In ranging markets (price near 1w HMA): trade mean reversion at Donchian extremes.
-Uses discrete position sizing (0.25) to minimize fee churn. Target: 15-25 trades/year.
+In ranging markets (price near 1w HMA): fade Donchian extremes with volume confirmation.
+Uses discrete position sizing (0.0, ±0.25) to minimize fee churn.
+Designed for 1d timeframe to capture swings with ~10-20 trades/year (40-80 total over 4 years).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -19,12 +20,11 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 HMA_PERIOD = 21
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.8  # Increased to reduce trades
+VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 15  # Increased to reduce turnover
-NEAR_HMA_THRESHOLD = 0.3  # Reduced to tighten ranging condition
+MAX_HOLD_BARS = 15  # ~15 days
 
 def generate_signals(prices):
     n = len(prices)
@@ -126,7 +126,7 @@ def generate_signals(prices):
         # Determine market regime based on HMA
         above_hma = close[i] > hma_1w_aligned[i]
         below_hma = close[i] < hma_1w_aligned[i]
-        near_hma = np.abs(close[i] - hma_1w_aligned[i]) < (NEAR_HMA_THRESHOLD * atr[i])  # Tightened
+        near_hma = np.abs(close[i] - hma_1w_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of HMA
         
         # Fade at extremes in ranging market (near HMA)
         fade_long = near_hma and (close[i] <= lowest_low[i]) and vol_confirmed
@@ -155,5 +155,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
