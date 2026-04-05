@@ -1,18 +1,19 @@
-# Note: Previous attempts with similar Donchian-based strategies yielded negative Sharpe ratios due to insufficient trade count or excessive drawdown.
-# This version adjusts parameters to increase trade frequency within acceptable limits while maintaining strict entry conditions.
-# Strategy: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
-# Entry: Long when price breaks above 20-period high, 1-day close above EMA50, and volume >1.5x 20-period average volume.
-#        Short when price breaks below 20-period low, 1-day close below EMA50, and volume >1.5x 20-period average volume.
-# Exit: Stop loss at 2x ATR, take profit at 3x ATR from entry.
-# Position sizing: 0.25 (25% of capital) to balance risk and return.
-# Timeframe: 4h
+#!/usr/bin/env python3
+
+"""
+Hypothesis: 1-day Donchian breakout with weekly trend filter and volume confirmation
+Works in bull markets via breakout momentum; in bear markets via shorting breakdowns.
+Weekly trend filter ensures alignment with higher timeframe momentum, reducing whipsaws.
+Volume confirmation ensures breakouts have institutional participation.
+Target: 30-100 trades over 4 years (7-25/year) by requiring confluence of trend, breakout, and volume.
+"""
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8337_4h_donchian20_1d_vol_v2"
-timeframe = "4h"
+name = "exp_8338_1d_donchian20_1w_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
@@ -20,28 +21,28 @@ DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-EMA_PERIOD = 50
+WEEKLY_EMA_PERIOD = 21
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
-    n = len(prices)
+    n = len(prrices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - weekly data
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=WEEKLY_EMA_PERIOD, adjust=False, min_periods=WEEKLY_EMA_PERIOD).mean().values
     
-    # Price relative to EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
+    # Price relative to weekly EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_1w > ema_1w, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
     
-    # Calculate LTF indicators
+    # Calculate daily indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -68,7 +69,7 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, WEEKLY_EMA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
@@ -88,14 +89,14 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1d EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
+        # Determine market bias from weekly EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # weekly close above EMA
+        bear_bias = price_vs_ema_aligned[i] == -1  # weekly close below EMA
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions - require close beyond channel bands to avoid wicks
+        # Breakout conditions - require close beyond channel bands
         upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
         lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
@@ -125,3 +126,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</dict>
