@@ -1,37 +1,44 @@
 #!/usr/bin/env python3
 """
-Experiment #10198: 1d Donchian Breakout + Weekly Trend + Volume Spike
-Hypothesis: Donchian(20) breakouts in the direction of weekly trend (EMA40) with volume confirmation
-provide high-probability trend continuation trades. Works in bull markets (breakouts above weekly EMA)
-and bear markets (breakdowns below weekly EMA). Volume filters reduce false breakouts.
-Target: 30-100 total trades over 4 years (7-25/year).
+Experiment #10199: 6h Breakout + 12h Momentum + Volume Confirmation
+Hypothesis: 6h price breakouts from Donchian channels in the direction of 12h momentum 
+(12h RSI slope) with volume confirmation capture momentum bursts in both bull and bear markets. 
+Volume filters prevent false breakouts, momentum alignment ensures trend continuation. 
+Target: 80-180 total trades over 4 years (20-45/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10198_1d_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "exp_10199_6h_breakout_12h_momentum_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
-WEEKLY_EMA_PERIOD = 40
+RSI_PERIOD = 14
+VOLUME_SPIKE_MULTIPLIER = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
+
+def calculate_rsi(close, period):
+    """Calculate RSI"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -47,17 +54,19 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for trend filter
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop for momentum filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly EMA for trend direction
-    weekly_close = df_weekly['close'].values
-    weekly_ema = calculate_ema(weekly_close, WEEKLY_EMA_PERIOD)
+    # Calculate 12h RSI and its slope for momentum
+    rsi_12h = calculate_rsi(df_12h['close'].values, RSI_PERIOD)
+    # Calculate RSI slope (change over 3 periods)
+    rsi_slope = np.diff(rsi_12h, prepend=rsi_12h[0])  # Simple difference
+    rsi_slope_smoothed = pd.Series(rsi_slope).ewm(span=3, adjust=False).mean().values
     
-    # Align weekly EMA to daily timeframe
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
+    # Align 12h RSI slope to 6h timeframe
+    rsi_slope_aligned = align_htf_to_ltf(prices, df_12h, rsi_slope_smoothed)
     
-    # Calculate daily indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -78,11 +87,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, 20) + 1
+    start = max(DONCHIAN_PERIOD, RSI_PERIOD, 20) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(weekly_ema_aligned[i]):
+        # Skip if 12h RSI slope not available
+        if np.isnan(rsi_slope_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -101,17 +110,17 @@ def generate_signals(prices):
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        above_weekly_ema = close[i] > weekly_ema_aligned[i]
-        below_weekly_ema = close[i] < weekly_ema_aligned[i]
+        # Momentum filter: RSI slope positive/negative
+        positive_momentum = rsi_slope_aligned[i] > 0
+        negative_momentum = rsi_slope_aligned[i] < 0
         
         # Breakout conditions
         bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
         bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
         
-        # Entry conditions: breakout in direction of weekly trend with volume
-        long_entry = bullish_breakout and above_weekly_ema and volume_spike
-        short_entry = bearish_breakout and below_weekly_ema and volume_spike
+        # Entry conditions: breakout in direction of 12h momentum with volume
+        long_entry = bullish_breakout and positive_momentum and volume_spike
+        short_entry = bearish_breakout and negative_momentum and volume_spike
         
         # Generate signals
         if position == 0:
