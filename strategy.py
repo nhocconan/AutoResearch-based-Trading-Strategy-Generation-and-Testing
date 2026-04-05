@@ -1,49 +1,7 @@
-# 0.027 (41 tr/sym) ← too_few_trades(41tr)
-  #7714 [   keep] exp_7714_4h_donchian20_1d_ema_vol_v1 | Sharpe=0.027 (41 tr/sym)
-  #7716 [   keep] exp_7716_4h_donchian20_1d_ema_vol_v1 | Sharpe=0.027 (41 tr/sym)
-
-⚠️ REJECTED: 41 total trades over 4 years = 10.25/year. Minimum is 12.5/year (50 total).
-TARGET: 75-250 total over 4 years. You need ~40 more trades.
-
-ISSUE: Conditions are too strict. The combination of:
-1. Price above/below 1d EMA (trend filter)
-2. Close beyond previous bar's Donchian band (breakout)
-3. Volume > 1.5x 20-period MA
-is rarely all true at once.
-
-FIX: Relax one condition slightly while keeping risk controls. Options:
-- Reduce volume threshold from 1.5 to 1.3
-- Allow breakout on either high or low (not just close)
-- Use 15-period Donchian instead of 20
-
-Choose ONE relaxation to add ~40 trades while keeping edge.
-
-# 0.027 (41 tr/sym) ← too_few_trades(41tr)
-  #7714 [   keep] exp_7714_4h_donchian20_1d_ema_vol_v1 | Sharpe=0.027 (41 tr/sym)
-  #7716 [   keep] exp_7716_4h_donchian20_1d_ema_vol_v1 | Sharpe=0.027 (41 tr/sym)
-
-⚠️ REJECTED: 41 total trades over 4 years = 10.25/year. Minimum is 12.5/year (50 total).
-TARGET: 75-250 total over 4 years. You need ~40 more trades.
-
-ISSUE: Conditions are too strict. The combination of:
-1. Price above/below 1d EMA (trend filter)
-2. Close beyond previous bar's Donchian band (breakout)
-3. Volume > 1.5x 20-period MA
-is rarely all true at once.
-
-FIX: Relax one condition slightly while keeping risk controls. Options:
-- Reduce volume threshold from 1.5 to 1.3
-- Allow breakout on either high or low (not just close)
-- Use 15-period Donchian instead of 20
-
-Choose ONE relaxation to add ~40 trades while keeping edge.
-
-</think>
 #!/usr/bin/env python3
 """
-Experiment #7713: 4-hour Donchian(18) breakout with 1-day EMA trend filter and volume confirmation.
-Relaxed Donchian period from 20 to 18 to increase trade frequency while maintaining edge.
-Hypothesis: Price breaking beyond 18-period high/low on 4h with volume confirmation and aligned 1d trend
+Experiment #7713: 4-hour Donchian(20) breakout with 12-hour EMA trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 4h with volume confirmation and aligned 12h trend
 captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above EMA) and bear
 markets (short breakdowns below EMA). Targets 75-200 trades over 4 years.
 """
@@ -52,12 +10,12 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7713_4h_donchian18_1d_ema_vol_v1"
+name = "exp_7713_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 18  # Reduced from 20 to increase trade frequency
+DONCHIAN_PERIOD = 20
 EMA_TREND = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
@@ -72,12 +30,12 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -110,7 +68,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(ema_12h_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -127,8 +85,8 @@ def generate_signals(prices):
                 continue
         
         # Determine market regime
-        bull_regime = close[i] > ema_1d_aligned[i]   # price above 1d EMA
-        bear_regime = close[i] < ema_1d_aligned[i]   # price below 1d EMA
+        bull_regime = close[i] > ema_12h_aligned[i]   # price above 12h EMA
+        bear_regime = close[i] < ema_12h_aligned[i]   # price below 12h EMA
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
