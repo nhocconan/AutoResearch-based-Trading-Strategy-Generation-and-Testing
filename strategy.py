@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #7913: 4-hour Donchian breakout with 12h trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.5x 20-period MA and 
-aligned 12h trend (price above/below 12h EMA50) captures sustained moves while avoiding whipsaw. 
-12h trend provides intermediate-term bias to reduce false breakouts, improving performance in 
-both bull and bear markets. Target 75-200 total trades over 4 years.
+Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.5x 20-period MA 
+and aligned 12h trend (price above/below 12h EMA50) captures sustained moves. 
+The 12h timeframe provides stronger trend context than 1d to improve performance in 
+both bull and bear markets while maintaining reasonable trade frequency. 
+Target: 75-200 total trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -30,14 +31,14 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - 12h trend filter
+    # Load HTF data ONCE before loop
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 12h EMA for trend filter
+    # Calculate 12h EMA
     close_12h = df_12h['close'].values
     ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Price relative to 12h EMA: above = bullish bias, below = bearish bias
+    # Price relative to EMA: above = bullish bias, below = bearish bias
     price_vs_ema = np.where(close_12h > ema_12h, 1, -1)  # 1=bullish, -1=bearish
     price_vs_ema_aligned = align_htf_to_ltf(prices, df_12h, price_vs_ema)
     
@@ -125,4 +126,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</py>
