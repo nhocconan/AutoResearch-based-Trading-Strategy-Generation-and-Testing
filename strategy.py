@@ -1,118 +1,70 @@
 #!/usr/bin/env python3
 """
-Experiment #9537: 4h Donchian(20) breakout + HMA(21) trend + volume confirmation.
-Hypothesis: Donchian breakouts with trend alignment and volume confirmation capture 
-strong momentum moves while avoiding false breakouts. HMA filter ensures we only 
-trade in direction of trend. Works in bull (breakouts above) and bear (breakdowns 
-below) with trend filter preventing counter-trend trades. Targets 75-200 total 
-trades over 4 years (19-50/year) to balance opportunity and cost.
+Experiment #9538: 1d Donchian Breakout + 1w Trend + Volume Spike + ATR Stop
+Hypothesis: Daily Donchian breakouts with weekly trend filter and volume confirmation
+capture major trends while avoiding whipsaws. Weekly trend ensures we only trade
+in the direction of the higher timeframe momentum. Targets 30-100 total trades
+over 4 years (7-25/year) to minimize fee drag and maximize edge.
+Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9537_4h_donchian20_hma_volume_v1"
-timeframe = "4h"
+name = "exp_9538_1d_donchian_breakout_1w_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-HMA_PERIOD = 21
 VOLUME_SPIKE_MULTIPLIER = 1.5
+VOLUME_MA_PERIOD = 20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 SIGNAL_SIZE = 0.25
 
-def calculate_hma(close, period):
-    """Calculate Hull Moving Average"""
-    n = int(period)
-    if n < 1:
-        return close
-    half_n = n // 2
-    sqrt_n = int(np.sqrt(n))
-    
-    # WMA with period n
-    def wma(values, window):
-        weights = np.arange(1, window + 1)
-        return np.convolve(values, weights, 'valid') / weights.sum()
-    
-    # Pad array for convolution
-    def padded_wma(arr, window):
-        if len(arr) < window:
-            return np.full(len(arr), np.nan)
-        return np.convolve(arr, np.arange(1, window + 1), 'valid') / np.arange(1, window + 1).sum()
-    
-    # Calculate WMA(2n) and WMA(n)
-    wma_half = np.array([padded_wma(close[:i+1], half_n)[-1] if i+1 >= half_n else np.nan for i in range(len(close))])
-    wma_full = np.array([padded_wma(close[:i+1], n)[-1] if i+1 >= n else np.nan for i in range(len(close))])
-    
-    # Calculate 2*WMA(n/2) - WMA(n)
-    raw_hma = 2 * wma_half - wma_full
-    
-    # WMA(sqrt(n)) of the above
-    hma = np.array([padded_wma(raw_hma[:i+1], sqrt_n)[-1] if i+1 >= sqrt_n else np.nan for i in range(len(raw_hma))])
-    return hma
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels: upper=max(high,period), lower=min(low,period)"""
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=period, min_periods=period).max().values
+    lower = low_series.rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing (equivalent to RMA)"""
+    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    
-    # Use exponential moving average with alpha = 1/period
-    atr = np.full_like(tr, np.nan, dtype=np.float64)
-    if len(tr) > 0:
-        # First value is simple average
-        atr[period-1] = np.nanmean(tr[:period])
-        # Subsequent values: ATR = (prev_atr * (period-1) + tr) / period
-        for i in range(period, len(tr)):
-            if not np.isnan(tr[i]) and not np.isnan(atr[i-1]):
-                atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
-
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = np.full_like(high, np.nan, dtype=np.float64)
-    lower = np.full_like(low, np.nan, dtype=np.float64)
-    
-    for i in range(len(high)):
-        if i >= period - 1:
-            upper[i] = np.max(high[i-period+1:i+1])
-            lower[i] = np.min(low[i-period+1:i+1])
-    
-    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for trend filter)
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop (1w for trend filter)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d HMA for trend filter
-    close_1d = df_1d['close'].values
-    hma_1d = calculate_hma(close_1d, HMA_PERIOD)
+    # Calculate 1w EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Align 1d HMA to 4h timeframe
-    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
-    
-    # Calculate LTF indicators (4h)
+    # Calculate LTF indicators (1d)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     # Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     
     # Volume moving average for spike detection
-    volume_ma = np.full_like(volume, np.nan, dtype=np.float64)
-    for i in range(len(volume)):
-        if i >= 19:  # 20-period MA
-            volume_ma[i] = np.mean(volume[i-19:i+1])
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -123,11 +75,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, HMA_PERIOD, ATR_PERIOD, 20) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
     
     for i in range(start, n):
-        # Skip if HMA data not available
-        if np.isnan(hma_1d_aligned[i]):
+        # Skip if HTF data not available
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -144,26 +96,19 @@ def generate_signals(prices):
                 continue
         
         # Volume spike confirmation
-        volume_spike = (not np.isnan(volume_ma[i]) and 
-                       volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER))
+        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: HMA slope
-        hma_rising = (i >= 1 and not np.isnan(hma_1d_aligned[i]) and 
-                     not np.isnan(hma_1d_aligned[i-1]) and
-                     hma_1d_aligned[i] > hma_1d_aligned[i-1])
-        hma_falling = (i >= 1 and not np.isnan(hma_1d_aligned[i]) and 
-                      not np.isnan(hma_1d_aligned[i-1]) and
-                      hma_1d_aligned[i] < hma_1d_aligned[i-1])
+        # Trend filter: price above/below weekly EMA
+        uptrend = close[i] > ema_1w_aligned[i]
+        downtrend = close[i] < ema_1w_aligned[i]
         
         # Breakout conditions
-        bullish_breakout = (not np.isnan(donchian_upper[i]) and 
-                           close[i] > donchian_upper[i])
-        bearish_breakout = (not np.isnan(donchian_lower[i]) and 
-                           close[i] < donchian_lower[i])
+        breakout_up = close[i] > donch_upper[i]
+        breakout_down = close[i] < donch_lower[i]
         
         # Entry conditions
-        long_entry = bullish_breakout and hma_rising and volume_spike
-        short_entry = bearish_breakout and hma_falling and volume_spike
+        long_entry = uptrend and breakout_up and volume_spike
+        short_entry = downtrend and breakout_down and volume_spike
         
         # Generate signals
         if position == 0:
@@ -185,3 +130,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</lymphocyte>
