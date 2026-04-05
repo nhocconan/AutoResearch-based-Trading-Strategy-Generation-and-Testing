@@ -1,32 +1,27 @@
-# 1. STATEMENT OF HYPOTHESIS
-# Strategy: 4h Donchian(20) breakout + 1d EMA50 trend + volume spike + ATR stop
-# Timeframe: 4h (primary), 1d (HTF for trend)
-# Hypothesis: Donchian breakouts in the direction of the daily trend (EMA50) with volume confirmation
-# capture strong momentum moves. The daily EMA50 filter ensures we only trade with the intermediate-term
-# trend, reducing whipsaws. Volume spike confirms institutional interest. Works in bull markets
-# (breakouts above EMA50) and bear markets (breakdowns below EMA50). Target: 75-200 total trades over 4 years.
+#!/usr/bin/env python3
+"""
+Experiment #10147: 6h Elder Ray + ADX + 1d Trend Filter
+Hypothesis: Elder Ray power measures bull/bear strength; combined with ADX for trend strength and 1d EMA filter, 
+it identifies strong directional moves. Works in bull markets (strong bull power + ADX > 20) and bear markets 
+(strong bear power + ADX > 20). Designed for low trade frequency (12-37/year) to minimize fee drag.
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10146_4h_donchian_breakout_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_10147_6h_elder_ray_adx_1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
-VOLUME_SPIKE_MULTIPLIER = 1.5
+ELDER_RAY_PERIOD = 13
+ADX_PERIOD = 14
+ADX_THRESHOLD = 20
+EMA_PERIOD_1D = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -41,32 +36,67 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_elder_ray(high, low, close, ema_period):
+    """Calculate Elder Ray: Bull Power = High - EMA, Bear Power = Low - EMA"""
+    ema = calculate_ema(close, ema_period)
+    bull_power = high - ema
+    bear_power = low - ema
+    return bull_power, bear_power
+
+def calculate_dmi(high, low, close, period):
+    """Calculate DMI components for ADX"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    # Smooth using Wilder's smoothing (alpha = 1/period)
+    tr_sum = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).sum().values
+    dm_plus_sum = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).sum().values
+    dm_minus_sum = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).sum().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_sum / tr_sum
+    di_minus = 100 * dm_minus_sum / tr_sum
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    return adx
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Load daily data ONCE before loop for trend filter
+    df_daily = get_htf_data(prices, '1d')
     
     # Calculate daily EMA for trend direction
-    daily_close = df_1d['close'].values
-    daily_ema = calculate_ema(daily_close, EMA_PERIOD)
+    daily_close = df_daily['close'].values
+    daily_ema = calculate_ema(daily_close, EMA_PERIOD_1D)
     
-    # Align daily EMA to 4h timeframe
-    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
+    # Align daily EMA to 6h timeframe
+    daily_ema_aligned = align_htf_to_ltf(prices, df_daily, daily_ema)
     
-    # Calculate 4h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Donchian channels
-    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    # Elder Ray
+    bull_power, bear_power = calculate_elder_ray(high, low, close, ELDER_RAY_PERIOD)
     
-    # Volume moving average for spike detection
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # ADX for trend strength
+    adx = calculate_dmi(high, low, close, ADX_PERIOD)
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -77,7 +107,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, 20) + 1
+    start = max(ELDER_RAY_PERIOD, ADX_PERIOD, EMA_PERIOD_1D) + 1
     
     for i in range(start, n):
         # Skip if daily EMA not available
@@ -97,20 +127,13 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume spike confirmation
-        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
-        
-        # Trend filter: price above/below daily EMA
+        # Trend filter: price relative to daily EMA
         above_daily_ema = close[i] > daily_ema_aligned[i]
         below_daily_ema = close[i] < daily_ema_aligned[i]
         
-        # Breakout conditions
-        bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
-        bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
-        
-        # Entry conditions: breakout in direction of daily trend with volume
-        long_entry = bullish_breakout and above_daily_ema and volume_spike
-        short_entry = bearish_breakout and below_daily_ema and volume_spike
+        # Entry conditions: strong Elder Ray power in direction of trend with ADX > threshold
+        long_entry = (bull_power[i] > 0) and above_daily_ema and (adx[i] > ADX_THRESHOLD)
+        short_entry = (bear_power[i] < 0) and below_daily_ema and (adx[i] > ADX_THRESHOLD)
         
         # Generate signals
         if position == 0:
