@@ -1,10 +1,10 @@
-# Your task: Generate the strategy.py code for experiment #7705
-# Previous attempts failed due to too few trades (<50). Focus on increasing trade frequency while maintaining edge.
-# Experiment #7705: 12-hour Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
-# Hypothesis: Price breaking beyond 20-period high/low on 12h with volume confirmation and aligned 1d trend captures sustained moves while avoiding whipsaw.
-# Targets 50-150 trades over 4 years by using tighter parameters and optimized entry/exit logic.
-
 #!/usr/bin/env python3
+"""
+Experiment #7705: 12-hour Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 12h with volume confirmation and aligned 1d trend
+captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above EMA) and bear
+markets (short breakdowns below EMA). Targets 50-150 trades over 4 years.
+"""
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
@@ -14,11 +14,11 @@ name = "exp_7705_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
-# Parameters - optimized for higher trade frequency while maintaining edge
+# Parameters
 DONCHIAN_PERIOD = 20
 EMA_TREND = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.3  # Lowered from 1.5 to increase frequency
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
