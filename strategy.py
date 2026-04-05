@@ -1,33 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #10493: 4h Donchian Breakout + 12h Trend + Volume Spike
-Hypothesis: 4-hour Donchian(20) breakouts in the direction of 12-hour EMA25 trend with volume confirmation
-provide high-probability trend continuation trades. Works in bull markets (breakouts above 12h EMA) 
-and bear markets (breakdowns below 12h EMA). Volume filters reduce false breakouts.
-Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #10494: 1h Momentum + 4h Trend + 1d Volume Spike
+Hypothesis: 1h momentum entries aligned with 4h trend and 1d volume confirmation
+provide high-probability trend continuation trades. Uses 4h/1d for signal direction
+and 1h only for entry timing to reduce noise. Target: 60-150 total trades over 4 years.
+Works in bull markets (momentum with trend) and bear markets (mean reversion in range).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10493_4h_donchian_breakout_12h_trend_volume_v1"
-timeframe = "4h"
+name = "exp_10494_1h_momentum_4h_trend_1d_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
-TREND_EMA_PERIOD = 25
-SIGNAL_SIZE = 0.25
+MOMENTUM_PERIOD = 10
+MOMENTUM_THRESHOLD = 0.02
+TREND_PERIOD = 21
+VOLUME_SPIKE_MULTIPLIER = 1.8
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+SESSION_START_HOUR = 8
+SESSION_END_HOUR = 20
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_momentum(close, period):
+    """Calculate price momentum as percent change"""
+    return pd.Series(close).pct_change(period).values
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -44,33 +45,32 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h data ONCE before loop for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h = calculate_ema(close_4h, TREND_PERIOD)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate 12h EMA for trend direction
-    close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
+    # Load 1d data ONCE before loop for volume filter
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
+    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
     
-    # Align 12h EMA to 4h timeframe
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
-    
-    # Calculate 4h indicators
+    # Calculate 1h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
-    
-    # Volume moving average for spike detection
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for risk management
+    momentum = calculate_momentum(close, MOMENTUM_PERIOD)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Pre-calculate session hours
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,12 +78,20 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, 20) + 1
+    start = max(MOMENTUM_PERIOD, TREND_PERIOD, 20) + 1
     
     for i in range(start, n):
-        # Skip if 12h EMA not available
-        if np.isnan(ema_12h_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        # Session filter: only trade 08:00-20:00 UTC
+        hour = hours[i]
+        if hour < SESSION_START_HOUR or hour > SESSION_END_HOUR:
+            signals[i] = 0.0
+            position = 0
+            continue
+        
+        # Skip if 4h EMA not available
+        if np.isnan(ema_4h_aligned[i]):
+            signals[i] = 0.0
+            position = 0
             continue
             
         # Check stoploss
@@ -98,20 +106,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume spike confirmation
-        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
+        # Volume spike confirmation (1d)
+        volume_spike = volume[i] > (volume_ma_1d_aligned[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma_1d_aligned[i]) else False
         
-        # Trend filter: price above/below 12h EMA
-        above_ema = close[i] > ema_12h_aligned[i]
-        below_ema = close[i] < ema_12h_aligned[i]
+        # Trend filter: price above/below 4h EMA
+        above_ema = close[i] > ema_4h_aligned[i]
+        below_ema = close[i] < ema_4h_aligned[i]
         
-        # Breakout conditions
-        bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
-        bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
+        # Momentum conditions
+        mom_up = momentum[i] > MOMENTUM_THRESHOLD if not np.isnan(momentum[i]) else False
+        mom_down = momentum[i] < -MOMENTUM_THRESHOLD if not np.isnan(momentum[i]) else False
         
-        # Entry conditions: breakout in direction of 12h trend with volume
-        long_entry = bullish_breakout and above_ema and volume_spike
-        short_entry = bearish_breakout and below_ema and volume_spike
+        # Entry conditions
+        long_entry = mom_up and above_ema and volume_spike
+        short_entry = mom_down and below_ema and volume_spike
         
         # Generate signals
         if position == 0:
