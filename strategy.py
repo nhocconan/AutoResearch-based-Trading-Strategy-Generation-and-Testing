@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #8826: 4h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
-Hypothesis: The 4h timeframe balances trade frequency and trend capture, while the 1d trend filter ensures alignment with daily momentum to avoid counter-trend trades. Volume confirmation filters breakouts requiring institutional participation, and ATR-based stops manage risk. Targets 75-200 trades over 4 years (19-50/year) to minimize fee impact while maintaining statistical validity.
+Experiment #8827: 6h Donchian breakout + weekly pivot direction + volume confirmation.
+Hypothesis: Weekly pivots provide strong support/resistance levels that align with weekly trend.
+Breakouts in direction of weekly pivot bias (above/below weekly pivot) capture institutional flow.
+Volume confirmation ensures genuine breakouts. Targets 50-150 total trades over 4 years (12-37/year).
+Uses 6h timeframe to balance trade frequency and signal quality, avoiding excessive churn.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8826_4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "exp_8827_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -35,19 +37,22 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop (weekly data for pivot calculation)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
+    # Calculate weekly pivot points (standard formula)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Price relative to 1d EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_1d > ema_1d, 1, 
-                     np.where(close_1d < ema_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
+    # Weekly pivot: P = (H + L + C) / 3
+    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
+    # Weekly bias: above pivot = bullish, below = bearish
+    weekly_bias = np.where(close_1w > weekly_pivot, 1, 
+                   np.where(close_1w < weekly_pivot, -1, 0))  # 1=bullish, -1=bearish, 0=at pivot
+    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias)
     
-    # Calculate LTF indicators (4h)
+    # Calculate LTF indicators (6h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -69,11 +74,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(price_vs_ema_aligned[i]):
+        if np.isnan(weekly_bias_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -89,9 +94,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1d EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1d price above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1d price below EMA50
+        # Determine market bias from weekly pivot
+        bull_bias = weekly_bias_aligned[i] == 1   # weekly close above pivot
+        bear_bias = weekly_bias_aligned[i] == -1  # weekly close below pivot
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
