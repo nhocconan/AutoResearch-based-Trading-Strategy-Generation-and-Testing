@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #7777: 4-hour Donchian breakout with 1-day trend filter, volume confirmation, and ATR-based risk management.
-Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.8x 20-period MA and aligned 1d trend (EMA50) captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above EMA) and bear markets (short breakdowns below EMA). Targets 75-200 trades over 4 years.
+Experiment #7779: 6-hour Donchian breakout with 12-hour trend filter, volume confirmation, and ATR-based risk management.
+Hypothesis: Price breaking beyond 20-period high/low on 6h with volume >1.5x 20-period MA and aligned 12h trend (EMA50) captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above EMA) and bear markets (short breakdowns below EMA). Targets 75-200 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7777_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7779_6h_donchian20_12h_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 EMA_TREND = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -28,12 +28,12 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -66,7 +66,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(ema_12h_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -83,8 +83,8 @@ def generate_signals(prices):
                 continue
         
         # Determine market regime
-        bull_regime = close[i] > ema_1d_aligned[i]   # price above 1d EMA
-        bear_regime = close[i] < ema_1d_aligned[i]   # price below 1d EMA
+        bull_regime = close[i] > ema_12h_aligned[i]   # price above 12h EMA
+        bear_regime = close[i] < ema_12h_aligned[i]   # price below 12h EMA
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -119,3 +119,5 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+
+</think>
