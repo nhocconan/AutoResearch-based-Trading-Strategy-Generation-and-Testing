@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #8068: 12-hour Donchian breakout with weekly trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA 
-and aligned weekly trend (price above/below weekly EMA50) captures sustained moves with 
-appropriate frequency for 12h timeframe. The weekly timeframe provides higher trend context 
-to reduce whipsaw while maintaining trade frequency of ~12-37/year.
+Experiment #8070: Daily Donchian breakout with weekly EMA filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-day high/low with volume >1.5x 20-day MA and aligned weekly trend (price above/below weekly EMA50) captures sustained moves with appropriate frequency for daily timeframe. The weekly timeframe provides higher trend context to reduce whipsaw while maintaining trade frequency of ~7-25 trades/year.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8068_12h_donchian20_1w_ema_vol_v1"
-timeframe = "12h"
+name = "exp_8070_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
@@ -33,7 +30,7 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly EMA
+    # Calculate 1w EMA
     close_1w = df_1w['close'].values
     ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
@@ -88,9 +85,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from weekly EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # weekly close above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # weekly close below EMA50
+        # Determine market bias from 1w EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1w close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1w close below EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
