@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-exp_7125_12h_donchian20_1d_pivot_v1
-Hypothesis: 12h Donchian(20) breakout with 1d Camarilla pivot regime filter.
+exp_7126_4h_donchian20_1d_pivot_v1
+Hypothesis: 4h Donchian(20) breakout with 1d Camarilla pivot regime filter.
 In ranging markets (price between S3/R3): mean reversion at extremes with volume confirmation.
 In trending markets (breaks S4/R4): continuation breakouts in breakout direction.
-Uses 1d Camarilla pivots for structure and 12h volume for confirmation.
-Designed for 12h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
+Uses 1d Camarilla pivots for structure and 4h volume for confirmation.
+Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
 Works in both bull and bear markets by adapting to pivot-defined regimes.
 """
 
@@ -13,8 +13,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7125_12h_donchian20_1d_pivot_v1"
-timeframe = "12h"
+name = "exp_7126_4h_donchian20_1d_pivot_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -24,7 +24,7 @@ VOL_BASE_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 4  # ~4 * 12h = 2 days
+MAX_HOLD_BARS = 6  # ~6 * 4h = 1 day
 
 def generate_signals(prices):
     n = len(prices)
@@ -48,7 +48,7 @@ def generate_signals(prices):
     R4 = pivot + (range_1d * 1.1)
     S4 = pivot - (range_1d * 1.1)
     
-    # Align to LTF (12h)
+    # Align to LTF (4h)
     R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
     S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
     R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
