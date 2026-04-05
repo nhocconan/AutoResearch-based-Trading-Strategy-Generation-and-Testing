@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #10896: 12h Donchian Breakout + 1d EMA Trend + Volume Confirmation
-Hypothesis: Donchian(20) breakouts capture medium-term trends, while 1d EMA provides trend filter to avoid counter-trend trades.
-Volume confirmation ensures breakouts have institutional participation. Works in both bull (breakouts continue) and bear (failed reversals) markets.
-Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+Experiment #10896: 12h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Donchian(20) breakouts capture strong directional moves. Daily EMA provides trend bias,
+and volume filter ensures institutional participation. Works in bull (breakouts continue) and
+bear (breakouts reverse quickly) by using 1d trend filter. Target: 50-150 trades over 4 years.
 """
 
 import numpy as np
@@ -16,15 +16,15 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+DAILY_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian upper and lower bands"""
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -47,12 +47,12 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA for trend
-    ema_1d = calculate_ema(df_1d['close'].values, EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate daily EMA for trend
+    ema_daily = calculate_ema(df_daily['close'].values, DAILY_EMA_PERIOD)
+    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
     # Calculate 12h indicators
     high = prices['high'].values
@@ -60,7 +60,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -70,11 +70,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 1d EMA not available
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if daily EMA not available
+        if np.isnan(ema_daily_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -94,19 +94,19 @@ def generate_signals(prices):
                 continue
         
         # Donchian breakout conditions
-        long_breakout = not np.isnan(donchian_upper[i-1]) and close[i] > donchian_upper[i-1]
-        short_breakout = not np.isnan(donchian_lower[i-1]) and close[i] < donchian_lower[i-1]
+        breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
+        breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
         # Volume confirmation
-        volume_ok = not np.isnan(volume_ma[i]) and volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (1d EMA)
-        uptrend_1d = close[i] > ema_1d_aligned[i]
-        downtrend_1d = close[i] < ema_1d_aligned[i]
+        # Trend filter (daily)
+        uptrend_daily = close[i] > ema_daily_aligned[i]
+        downtrend_daily = close[i] < ema_daily_aligned[i]
         
         # Entry conditions
-        long_entry = long_breakout and volume_ok and uptrend_1d
-        short_entry = short_breakout and volume_ok and downtrend_1d
+        long_entry = breakout_up and volume_ok and uptrend_daily
+        short_entry = breakout_down and volume_ok and downtrend_daily
         
         # Generate signals
         if position == 0:
