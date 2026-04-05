@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #7927: 6-hour price action with 1d pivot confluence and volume confirmation.
-Hypothesis: Price breaking beyond daily pivot levels (S1/S2/S3 or R1/R2/R3) on 6h with volume > 1.5x 20-period MA 
-and aligned 1d trend (price above/below daily EMA50) captures reversal or continuation moves. 
-Daily pivot levels provide institutional reference points that work in both bull and bear markets, 
-while the 1d EMA filter ensures we trade with the higher timeframe trend. 
-Target: 50-150 total trades over 4 years (12-37/year).
+Experiment #7928: 12-hour Donchian breakout with 1w trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA 
+and aligned 1w trend (price above/below 1w EMA50) captures sustained moves. 
+The 1w timeframe provides stronger trend context than 1d to improve performance in 
+both bull and bear markets while maintaining reasonable trade frequency. 
+Target: 50-150 total trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7927_6h_pivot1d_vol_v1"
-timeframe = "6h"
+name = "exp_7928_12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-PIVOT_PERIOD = 1
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -26,74 +26,31 @@ ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
 
-def calculate_pivot_points(high, low, close):
-    """Calculate standard pivot points and support/resistance levels."""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, r2, r3, s1, s2, s3
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate 1w EMA
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
     # Price relative to EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
-    
-    # Calculate daily pivot points from previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate pivot points for each day
-    pivot_vals = np.full(len(close_1d), np.nan)
-    r1_vals = np.full(len(close_1d), np.nan)
-    r2_vals = np.full(len(close_1d), np.nan)
-    r3_vals = np.full(len(close_1d), np.nan)
-    s1_vals = np.full(len(close_1d), np.nan)
-    s2_vals = np.full(len(close_1d), np.nan)
-    s3_vals = np.full(len(close_1d), np.nan)
-    
-    for i in range(len(close_1d)):
-        if i >= PIVOT_PERIOD:  # Need previous day data
-            pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(
-                high_1d[i-1], low_1d[i-1], close_1d[i-1]
-            )
-            pivot_vals[i] = pivot
-            r1_vals[i] = r1
-            r2_vals[i] = r2
-            r3_vals[i] = r3
-            s1_vals[i] = s1
-            s2_vals[i] = s2
-            s3_vals[i] = s3
-    
-    # Align pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_vals)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_vals)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2_vals)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_vals)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_vals)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2_vals)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_vals)
+    price_vs_ema = np.where(close_1w > ema_1w, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
     
     # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Price channel (Donchian)
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -112,11 +69,11 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(price_vs_ema_aligned[i]) or np.isnan(pivot_aligned[i]):
+        if np.isnan(price_vs_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -132,28 +89,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1d EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
+        # Determine market bias from 1w EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1w close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1w close below EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions - price breaking through pivot levels
-        # Long: price breaks above R1 (in bullish bias) or S2/S3 (mean reversion in bearish bias)
-        # Short: price breaks below S1 (in bearish bias) or R2/R3 (mean reversion in bullish bias)
-        long_breakout = (
-            (bull_bias and close[i] > r1_aligned[i-1]) or  # Continuation in bullish trend
-            (not bull_bias and close[i] > s2_aligned[i-1])  # Mean reversion from oversold
-        )
-        short_breakout = (
-            (bear_bias and close[i] < s1_aligned[i-1]) or  # Continuation in bearish trend
-            (not bear_bias and close[i] < r2_aligned[i-1])  # Mean reversion from overbought
-        )
+        # Breakout conditions - require close beyond channel bands to avoid wicks
+        upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
+        lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
         # Entry conditions
-        long_entry = long_breakout and volume_confirmed
-        short_entry = short_breakout and volume_confirmed
+        long_entry = bull_bias and upper_breakout and volume_confirmed
+        short_entry = bear_bias and lower_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
