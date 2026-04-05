@@ -3,8 +3,8 @@
 Experiment #8122: 12-hour Donchian breakout with 1-day trend filter and volume confirmation.
 Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA 
 and aligned daily trend (price above/below daily EMA50) captures sustained moves with 
-appropriate frequency for 12h timeframe. Targets 50-150 trades over 4 years by using 
-daily trend filter to reduce whipsaw and avoid overtrading.
+appropriate frequency for 12h timeframe. Uses daily timeframe for stronger trend context 
+to reduce whipsaw while targeting 50-150 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
