@@ -1,40 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #8559: 6h Donchian breakout + 12h pivot reversal + volume confirmation.
-Hypothesis: Combines trend-following breakouts (Donchian) with counter-trend reversals at extreme pivot levels (R4/S4) from higher timeframe.
-Uses 12h pivots for context and volume to filter false breakouts. Works in both bull/bear by adapting to pivot levels.
-Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity with fee minimization.
+Experiment #8564: 1d Donchian breakout + 1w trend filter + volume confirmation + ATR stoploss.
+Hypothesis: Daily timeframe reduces trade frequency to combat fee drag while capturing major trends.
+Using 1-week trend filter (EMA50) ensures alignment with multi-week momentum, avoiding counter-trend trades.
+Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk.
+Targets 30-100 trades over 4 years (7-25/year) to minimize fee impact while maintaining statistical validity.
 """
 
-from mtf_data import get_alt_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8559_6h_donchian20_12h_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_8564_1d_donchian20_1w_trend_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-PIVOT_LOOKBACK = 10  # periods for pivot calculation
+TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+VOLUME_THRESHOLD = 2.0  # Increased from 1.5 to reduce trades
+SIGNAL_SIZE = 0.30
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_pivots(high, low, close):
-    """Calculate classic pivot points and support/resistance levels"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    r4 = r3 + (high - low)
-    s4 = s3 - (high - low)
-    return pivot, r1, r2, r3, r4, s1, s2, s3, s4
+ATR_STOP_MULTIPLIER = 2.5  # Increased from 2.0 to reduce whipsaws
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -51,31 +39,18 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 12h pivot points
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1w EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
     
-    # Initialize pivot arrays
-    pivot_vals = np.full(len(close_12h), np.nan)
-    r4_vals = np.full(len(close_12h), np.nan)
-    s4_vals = np.full(len(close_12h), np.nan)
+    # Price relative to 1w EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_1w > ema_1w, 1, 
+                     np.where(close_1w < ema_1w, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
     
-    # Calculate pivots for each 12h bar
-    for i in range(len(close_12h)):
-        p, r1, r2, r3, r4, s1, s2, s3, s4 = calculate_pivots(high_12h[i], low_12h[i], close_12h[i])
-        pivot_vals[i] = p
-        r4_vals[i] = r4
-        s4_vals[i] = s4
-    
-    # Align pivot data to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_vals)
-    r4_aligned = align_htf_to_ltf(prices, df_12h, r4_vals)
-    s4_aligned = align_htf_to_ltf(prices, df_12h, s4_vals)
-    
-    # Calculate LTF indicators (6h)
+    # Calculate LTF indicators (daily)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -97,11 +72,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, PIVOT_LOOKBACK, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(pivot_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
+        if np.isnan(price_vs_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -117,9 +92,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Pivot-based conditions
-        near_r4 = close[i] >= r4_aligned[i] * 0.995  # Within 0.5% of R4
-        near_s4 = close[i] <= s4_aligned[i] * 1.005  # Within 0.5% of S4
+        # Determine market bias from 1w EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1w price above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1w price below EMA50
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
@@ -128,17 +103,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry logic: 
-        # - Fade at extreme pivot levels (R4/S4) with volume
-        # - Continue breakout trend when not at extremes
-        fade_long = near_s4 and volume_confirmed  # Buy near S4 with volume
-        fade_short = near_r4 and volume_confirmed  # Sell near R4 with volume
-        breakout_long = not near_r4 and long_breakout and volume_confirmed  # Breakout unless at R4
-        breakout_short = not near_s4 and short_breakout and volume_confirmed  # Breakdown unless at S4
-        
-        # Combine signals
-        long_entry = fade_long or breakout_long
-        short_entry = fade_short or breakout_short
+        # Entry conditions
+        long_entry = bull_bias and long_breakout and volume_confirmed
+        short_entry = bear_bias and short_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
