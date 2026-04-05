@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 exp_7112_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA filter and volume confirmation.
-In ranging markets: wait for volume spike at Donchian bounds for mean reversion.
-In trending markets: breakout continuation with volume confirmation.
-Uses 1d EMA50 for trend filter and 12h volume for confirmation.
+Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
+In bull markets (price > 1d EMA50): take long breakouts above Donchian upper band.
+In bear markets (price < 1d EMA50): take short breakouts below Donchian lower band.
+Uses 1d EMA50 for trend regime and 12h volume for confirmation.
 Designed for 12h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by adapting to EMA-defined trend regime.
+Works in both bull and bear markets by only taking trades in direction of higher timeframe trend.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -19,27 +19,25 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0
+VOL_BASE_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 MAX_HOLD_BARS = 12  # ~12 * 12h = 6 days
-EMA_PERIOD = 50
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA filter
+    # Load HTF data ONCE before loop - using 1d for EMA trend
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d EMA50
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
-    
-    # Align to LTF (12h)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -68,7 +66,7 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
@@ -102,30 +100,22 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on 1d EMA50
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
+        # Determine trend regime from 1d EMA50
+        bull_regime = close[i] > ema_1d_aligned[i]
+        bear_regime = close[i] < ema_1d_aligned[i]
         
-        # Donchian breakout conditions
-        upper_break = close[i] > highest_high[i]
-        lower_break = close[i] < lowest_low[i]
-        
-        # Mean reversion at Donchian bounds with volume
-        mean_rev_long = (close[i] <= lowest_low[i] * 1.001) and vol_confirmed and below_ema
-        mean_rev_short = (close[i] >= highest_high[i] * 0.999) and vol_confirmed and above_ema
-        
-        # Continuation breakouts with volume and trend filter
-        cont_long = upper_break and vol_confirmed and above_ema
-        cont_short = lower_break and vol_confirmed and below_ema
+        # Donchian breakouts in direction of trend
+        breakout_long = bull_regime and (close[i] > highest_high[i]) and vol_confirmed
+        breakout_short = bear_regime and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if mean_rev_long or cont_long:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif mean_rev_short or cont_short:
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
