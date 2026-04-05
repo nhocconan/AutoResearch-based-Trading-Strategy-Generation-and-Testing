@@ -1,68 +1,59 @@
 #!/usr/bin/env python3
 """
-exp_7170_1d_donchian20_1w_hma_v1
-Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter for regime.
-In trending markets (price > HMA): continuation breakouts in breakout direction.
-In ranging markets (price near HMA): mean reversion at Donchian extremes with volume confirmation.
-Uses 1w HMA for trend regime and 1d volume for confirmation.
-Designed for 1d timeframe to capture swings with ~7-25 trades/year (30-100 total over 4 years).
-Works in both bull and bear markets by adapting to HMA-defined trend regime.
+exp_7171_6h_donchian20_1d_pivot_v1
+Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot regime filter.
+In trending markets (price between R3-S3): breakout continuation in breakout direction.
+In ranging markets (price outside R3-S3): mean reversion at Donchian extremes with volume confirmation.
+Uses 1d Camarilla pivots for regime detection and 6h volume for confirmation.
+Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
+Works in both bull and bear markets by adapting to pivot-defined market structure.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7170_1d_donchian20_1w_hma_v1"
-timeframe = "1d"
+name = "exp_7171_6h_donchian20_1d_pivot_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-HMA_PERIOD = 21
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # ~10 days
+MAX_HOLD_BARS = 8  # ~4 days (8*6h=48h)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1w for HMA trend
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop - using 1d for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w HMA (Hull Moving Average)
-    close_1w = df_1w['close'].values
-    half_period = HMA_PERIOD // 2
-    sqrt_period = int(np.sqrt(HMA_PERIOD))
+    # Calculate 1d Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # WMA function
-    def wma(values, period):
-        if len(values) < period:
-            return np.full_like(values, np.nan)
-        weights = np.arange(1, period + 1)
-        return np.convolve(values, weights / weights.sum(), mode='valid')
+    # Typical price for pivot calculation
+    typical_price = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # HMA calculation
-    wma_half = wma(close_1w, half_period)
-    wma_full = wma(close_1w, HMA_PERIOD)
+    # Camarilla levels
+    camarilla_h5 = typical_price + (range_1d * 1.1 / 2)  # R4
+    camarilla_h4 = typical_price + (range_1d * 1.1 / 4)  # R3
+    camarilla_h3 = typical_price + (range_1d * 1.1 / 6)  # R2
+    camarilla_l3 = typical_price - (range_1d * 1.1 / 6)  # S2
+    camarilla_l4 = typical_price - (range_1d * 1.1 / 4)  # S3
+    camarilla_l5 = typical_price - (range_1d * 1.1 / 2)  # S4
     
-    # Handle array lengths
-    if len(wma_half) > 0 and len(wma_full) > 0:
-        raw_hma = 2 * wma_half - wma_full
-        hma_values = wma(raw_hma, sqrt_period)
-        # Pad to original length
-        hma_1w = np.full_like(close_1w, np.nan)
-        hma_1w[half_period - 1:half_period - 1 + len(hma_values)] = hma_values
-    else:
-        hma_1w = np.full_like(close_1w, np.nan)
-    
-    # Align to LTF (1d)
-    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
+    # Align to LTF (6h)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)  # R3
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)  # S3
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -90,13 +81,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, HMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(hma_1w_aligned[i]):
+        if np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -124,27 +115,28 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on HMA
-        above_hma = close[i] > hma_1w_aligned[i]
-        below_hma = close[i] < hma_1w_aligned[i]
-        near_hma = np.abs(close[i] - hma_1w_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of HMA
+        # Determine market regime based on Camarilla levels
+        # Trending: price between R3 and S3 (camarilla_h4 and camarilla_l4)
+        # Ranging: price outside R3-S3 (above R3 or below S3)
+        in_trending_zone = (close[i] <= camarilla_h4_aligned[i]) and (close[i] >= camarilla_l4_aligned[i])
+        in_ranging_zone = (close[i] > camarilla_h4_aligned[i]) or (close[i] < camarilla_l4_aligned[i])
         
-        # Fade at extremes in ranging market (near HMA)
-        fade_long = near_hma and (close[i] <= lowest_low[i]) and vol_confirmed
-        fade_short = near_hma and (close[i] >= highest_high[i]) and vol_confirmed
+        # Continuation breakouts in trending market (between R3-S3)
+        continuation_long = in_trending_zone and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = in_trending_zone and (close[i] < lowest_low[i]) and vol_confirmed
         
-        # Continuation breakouts in trending market
-        continuation_long = above_hma and (close[i] > highest_high[i]) and vol_confirmed
-        continuation_short = below_hma and (close[i] < lowest_low[i]) and vol_confirmed
+        # Fade at extremes in ranging market (outside R3-S3)
+        fade_long = in_ranging_zone and (close[i] <= lowest_low[i]) and vol_confirmed
+        fade_short = in_ranging_zone and (close[i] >= highest_high[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if fade_long or continuation_long:
+            if continuation_long or fade_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif fade_short or continuation_short:
+            elif continuation_short or fade_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
