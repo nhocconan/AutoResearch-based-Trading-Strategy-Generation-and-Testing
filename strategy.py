@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #7905: 12-hour Donchian breakout with daily EMA trend and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA and aligned daily EMA trend (price above/below EMA21) captures sustained moves while avoiding whipsaw. Daily EMA provides structural bias from higher timeframe to reduce false breakouts. Designed for 12h timeframe to target 50-150 trades over 4 years with controlled risk via ATR-based stops.
+Experiment #7905: 12-hour Donchian breakout with daily trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA and aligned daily trend (price above/below daily EMA50) captures sustained moves while avoiding whipsaw. Daily EMA provides structural bias from higher timeframe to reduce false breakouts. Focus on fewer, higher-quality trades to minimize fee drag and improve generalization to bear markets. Target 50-150 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -17,7 +17,7 @@ DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-EMA_PERIOD = 21
+EMA_PERIOD = 50
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
@@ -86,8 +86,8 @@ def generate_signals(prices):
                 continue
         
         # Determine market bias from daily EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # daily close above EMA21
-        bear_bias = price_vs_ema_aligned[i] == -1  # daily close below EMA21
+        bull_bias = price_vs_ema_aligned[i] == 1   # daily close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # daily close below EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
