@@ -1,43 +1,69 @@
 #!/usr/bin/env python3
 """
-exp_7340_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Uses tighter volume threshold (1.8) and removes retest logic to reduce trade frequency.
-Targets 75-200 trades over 4 years. Works in bull/bear markets via EMA regime filter.
+exp_7339_6h_adx_regime_donchian_v1
+Hypothesis: 6h Donchian(20) breakouts filtered by 12h ADX regime and volume confirmation.
+In trending markets (ADX > 25), trade breakouts in direction of trend.
+In ranging markets (ADX < 20), fade at Donchian extremes with volume spike.
+Uses 12h HTF for regime detection to avoid whipsaws. Designed for low trade frequency (50-150/4y).
+Works in bull/bear via regime adaptation. 6h timeframe balances responsiveness and cost.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7340_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7339_6h_adx_regime_donchian_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+ADX_PERIOD = 14
+ADX_TREND_THRESHOLD = 25
+ADX_RANGE_THRESHOLD = 20
+VOL_SPIKE_MULTIPLIER = 2.0
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.8  # Increased from 1.3 to reduce false signals
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # ~40 hours
+MAX_HOLD_BARS = 8  # ~2 days
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA trend
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - using 12h for ADX regime
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate 12h ADX
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Align to LTF (4h)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # True Range
+    tr1 = pd.Series(high_12h - low_12h)
+    tr2 = pd.Series(np.abs(high_12h - np.roll(close_12h, 1)))
+    tr3 = pd.Series(np.abs(low_12h - np.roll(close_12h, 1)))
+    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_12h = tr_12h.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values
+    
+    # Directional Movement
+    up_move = pd.Series(high_12h - np.roll(high_12h, 1))
+    down_move = pd.Series(np.roll(low_12h, 1) - low_12h)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values / atr_12h
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values / atr_12h
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values
+    
+    # Align ADX to LTF (6h)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -65,13 +91,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, ADX_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(adx_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -97,29 +123,48 @@ def generate_signals(prices):
             continue
             
         # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_SPIKE_MULTIPLIER if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on EMA
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
+        # Determine market regime based on ADX
+        is_trending = adx_aligned[i] > ADX_TREND_THRESHOLD
+        is_ranging = adx_aligned[i] < ADX_RANGE_THRESHOLD
         
-        # Only continuation breakouts (no retest) - stricter entry
-        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
-        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
+        # Donchian breakout levels
+        breakout_up = close[i] > highest_high[i]
+        breakout_down = close[i] < lowest_low[i]
+        
+        # Donchian retest levels (pullback to channel)
+        retest_up = (close[i] >= lowest_low[i] * 0.995) and (close[i] <= lowest_low[i] * 1.005)
+        retest_down = (close[i] >= highest_high[i] * 0.995) and (close[i] <= highest_high[i] * 1.005)
         
         # Enter new positions only if flat
         if position == 0:
-            if continuation_long:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-            elif continuation_short:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                bars_since_entry = 0
+            if is_trending:
+                # Trend mode: trade breakouts in direction of momentum
+                if breakout_up and vol_confirmed:
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                elif breakout_down and vol_confirmed:
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+            elif is_ranging:
+                # Range mode: fade at extremes with volume spike
+                if retest_down and vol_confirmed:
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                elif retest_up and vol_confirmed:
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
             else:
+                # Transition zone: no trades
                 signals[i] = 0.0
         else:
             # Hold current position
@@ -130,44 +175,70 @@ def generate_signals(prices):
 </think>
 #!/usr/bin/env python3
 """
-exp_7340_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Uses tighter volume threshold (1.8) and removes retest logic to reduce trade frequency.
-Targets 75-200 trades over 4 years. Works in bull/bear markets via EMA regime filter.
+exp_7339_6h_adx_regime_donchian_v1
+Hypothesis: 6h Donchian(20) breakouts filtered by 12h ADX regime and volume confirmation.
+In trending markets (ADX > 25), trade breakouts in direction of trend.
+In ranging markets (ADX < 20), fade at Donchian extremes with volume spike.
+Uses 12h HTF for regime detection to avoid whipsaws. Designed for low trade frequency (50-150/4y).
+Works in bull/bear via regime adaptation. 6h timeframe balances responsiveness and cost.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7340_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7339_6h_adx_regime_donchian_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+ADX_PERIOD = 14
+ADX_TREND_THRESHOLD = 25
+ADX_RANGE_THRESHOLD = 20
+VOL_SPIKE_MULTIPLIER = 2.0
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.8  # Increased from 1.3 to reduce false signals
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # ~40 hours
+MAX_HOLD_BARS = 8  # ~2 days
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA trend
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - using 12h for ADX regime
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate 12h ADX
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Align to LTF (4h)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # True Range
+    tr1 = pd.Series(high_12h - low_12h)
+    tr2 = pd.Series(np.abs(high_12h - np.roll(close_12h, 1)))
+    tr3 = pd.Series(np.abs(low_12h - np.roll(close_12h, 1)))
+    tr_12h = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr_12h = tr_12h.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values
+    
+    # Directional Movement
+    up_move = pd.Series(high_12h - np.roll(high_12h, 1))
+    down_move = pd.Series(np.roll(low_12h, 1) - low_12h)
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    
+    # Smoothed DM
+    plus_di = 100 * pd.Series(plus_dm).ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values / atr_12h
+    minus_di = 100 * pd.Series(minus_dm).ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values / atr_12h
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values
+    
+    # Align ADX to LTF (6h)
+    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -195,13 +266,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, ADX_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(adx_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -227,29 +298,48 @@ def generate_signals(prices):
             continue
             
         # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_SPIKE_MULTIPLIER if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on EMA
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
+        # Determine market regime based on ADX
+        is_trending = adx_aligned[i] > ADX_TREND_THRESHOLD
+        is_ranging = adx_aligned[i] < ADX_RANGE_THRESHOLD
         
-        # Only continuation breakouts (no retest) - stricter entry
-        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
-        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
+        # Donchian breakout levels
+        breakout_up = close[i] > highest_high[i]
+        breakout_down = close[i] < lowest_low[i]
+        
+        # Donchian retest levels (pullback to channel)
+        retest_up = (close[i] >= lowest_low[i] * 0.995) and (close[i] <= lowest_low[i] * 1.005)
+        retest_down = (close[i] >= highest_high[i] * 0.995) and (close[i] <= highest_high[i] * 1.005)
         
         # Enter new positions only if flat
         if position == 0:
-            if continuation_long:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-            elif continuation_short:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                bars_since_entry = 0
+            if is_trending:
+                # Trend mode: trade breakouts in direction of momentum
+                if breakout_up and vol_confirmed:
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                elif breakout_down and vol_confirmed:
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+            elif is_ranging:
+                # Range mode: fade at extremes with volume spike
+                if retest_down and vol_confirmed:
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                elif retest_up and vol_confirmed:
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
             else:
+                # Transition zone: no trades
                 signals[i] = 0.0
         else:
             # Hold current position
