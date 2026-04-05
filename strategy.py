@@ -1,52 +1,56 @@
 #!/usr/bin/env python3
 """
-exp_7054_1h_donchian20_4h_ema1d_vol_v1
-Hypothesis: 1h Donchian(20) breakout with 4h EMA50 trend filter and 1d EMA200 regime filter, volume confirmation.
-In bull markets (price > 1d EMA200): long breakouts only when price > 4h EMA50. In bear markets (price < 1d EMA200): short breakouts only when price < 4h EMA50.
-4h EMA50 provides intermediate-term trend, 1d EMA200 avoids counter-trend trades in major regime.
-Session filter (08-20 UTC) reduces noise. Target: 60-150 total trades over 4 years.
+exp_7055_6h_donchian20_1w_pivot_vol_v1
+Hypothesis: 6h Donchian(20) breakout with 1w Camarilla pivot regime filter and volume confirmation.
+In weekly bull regime (close > weekly pivot): only long breakouts. In weekly bear regime (close < weekly pivot): only short breakouts.
+Weekly pivot provides major trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
+Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
+Works in both bull and bear markets by aligning with weekly pivot regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7054_1h_donchian20_4h_ema1d_vol_v1"
-timeframe = "1h"
+name = "exp_7055_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 24  # ~1 day (1h bars)
-EMA_4H_PERIOD = 50
-EMA_1D_PERIOD = 200
+MAX_HOLD_BARS = 30  # ~7.5 months (6h bars)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 4h for EMA50, 1d for EMA200
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - using 1w for Camarilla pivot
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA50
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=EMA_4H_PERIOD, adjust=False, min_periods=EMA_4H_PERIOD).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate 1w Camarilla pivot levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA200
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_1D_PERIOD, adjust=False, min_periods=EMA_1D_PERIOD).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_1w = high_1w - low_1w
+    r3_1w = pivot_1w + range_1w * 1.1 / 2
+    s3_1w = pivot_1w - range_1w * 1.1 / 2
+    r4_1w = pivot_1w + range_1w * 1.1
+    s4_1w = pivot_1w - range_1w * 1.1
     
-    # Pre-compute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    # Align to LTF (6h)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
+    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -74,17 +78,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_4H_PERIOD, EMA_1D_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Session filter: 08-20 UTC only
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
         # Skip if HTF data not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+        if np.isnan(pivot_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -109,27 +109,24 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        if not in_session:
-            # Outside session: maintain current position or flat
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-            continue
-            
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend direction from 4h EMA50 and 1d EMA200 regime
-        # Bull regime: price > 1d EMA200
-        bull_regime = close[i] > ema_1d_aligned[i]
-        # Bear regime: price < 1d EMA200
-        bear_regime = close[i] < ema_1d_aligned[i]
+        # Determine weekly regime from pivot
+        weekly_bull = close[i] > pivot_1w_aligned[i]
+        weekly_bear = close[i] < pivot_1w_aligned[i]
         
-        # Intermediate trend from 4h EMA50
-        intermediate_uptrend = close[i] > ema_4h_aligned[i]
-        intermediate_downtrend = close[i] < ema_4h_aligned[i]
-        
-        # Breakout signals aligned with trend and regime
-        long_breakout = bull_regime and intermediate_uptrend and (close[i] > highest_high[i]) and vol_confirmed
-        short_breakout = bear_regime and intermediate_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
+        # Breakout signals aligned with weekly regime
+        # Long: price breaks above R4 in bull regime OR breaks above highest high with volume in bull regime
+        long_breakout = weekly_bull and vol_confirmed and (
+            (close[i] > r4_1w_aligned[i]) or 
+            (close[i] > highest_high[i])
+        )
+        # Short: price breaks below S4 in bear regime OR breaks below lowest low with volume in bear regime
+        short_breakout = weekly_bear and vol_confirmed and (
+            (close[i] < s4_1w_aligned[i]) or 
+            (close[i] < lowest_low[i])
+        )
         
         # Enter new positions only if flat
         if position == 0:
