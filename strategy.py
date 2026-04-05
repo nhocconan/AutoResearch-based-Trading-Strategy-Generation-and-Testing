@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #7683: 4-hour Donchian(20) breakout with 12-hour EMA50 trend filter and volume confirmation.
-Hypothesis: Combining 4h price breakouts with 12h trend filter (EMA50) and volume confirmation 
-will reduce false signals while maintaining sufficient trades. The 12h EMA50 provides smoother 
-trend detection than shorter periods, reducing whipsaw in both bull and bear markets. 
-Target: 75-200 trades over 4 years.
+Hypothesis: Using 12-hour EMA50 as trend filter (instead of 1-day EMA200) provides faster adaptation to trend changes while still filtering counter-trend trades. Combined with Donchian breakouts and volume confirmation, this should work in both bull and bear markets by capturing strong trending moves. Targets 75-200 trades over 4 years.
 """
 
-from mtf_data import get_ftf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
@@ -27,7 +24,7 @@ ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -85,7 +82,7 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market regime using 12h EMA50
+        # Determine market regime
         bull_regime = close[i] > ema_12h_50_aligned[i]   # price above 12h EMA50
         bear_regime = close[i] < ema_12h_50_aligned[i]   # price below 12h EMA50
         
