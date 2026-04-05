@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #8847: 6h Donchian(20) breakout + 1d pivot direction + volume confirmation.
-Hypothesis: 6h timeframe balances trade frequency and signal quality. Using daily pivot levels
-(Pivot, R1, S1) as trend filter ensures alignment with institutional key levels. Breakouts in
-direction of pivot bias capture institutional flow. Volume confirmation avoids false breakouts.
-Targets 100-200 total trades over 4 years (25-50/year) for statistical validity while managing
-fee drift. Works in bull (breakouts continue) and bear (breakouts reverse at pivot levels).
+Experiment #8847: 6h Donchian breakout + 1d pivot direction + volume confirmation + ATR stoploss.
+Hypothesis: 6h timeframe balances trade frequency and signal quality. Using 1d pivot points (classic support/resistance) for trend direction: 
+price above daily pivot = bullish bias, below = bearish bias. Donchian(20) breakout in direction of pivot bias with volume confirmation 
+captures institutional moves. Works in bull (breakouts continuation) and bear (breakdowns continuation) markets. 
+Targets 50-150 total trades over 4 years (12-37/year) to avoid fee drag while maintaining statistical validity.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -18,12 +17,12 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-PIVOT_LOOKBACK = 1  # Use previous day's pivot
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+PIVOT_LOOKBACK = 1  # Use previous day's pivot
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -35,7 +34,7 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def calculate_pivot(high, low, close):
-    """Calculate classic pivot point: P = (H + L + C)/3"""
+    """Calculate classic pivot point: (H + L + C) / 3"""
     return (high + low + close) / 3.0
 
 def generate_signals(prices):
@@ -46,15 +45,15 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily pivot and bias
+    # Calculate 1d pivot points
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    pivot_1d = calculate_pivot(high_1d, low_1d, close_1d)
     
-    pivot = calculate_pivot(high_1d, low_1d, close_1d)
-    # Bullish bias: price above pivot, Bearish: price below pivot
-    price_vs_pivot = np.where(close_1d > pivot, 1, 
-                       np.where(close_1d < pivot, -1, 0))  # 1=bullish, -1=bearish, 0=at pivot
+    # Price relative to 1d pivot: above = bullish bias, below = bearish bias
+    price_vs_pivot = np.where(close_1d > pivot_1d, 1, 
+                     np.where(close_1d < pivot_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at pivot
     price_vs_pivot_aligned = align_htf_to_ltf(prices, df_1d, price_vs_pivot)
     
     # Calculate LTF indicators (6h)
@@ -99,7 +98,7 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from daily pivot
+        # Determine market bias from 1d pivot
         bull_bias = price_vs_pivot_aligned[i] == 1   # 1d price above pivot
         bear_bias = price_vs_pivot_aligned[i] == -1  # 1d price below pivot
         
