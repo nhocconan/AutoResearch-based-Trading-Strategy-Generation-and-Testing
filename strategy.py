@@ -1,24 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #9890: 1d Donchian Breakout + Weekly Trend + Volume Spike
-Hypothesis: Donchian(20) breakouts on 1d timeframe in the direction of weekly trend (EMA40) with volume confirmation provide high-probability trend continuation trades. Works in bull markets (breakouts above weekly EMA) and bear markets (breakdowns below weekly EMA). Volume filters reduce false breakouts. Target: 30-100 total trades over 4 years (7-25/year).
+Experiment #9891: 6h Donchian Breakout + Daily Trend + Volume Spike + Volatility Filter
+Hypothesis: Donchian(20) breakouts in the direction of daily trend (EMA20) with volume confirmation and volatility filter (ATR ratio) provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA) and bear markets (breakdowns below daily EMA). Volume and volatility filters reduce false breakouts. Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9890_1d_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "exp_9891_6h_donchian_breakout_daily_trend_volume_volatility_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_SPIKE_MULTIPLIER = 1.5
-WEEKLY_EMA_PERIOD = 40
+DAILY_EMA_PERIOD = 20
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
+VOLATILITY_LOOKBACK = 20
+VOLATILITY_THRESHOLD = 1.5  # ATR ratio > 1.5 indicates high volatility
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
@@ -44,17 +46,17 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for trend filter
-    df_weekly = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop for trend filter
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend direction
-    weekly_close = df_weekly['close'].values
-    weekly_ema = calculate_ema(weekly_close, WEEKLY_EMA_PERIOD)
+    # Calculate daily EMA for trend direction
+    daily_close = df_daily['close'].values
+    daily_ema = calculate_ema(daily_close, DAILY_EMA_PERIOD)
     
-    # Align weekly EMA to 1d timeframe
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
+    # Align daily EMA to 6h timeframe
+    daily_ema_aligned = align_htf_to_ltf(prices, df_daily, daily_ema)
     
-    # Calculate 1d indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -66,8 +68,11 @@ def generate_signals(prices):
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ATR for risk management
+    # ATR for risk management and volatility filter
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    # ATR ratio: current ATR / average ATR over lookback period
+    atr_ma = pd.Series(atr).rolling(window=VOLATILITY_LOOKBACK, min_periods=VOLATILITY_LOOKBACK).mean().values
+    atr_ratio = atr / atr_ma  # >1 indicates higher than average volatility
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -75,11 +80,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, 20) + 1
+    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, 20, VOLATILITY_LOOKBACK) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(weekly_ema_aligned[i]):
+        # Skip if daily EMA or volatility data not available
+        if np.isnan(daily_ema_aligned[i]) or np.isnan(atr_ratio[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -98,17 +103,20 @@ def generate_signals(prices):
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        above_weekly_ema = close[i] > weekly_ema_aligned[i]
-        below_weekly_ema = close[i] < weekly_ema_aligned[i]
+        # Volatility filter: only trade when volatility is above average
+        volatility_filter = atr_ratio[i] > VOLATILITY_THRESHOLD if not np.isnan(atr_ratio[i]) else False
+        
+        # Trend filter: price above/below daily EMA
+        above_daily_ema = close[i] > daily_ema_aligned[i]
+        below_daily_ema = close[i] < daily_ema_aligned[i]
         
         # Breakout conditions
         bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
         bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
         
-        # Entry conditions: breakout in direction of weekly trend with volume
-        long_entry = bullish_breakout and above_weekly_ema and volume_spike
-        short_entry = bearish_breakout and below_weekly_ema and volume_spike
+        # Entry conditions: breakout in direction of daily trend with volume and volatility
+        long_entry = bullish_breakout and above_daily_ema and volume_spike and volatility_filter
+        short_entry = bearish_breakout and below_daily_ema and volume_spike and volatility_filter
         
         # Generate signals
         if position == 0:
@@ -130,3 +138,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</lyra>
