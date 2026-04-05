@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 exp_7410_1d_donchian20_1w_ema_vol_v1
-Hypothesis: Daily Donchian(20) breakout with weekly EMA(50) trend filter and volume confirmation.
-Designed for low trade frequency (target: 30-100 total over 4 years) to minimize fee drift.
-Weekly EMA filter ensures we only trade in the direction of the higher timeframe trend,
-reducing whipsaws in sideways markets while capturing trends in both bull and bear regimes.
+Hypothesis: 1d Donchian(20) breakout with 1w EMA(20) trend filter and volume confirmation.
+Designed for very low trade frequency (<25/year) to minimize fee drift in 2025 bear market.
+Works in bull/bear via 1w EMA filter: only long when above 1w EMA, short when below.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -17,30 +16,30 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+EMA_PERIOD = 20
 VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 2.0
+VOL_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_DAYS = 25  # ~1 month max hold
+ATR_STOP_MULTIPLIER = 2.0
+MAX_HOLD_DAYS = 10
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
+    # Load HTF data ONCE before loop - using 1w for EMA trend
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly EMA
+    # Calculate 1w EMA
     close_1w = df_1w['close'].values
     ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align to daily timeframe
+    # Align to LTF (1d)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate daily indicators
+    # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -71,7 +70,7 @@ def generate_signals(prices):
     for i in range(start, n):
         days_since_entry += 1
         
-        # Skip if weekly EMA not available
+        # Skip if HTF data not available
         if np.isnan(ema_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
@@ -100,11 +99,11 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on weekly EMA
+        # Determine market regime based on 1w EMA
         above_ema = close[i] > ema_1w_aligned[i]
         below_ema = close[i] < ema_1w_aligned[i]
         
-        # Breakout entries in trending market
+        # Breakout entries with volume confirmation
         breakout_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
         breakout_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
         
@@ -127,4 +126,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-</s>
