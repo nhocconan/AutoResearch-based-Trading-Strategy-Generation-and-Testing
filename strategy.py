@@ -1,37 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #10396: 12h Donchian Breakout + Daily Trend + Volume Spike
-Hypothesis: Donchian(20) breakouts on 12h timeframe in the direction of daily trend (EMA50) with volume confirmation
-provide high-probability trend continuation trades. 12h reduces trade frequency vs 4h, avoiding overtrading while
-capturing major trends. Works in bull markets (breakouts above daily EMA) and bear markets (breakdowns below daily EMA).
-Volume filters reduce false breakouts. Target: 50-150 total trades over 4 years (12-37/year).
+Experiment #10399: 6h Chandelier Exit Reversal with 12h Trend Filter
+Hypothesis: Chandelier Exit (trailing stop based on ATR) provides dynamic support/resistance.
+In ranging markets, price reverses at these levels; in trending markets, trailing stop follows.
+Combined with 12h EMA trend filter to only take reversals in direction of higher timeframe trend.
+Works in both bull/bear: reversals catch pullbacks in uptrend and bounces in downtrend.
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10396_12h_donchian_breakout_daily_trend_volume_v1"
-timeframe = "12h"
+name = "exp_10399_6h_chandelier_exit_reversal_12h_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
-DAILY_EMA_PERIOD = 50
+CHANDELIER_PERIOD = 22
+ATR_PERIOD = 22
+CHANDELIER_MULTIPLIER = 3.0
+TREND_EMA_PERIOD = 50
 SIGNAL_SIZE = 0.25
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -42,234 +32,96 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def generate_signals(prices):
-    n = len(prices)
-    if n < 100:
-        return np.zeros(n)
-    
-    # Load daily data ONCE before loop for trend filter
-    df_daily = get_htf_data(prices, '1d')
-    
-    # Calculate daily EMA for trend direction
-    daily_close = df_daily['close'].values
-    daily_ema = calculate_ema(daily_close, DAILY_EMA_PERIOD)
-    
-    # Align daily EMA to 12h timeframe
-    daily_ema_aligned = align_htf_to_ltf(prices, df_daily, daily_ema)
-    
-    # Calculate 12h indicators
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Donchian channels
-    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
-    
-    # Volume moving average for spike detection
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for risk management
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    stop_price = 0.0
-    
-    # Start from warmup period
-    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, 20) + 1
-    
-    for i in range(start, n):
-        # Skip if daily EMA not available
-        if np.isnan(daily_ema_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-            continue
-            
-        # Check stoploss
-        if position == 1:  # long position
-            if close[i] <= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
-        elif position == -1:  # short position
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
-        
-        # Volume spike confirmation
-        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
-        
-        # Trend filter: price above/below daily EMA
-        above_daily_ema = close[i] > daily_ema_aligned[i]
-        below_daily_ema = close[i] < daily_ema_aligned[i]
-        
-        # Breakout conditions
-        bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
-        bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
-        
-        # Entry conditions: breakout in direction of daily trend with volume
-        long_entry = bullish_breakout and above_daily_ema and volume_spike
-        short_entry = bearish_breakout and below_daily_ema and volume_spike
-        
-        # Generate signals
-        if position == 0:
-            if long_entry:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            signals[i] = SIGNAL_SIZE
-        elif position == -1:
-            signals[i] = -SIGNAL_SIZE
-    
-    return signals
-
-</think>
-
-#!/usr/bin/env python3
-"""
-Experiment #10396: 12h Donchian Breakout + Daily Trend + Volume Spike
-Hypothesis: Donchian(20) breakouts on 12h timeframe in the direction of daily trend (EMA50) with volume confirmation
-provide high-probability trend continuation trades. 12h reduces trade frequency vs 4h, avoiding overtrading while
-capturing major trends. Works in bull markets (breakouts above daily EMA) and bear markets (breakdowns below daily EMA).
-Volume filters reduce false breakouts. Target: 50-150 total trades over 4 years (12-37/year).
-"""
-
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "exp_10396_12h_donchian_breakout_daily_trend_volume_v1"
-timeframe = "12h"
-leverage = 1.0
-
-# Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
-DAILY_EMA_PERIOD = 50
-SIGNAL_SIZE = 0.25
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def calculate_ema(close, period):
     """Calculate EMA"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
+def calculate_chandelier_exit(high, low, close, atr, period, multiplier):
+    """Calculate Chandelier Exit (long and short)"""
+    # For long positions: highest high - ATR * multiplier
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    chandelier_long = highest_high - (atr * multiplier)
+    
+    # For short positions: lowest low + ATR * multiplier
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    chandelier_short = lowest_low + (atr * multiplier)
+    
+    return chandelier_long, chandelier_short
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for trend filter
-    df_daily = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily EMA for trend direction
-    daily_close = df_daily['close'].values
-    daily_ema = calculate_ema(daily_close, DAILY_EMA_PERIOD)
+    # Calculate 12h EMA for trend direction
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
     
-    # Align daily EMA to 12h timeframe
-    daily_ema_aligned = align_htf_to_ltf(prices, df_daily, daily_ema)
+    # Align 12h EMA to 6h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 12h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Donchian channels
-    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
-    
-    # Volume moving average for spike detection
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ATR for risk management
+    # ATR for Chandelier Exit
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Chandelier Exit levels
+    chandelier_long, chandelier_short = calculate_chandelier_exit(
+        high, low, close, atr, CHANDELIER_PERIOD, CHANDELIER_MULTIPLIER
+    )
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, 20) + 1
+    start = max(CHANDELIER_PERIOD, ATR_PERIOD, TREND_EMA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily EMA not available
-        if np.isnan(daily_ema_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        # Skip if 12h EMA not available
+        if np.isnan(ema_12h_aligned[i]):
+            signals[i] = 0.0
             continue
-            
-        # Check stoploss
-        if position == 1:  # long position
-            if close[i] <= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
-        elif position == -1:  # short position
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
         
-        # Volume spike confirmation
-        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
+        # Determine trend direction from 12h EMA
+        uptrend = close[i] > ema_12h_aligned[i]
+        downtrend = close[i] < ema_12h_aligned[i]
         
-        # Trend filter: price above/below daily EMA
-        above_daily_ema = close[i] > daily_ema_aligned[i]
-        below_daily_ema = close[i] < daily_ema_aligned[i]
-        
-        # Breakout conditions
-        bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
-        bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
-        
-        # Entry conditions: breakout in direction of daily trend with volume
-        long_entry = bullish_breakout and above_daily_ema and volume_spike
-        short_entry = bearish_breakout and below_daily_ema and volume_spike
+        # Chandelier Exit reversal signals
+        # Long: price crosses above Chandelier long (short covering)
+        long_signal = (close[i] > chandelier_long[i]) and (close[i-1] <= chandelier_long[i-1]) if not np.isnan(chandelier_long[i]) else False
+        # Short: price crosses below Chandelier short (long liquidation)
+        short_signal = (close[i] < chandelier_short[i]) and (close[i-1] >= chandelier_short[i-1]) if not np.isnan(chandelier_short[i]) else False
         
         # Generate signals
         if position == 0:
-            if long_entry:
+            # Only take longs in uptrend, shorts in downtrend
+            if long_signal and uptrend:
                 signals[i] = SIGNAL_SIZE
                 position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
+            elif short_signal and downtrend:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            signals[i] = SIGNAL_SIZE
+            # Long: exit when price crosses below Chandelier long
+            if close[i] < chandelier_long[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = SIGNAL_SIZE
         elif position == -1:
-            signals[i] = -SIGNAL_SIZE
+            # Short: exit when price crosses above Chandelier short
+            if close[i] > chandelier_short[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -SIGNAL_SIZE
     
     return signals
-
-</think>
