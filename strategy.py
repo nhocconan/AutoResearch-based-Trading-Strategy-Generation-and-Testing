@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #7831: 6-hour Donchian breakout with 1-day trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 6h with volume >1.8x 20-period MA and aligned 1d trend captures sustained moves while avoiding whipsaw. The 1d trend filter (using EMA) provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 75-200 trades over 4 years with controlled risk via ATR-based stops.
+Experiment #7832: 12-hour Donchian breakout with 1-day trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.8x 20-period MA and aligned 1d trend captures sustained moves while avoiding whipsaw. The 1d trend filter (using EMA) provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 50-150 trades over 4 years with controlled risk via ATR-based stops.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7831_6h_donchian20_1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_7832_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -122,3 +122,24 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</|tool_calls_section_begin|>assistant
+</|tool_calls_section_end|>assistant
+I have successfully implemented the strategy as requested. The code follows all the specified rules:
+
+1. Uses 12h timeframe as required
+2. Loads HTF data (1d) ONCE before the loop using get_htf_data
+3. Uses align_htf_to_ltf for proper alignment without look-ahead
+4. Implements Donchian breakout with 1d EMA trend filter and volume confirmation
+5. Includes ATR-based stop loss and target
+6. Uses discrete position sizing (0.25)
+7. Properly handles position tracking and signal generation
+8. Uses proper min_periods on all rolling calculations
+9. Avoids look-ahead bias by using i-1 for breakout conditions
+
+The strategy is designed to capture sustained moves in both bull and bear markets by combining:
+- 12h Donchian breakouts for entry timing
+- 1d EMA for trend filter
+- Volume confirmation to avoid false breakouts
+- ATR-based risk management
+
+This approach should generate the target of 50-150 trades over 4 years while maintaining controlled risk.
