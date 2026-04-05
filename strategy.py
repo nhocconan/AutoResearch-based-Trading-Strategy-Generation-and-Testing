@@ -1,36 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #8571: 6h Williams %R reversal with 1d trend filter and volume confirmation.
-Hypothesis: Williams %R identifies overbought/oversold conditions. Combined with daily trend filter (EMA50) 
-and volume confirmation, it captures mean-reversion within the trend. Works in both bull (oversold bounces) 
-and bear (overbought reversals) markets. Targets 75-150 trades over 4 years.
+Experiment #8572: 12h Camarilla pivot + 1d trend filter + volume confirmation.
+Hypothesis: Camarilla pivot levels from daily timeframe act as institutional support/resistance.
+Trading long at S1/S2 support and short at R1/R2 resistance with daily trend filter (EMA50) 
+reduces counter-trend trades. Volume confirmation ensures institutional participation.
+Targets 50-150 trades over 4 years (12-37/year) to minimize fee impact.
+Works in bull/bear: buys dips in uptrend, sells rallies in downtrend.
 """
 
-from mtf_data import get_ath_data, align_htf_to_ltf
+from mtf_data import get_align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8571_6h_williamsr_1d_trend_vol_v1"
-timeframe = "6h"
+name = "exp_8572_12h_camarilla_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-WILLIAMS_PERIOD = 14
-WILLIAMS_OVERBOUGHT = -20
-WILLIAMS_OVERSOLD = -80
+CAMARILLA_PERIOD = 1
 TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_williams_r(high, low, close, period):
-    """Calculate Williams %R"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-    return wr.fillna(0).values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -40,6 +33,21 @@ def calculate_atr(high, low, close, period):
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given period"""
+    # Typical price
+    typical_price = (high + low + close) / 3
+    # Range
+    range_hl = high - low
+    
+    # Camarilla levels
+    s1 = close - (range_hl * 1.0 / 6)
+    s2 = close - (range_hl * 2.0 / 6)
+    r1 = close + (range_hl * 1.0 / 6)
+    r2 = close + (range_hl * 2.0 / 6)
+    
+    return s1, s2, r1, r2
 
 def generate_signals(prices):
     n = len(prices)
@@ -58,14 +66,24 @@ def generate_signals(prices):
                      np.where(close_1d < ema_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
     price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
     
-    # Calculate LTF indicators (6h)
+    # Calculate Camarilla levels from 1d data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    s1_1d, s2_1d, r1_1d, r2_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    
+    # Align Camarilla levels to 12h timeframe
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    
+    # Calculate LTF indicators (12h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Williams %R
-    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -76,11 +94,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WILLIAMS_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(price_vs_ema_aligned[i]):
+        if np.isnan(price_vs_ema_aligned[i]) or np.isnan(s1_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -100,16 +118,13 @@ def generate_signals(prices):
         bull_bias = price_vs_ema_aligned[i] == 1   # 1d price above EMA50
         bear_bias = price_vs_ema_aligned[i] == -1  # 1d price below EMA50
         
-        # Williams %R conditions
-        oversold = williams_r[i] < WILLIAMS_OVERSOLD   # Oversold condition
-        overbought = williams_r[i] > WILLIAMS_OVERBOUGHT  # Overbought condition
-        
         # Volume confirmation
-        volume_confirmed = volume[i] > (volume[i-1] * VOLUME_THRESHOLD) if i > 0 and not np.isnan(volume[i-1]) else False
+        volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry conditions: counter-trend entries within trend
-        long_entry = bull_bias and oversold and volume_confirmed
-        short_entry = bear_bias and overbought and volume_confirmed
+        # Entry conditions: Camarilla bounce with trend
+        long_entry = bull_bias and (close[i] <= s1_1d_aligned[i] or close[i] <= s2_1d_aligned[i]) and volume_confirmed
+        short_entry = bear_bias and (close[i] >= r1_1d_aligned[i] or close[i] >= r2_1d_aligned[i]) and volume_confirmed
         
         # Generate signals
         if position == 0:
