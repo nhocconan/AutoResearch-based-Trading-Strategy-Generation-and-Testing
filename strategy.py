@@ -1,33 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #10214: 1h Donchian Breakout + 4h Trend + Volume Spike
-Hypothesis: Donchian(20) breakouts in the direction of 4h trend (EMA40) with volume confirmation
-provide high-probability trend continuation trades. Uses 4h for signal direction and 1h for entry timing.
-Session filter (08-20 UTC) reduces noise trades. Target: 60-150 total trades over 4 years (15-38/year).
-Works in bull markets (breakouts above 4h EMA) and bear markets (breakdowns below 4h EMA).
+Experiment #10215: 6h Elder Ray + Volume Spike + 1d Trend
+Hypothesis: Elder Ray (Bull/Bear Power) identifies bull/bear strength; entering on power expansions with volume spikes in the direction of the daily trend filters false signals. Works in bull markets (bull power expansion) and bear markets (bear power expansion). Volume confirms institutional participation. Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10214_1h_donchian_breakout_4h_trend_volume_v1"
-timeframe = "1h"
+name = "exp_10215_6h_elder_ray_volume_spike_daily_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
-TREND_EMA_PERIOD = 40
-SIGNAL_SIZE = 0.20
+ELDER_RAY_PERIOD = 13
+VOLUME_SPIKE_MULTIPLIER = 2.0
+DAILY_EMA_PERIOD = 50
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -47,24 +38,30 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop for trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Load daily data ONCE before loop for trend filter
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = calculate_ema(close_4h, TREND_EMA_PERIOD)
+    # Calculate daily EMA for trend direction
+    daily_close = df_daily['close'].values
+    daily_ema = calculate_ema(daily_close, DAILY_EMA_PERIOD)
     
-    # Align 4h EMA to 1h timeframe
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Align daily EMA to 6h timeframe
+    daily_ema_aligned = align_htf_to_ltf(prices, df_daily, daily_ema)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    # Elder Ray components
+    ema_close = calculate_ema(close, ELDER_RAY_PERIOD)
+    bull_power = high - ema_close
+    bear_power = low - ema_close
+    
+    # Smooth the power values
+    bull_power_smooth = pd.Series(bull_power).ewm(span=ELDER_RAY_PERIOD, adjust=False, min_periods=ELDER_RAY_PERIOD).mean().values
+    bear_power_smooth = pd.Series(bear_power).ewm(span=ELDER_RAY_PERIOD, adjust=False, min_periods=ELDER_RAY_PERIOD).mean().values
     
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -72,29 +69,18 @@ def generate_signals(prices):
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Session filter: 08-20 UTC
-    session_mask = (prices.index.hour >= 8) & (prices.index.hour < 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, 20) + 1
+    start = max(ELDER_RAY_PERIOD * 2, DAILY_EMA_PERIOD, 20) + 1
     
     for i in range(start, n):
-        # Skip if outside trading session
-        if not session_mask[i]:
-            signals[i] = 0.0
-            position = 0
-            entry_price = 0.0
-            stop_price = 0.0
-            continue
-            
-        # Skip if 4h EMA not available
-        if np.isnan(ema_4h_aligned[i]):
-            signals[i] = 0.0
+        # Skip if daily EMA not available
+        if np.isnan(daily_ema_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
         # Check stoploss
@@ -102,31 +88,27 @@ def generate_signals(prices):
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                stop_price = 0.0
                 continue
         elif position == -1:  # short position
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                stop_price = 0.0
                 continue
         
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below 4h EMA
-        above_4h_ema = close[i] > ema_4h_aligned[i]
-        below_4h_ema = close[i] < ema_4h_aligned[i]
+        # Trend filter: price above/below daily EMA
+        above_daily_ema = close[i] > daily_ema_aligned[i]
+        below_daily_ema = close[i] < daily_ema_aligned[i]
         
-        # Breakout conditions
-        bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
-        bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
+        # Elder Ray signals: expanding power in direction of trend
+        bull_power_expanding = bull_power_smooth[i] > bull_power_smooth[i-1] if i > 0 else False
+        bear_power_expanding = bear_power_smooth[i] < bear_power_smooth[i-1] if i > 0 else False  # more negative = expanding bear power
         
-        # Entry conditions: breakout in direction of 4h trend with volume
-        long_entry = bullish_breakout and above_4h_ema and volume_spike
-        short_entry = bearish_breakout and below_4h_ema and volume_spike
+        # Entry conditions: power expansion with volume in direction of daily trend
+        long_entry = bull_power_expanding and above_daily_ema and volume_spike
+        short_entry = bear_power_expanding and below_daily_ema and volume_spike
         
         # Generate signals
         if position == 0:
