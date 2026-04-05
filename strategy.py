@@ -11,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8369_4h_donchian20_1d_trend_vol_v2"
+name = "exp_8369_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
