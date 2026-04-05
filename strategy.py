@@ -2,11 +2,11 @@
 """
 exp_7328_12h_donchian20_1w_ema_vol_v1
 Hypothesis: 12h Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
-In trending markets (price > EMA): continuation breakouts in breakout direction.
-In ranging markets (price near EMA): mean reversion at Donchian extremes with volume confirmation.
+In trending markets (price > 1w EMA): continuation breakouts in breakout direction.
+In ranging markets (price near 1w EMA): mean reversion at Donchian extremes with volume confirmation.
 Uses 1w EMA for trend regime and 12h volume for confirmation.
 Designed for 12h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by adapting to EMA-defined trend regime.
+Works in both bull and bear markets by adapting to 1w EMA-defined trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -25,11 +25,11 @@ VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # ~120 hours (5 days)
+MAX_HOLD_BARS = 5  # ~60 hours (5 * 12h)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop - using 1w for EMA trend
@@ -102,7 +102,7 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on EMA
+        # Determine market regime based on 1w EMA
         above_ema = close[i] > ema_1w_aligned[i]
         below_ema = close[i] < ema_1w_aligned[i]
         near_ema = np.abs(close[i] - ema_1w_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of EMA
@@ -134,3 +134,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
