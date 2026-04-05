@@ -1,54 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #11131: 6h Williams Alligator + Elder Ray with 1d Trend Filter
-Hypothesis: Williams Alligator identifies trend direction and strength. Elder Ray measures bull/bear power.
-Combined with 1d trend filter, this captures strong trends while avoiding whipsaws in chop.
-Works in bull (strong uptrends) and bear (strong downtrends) by requiring alignment across timeframes.
-Target: 75-200 total trades over 4 years.
+Experiment #11132: 12h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Donchian(20) breakouts capture strong directional moves. Daily EMA provides trend bias,
+and volume filter ensures institutional participation. Works in bull (breakouts continue) and
+bear (breakouts reverse quickly) by using 1d trend filter. Target: 50-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11131_6h_alligator_elder_1d_trend_v1"
-timeframe = "6h"
+name = "exp_11132_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-ALLIGATOR_PERIOD = 13
-ELDER_RAY_PERIOD = 13
-SMOOTHING_FACTOR = 8
-EMA_TREND_PERIOD = 21
+DONCHIAN_PERIOD = 20
+DAILY_EMA_PERIOD = 21
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_alligator_lines(price, period, smoothing):
-    """Calculate Williams Alligator lines: Jaw, Teeth, Lips"""
-    # Jaw (Blue) - 13-period SMMA shifted 8 bars
-    jaw = pd.Series(price).rolling(window=period, center=False).mean()
-    jaw = jaw.rolling(window=smoothing, center=False).mean()
-    jaw = jaw.shift(smoothing)
-    
-    # Teeth (Red) - 8-period SMMA shifted 5 bars
-    teeth = pd.Series(price).rolling(window=period-5, center=False).mean()
-    teeth = teeth.rolling(window=smoothing, center=False).mean()
-    teeth = teeth.shift(smoothing-3)
-    
-    # Lips (Green) - 5-period SMMA shifted 3 bars
-    lips = pd.Series(price).rolling(window=period-8, center=False).mean()
-    lips = lips.rolling(window=smoothing, center=False).mean()
-    lips = lips.shift(smoothing-5)
-    
-    return jaw.values, teeth.values, lips.values
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
-def calculate_elder_ray(high, low, close, ema_period):
-    """Calculate Elder Ray: Bull Power and Bear Power"""
-    ema = pd.Series(close).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean()
-    bull_power = high - ema.values
-    bear_power = low - ema.values
-    return bull_power, bear_power, ema.values
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -67,22 +50,18 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend filter
-    ema_daily = pd.Series(df_daily['close'].values).ewm(span=EMA_TREND_PERIOD, adjust=False, min_periods=EMA_TREND_PERIOD).mean().values
+    # Calculate daily EMA for trend
+    ema_daily = calculate_ema(df_daily['close'].values, DAILY_EMA_PERIOD)
     ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator
-    jaw, teeth, lips = calculate_alligator_lines(close, ALLIGATOR_PERIOD, SMOOTHING_FACTOR)
-    
-    # Elder Ray
-    bull_power, bear_power, elder_ema = calculate_elder_ray(high, low, close, ELDER_RAY_PERIOD)
-    
-    # ATR for stop loss
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -91,7 +70,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ALLIGATOR_PERIOD + SMOOTHING_FACTOR, ELDER_RAY_PERIOD, EMA_TREND_PERIOD) + 5
+    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if daily EMA not available
@@ -114,27 +93,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Alligator alignment: Lips > Teeth > Jaw = uptrend, Lips < Teeth < Jaw = downtrend
-        alligator_long = (not np.isnan(lips[i]) and not np.isnan(teeth[i]) and not np.isnan(jaw[i]) and
-                         lips[i] > teeth[i] and teeth[i] > jaw[i])
-        alligator_short = (not np.isnan(lips[i]) and not np.isnan(teeth[i]) and not np.isnan(jaw[i]) and
-                          lips[i] < teeth[i] and teeth[i] < jaw[i])
+        # Donchian breakout conditions
+        breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
+        breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # Elder Ray: Bull Power > 0 and rising, Bear Power < 0 and falling
-        elder_long = (not np.isnan(bull_power[i]) and not np.isnan(bear_power[i]) and
-                     bull_power[i] > 0 and (i == 0 or bull_power[i] > bull_power[i-1]) and
-                     bear_power[i] < 0)
-        elder_short = (not np.isnan(bull_power[i]) and not np.isnan(bear_power[i]) and
-                      bear_power[i] < 0 and (i == 0 or bear_power[i] < bear_power[i-1]) and
-                      bull_power[i] > 0)
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter (daily)
         uptrend_daily = close[i] > ema_daily_aligned[i]
         downtrend_daily = close[i] < ema_daily_aligned[i]
         
-        # Entry conditions - require Alligator alignment AND Elder Ray confirmation
-        long_entry = alligator_long and elder_long and uptrend_daily
-        short_entry = alligator_short and elder_short and downtrend_daily
+        # Entry conditions
+        long_entry = breakout_up and volume_ok and uptrend_daily
+        short_entry = breakout_down and volume_ok and downtrend_daily
         
         # Generate signals
         if position == 0:
