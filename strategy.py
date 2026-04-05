@@ -1,23 +1,24 @@
-# -*- coding: utf-8 -*-
-# Experiment #10313: 4h Donchian Breakout + 12h Trend + Volume Spike
-# Hypothesis: Donchian(20) breakouts in the direction of 12h EMA50 trend with volume confirmation
-# provide high-probability trend continuation trades. Works in bull markets (breakouts above 12h EMA)
-# and bear markets (breakdowns below 12h EMA). Volume filters reduce false breakouts.
-# Target: 75-200 total trades over 4 years (19-50/year).
+#!/usr/bin/env python3
+"""
+Experiment #10314: 1h Donchian Breakout + 4h Trend + Volume Spike
+Hypothesis: Donchian(20) breakouts on 1h in direction of 4h EMA(20) trend with volume confirmation
+provide high-probability trend continuation. Works in bull/bear via trend filter. Session filter (08-20 UTC)
+reduces noise. Target: 60-150 total trades over 4 years (15-37/year).
+"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10313_4h_donchian_breakout_12h_trend_volume_v1"
-timeframe = "4h"
+name = "exp_10314_1h_donchian_breakout_4h_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_SPIKE_MULTIPLIER = 1.5
-TREND_EMA_PERIOD = 50
-SIGNAL_SIZE = 0.25
+EMA_4H_PERIOD = 20
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
@@ -45,17 +46,21 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for trend filter
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h data ONCE before loop for trend filter
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 12h EMA for trend direction
-    close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
+    # Calculate 4h EMA for trend direction
+    close_4h = df_4h['close'].values
+    ema_4h = calculate_ema(close_4h, EMA_4H_PERIOD)
     
-    # Align 12h EMA to 4h timeframe
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align 4h EMA to 1h timeframe
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate 4h indicators
+    # Precompute session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Calculate 1h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -76,12 +81,20 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, 20) + 1
+    start = max(DONCHIAN_PERIOD, EMA_4H_PERIOD, 20) + 1
     
     for i in range(start, n):
-        # Skip if 12h EMA not available
-        if np.isnan(ema_12h_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        # Skip if outside session
+        if not in_session[i]:
+            signals[i] = 0.0
+            position = 0
+            entry_price = 0.0
+            stop_price = 0.0
+            continue
+            
+        # Skip if 4h EMA not available
+        if np.isnan(ema_4h_aligned[i]):
+            signals[i] = 0.0
             continue
             
         # Check stoploss
@@ -89,27 +102,31 @@ def generate_signals(prices):
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                stop_price = 0.0
                 continue
         elif position == -1:  # short position
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                stop_price = 0.0
                 continue
         
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below 12h EMA
-        above_ema = close[i] > ema_12h_aligned[i]
-        below_ema = close[i] < ema_12h_aligned[i]
+        # Trend filter: price above/below 4h EMA
+        above_ema_4h = close[i] > ema_4h_aligned[i]
+        below_ema_4h = close[i] < ema_4h_aligned[i]
         
         # Breakout conditions
         bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
         bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
         
-        # Entry conditions: breakout in direction of 12h trend with volume
-        long_entry = bullish_breakout and above_ema and volume_spike
-        short_entry = bearish_breakout and below_ema and volume_spike
+        # Entry conditions: breakout in direction of 4h trend with volume
+        long_entry = bullish_breakout and above_ema_4h and volume_spike
+        short_entry = bearish_breakout and below_ema_4h and volume_spike
         
         # Generate signals
         if position == 0:
