@@ -1,7 +1,8 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-Experiment #7798: Daily Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
-Hypothesis: Daily price breaking beyond 20-day high/low with volume >1.8x 20-day MA and aligned weekly EMA trend captures sustained moves while avoiding whipsaw. Weekly EMA provides robust trend filtering for daily entries in both bull and bear markets. Targets 30-100 trades over 4 years.
+Experiment #7798: Daily Donchian breakout with weekly EMA trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-day high/low with volume >1.5x 20-day MA and aligned weekly EMA trend captures sustained moves in both bull and bear markets. Weekly EMA provides robust trend filtering for daily entries. Targets 30-100 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -16,7 +17,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_TREND = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -35,7 +36,7 @@ def generate_signals(prices):
     ema_1w = pd.Series(close_1w).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate daily indicators
+    # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
