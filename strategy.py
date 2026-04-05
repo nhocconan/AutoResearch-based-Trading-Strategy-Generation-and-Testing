@@ -2,9 +2,7 @@
 """
 exp_7293_4h_donchian20_12h_ema_vol_v1
 Hypothesis: 4h Donchian(20) breakout with 12h EMA(50) trend filter and volume confirmation.
-In trending markets (price > EMA): continuation breakouts in breakout direction.
-In ranging markets (price near EMA): mean reversion at Donchian extremes with volume confirmation.
-Uses 12h EMA for trend regime and 4h volume for confirmation.
+Uses 12h EMA to define trend regime: continuation breakouts when price > EMA, mean reversion at Donchian extremes when price < EMA.
 Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
 Works in both bull and bear markets by adapting to EMA-defined trend regime.
 """
