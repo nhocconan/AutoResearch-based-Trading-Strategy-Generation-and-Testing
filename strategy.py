@@ -2,8 +2,9 @@
 """
 exp_7405_12h_donchian20_1d_ema_vol_v1
 Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Targets 50-150 trades over 4 years by using 12h timeframe and strict volume confirmation.
-Works in bull/bear via EMA filter: only long when above 1d EMA, short when below.
+Uses 1d EMA to filter trend direction (avoiding counter-trend trades) while maintaining
+moderate trade frequency suitable for 12h timeframe. Designed for 50-150 total trades over 4 years.
+Focus on fewer, higher-quality trades with volume confirmation and ATR stoploss.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -93,13 +94,13 @@ def generate_signals(prices):
         if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
             signals[i] = 0.0
             position = 0
-            bars_since_entry = 0
+                bars_since_entry = 0
             continue
             
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on 1d EMA
+        # Determine market regime based on EMA
         above_ema = close[i] > ema_1d_aligned[i]
         below_ema = close[i] < ema_1d_aligned[i]
         
@@ -130,3 +131,4 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+</s>
