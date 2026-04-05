@@ -6,10 +6,10 @@ In bull markets (price > 1d EMA200): long breakout above 12h Donchian upper.
 In bear markets (price < 1d EMA200): short breakdown below 12h Donchian lower.
 Volume must be above 20-period average to confirm breakout strength.
 Uses ATR-based stoploss and target-based exits.
-Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year).
+Targets 50-150 trades over 4 years (12-37/year) with strict breakout conditions.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_ft_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
