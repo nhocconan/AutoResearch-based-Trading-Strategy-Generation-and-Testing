@@ -2,8 +2,8 @@
 """
 Experiment #8383: 4-hour Donchian breakout with 12-hour trend filter and volume confirmation.
 Hypothesis: Price breaking above/below the 20-period Donchian channel on 4h with volume >1.5x 20-period MA 
-and aligned 12-hour trend (price above/below 12h EMA25) captures sustained moves while avoiding whipsaw. 
-The 12-hour timeframe provides intermediate-term context, reducing false breakouts during consolidation. 
+and aligned 12h trend (price above/below 12h EMA25) captures sustained moves while avoiding whipsaw. 
+The 12h timeframe provides intermediate-term context, reducing false breakouts during consolidation. 
 Targeting 75-200 total trades over 4 years for optimal balance.
 """
 
