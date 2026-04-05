@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #11125: 12h Donchian Breakout with 1d Trend and Volume Confirmation
+Experiment #11127: 6h Donchian Breakout with 1d Trend and Volume Confirmation
 Hypothesis: Donchian(20) breakouts capture strong directional moves. Daily EMA provides trend bias,
-and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1d trend filter. Target: 50-150 trades over 4 years.
+and volume filter ensures institutional participation. Using 6h timeframe for lower frequency.
+Target: 50-150 trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11125_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_11127_6h_donchian20_1d_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
@@ -54,7 +54,7 @@ def generate_signals(prices):
     ema_daily = calculate_ema(df_daily['close'].values, DAILY_EMA_PERIOD)
     ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
-    # Calculate 12h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
