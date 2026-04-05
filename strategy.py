@@ -1,41 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #7685: 12-hour Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
-Designed for 12h timeframe with HTF=1d. Targets 50-150 total trades over 4 years (12-37/year).
-Works in both bull (long breakouts above EMA) and bear (short breakdowns below EMA) markets.
-Uses discrete position sizing (0.25) to minimize churn and ATR-based risk management.
+Experiment #7686: 4-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
+Enhanced from #7681: Added momentum filter (price > VWAP) to reduce whipsaw and improve win rate.
+Target: 75-200 trades over 4 years. Works in bull (long breakouts above EMA200) and bear (short breakdowns below EMA200) markets.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7685_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_7686_4h_donchian20_1d_ema_vwap_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_TREND = 50  # Shorter trend for 12h timeframe
+EMA_TREND = 200
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5  # Volume confirmation threshold
-SIGNAL_SIZE = 0.25  # Position size as fraction of capital
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA for trend filter
+    # Calculate 1d EMA200 for trend filter
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -49,6 +48,12 @@ def generate_signals(prices):
     
     # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # VWAP (typical price * volume)
+    typical_price = (high + low + close) / 3.0
+    vwap_num = pd.Series(typical_price * volume).rolling(window=20, min_periods=20).sum().values
+    vwap_den = pd.Series(volume).rolling(window=20, min_periods=20).sum().values
+    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(vwap_num, np.nan), where=vwap_den!=0)
     
     # ATR for risk management
     tr1 = pd.Series(high - low)
@@ -64,11 +69,11 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD, 20) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(ema_1d_200_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -85,19 +90,23 @@ def generate_signals(prices):
                 continue
         
         # Determine market regime
-        bull_regime = close[i] > ema_1d_aligned[i]   # price above 1d EMA
-        bear_regime = close[i] < ema_1d_aligned[i]   # price below 1d EMA
+        bull_regime = close[i] > ema_1d_200_aligned[i]   # price above 1d EMA200
+        bear_regime = close[i] < ema_1d_200_aligned[i]   # price below 1d EMA200
         
-        # Volume confirmation
+        # Volume confirmation (tightened from 1.3 to 1.5 to reduce trades)
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        
+        # Momentum filter: price above VWAP for long, below VWAP for short
+        momentum_long = close[i] > vwap[i] if not np.isnan(vwap[i]) else False
+        momentum_short = close[i] < vwap[i] if not np.isnan(vwap[i]) else False
         
         # Breakout conditions - require close beyond Donchian bands to avoid wicks
         upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
         lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
         # Entry conditions
-        long_entry = bull_regime and upper_breakout and volume_confirmed
-        short_entry = bear_regime and lower_breakout and volume_confirmed
+        long_entry = bull_regime and upper_breakout and volume_confirmed and momentum_long
+        short_entry = bear_regime and lower_breakout and volume_confirmed and momentum_short
         
         # Generate signals
         if position == 0:
