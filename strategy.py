@@ -1,63 +1,55 @@
 #!/usr/bin/env python3
 """
-exp_7039_6h_camarilla_pivot_1d_vol_v1
-Hypothesis: 6h Camarilla pivot breakout/fade with 1d volume confirmation. 
-In ranging markets (price between daily R3/S3): fade extreme levels (R4/S4) with 1d volume spike.
-In trending markets (price outside daily R3/S3): breakout continuation at R4/S4 with 1d volume.
-Uses 1d Camarilla pivots calculated from prior 1d bar's H/L/C. Volume confirms institutional interest.
-Designed for 6h timeframe to capture ~12-37 trades/year (50-150 total over 4 years) with discrete sizing.
-Works in both bull and bear markets by adapting to daily regime (range vs trend).
+exp_7040_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation. 
+In bull markets (price > 1d EMA50): long Donchian(20) breakouts with volume spike.
+In bear markets (price < 1d EMA50): short Donchian(20) breakdowns with volume spike.
+Volume confirms institutional participation in breakouts. Designed for 4h timeframe 
+to capture 19-50 trades/year (75-200 total over 4 years) with discrete sizing.
+Uses ATR-based stoploss for risk management. Works in both bull and bear by 
+adapting to daily trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7039_6h_camarilla_pivot_1d_vol_v1"
-timeframe = "6h"
+name = "exp_7040_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 20  # ~5 months (6h bars)
-CHANNEL_LOOKBACK = 10  # for regime detection
+ATR_STOP_MULTIPLIER = 2.0
+MAX_HOLD_BARS = 50  # ~8.3 months (4h bars)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for Camarilla pivots
+    # Load HTF data ONCE before loop - using 1d for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Camarilla pivot levels (based on prior 1d bar)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA for trend filter
     close_1d = df_1d['close'].values
-    
-    # Camarilla calculations
-    range_1d = high_1d - low_1d
-    pivot = (high_1d + low_1d + close_1d) / 3
-    r4 = pivot + (range_1d * 1.1 / 2)
-    r3 = pivot + (range_1d * 1.1 / 4)
-    s3 = pivot - (range_1d * 1.1 / 4)
-    s4 = pivot - (range_1d * 1.1 / 2)
-    
-    # Align to LTF (6h) - note: Camarilla levels are for the 1d bar, so we align with shift(1) via helper
-    r4_1d = align_htf_to_ltf(prices, df_1d, r4)
-    r3_1d = align_htf_to_ltf(prices, df_1d, r3)
-    s3_1d = align_htf_to_ltf(prices, df_1d, s3)
-    s4_1d = align_htf_to_ltf(prices, df_1d, s4)
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # ATR for stoploss
     tr1 = pd.Series(high - low)
@@ -75,13 +67,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(r4_1d[i]) or np.isnan(s4_1d[i]):
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -109,27 +101,20 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Regime detection: are we in range or trend based on daily levels?
-        # Range: price between R3 and S3
-        # Trend: price outside R3/S3 (breakout territory)
-        in_range = (close[i] >= s3_1d[i]) and (close[i] <= r3_1d[i])
-        in_uptrend = close[i] > r3_1d[i]
-        in_downtrend = close[i] < s3_1d[i]
+        # Trend filter: 1d EMA50
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # Trading logic based on regime
+        # Entry logic: Donchian breakout/breakdown with volume and trend filter
         long_signal = False
         short_signal = False
         
-        if in_range:
-            # In range: fade extremes at R4/S4 with volume
-            long_signal = (close[i] <= s4_1d[i]) and vol_confirmed  # bounce from S4
-            short_signal = (close[i] >= r4_1d[i]) and vol_confirmed  # reject at R4
-        elif in_uptrend:
-            # In uptrend: breakout continuation at R4
-            long_signal = (close[i] > r4_1d[i]) and vol_confirmed
-        elif in_downtrend:
-            # In downtrend: breakdown continuation at S4
-            short_signal = (close[i] < s4_1d[i]) and vol_confirmed
+        if uptrend and vol_confirmed:
+            # In uptrend: long Donchian breakout
+            long_signal = close[i] > highest_high[i]
+        elif downtrend and vol_confirmed:
+            # In downtrend: short Donchian breakdown
+            short_signal = close[i] < lowest_low[i]
         
         # Enter new positions only if flat
         if position == 0:
