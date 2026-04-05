@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #10401: 4h Donchian Breakout + Daily Trend + Volume Spike (Revised)
+Experiment #10402: 12h Donchian Breakout + Daily Trend + Volume Spike
 Hypothesis: Donchian(20) breakouts in the direction of daily trend (EMA50) with volume confirmation
-provide high-probability trend continuation trades. Revised to reduce trade frequency by tightening
-volume spike multiplier and adding minimum hold time to avoid overtrading. Target: 75-200 total trades.
+provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
+and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10401_4h_donchian_breakout_daily_trend_volume_v2"
-timeframe = "4h"
+name = "exp_10402_12h_donchian_breakout_daily_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
-# Parameters - tightened to reduce trade frequency
+# Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 2.0  # Increased from 1.5 to reduce false signals
+VOLUME_SPIKE_MULTIPLIER = 1.5
 DAILY_EMA_PERIOD = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MIN_HOLD_BARS = 4  # Minimum 16 hours (4 bars) hold to reduce churn
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
@@ -54,10 +54,10 @@ def generate_signals(prices):
     daily_close = df_daily['close'].values
     daily_ema = calculate_ema(daily_close, DAILY_EMA_PERIOD)
     
-    # Align daily EMA to 4h timeframe
+    # Align daily EMA to 12h timeframe
     daily_ema_aligned = align_htf_to_ltf(prices, df_daily, daily_ema)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -76,7 +76,6 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
-    bars_since_entry = 0
     
     # Start from warmup period
     start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, 20) + 1
@@ -92,13 +91,11 @@ def generate_signals(prices):
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
                 continue
         
         # Volume spike confirmation
@@ -123,36 +120,16 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Only exit if minimum hold time passed and reverse signal
-            if bars_since_entry >= MIN_HOLD_BARS and short_entry:
-                signals[i] = -SIGNAL_SIZE  # Reverse to short
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            else:
-                signals[i] = SIGNAL_SIZE
-                bars_since_entry += 1
+            signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Only exit if minimum hold time passed and reverse signal
-            if bars_since_entry >= MIN_HOLD_BARS and long_entry:
-                signals[i] = SIGNAL_SIZE  # Reverse to long
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            else:
-                signals[i] = -SIGNAL_SIZE
-                bars_since_entry += 1
+            signals[i] = -SIGNAL_SIZE
     
     return signals
