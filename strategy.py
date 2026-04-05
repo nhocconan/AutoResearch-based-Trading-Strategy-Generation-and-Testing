@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #8699: 6h Donchian breakout + 12h Camarilla pivot + volume confirmation + ATR stoploss.
-Hypothesis: Combines price channel breakouts with institutional pivot levels on higher timeframe.
-6h timeframe balances responsiveness with lower trade frequency. 12h Camarilla levels provide
-support/resistance zones for filtering breakouts. Volume confirmation ensures institutional
-participation. ATR stops manage risk. Designed to work in both bull (breakouts) and bear (fades at S3/R3).
-Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+Experiment #8700: 4h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
+Hypothesis: 4h balances trade frequency and signal quality. 1d EMA200 trend filter avoids counter-trend trades.
+Volume confirmation ensures institutional participation. ATR stops manage risk.
+Targets 75-200 trades over 4 years (19-50/year) to balance opportunity and cost.
+Works in bull (trend following) and bear (avoids shorts in uptrend, longs in downtrend).
 """
 
-from mtf_data import get_align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8699_6h_donchian20_12h_camarilla_vol_v1"
-timeframe = "6h"
+name = "exp_8700_4h_donchian20_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-CAMARILLA_PERIOD = 20
+TREND_PERIOD = 200
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -34,51 +33,24 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close"""
-    range_val = high - low
-    if range_val == 0:
-        return close, close, close, close, close, close, close, close
-    c = close + (range_val * 1.1 / 12)
-    d = close - (range_val * 1.1 / 12)
-    l3 = close + (range_val * 1.1 / 6)
-    h3 = close - (range_val * 1.1 / 6)
-    l4 = close + (range_val * 1.1 / 4)
-    h4 = close - (range_val * 1.1 / 4)
-    return h4, l4, h3, l3, c, d
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h Camarilla levels
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
     
-    # Initialize Camarilla arrays
-    h4_12h = np.full_like(close_12h, np.nan)
-    l4_12h = np.full_like(close_12h, np.nan)
-    h3_12h = np.full_like(close_12h, np.nan)
-    l3_12h = np.full_like(close_12h, np.nan)
+    # Price relative to 1d EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_1d > ema_1d, 1, 
+                     np.where(close_1d < ema_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
     
-    # Calculate Camarilla for each 12h bar
-    for i in range(len(close_12h)):
-        h4, l4, h3, l3, _, _ = calculate_camarilla(high_12h[i], low_12h[i], close_12h[i])
-        h4_12h[i] = h4
-        l4_12h[i] = l4
-        h3_12h[i] = h3
-        l3_12h[i] = l3
-    
-    # Camarilla breakout levels: H4 = bullish breakout, L4 = bearish breakdown
-    h4_12h_aligned = align_htf_to_ltf(prices, df_12h, h4_12h)
-    l4_12h_aligned = align_htf_to_ltf(prices, df_12h, l4_12h)
-    
-    # Calculate LTF indicators (6h)
+    # Calculate LTF indicators (4h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -100,11 +72,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(h4_12h_aligned[i]) or np.isnan(l4_12h_aligned[i]):
+        if np.isnan(price_vs_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -120,20 +92,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
+        # Determine market bias from 1d EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d price above EMA200
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d price below EMA200
+        
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
         short_breakout = close[i] < donchian_low[i-1]  # Break below previous period's low
-        
-        # Camarilla conditions: break above H4 = bullish, break below L4 = bearish
-        camarilla_long = close[i] > h4_12h_aligned[i-1] if not np.isnan(h4_12h_aligned[i-1]) else False
-        camarilla_short = close[i] < l4_12h_aligned[i-1] if not np.isnan(l4_12h_aligned[i-1]) else False
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Entry conditions
-        long_entry = long_breakout and camarilla_long and volume_confirmed
-        short_entry = short_breakout and camarilla_short and volume_confirmed
+        long_entry = bull_bias and long_breakout and volume_confirmed
+        short_entry = bear_bias and short_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
@@ -155,3 +127,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</x>
