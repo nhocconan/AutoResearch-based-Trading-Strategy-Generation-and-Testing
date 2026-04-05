@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #9122: 12h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Donchian breakouts capture trends; 1d EMA filter ensures directional alignment; volume confirms institutional participation.
+Hypothesis: Donchian breakouts on 12h capture trends; 1d EMA filter ensures directional alignment; volume confirms institutional participation.
 Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost. Works in bull (breakouts) and bear (filtered shorts).
 """
 
