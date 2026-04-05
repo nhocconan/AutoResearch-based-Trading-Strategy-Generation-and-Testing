@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
 exp_7364_1d_donchian20_1w_ema_vol_v1
-Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
-Using 1d primary timeframe targets 30-100 trades over 4 years (7-25/year).
-Weekly EMA provides strong trend filter reducing false breakouts in choppy markets.
-Volume confirmation ensures breakouts have participation. Discrete sizing (0.0, ±0.25) minimizes fee churn.
-Works in bull via EMA uptrend longs, works in bear via EMA downtrend shorts.
+Hypothesis: Daily Donchian(20) breakout with weekly EMA(50) trend filter and volume confirmation.
+Uses 1w HTF for trend to reduce noise vs 1d, targeting 30-100 trades over 4 years.
+Discrete position sizing (0.0, ±0.25) minimizes fee churn. Works in bull/bear via EMA regime filter.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -20,11 +18,11 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0  # Volume spike threshold
+VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 15  # ~3 weeks max hold
+MAX_HOLD_BARS = 30  # ~30 days max hold
 
 def generate_signals(prices):
     n = len(prices)
@@ -101,22 +99,26 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on weekly EMA
+        # Determine market regime based on EMA
         above_ema = close[i] > ema_1w_aligned[i]
         below_ema = close[i] < ema_1w_aligned[i]
         
-        # Donchian breakout entries with volume confirmation
-        breakout_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
-        breakout_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
+        # Continuation breakouts in trending market
+        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
+        
+        # Breakout retest entries (pullback to breakout level with volume)
+        retest_long = above_ema and (close[i] <= highest_high[i-1] * 1.005) and (close[i] >= lowest_low[i-1]) and vol_confirmed
+        retest_short = below_ema and (close[i] >= lowest_low[i-1] * 0.995) and (close[i] <= highest_high[i-1]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if breakout_long:
+            if continuation_long or retest_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif breakout_short:
+            elif continuation_short or retest_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -128,5 +130,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
