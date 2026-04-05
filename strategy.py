@@ -1,30 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #7934: 1-hour momentum with 4h/1d trend filter and volume confirmation.
-Hypothesis: In ranging markets (2025-2026), momentum on 1h aligned with 4h trend and 1d regime 
-captures mean-reversion bounces with controlled risk. Uses 4h for trend direction, 1d for 
-volatility regime (low volatility = mean reversion), and 1h for precise entry timing. 
-Target: 60-150 total trades over 4 years (15-37/year).
+Experiment #7938: 1-day Donchian breakout with 1-week trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-day high/low with volume >1.5x 20-day MA and 
+aligned weekly trend (price above/below weekly EMA20) captures sustained moves. 
+Weekly trend filter reduces whipsaws in sideways markets while daily breakouts 
+provide timely entries. Designed for low trade frequency (<25/year) to minimize 
+fee impact and improve generalization to bear markets (2025+).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7934_1h_momentum_4h_1d_vol_regime_v1"
-timeframe = "1h"
+name = "exp_7938_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-MOMENTUM_PERIOD = 10
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
+EMA_PERIOD = 20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
 
 def generate_signals(prices):
     n = len(prices)
@@ -32,45 +31,27 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # 4h EMA for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
-    trend_4h = np.where(close_4h > ema_4h, 1, -1)  # 1=uptrend, -1=downtrend
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
+    # Calculate weekly EMA
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # 1d volatility regime (ATR percentile)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    tr1 = pd.Series(high_1d - low_1d)
-    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
-    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
-    tr_1d = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_1d = tr_1d.ewm(span=14, adjust=False, min_periods=14).mean().values
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=50, min_periods=50).mean().values
-    volatility_regime = np.where(atr_1d < atr_ma_1d, 1, -1)  # 1=low vol (mean revert), -1=high vol (trend)
-    volatility_regime_aligned = align_htf_to_ltf(prices, df_1d, volatility_regime)
+    # Price relative to EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_1w > ema_1w, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
     
-    # LTF indicators
+    # Calculate daily indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI for momentum
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean()
-    avg_loss = loss.ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # Price channel (Donchian)
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Volume confirmation
+    # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR for risk management
@@ -81,64 +62,60 @@ def generate_signals(prices):
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
     signals = np.zeros(n)
-    position = 0
+    position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    stop_price = 0.0
     
     # Start from warmup period
-    start = max(MOMENTUM_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, RSI_PERIOD, 20, 50) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(trend_4h_aligned[i]) or np.isnan(volatility_regime_aligned[i]):
-            signals[i] = 0.0
+        if np.isnan(price_vs_ema_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
         # Check stoploss
-        if position != 0:
-            if position == 1 and close[i] < entry_price - (ATR_STOP_MULTIPLIER * atr[i]):
+        if position == 1:  # long position
+            if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
-            elif position == -1 and close[i] > entry_price + (ATR_STOP_MULTIPLIER * atr[i]):
+        elif position == -1:  # short position
+            if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Determine regime alignment
-        low_volatility = volatility_regime_aligned[i] == 1
-        uptrend_4h = trend_4h_aligned[i] == 1
-        downtrend_4h = trend_4h_aligned[i] == -1
+        # Determine market bias from weekly EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # weekly close above EMA20
+        bear_bias = price_vs_ema_aligned[i] == -1  # weekly close below EMA20
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Momentum conditions
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        # Breakout conditions - require close beyond channel bands to avoid wicks
+        upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
+        lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
-        # Entry logic: In low volatility, mean reversion; in high volatility, follow trend
+        # Entry conditions
+        long_entry = bull_bias and upper_breakout and volume_confirmed
+        short_entry = bear_bias and lower_breakout and volume_confirmed
+        
+        # Generate signals
         if position == 0:
-            # Low volatility regime: mean reversion at RSI extremes
-            if low_volatility:
-                if rsi_oversold and volume_confirmed:
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                elif rsi_overbought and volume_confirmed:
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-            # High volatility regime: follow 4h trend on momentum
+            if long_entry:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif short_entry:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
-                if uptrend_4h and rsi[i] > 50 and rsi[i] < RSI_OVERBOUGHT and volume_confirmed:
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                elif downtrend_4h and rsi[i] < 50 and rsi[i] > RSI_OVERSOLD and volume_confirmed:
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-            # Hold position
+                signals[i] = 0.0
         elif position == 1:
             signals[i] = SIGNAL_SIZE
         elif position == -1:
