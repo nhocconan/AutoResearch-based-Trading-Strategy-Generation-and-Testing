@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #8834: 1h Donchian breakout + 4h/1d trend filter + volume confirmation + session filter.
-Hypothesis: Use 4h and 1d trends to filter direction, 1h for precise entry timing. 
-Session filter (08-20 UTC) reduces noise. Target 60-150 trades over 4 years to avoid fee drag.
+Experiment #8835: 6h Donchian(20) breakout + 1d VWAP filter + volume confirmation + ATR stoploss.
+Hypothesis: 6h timeframe balances trade frequency and trend capture. Donchian breakouts capture momentum,
+while 1d VWAP acts as dynamic support/resistance to avoid false breakouts. Volume confirms institutional
+participation. Works in both bull (breakouts with volume) and bear (fades at VWAP during low volume).
+Targets 75-200 total trades over 4 years (~19-50/year) to balance frequency and cost.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8834_1h_donchian20_4h_1d_trend_vol_sess_v1"
-timeframe = "1h"
+name = "exp_8835_6h_donchian20_1d_vwap_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+VWAP_PERIOD = 24  # 1 day of 6h bars
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
@@ -30,33 +33,31 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_vwap(high, low, close, volume, period):
+    """Calculate VWAP using typical price"""
+    typical_price = (high + low + close) / 3.0
+    vwap_num = pd.Series(typical_price * volume).rolling(window=period, min_periods=period).sum()
+    vwap_den = pd.Series(volume).rolling(window=period, min_periods=period).sum()
+    vwap = (vwap_num / vwap_den).values
+    return vwap
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
-    # Calculate 1d EMA for trend filter
+    # Calculate 1d VWAP
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    volume_1d = df_1d['volume'].values
+    vwap_1d = calculate_vwap(high_1d, low_1d, close_1d, volume_1d, VWAP_PERIOD)
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d)
     
-    # Price relative to EMAs: above = bullish bias, below = bearish bias
-    bias_4h = np.where(close_4h > ema_4h, 1, 
-                       np.where(close_4h < ema_4h, -1, 0))
-    bias_1d = np.where(close_1d > ema_1d, 1, 
-                       np.where(close_1d < ema_1d, -1, 0))
-    
-    bias_4h_aligned = align_htf_to_ltf(prices, df_4h, bias_4h)
-    bias_1d_aligned = align_htf_to_ltf(prices, df_1d, bias_1d)
-    
-    # LTF indicators (1h)
+    # Calculate LTF indicators (6h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -72,20 +73,17 @@ def generate_signals(prices):
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
+    start = max(DONCHIAN_PERIOD, VWAP_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(bias_4h_aligned[i]) or np.isnan(bias_1d_aligned[i]):
+        if np.isnan(vwap_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -101,28 +99,19 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Session filter
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
-        if not in_session:
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-            continue
-        
-        # Determine market bias from 4h and 1d EMAs (both must agree)
-        bull_bias = (bias_4h_aligned[i] == 1) and (bias_1d_aligned[i] == 1)
-        bear_bias = (bias_4h_aligned[i] == -1) and (bias_1d_aligned[i] == -1)
+        # VWAP position: above = bullish bias, below = bearish bias
+        price_vs_vwap = close[i] > vwap_1d_aligned[i]
         
         # Donchian breakout conditions
-        long_breakout = close[i] > donchian_high[i-1]
-        short_breakout = close[i] < donchian_low[i-1]
+        long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
+        short_breakout = close[i] < donchian_low[i-1]  # Break below previous period's low
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry conditions
-        long_entry = bull_bias and long_breakout and volume_confirmed
-        short_entry = bear_bias and short_breakout and volume_confirmed
+        # Entry conditions: breakout in direction of VWAP bias with volume
+        long_entry = price_vs_vwap and long_breakout and volume_confirmed
+        short_entry = (not price_vs_vwap) and short_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
