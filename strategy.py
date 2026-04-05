@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #7820: 4-hour Donchian breakout with daily EMA trend and volume concentration.
-Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >2.0x 20-period MA and aligned daily EMA trend captures sustained moves while avoiding whipsaw. Volume concentration threshold raised to reduce trade frequency. Targets 75-200 trades over 4 years with volume filter acting as primary gate.
+Experiment #7822: 12-hour Donchian breakout with daily EMA trend and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.8x 20-period MA and aligned daily EMA trend captures sustained moves while avoiding whipsaw. Daily EMA provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 50-150 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7820_4h_donchian20_1d_ema_vol_v2"
-timeframe = "4h"
+name = "exp_7822_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
-# Parameters - tightened to reduce trade frequency
+# Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0  # Increased from 1.8 to reduce trades
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 EMA_PERIOD = 50
 ATR_PERIOD = 14
@@ -89,16 +89,16 @@ def generate_signals(prices):
         bull_bias = trend_bias_1d_aligned[i] == 1   # daily close above EMA
         bear_bias = trend_bias_1d_aligned[i] == -1  # daily close below EMA
         
-        # Volume concentration - require strong volume to confirm breakout
-        volume_concentrated = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Volume confirmation
+        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Breakout conditions - require close beyond channel bands to avoid wicks
         upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
         lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
-        # Entry conditions - require BOTH trend alignment AND volume concentration
-        long_entry = bull_bias and upper_breakout and volume_concentrated
-        short_entry = bear_bias and lower_breakout and volume_concentrated
+        # Entry conditions
+        long_entry = bull_bias and upper_breakout and volume_confirmed
+        short_entry = bear_bias and lower_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
