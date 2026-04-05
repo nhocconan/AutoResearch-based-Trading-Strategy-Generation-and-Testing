@@ -1,67 +1,99 @@
 #!/usr/bin/env python3
 """
-exp_6979_6h_camarilla1d_pivot_v1
-Hypothesis: 6h Camarilla pivot reversals from 1d levels with volume confirmation.
-In ranging markets: fade extreme levels (R3/S3, R4/S4) for mean reversion.
-In trending markets: breakout continuation beyond R4/S4 with volume.
-Uses 1d Camarilla pivots calculated from prior day's OHLC to avoid look-ahead.
-Designed for low trade frequency (12-37/year) with discrete sizing to minimize fees.
-Works in both bull and bear markets by adapting to volatility regimes.
+exp_6979_6h_ichimoku_cloud_1d_adx_v1
+Hypothesis: 6h Ichimoku cloud breakout with 1d ADX trend filter and volume confirmation.
+In strong uptrends (1d ADX>25): long when price breaks above Kumo cloud and TK cross bullish.
+In strong downtrends (1d ADX>25): short when price breaks below Kumo cloud and TK cross bearish.
+In weak trends (1d ADX<=25): fade at cloud edges (mean reversion).
+Ichimoku provides dynamic support/resistance, ADX filters for trend strength, volume confirms breakouts.
+Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
+Works in both bull and bear markets by aligning with 1d trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6979_6h_camarilla1d_pivot_v1"
+name = "exp_6979_6h_ichimoku_cloud_1d_adx_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-SIGNAL_SIZE = 0.25
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ICHI_CONVERSION_PERIOD = 9   # Tenkan-sen
+ICHI_BASE_PERIOD = 26        # Kijun-sen
+ICHI_LEADING_SPAN_B_PERIOD = 52  # Senkou Span B
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.8
-MAX_HOLD_BARS = 24  # 4 days max hold (6h bars)
-CHOP_PERIOD = 14
-CHOP_THRESHOLD = 50  # <50 = trending, >50 = ranging
+SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
+MAX_HOLD_BARS = 20  # ~5 months (6h bars)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for Camarilla pivots
+    # Load HTF data ONCE before loop - using 1d for ADX and Ichimoku
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Camarilla pivot levels (using prior day's OHLC to avoid look-ahead)
+    # Calculate 1d Ichimoku components
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Prior day's values (shift by 1 to avoid look-ahead)
-    prev_high = np.roll(high_1d, 1)
-    prev_low = np.roll(low_1d, 1)
-    prev_close = np.roll(close_1d, 1)
-    prev_high[0] = np.nan
-    prev_low[0] = np.nan
-    prev_close[0] = np.nan
+    # Tenkan-sen (Conversion Line): (highest high + lowest low)/2 over Conversion Period
+    highest_high_9 = pd.Series(high_1d).rolling(window=ICHI_CONVERSION_PERIOD, min_periods=ICHI_CONVERSION_PERIOD).max().values
+    lowest_low_9 = pd.Series(low_1d).rolling(window=ICHI_CONVERSION_PERIOD, min_periods=ICHI_CONVERSION_PERIOD).min().values
+    tenkan_sen = (highest_high_9 + lowest_low_9) / 2
     
-    pivot = (prev_high + prev_low + prev_close) / 3.0
-    range_1d = prev_high - prev_low
+    # Kijun-sen (Base Line): (highest high + lowest low)/2 over Base Period
+    highest_high_26 = pd.Series(high_1d).rolling(window=ICHI_BASE_PERIOD, min_periods=ICHI_BASE_PERIOD).max().values
+    lowest_low_26 = pd.Series(low_1d).rolling(window=ICHI_BASE_PERIOD, min_periods=ICHI_BASE_PERIOD).min().values
+    kijun_sen = (highest_high_26 + lowest_low_26) / 2
     
-    # Camarilla levels
-    r3 = pivot + (range_1d * 1.1 / 4.0)
-    s3 = pivot - (range_1d * 1.1 / 4.0)
-    r4 = pivot + (range_1d * 1.1 / 2.0)
-    s4 = pivot - (range_1d * 1.1 / 2.0)
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2 shifted forward 26 periods
+    senkou_span_a = ((tenkan_sen + kijun_sen) / 2)
     
-    # Align to LTF (6h)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Senkou Span B (Leading Span B): (highest high + lowest low)/2 over Leading Span B Period shifted forward 26 periods
+    highest_high_52 = pd.Series(high_1d).rolling(window=ICHI_LEADING_SPAN_B_PERIOD, min_periods=ICHI_LEADING_SPAN_B_PERIOD).max().values
+    lowest_low_52 = pd.Series(low_1d).rolling(window=ICHI_LEADING_SPAN_B_PERIOD, min_periods=ICHI_LEADING_SPAN_B_PERIOD).min().values
+    senkou_span_b = ((highest_high_52 + lowest_low_52) / 2)
+    
+    # Calculate 1d ADX
+    # True Range
+    tr1 = pd.Series(high_1d - low_1d)
+    tr2 = pd.Series(np.abs(high_1d - np.roll(close_1d, 1)))
+    tr3 = pd.Series(np.abs(low_1d - np.roll(close_1d, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # Directional Movement
+    dm_plus = pd.Series(np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
+                                 np.maximum(high_1d - np.roll(high_1d, 1), 0), 0))
+    dm_minus = pd.Series(np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
+                                  np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0))
+    
+    # Smooth TR, DM+ and DM- with Wilder's smoothing (EMA with alpha=1/period)
+    atr_1d = tr.ewm(alpha=1/ADX_PERIOD, adjust=False).mean().values
+    dm_plus_smooth = dm_plus.ewm(alpha=1/ADX_PERIOD, adjust=False).mean().values
+    dm_minus_smooth = dm_minus.ewm(alpha=1/ADX_PERIOD, adjust=False).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / (atr_1d + 1e-10)
+    di_minus = 100 * dm_minus_smooth / (atr_1d + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/ADX_PERIOD, adjust=False).mean().values
+    
+    # Align HTF indicators to LTF (6h)
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b)
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -79,26 +111,23 @@ def generate_signals(prices):
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
-    # Choppiness Index for regime detection
-    highest_high_h = pd.Series(high).rolling(window=CHOP_PERIOD, min_periods=CHOP_PERIOD).max().values
-    lowest_low_l = pd.Series(low).rolling(window=CHOP_PERIOD, min_periods=CHOP_PERIOD).min().values
-    atr_sum = pd.Series(atr).rolling(window=CHOP_PERIOD, min_periods=CHOP_PERIOD).sum().values
-    chop = 100 * np.log10(atr_sum / np.log10(CHOP_PERIOD) / (highest_high_h - lowest_low_l))
-    chop = np.where((highest_high_h - lowest_low_l) > 0, chop, 50)  # avoid div by zero
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(CHOP_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(
+        ICHI_BASE_PERIOD, ICHI_LEADING_SPAN_B_PERIOD,  # Ichimoku needs base periods
+        ADX_PERIOD * 2,  # ADX needs extra smoothing
+        VOL_MA_PERIOD, ATR_PERIOD
+    ) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        if np.isnan(adx_aligned[i]) or np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -126,44 +155,65 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Regime detection
-        is_ranging = chop[i] > CHOP_THRESHOLD
-        is_trending = chop[i] <= CHOP_THRESHOLD
+        # Determine Kumo (cloud) boundaries
+        senkou_span_a_val = senkou_span_a_aligned[i]
+        senkou_span_b_val = senkou_span_b_aligned[i]
+        upper_kumo = max(senkou_span_a_val, senkou_span_b_val)
+        lower_kumo = min(senkou_span_a_val, senkou_span_b_val)
+        
+        # TK Cross (Tenkan-sen / Kijun-sen cross)
+        tk_cross_bullish = tenkan_sen_aligned[i] > kijun_sen_aligned[i]
+        tk_cross_bearish = tenkan_sen_aligned[i] < kijun_sen_aligned[i]
+        
+        # Determine trend regime from 1d ADX
+        strong_trend = adx_aligned[i] > ADX_THRESHOLD
+        weak_trend = adx_aligned[i] <= ADX_THRESHOLD
         
         # Initialize signal
-        signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        new_signal = 0.0
         
-        # Enter new positions only if flat
-        if position == 0:
-            if is_ranging:
-                # Ranging market: fade extreme levels
-                long_fade = close[i] <= s3_aligned[i] and vol_confirmed
-                short_fade = close[i] >= r3_aligned[i] and vol_confirmed
-                
-                if long_fade:
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                elif short_fade:
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
+        if strong_trend:
+            # Strong trend: follow Ichimoku breakouts with TK cross
+            # Long: price above cloud + bullish TK cross + volume
+            long_breakout = (close[i] > upper_kumo) and tk_cross_bullish and vol_confirmed
+            # Short: price below cloud + bearish TK cross + volume
+            short_breakout = (close[i] < lower_kumo) and tk_cross_bearish and vol_confirmed
+            
+            if long_breakout and position <= 0:
+                new_signal = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+            elif short_breakout and position >= 0:
+                new_signal = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                bars_since_entry = 0
             else:
-                # Trending market: breakout continuation
-                long_breakout = close[i] > r4_aligned[i] and vol_confirmed
-                short_breakout = close[i] < s4_aligned[i] and vol_confirmed
+                # Hold current position
+                new_signal = position * SIGNAL_SIZE if position != 0 else 0.0
                 
-                if long_breakout:
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                elif short_breakout:
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
+        else:
+            # Weak trend: mean reversion at cloud edges
+            # Long: price touches lower cloud + oversold bounce
+            long_reversion = (close[i] <= lower_kumo * 1.005) and (tenkan_sen_aligned[i] > kijun_sen_aligned[i])
+            # Short: price touches upper cloud + overbought rejection
+            short_reversion = (close[i] >= upper_kumo * 0.995) and (tenkan_sen_aligned[i] < kijun_sen_aligned[i])
+            
+            if long_reversion and position <= 0:
+                new_signal = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+            elif short_reversion and position >= 0:
+                new_signal = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+            else:
+                # Hold current position
+                new_signal = position * SIGNAL_SIZE if position != 0 else 0.0
+        
+        signals[i] = new_signal
     
     return signals
