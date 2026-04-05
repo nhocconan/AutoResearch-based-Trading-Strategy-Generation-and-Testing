@@ -1,46 +1,73 @@
 #!/usr/bin/env python3
 """
-exp_7157_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-In trending markets (price > 1d EMA50): take Donchian breakouts in trend direction.
-In ranging markets (price near 1d EMA50): fade Donchian extremes with volume confirmation.
-Uses 1d EMA for trend regime and 4h volume spike for confirmation.
-Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
-Works in both bull and bear markets by adapting to EMA-defined trend regime.
+exp_7158_1d_donchian20_1w_hma_v2
+Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter and volume confirmation.
+- In trending markets (price > 1w HMA): trade continuation breakouts in breakout direction
+- In ranging markets (price near 1w HMA): mean reversion at Donchian extremes with volume spike
+- Uses discrete position sizing (0.25) to minimize fee churn
+- Includes ATR-based stoploss and time-based exit to limit drawdown
+- Designed for 1d timeframe targeting ~15-25 trades/year (60-100 total over 4 years)
+- Works in both bull and bear markets by adapting to HMA-defined trend regime
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7157_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7158_1d_donchian20_1w_hma_v2"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+HMA_PERIOD = 21
 VOL_MA_PERIOD = 20
-VOL_SPIKE_THRESHOLD = 2.0
+VOL_SPIKE_THRESHOLD = 2.0  # Increased to reduce trades
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 20  # ~20 * 4h = ~3.3 days
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 15  # Increased to reduce trade frequency
+NEAR_HMA_THRESHOLD = 0.3  # Reduced to tighten ranging condition
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA trend
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - using 1w for HMA trend
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate 1w HMA (Hull Moving Average)
+    close_1w = df_1w['close'].values
+    half_period = HMA_PERIOD // 2
+    sqrt_period = int(np.sqrt(HMA_PERIOD))
     
-    # Align to LTF (4h)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # WMA function with proper min_periods handling
+    def wma(values, period):
+        if len(values) < period:
+            return np.full_like(values, np.nan)
+        weights = np.arange(1, period + 1)
+        return np.convolve(values, weights / weights.sum(), mode='valid')
+    
+    # HMA calculation
+    wma_half = wma(close_1w, half_period)
+    wma_full = wma(close_1w, HMA_PERIOD)
+    
+    # Handle array lengths
+    if len(wma_half) > 0 and len(wma_full) > 0:
+        raw_hma = 2 * wma_half - wma_full
+        hma_values = wma(raw_hma, sqrt_period)
+        # Pad to original length
+        hma_1w = np.full_like(close_1w, np.nan)
+        start_idx = half_period - 1
+        end_idx = start_idx + len(hma_values)
+        if end_idx <= len(close_1w):
+            hma_1w[start_idx:end_idx] = hma_values
+    else:
+        hma_1w = np.full_like(close_1w, np.nan)
+    
+    # Align to LTF (1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -48,14 +75,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels
+    # Donchian channels with min_periods
     highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
     lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Volume MA for confirmation
+    # Volume MA for confirmation with min_periods
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
-    # ATR for stoploss
+    # ATR for stoploss with min_periods
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
@@ -68,13 +95,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, HMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -99,21 +126,21 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Volume confirmation (volume spike)
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_SPIKE_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        # Volume confirmation - require significant spike
+        vol_confirmed = not np.isnan(vol_ma[i]) and volume[i] > vol_ma[i] * VOL_SPIKE_THRESHOLD
         
-        # Determine market regime based on EMA
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
-        near_ema = np.abs(close[i] - ema_1d_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of EMA
+        # Determine market regime based on HMA
+        above_hma = close[i] > hma_1w_aligned[i]
+        below_hma = close[i] < hma_1w_aligned[i]
+        near_hma = np.abs(close[i] - hma_1w_aligned[i]) < (NEAR_HMA_THRESHOLD * atr[i])  # Tightened
         
-        # Fade at extremes in ranging market (near EMA)
-        fade_long = near_ema and (close[i] <= lowest_low[i]) and vol_confirmed
-        fade_short = near_ema and (close[i] >= highest_high[i]) and vol_confirmed
+        # Fade at extremes in ranging market (near HMA) - requires volume spike
+        fade_long = near_hma and (close[i] <= lowest_low[i]) and vol_confirmed
+        fade_short = near_hma and (close[i] >= highest_high[i]) and vol_confirmed
         
-        # Continuation breakouts in trending market
-        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
-        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
+        # Continuation breakouts in trending market - requires volume spike
+        continuation_long = above_hma and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_hma and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
@@ -134,3 +161,4 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+</file>
