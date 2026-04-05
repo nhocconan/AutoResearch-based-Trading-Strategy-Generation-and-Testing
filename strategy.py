@@ -1,43 +1,47 @@
 #!/usr/bin/env python3
 """
-exp_7353_4h_donchian20_12h_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 12h EMA(50) trend filter and volume confirmation.
-Uses 12h HTF for trend to reduce noise vs 1d, targeting 75-200 trades over 4 years.
-Discrete position sizing (0.0, ±0.25) minimizes fee churn. Works in bull/bear via EMA regime filter.
+exp_7354_1h_donchian20_4h_ema_vol_v1
+Hypothesis: 1h Donchian(20) breakout with 4h EMA(50) trend filter and volume confirmation.
+Uses 4h HTF for trend to reduce noise vs 1d, targeting 60-150 trades over 4 years.
+Discrete position sizing (0.0, ±0.20) minimizes fee churn. Works in bull/bear via EMA regime filter.
+Uses session filter (08-20 UTC) to reduce noise trades.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7353_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7354_1h_donchian20_4h_ema_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0  # Increased to reduce overtrading
-SIGNAL_SIZE = 0.25
+VOL_BASE_THRESHOLD = 2.0
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # ~40 hours
+MAX_HOLD_BARS = 24  # ~1 day
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 12h for EMA trend
-    df_12h = get_htf_data(prices, '12h')
+    # Compute session hours ONCE before loop
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
-    # Calculate 12h EMA
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Load HTF data ONCE before loop - using 4h for EMA trend
+    df_4h = get_htf_data(prices, '4h')
     
-    # Align to LTF (4h)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 4h EMA
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    
+    # Align to LTF (1h)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -70,8 +74,12 @@ def generate_signals(prices):
     for i in range(start, n):
         bars_since_entry += 1
         
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
+        
         # Skip if HTF data not available
-        if np.isnan(ema_12h_aligned[i]):
+        if np.isnan(ema_4h_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -100,8 +108,8 @@ def generate_signals(prices):
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Determine market regime based on EMA
-        above_ema = close[i] > ema_12h_aligned[i]
-        below_ema = close[i] < ema_12h_aligned[i]
+        above_ema = close[i] > ema_4h_aligned[i]
+        below_ema = close[i] < ema_4h_aligned[i]
         
         # Continuation breakouts in trending market
         continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
@@ -111,8 +119,8 @@ def generate_signals(prices):
         retest_long = above_ema and (close[i] <= highest_high[i-1] * 1.005) and (close[i] >= lowest_low[i-1]) and vol_confirmed
         retest_short = below_ema and (close[i] >= lowest_low[i-1] * 0.995) and (close[i] <= highest_high[i-1]) and vol_confirmed
         
-        # Enter new positions only if flat
-        if position == 0:
+        # Enter new positions only if flat AND in session
+        if position == 0 and in_session:
             if continuation_long or retest_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
@@ -126,7 +134,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         else:
-            # Hold current position
-            signals[i] = position * SIGNAL_SIZE
+            # Hold current position or stay flat outside session
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
     
     return signals
