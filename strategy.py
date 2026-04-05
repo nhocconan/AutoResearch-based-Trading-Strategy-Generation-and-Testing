@@ -1,19 +1,18 @@
-# Investigate 6h: donchian(20) + 1d POC + volume
-# Pivot point: use 1d high/low/close to compute POC as (H+L+C)/3
-# Long when price > POC and breaks Donchian high + volume
-# Short when price < POC and breaks Donchian low + volume
-# Trend filter: require price > 1d EMA200 for longs, < for shorts
-# Risk: ATR stop 2x, target 3x
-# Position size 0.25
-# Expect ~150-250 trades over 4 years
-
 #!/usr/bin/env python3
+"""
+Experiment #8073: 4-hour Donchian breakout with 12-hour trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.5x 20-period MA 
+and aligned 12h trend (price above/below 12h EMA50) captures sustained moves with 
+appropriate frequency for 4h timeframe. The 12h timeframe provides higher trend context 
+to reduce whipsaw while maintaining trade frequency of ~20-50 trades/year.
+"""
+
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8071_6h_donchian20_1d_poc_ema_vol_v1"
-timeframe = "6h"
+name = "exp_8073_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -21,31 +20,26 @@ DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-EMA_LONG = 200  # for trend filter on 1d
+EMA_PERIOD = 50
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d POC: (H+L+C)/3
-    poc_1d = (df_1d['high'].values + df_1d['low'].values + df_1d['close'].values) / 3.0
+    # Calculate 12h EMA
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Calculate 1d EMA200 for trend filter
-    close_1d = df_1d['close'].values
-    ema_200 = pd.Series(close_1d).ewm(span=EMA_LONG, adjust=False, min_periods=EMA_LONG).mean().values
-    
-    # POC relative to EMA: if POC > EMA200, bullish bias; else bearish
-    # Actually we'll use price vs POC for entry, EMA for filter
-    ema_filter = np.where(close_1d > ema_200, 1, -1)  # 1=bullish bias (price above EMA200), -1=bearish
-    ema_filter_aligned = align_htf_to_ltf(prices, df_1d, ema_filter)
-    poc_aligned = align_htf_to_ltf(prices, df_1d, poc_1d)
+    # Price relative to EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_12h > ema_12h, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_12h, price_vs_ema)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -74,11 +68,11 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_LONG) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(poc_aligned[i]) or np.isnan(ema_filter_aligned[i]):
+        if np.isnan(price_vs_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -94,9 +88,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine bias from 1d EMA200
-        bull_bias = ema_filter_aligned[i] == 1   # 1d close above EMA200
-        bear_bias = ema_filter_aligned[i] == -1  # 1d close below EMA200
+        # Determine market bias from 12h EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 12h close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 12h close below EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -106,8 +100,8 @@ def generate_signals(prices):
         lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
         # Entry conditions
-        long_entry = bull_bias and (close[i] > poc_aligned[i]) and upper_breakout and volume_confirmed
-        short_entry = bear_bias and (close[i] < poc_aligned[i]) and lower_breakout and volume_confirmed
+        long_entry = bull_bias and upper_breakout and volume_confirmed
+        short_entry = bear_bias and lower_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
