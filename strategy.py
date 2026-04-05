@@ -2,10 +2,10 @@
 """
 exp_7312_12h_donchian20_1d_ema_vol_v1
 Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Uses higher timeframe (12h) to reduce trade frequency and fee drag while capturing multi-day trends.
 In trending markets (price > EMA): continuation breakouts in breakout direction.
 In ranging markets (price near EMA): mean reversion at Donchian extremes with volume confirmation.
-Designed for 12h timeframe to achieve 12-37 trades/year (50-150 total over 4 years) with minimal fee impact.
+Uses 1d EMA for trend regime and 12h volume for confirmation.
+Designed for 12h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
 Works in both bull and bear markets by adapting to EMA-defined trend regime.
 """
 
@@ -25,7 +25,7 @@ VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 8  # ~4 days
+MAX_HOLD_BARS = 10  # ~5 days
 
 def generate_signals(prices):
     n = len(prices)
