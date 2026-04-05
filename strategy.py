@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #7812: 12-hour Donchian breakout with daily EMA trend and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.8x 20-period MA and aligned daily EMA trend captures sustained moves while avoiding whipsaw. Daily EMA provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 75-200 trades over 4 years.
+Experiment #7816: 12-hour Donchian breakout with daily EMA trend and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.8x 20-period MA and aligned daily EMA trend captures sustained moves while avoiding whipsaw. Daily EMA provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 50-150 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7812_12h_donchian20_1d_ema_vol_v1"
+name = "exp_7816_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
