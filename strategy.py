@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #7892: 12-hour Donchian breakout with daily EMA trend and volume filter.
+Experiment #7892: 12-hour Donchian breakout with daily EMA trend and volume confirmation.
 Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA and aligned daily EMA trend (price above/below EMA50) captures sustained moves while avoiding whipsaw. Daily EMA provides structural bias from higher timeframe to reduce false breakouts. Targets 50-150 trades over 4 years with controlled risk via ATR-based stops.
 """
 
@@ -122,3 +122,5 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+
+</think>
