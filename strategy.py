@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #8640: 4h Donchian(20) breakout + 1d trend filter + volume confirmation + ATR stoploss.
-Hypothesis: 4h timeframe balances trade frequency and trend capture; 1d EMA filter ensures alignment with daily momentum to avoid counter-trend trades. Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk. Targets 75-200 trades over 4 years (19-50/year) to minimize fee impact while maintaining statistical validity.
+Experiment #8642: 12h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
+Hypothesis: 12h timeframe balances trade frequency (50-150 total over 4 years) with responsiveness.
+1d trend filter (EMA50) ensures alignment with multi-day momentum. Volume confirmation filters breakouts
+requiring institutional participation. ATR-based stops manage risk. Works in bull (trend following) and bear
+(mean-reversion via breakout of ranges).
 """
 
-from mtf_data import get_ft_data, align_htf_to_ltf
+from mft_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8640_4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "exp_8642_12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -47,7 +50,7 @@ def generate_signals(prices):
                      np.where(close_1d < ema_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
     price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
     
-    # Calculate LTF indicators (4h)
+    # Calculate LTF indicators (12h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -124,3 +127,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</file>
