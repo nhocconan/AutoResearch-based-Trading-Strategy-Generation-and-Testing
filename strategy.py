@@ -1,70 +1,43 @@
 #!/usr/bin/env python3
 """
-exp_7367_6h_donchian20_1w_pivot_vol_v1
-Hypothesis: 6h Donchian(20) breakout with 1d pivot direction (from 1w HTF) and volume confirmation.
-Pivots calculated from weekly OHLC: long when price > weekly pivot, short when < weekly pivot.
-Reduces false breakouts by aligning with higher timeframe bias. Targets 50-150 trades over 4 years.
-Uses discrete sizing (0.0, ±0.25) to minimize fee churn. Works in bull/bear via weekly pivot regime filter.
+exp_7368_12h_donchian20_1w_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
+Uses weekly HTF for strong trend filter to reduce whipsaw, targeting 50-150 trades over 4 years.
+Discrete position sizing (0.0, ±0.25) minimizes fee churn. Works in bull/bear via EMA regime filter.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7367_6h_donchian20_1w_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_7368_12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 8  # ~2 days for 6h
+MAX_HOLD_BARS = 8  # ~4 days for 12h timeframe
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - using 1w for EMA trend
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivots from 1d data (approximate weekly OHLC)
-    # We'll resample 1d to weekly manually since we have daily data
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1w EMA
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Convert to Series for resampling
-    df_1d_series = pd.DataFrame({
-        'open': df_1d['open'].values,
-        'high': high_1d,
-        'low': low_1d,
-        'close': close_1d
-    }, index=pd.to_datetime(df_1d.index))
-    
-    # Resample to weekly (starting Monday)
-    df_weekly = df_1d_series.resample('W-MON').agg({
-        'open': 'first',
-        'high': 'max',
-        'low': 'min',
-        'close': 'last'
-    }).dropna()
-    
-    if len(df_weekly) < 2:
-        return np.zeros(n)
-    
-    # Calculate weekly pivot points: P = (H + L + C)/3
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    
-    # Align weekly pivot to 6h LTF
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    # Align to LTF (12h)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -92,13 +65,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(weekly_pivot_aligned[i]):
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -126,22 +99,26 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market bias from weekly pivot
-        above_pivot = close[i] > weekly_pivot_aligned[i]
-        below_pivot = close[i] < weekly_pivot_aligned[i]
+        # Determine market regime based on EMA
+        above_ema = close[i] > ema_1w_aligned[i]
+        below_ema = close[i] < ema_1w_aligned[i]
         
-        # Breakout entries aligned with weekly pivot bias
-        breakout_long = above_pivot and (close[i] > highest_high[i]) and vol_confirmed
-        breakout_short = below_pivot and (close[i] < lowest_low[i]) and vol_confirmed
+        # Continuation breakouts in trending market
+        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
+        
+        # Breakout retest entries (pullback to breakout level with volume)
+        retest_long = above_ema and (close[i] <= highest_high[i-1] * 1.005) and (close[i] >= lowest_low[i-1]) and vol_confirmed
+        retest_short = below_ema and (close[i] >= lowest_low[i-1] * 0.995) and (close[i] <= highest_high[i-1]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if breakout_long:
+            if continuation_long or retest_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif breakout_short:
+            elif continuation_short or retest_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -153,3 +130,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
