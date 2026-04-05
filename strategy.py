@@ -1,41 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #8634: 1h RSI mean reversion + 4h/1d trend filter + volume confirmation.
-Hypothesis: Mean reversion on 1h works in both bull and bear markets when filtered by higher timeframe trend.
-In bull markets, we take long reversals from oversold; in bear markets, we take short reversals from overbought.
-Using 4h for trend direction and 1d for trend strength reduces false signals.
-Volume confirmation ensures institutional participation. Targets 60-150 trades over 4 years (15-37/year).
+Experiment #8635: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation.
+Hypothesis: Weekly pivot levels define institutional support/resistance. Price breaking weekly R1/S1 with volume and aligned to weekly trend captures institutional flow. 6h timeframe balances trade frequency (~25-50/year) to minimize fee drag while capturing multi-day moves. Works in bull/bear via pivot direction filter.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_ftf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8634_1h_rsi_meanrev_4h_1d_trend_vol_v1"
-timeframe = "1h"
+name = "exp_8635_6h_donchian20_weekly_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-TREND_PERIOD = 50
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_rsi(close, period):
-    """Calculate RSI using Wilder's smoothing"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -46,40 +29,51 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_pivot_points(high, low, close):
+    """Calculate standard pivot points: P, R1, S1, R2, S2, R3, S3"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, s1, r2, s2, r3, s3
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
-    # 1 = bullish (price above EMA), -1 = bearish (price below EMA)
-    trend_4h = np.where(close_4h > ema_4h, 1, -1)
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
+    # Calculate weekly pivot points from prior week
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate 1d EMA for trend strength (avoid choppy markets)
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
-    # Distance from EMA as strength indicator
-    dist_1d = (close_1d - ema_1d) / ema_1d
-    # Normalize to [-1, 1] range for consistent scaling
-    dist_1d_clipped = np.clip(dist_1d, -0.2, 0.2)  # Clip to reasonable range
-    trend_strength_1d = dist_1d_clipped / 0.2  # Scale to [-1, 1]
-    trend_strength_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_strength_1d)
+    # Calculate pivot points for each week
+    wpivot, wr1, ws1, wr2, ws2, wr3, ws3 = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
     
-    # Calculate LTF indicators (1h)
+    # Weekly trend: price above/below weekly pivot
+    weekly_trend = np.where(weekly_close > wpivot, 1, 
+                   np.where(weekly_close < wpivot, -1, 0))
+    
+    # Align weekly data to 6h timeframe
+    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
+    wr1_aligned = align_htf_to_ltf(prices, df_1w, wr1)
+    ws1_aligned = align_htf_to_ltf(prices, df_1w, ws1)
+    
+    # Calculate LTF indicators (6h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI for mean reversion
-    rsi = calculate_rsi(close, RSI_PERIOD)
+    # Donchian channels
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -93,11 +87,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(trend_4h_aligned[i]) or np.isnan(trend_strength_1d_aligned[i]):
+        if np.isnan(weekly_trend_aligned[i]) or np.isnan(wr1_aligned[i]) or np.isnan(ws1_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -113,25 +107,24 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 4h EMA
-        bull_bias = trend_4h_aligned[i] == 1   # 4h price above EMA50
-        bear_bias = trend_4h_aligned[i] == -1  # 4h price below EMA50
+        # Determine bias from weekly pivot
+        bull_bias = weekly_trend_aligned[i] == 1   # weekly close above pivot
+        bear_bias = weekly_trend_aligned[i] == -1  # weekly close below pivot
         
-        # Use 1d trend strength to filter choppy markets
-        strong_trend = abs(trend_strength_1d_aligned[i]) > 0.3  # At least 30% of max strength
+        # Donchian breakout conditions
+        long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
+        short_breakout = close[i] < donchian_low[i-1]  # Break below previous period's low
         
-        # RSI mean reversion conditions
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        # Weekly pivot breakout conditions
+        long_pivot_break = close[i] > wr1_aligned[i-1]  # Break above weekly R1
+        short_pivot_break = close[i] < ws1_aligned[i-1]  # Break below weekly S1
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry conditions
-        # Long: bullish trend + oversold RSI + volume + strong trend
-        long_entry = bull_bias and rsi_oversold and volume_confirmed and strong_trend
-        # Short: bearish trend + overbought RSI + volume + strong trend
-        short_entry = bear_bias and rsi_overbought and volume_confirmed and strong_trend
+        # Entry conditions: require both Donchian and pivot breakout with volume
+        long_entry = bull_bias and long_breakout and long_pivot_break and volume_confirmed
+        short_entry = bear_bias and short_breakout and short_pivot_break and volume_confirmed
         
         # Generate signals
         if position == 0:
@@ -153,4 +146,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</p>
