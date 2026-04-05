@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #7809: 4-hour Donchian breakout with daily EMA trend and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.8x 20-period MA and aligned daily EMA trend captures sustained moves while avoiding whipsaw. Daily EMA provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 75-200 trades over 4 years.
+Experiment #7811: 6-hour Donchian breakout with daily trend and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 6h with volume >1.8x 20-period MA and aligned daily trend captures sustained moves while avoiding whipsaw. Daily trend uses price above/below EMA50 for directional bias to reduce false breakouts. Targets 100-200 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7809_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7811_6h_donchian20_1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
@@ -30,11 +30,9 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend filter
+    # Calculate daily trend: price above/below EMA
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
-    
-    # Trend bias: above EMA = bullish, below EMA = bearish
     trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
     trend_bias_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
     
@@ -65,7 +63,7 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, EMA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
@@ -85,9 +83,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from daily EMA
-        bull_bias = trend_bias_1d_aligned[i] == 1   # daily close above EMA
-        bear_bias = trend_bias_1d_aligned[i] == -1  # daily close below EMA
+        # Determine market bias from daily trend
+        bull_bias = trend_bias_1d_aligned[i] == 1   # daily price above EMA
+        bear_bias = trend_bias_1d_aligned[i] == -1  # daily price below EMA
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
