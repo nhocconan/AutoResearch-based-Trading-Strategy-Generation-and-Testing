@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #8767: 6h Donchian(20) breakout + 1d pivot direction + volume confirmation.
-Hypothesis: Donchian breakouts capture directional momentum, while 1d pivot levels filter 
-direction (long above daily pivot, short below) and volume confirms institutional participation.
-This combines trend following with mean-reversion filters to work in both bull and bear markets.
-Targets 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag.
+Experiment #8767: 6h Donchian breakout + daily pivot direction + volume confirmation.
+Hypothesis: Daily pivot levels (R3/S3, R4/S4) provide institutional reference points.
+Breakouts above R3 or below S3 with volume confirmation and daily trend filter capture
+institutional moves. Works in bull/bear: buys breakouts above pivot resistance in uptrend,
+sells breakdowns below pivot support in downtrend. Targets 50-150 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -17,16 +17,12 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-PIVOT_LOOKBACK = 1  # Use previous day's pivot
+PIVOT_LOOKBACK = 1  # Previous day for pivot calculation
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_pivot(high, low, close):
-    """Calculate classic pivot point: (H + L + C) / 3"""
-    return (high + low + close) / 3.0
+ATR_STOP_MULTIPLIER = 2.2
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -37,6 +33,19 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_pivots(high, low, close):
+    """Calculate standard pivot points: P, R1, S1, R2, S2, R3, S3, R4, S4"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    r4 = r3 + (high - low)
+    s4 = s3 - (high - low)
+    return pivot, r1, s1, r2, s2, r3, s3, r4, s4
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -45,18 +54,29 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d pivot from previous day
+    # Calculate daily pivots and trend
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    pivot_1d = calculate_pivot(high_1d, low_1d, close_1d)
     
-    # Price relative to pivot: above = bullish bias, below = bearish bias
-    price_vs_pivot = np.where(close_1d > pivot_1d, 1, 
-                     np.where(close_1d < pivot_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at pivot
-    price_vs_pivot_aligned = align_htf_to_ltf(prices, df_1d, price_vs_pivot)
+    # Pivot levels
+    _, _, _, _, _, r3_1d, s3_1d, r4_1d, s4_1d = calculate_pivots(high_1d, low_1d, close_1d)
     
-    # Calculate LTF indicators (6h)
+    # Daily trend: above/below previous day close
+    prev_close_1d = np.roll(close_1d, 1)
+    prev_close_1d[0] = np.nan
+    daily_bull = close_1d > prev_close_1d  # Above prev close = bullish
+    daily_bear = close_1d < prev_close_1d  # Below prev close = bearish
+    
+    # Pivot levels aligned to 6h
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    daily_bull_aligned = align_htf_to_ltf(prices, df_1d, daily_bull.astype(float))
+    daily_bear_aligned = align_htf_to_ltf(prices, df_1d, daily_bear.astype(float))
+    
+    # LTF indicators (6h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -78,11 +98,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, PIVOT_LOOKBACK, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(price_vs_pivot_aligned[i]):
+        if np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -98,9 +118,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1d pivot
-        bull_bias = price_vs_pivot_aligned[i] == 1   # 6h price above daily pivot
-        bear_bias = price_vs_pivot_aligned[i] == -1  # 6h price below daily pivot
+        # Determine market bias from daily price action
+        bull_bias = daily_bull_aligned[i] == 1.0   # Daily close above prev close
+        bear_bias = daily_bear_aligned[i] == 1.0   # Daily close below prev close
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
@@ -109,9 +129,15 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
+        # Pivot-based filters
+        # Long: breakout above R3 with bullish daily bias
+        long_pivot_filter = bull_bias and (close[i] > r3_1d_aligned[i])
+        # Short: breakdown below S3 with bearish daily bias
+        short_pivot_filter = bear_bias and (close[i] < s3_1d_aligned[i])
+        
         # Entry conditions
-        long_entry = bull_bias and long_breakout and volume_confirmed
-        short_entry = bear_bias and short_breakout and volume_confirmed
+        long_entry = long_breakout and volume_confirmed and long_pivot_filter
+        short_entry = short_breakout and volume_confirmed and short_pivot_filter
         
         # Generate signals
         if position == 0:
@@ -133,4 +159,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</x>
