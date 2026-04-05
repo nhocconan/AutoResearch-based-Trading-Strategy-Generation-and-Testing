@@ -1,32 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #9627: 6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation.
-Hypothesis: Donchian(20) breakouts aligned with weekly pivot bias (bullish if price > weekly pivot) 
-provide directional edge, with volume confirmation filtering false breakouts. 
-Weekly pivot adds higher-timeframe context, working in bull markets (breakouts above pivot) 
-and bear markets (breakdowns below pivot). Targets 100-200 total trades over 4 years (25-50/year).
+Experiment #9629: 4h Donchian Breakout + Volume Spike + HMA Trend + ATR Stoploss.
+Hypothesis: Donchian(20) breakouts with volume confirmation and trend filtering (HMA21) 
+provide high-probability trend continuation signals. Works in bull (breakouts above upper band) 
+and bear (breakdowns below lower band). Targets 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9627_6h_donchian20_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "exp_9629_4h_donchian_breakout_volume_hma_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
+VOLUME_SPIKE_MULTIPLIER = 2.0
+HMA_PERIOD = 21
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels: upper = max(high, period), lower = min(low, period)"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_hma(close, period):
+    """Calculate Hull Moving Average"""
+    half_period = int(period / 2)
+    sqrt_period = int(np.sqrt(period))
+    
+    wma1 = pd.Series(close).ewm(span=half_period, adjust=False, min_periods=half_period).mean()
+    wma2 = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean()
+    raw_hma = 2 * wma1 - wma2
+    hma = pd.Series(raw_hma).ewm(span=sqrt_period, adjust=False, min_periods=sqrt_period).mean()
+    return hma.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -37,37 +42,30 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_weekly_pivot(high, low, close):
-    """
-    Calculate weekly pivot point: P = (H + L + C) / 3
-    """
-    return (high + low + close) / 3.0
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (weekly for pivot calculation)
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop (1d for trend filter)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot using previous week's OHLC
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    weekly_pivot = calculate_weekly_pivot(high_1w, low_1w, close_1w)
+    # Calculate 1d HMA for trend filter
+    close_1d = df_1d['close'].values
+    hma_1d = calculate_hma(close_1d, HMA_PERIOD)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Align weekly pivot to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    
-    # Calculate LTF indicators (6h)
+    # Calculate LTF indicators (4h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     # Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    high_roll = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max()
+    low_roll = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min()
+    donchian_upper = high_roll.values
+    donchian_lower = low_roll.values
     
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -84,8 +82,8 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, 20) + 1
     
     for i in range(start, n):
-        # Skip if weekly pivot data not available
-        if np.isnan(weekly_pivot_aligned[i]):
+        # Skip if HTF data not available
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -104,17 +102,17 @@ def generate_signals(prices):
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Weekly pivot bias
-        above_pivot = close[i] > weekly_pivot_aligned[i]
-        below_pivot = close[i] < weekly_pivot_aligned[i]
+        # Trend filter: HMA slope
+        hma_rising = hma_1d_aligned[i] > hma_1d_aligned[i-1] if i > 0 else False
+        hma_falling = hma_1d_aligned[i] < hma_1d_aligned[i-1] if i > 0 else False
         
         # Breakout conditions
         breakout_up = close[i] > donchian_upper[i]
-        breakout_down = close[i] < donchian_lower[i]
+        breakdown_down = close[i] < donchian_lower[i]
         
-        # Entry conditions: Donchian breakout + volume spike + weekly pivot bias
-        long_entry = breakout_up and volume_spike and above_pivot
-        short_entry = breakout_down and volume_spike and below_pivot
+        # Entry conditions
+        long_entry = volume_spike and hma_rising and breakout_up
+        short_entry = volume_spike and hma_falling and breakdown_down
         
         # Generate signals
         if position == 0:
