@@ -1,96 +1,105 @@
 #!/usr/bin/env python3
 """
-Experiment #9786: 4h Donchian Breakout + Volume Spike + Regime Filter.
-Hypothesis: Combining Donchian channel breakouts (20-period) with volume confirmation 
-and ADX regime filtering creates robust trend-following signals that work in both 
-bull and bear markets. The Donchian channel provides clear breakout levels, volume 
-confirms institutional participation, and ADX filters out low-momentum environments. 
-Uses 1h timeframe for HTF trend context to avoid counter-trend trades. Targets 
-75-200 total trades over 4 years (19-50/year) to balance opportunity and cost.
+Experiment #9789: 4h Donchian(20) breakout + HMA trend + volume confirmation + ATR stoploss.
+Hypothesis: Donchian breakouts capture trend continuation, HMA(21) filters direction, 
+volume confirms conviction, ATR stops manage risk. Works in bull (breakouts up) and 
+bear (breakouts down) with trend filter preventing counter-trend entries.
+Targets 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9786_4h_donchian_breakout_volume_regime_v1"
+name = "exp_9789_4h_donchian_breakout_hma_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 2.0
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
-SIGNAL_SIZE = 0.25
+HMA_PERIOD = 21
+VOLUME_SPIKE_MULTIPLIER = 1.5
+VOLUME_MA_PERIOD = 20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+SIGNAL_SIZE = 0.25
 
-def calculate_true_range(high, low, close):
-    """Calculate True Range"""
+def hull_moving_average(arr, period):
+    """Calculate Hull Moving Average"""
+    n = len(arr)
+    if n < period:
+        return np.full(n, np.nan)
+    
+    half_period = period // 2
+    sqrt_period = int(np.sqrt(period))
+    
+    # WMA of half period
+    wma_half = np.full(n, np.nan)
+    for i in range(half_period - 1, n):
+        weights = np.arange(1, half_period + 1)
+        wma_half[i] = np.sum(arr[i - half_period + 1:i + 1] * weights) / weights.sum()
+    
+    # WMA of full period
+    wma_full = np.full(n, np.nan)
+    for i in range(period - 1, n):
+        weights = np.arange(1, period + 1)
+        wma_full[i] = np.sum(arr[i - period + 1:i + 1] * weights) / weights.sum()
+    
+    # Raw HMA: 2*WMA(half) - WMA(full)
+    hma_raw = 2 * wma_half - wma_full
+    
+    # Final WMA of sqrt period
+    hma = np.full(n, np.nan)
+    for i in range(sqrt_period - 1, n):
+        weights = np.arange(1, sqrt_period + 1)
+        hma[i] = np.sum(hma_raw[i - sqrt_period + 1:i + 1] * weights) / weights.sum()
+    
+    return hma
+
+def calculate_atr(high, low, close, period):
+    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    return tr
-
-def calculate_adx(high, low, close, period):
-    """Calculate ADX using Wilder's smoothing"""
-    tr = calculate_true_range(high, low, close)
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    atr = np.full_like(tr, np.nan, dtype=np.float64)
     
-    # Smooth using Wilder's smoothing (alpha = 1/period)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
+    if len(tr) >= period:
+        atr[period - 1] = np.nanmean(tr[:period])
+        for i in range(period, len(tr)):
+            atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
     
-    dx = np.where((plus_di + minus_di) != 0, 
-                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return adx
-
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
-    tr = calculate_true_range(high, low, close)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
-
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1h for trend context)
-    df_1h = get_htf_data(prices, '1h')
+    # Load HTF data ONCE before loop (1d for trend filter)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1h EMA for trend filter
-    close_1h = df_1h['close'].values
-    ema_1h = pd.Series(close_1h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_1h)
+    # Calculate 1d HMA for trend filter
+    hma_1d = hull_moving_average(df_1d['close'].values, HMA_PERIOD)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
-    # Calculate 4h indicators
+    # Calculate LTF indicators (4h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     # Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(DONCHIAN_PERIOD - 1, n):
+        donchian_high[i] = np.max(high[i - DONCHIAN_PERIOD + 1:i + 1])
+        donchian_low[i] = np.min(low[i - DONCHIAN_PERIOD + 1:i + 1])
     
     # Volume moving average for spike detection
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    
-    # ADX for regime filtering
-    adx = calculate_adx(high, low, close, ADX_PERIOD)
+    volume_ma = np.full(n, np.nan)
+    for i in range(VOLUME_MA_PERIOD - 1, n):
+        volume_ma[i] = np.mean(volume[i - VOLUME_MA_PERIOD + 1:i + 1])
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -101,11 +110,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, 20, ADX_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, HMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if HTF data not available
-        if np.isnan(ema_1h_aligned[i]):
+        # Skip if HMA data not available
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -124,20 +133,19 @@ def generate_signals(prices):
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Regime filter: only trade when ADX > 25 (trending market)
-        trending_market = adx[i] >= ADX_THRESHOLD
+        # Breakout conditions
+        breakout_up = high[i] >= donchian_high[i]  # Using high to catch breakout
+        breakout_down = low[i] <= donchian_low[i]   # Using low to catch breakdown
         
-        # Trend filter: only trade in direction of 1h EMA
-        uptrend = close[i] > ema_1h_aligned[i]
-        downtrend = close[i] < ema_1h_aligned[i]
-        
-        # Breakout signals
-        breakout_long = trending_market and volume_spike and uptrend and close[i] >= donchian_upper[i]
-        breakout_short = trending_market and volume_spike and downtrend and close[i] <= donchian_lower[i]
+        # Trend filter: HMA slope (simplified: current vs previous)
+        hma_now = hma_1d_aligned[i]
+        hma_prev = hma_1d_aligned[i - 1] if i > 0 else hma_now
+        uptrend = hma_now > hma_prev
+        downtrend = hma_now < hma_prev
         
         # Entry conditions
-        long_entry = breakout_long
-        short_entry = breakout_short
+        long_entry = breakout_up and volume_spike and uptrend
+        short_entry = breakout_down and volume_spike and downtrend
         
         # Generate signals
         if position == 0:
