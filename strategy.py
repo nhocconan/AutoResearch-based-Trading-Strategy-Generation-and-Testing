@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #11689: 4h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: 4h Donchian(20) breakouts with 1d EMA trend filter and volume confirmation capture medium-term trends. 
-Works in bull (breakouts continue) and bear (breakouts reverse quickly) by using 1d trend filter. 
-Targets 75-200 trades over 4 years (19-50/year) with low turnover to minimize fee drag.
+Experiment #11694: 1h Donchian Breakout with 4h Trend and Daily Volume Confirmation
+Hypothesis: 1h Donchian(20) breakouts capture short-term momentum. 4h EMA provides trend bias,
+and daily volume filter ensures institutional participation. Works in bull (breakouts continue) 
+and bear (breakouts reverse quickly) by using 4h trend filter. Target: 60-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11689_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_11694_1h_donchian20_4h_trend_1d_vol"
+timeframe = "1h"
 leverage = 1.0
 
-# Parameters - tuned for moderate trade frequency
+# Parameters - tuned for appropriate trade frequency
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
@@ -47,14 +47,21 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    
+    # Calculate 4h EMA for trend
+    ema_4h = calculate_ema(df_4h['close'].values, TREND_EMA_PERIOD)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA for trend
-    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate daily volume MA
+    volume_1d = pd.Series(df_1d['volume'].values).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
     
-    # Calculate 4h indicators
+    # Calculate 1h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -73,8 +80,8 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 1d EMA not available
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if 4h EMA or daily volume not available
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(volume_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -97,16 +104,18 @@ def generate_signals(prices):
         breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
         breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Volume confirmation (both 1h and daily)
+        volume_1h_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_1d_ok = volume[i] > (volume_1d_aligned[i] * VOLUME_THRESHOLD) if not np.isnan(volume_1d_aligned[i]) else False
+        volume_ok = volume_1h_ok and volume_1d_ok
         
-        # Trend filter (1d)
-        uptrend_1d = close[i] > ema_1d_aligned[i]
-        downtrend_1d = close[i] < ema_1d_aligned[i]
+        # Trend filter (4h)
+        uptrend_4h = close[i] > ema_4h_aligned[i]
+        downtrend_4h = close[i] < ema_4h_aligned[i]
         
         # Entry conditions
-        long_entry = breakout_up and volume_ok and uptrend_1d
-        short_entry = breakout_down and volume_ok and downtrend_1d
+        long_entry = breakout_up and volume_ok and uptrend_4h
+        short_entry = breakout_down and volume_ok and downtrend_4h
         
         # Generate signals
         if position == 0:
