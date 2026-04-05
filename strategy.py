@@ -1,33 +1,43 @@
 #!/usr/bin/env python3
 """
-Experiment #11377: 4h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: Donchian(20) breakouts capture strong directional moves. Daily EMA provides trend bias,
-and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 total trades over 4 years.
+Experiment #11379: 6h Camarilla Pivot + Volume Spike + 12h Trend Filter
+Hypothesis: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) work well on 6h timeframe.
+In ranging markets: fade extreme touches of R3/S3 with volume confirmation.
+In trending markets: breakout continuation when price closes beyond R4/S4 with 12h trend alignment.
+Volume filter ensures institutional participation. Designed for both bull (breakouts) and bear (mean reversion at extremes).
+Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11377_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_11379_6h_camarilla_pivot_vol_12h_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-DAILY_EMA_PERIOD = 21
+CAMARILLA_PERIOD = 1
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+TREND_HTF = '12h'
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given period"""
+    # Typical price for the period
+    typical_price = (high + low + close) / 3
+    range_val = high - low
+    
+    # Camarilla levels
+    R4 = close + range_val * 1.1 / 2
+    R3 = close + range_val * 1.1 / 4
+    S3 = close - range_val * 1.1 / 4
+    S4 = close - range_val * 1.1 / 2
+    
+    return R4, R3, S3, S4
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -47,20 +57,33 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load daily data for Camarilla (using previous day's data)
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend
-    ema_daily = calculate_ema(df_daily['close'].values, DAILY_EMA_PERIOD)
-    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
+    # Calculate Camarilla levels from daily data
+    high_daily = df_daily['high'].values
+    low_daily = df_daily['low'].values
+    close_daily = df_daily['close'].values
     
-    # Calculate 4h indicators
+    camarilla_R4, camarilla_R3, camarilla_S3, camarilla_S4 = calculate_camarilla(high_daily, low_daily, close_daily)
+    
+    # Align Camarilla levels to 6h timeframe (shifted by 1 day to avoid look-ahead)
+    camarilla_R4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_R4)
+    camarilla_R3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_R3)
+    camarilla_S3_aligned = align_htf_to_ltf(prices, df_daily, camarilla_S3)
+    camarilla_S4_aligned = align_htf_to_ltf(prices, df_daily, camarilla_S4)
+    
+    # Load 12h data for trend filter
+    df_12h = get_htf_data(prices, TREND_HTF)
+    ema_12h = calculate_ema(df_12h['close'].values, 21)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -70,11 +93,13 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily EMA not available
-        if np.isnan(ema_daily_aligned[i]):
+        # Skip if data not available
+        if (np.isnan(camarilla_R3_aligned[i]) or np.isnan(camarilla_S3_aligned[i]) or 
+            np.isnan(camarilla_R4_aligned[i]) or np.isnan(camarilla_S4_aligned[i]) or
+            np.isnan(ema_12h_aligned[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,20 +118,36 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout conditions
-        breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
-        breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
-        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (daily)
-        uptrend_daily = close[i] > ema_daily_aligned[i]
-        downtrend_daily = close[i] < ema_daily_aligned[i]
+        # Trend filter (12h)
+        uptrend_12h = close[i] > ema_12h_aligned[i]
+        downtrend_12h = close[i] < ema_12h_aligned[i]
+        
+        # Market regime detection based on price action
+        # Determine if we're in ranging or trending market based on recent price action
+        # Simple approach: if price is between S3 and R3, we consider it ranging
+        # If price breaks beyond S4 or R4, we consider it trending
+        price_in_middle = (camarilla_S3_aligned[i] < close[i] < camarilla_R3_aligned[i])
+        price_beyond_R4 = close[i] > camarilla_R4_aligned[i]
+        price_beyond_S4 = close[i] < camarilla_S4_aligned[i]
         
         # Entry conditions
-        long_entry = breakout_up and volume_ok and uptrend_daily
-        short_entry = breakout_down and volume_ok and downtrend_daily
+        long_entry = False
+        short_entry = False
+        
+        if price_in_middle and volume_ok:
+            # Ranging market: mean reversion at extremes
+            # Long near S3, Short near R3
+            long_entry = (low[i] <= camarilla_S3_aligned[i] * 1.002) and (close[i] > camarilla_S3_aligned[i])
+            short_entry = (high[i] >= camarilla_R3_aligned[i] * 0.998) and (close[i] < camarilla_R3_aligned[i])
+        elif (price_beyond_R4 or price_beyond_S4) and volume_ok:
+            # Trending market: breakout continuation
+            if price_beyond_R4 and uptrend_12h:
+                long_entry = True
+            elif price_beyond_S4 and downtrend_12h:
+                short_entry = True
         
         # Generate signals
         if position == 0:
