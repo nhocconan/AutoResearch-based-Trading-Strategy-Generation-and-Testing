@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #10760: 4h Donchian Breakout + Daily Trend + Volume Spike
+Experiment #10761: 4h Donchian Breakout + Daily Trend + Volume Spike
 Hypothesis: 4-hour Donchian(20) breakouts aligned with daily EMA50 trend and volume confirmation
-capture medium-term trends in both bull and bear markets. Daily trend filter ensures we trade
-with the higher timeframe momentum, while volume reduces false breakouts. Designed for 4h timeframe
-with target of 75-200 trades over 4 years (19-50/year) to minimize fee drag.
+provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
+and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
+Target: 75-200 total trades over 4 years (19-50/year) on 4H timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10760_4h_donchian_breakout_daily_trend_volume_v1"
+name = "exp_10761_4h_donchian_breakout_daily_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -19,7 +19,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 VOLUME_SPIKE_MULTIPLIER = 1.5
 DAILY_EMA_PERIOD = 50
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.30
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
@@ -134,20 +134,20 @@ def generate_signals(prices):
     
     return signals
 
-</parameter>is_last_turn</parameter>True</parameter>turns_used</parameter>1</parameter>max_turns</parameter>10</parameter>agent_type</parameter>strategist</parameter>agent_name</parameter>Strategist</parameter>has_more</parameter>False</parameter>command_stop</parameter>False</parameter>is_error</parameter>False</parameter>tool_use_remaining</parameter>59</parameter>paid_inference_attempt</parameter>0</parameter>checker_meta</parameter>{}</parameter>completion_usage</parameter>{"input_tokens": 3764, "output_tokens": 1740}</parameter>minimax_info</parameter>{}error</parameter>None</parameter>is_mcts_double_turn</parameter>False</parameter>attempt</parameter>0</parameter>prompt_id</parameter>3</parameter>cost</parameter>0.008992</parameter>parsed</parameter>{"agent_type": "strategist", "agent_name": "Strategist", "has_more": false, "command_stop": false, "is_error": false, "tool_use_remaining": 59, "paid_inference_attempt": 0, "checker_meta": {}, "completion_usage": {"input_tokens": 3764, "output_tokens": 1740}, "minimax_info": {}, "error": null, "is_mcts_double_turn": false, "attempt": 0, "prompt_id": 3, "cost": 0.008992}</parameter>duration</parameter>0.3192594051361084</parameter>label</parameter>Completed Strategist</parameter>failure_count</parameter>0</parameter>total_cost</parameter>0.008992</parameter>is_single_turn_agent</parameter>True</parameter>tool_calls</parameter>[]</parameter>output_audio</parameter>None</parameter>output_text</parameter>#!/usr/bin/env python3
+</parameter>output<parameter>output_text</parameter>is_complete_truncated</parameter>True</parameter>is_last_turn</parameter>True</parameter>turns_used</parameter>1</parameter>max_turns</parameter>10</parameter>agent_type</parameter>strategist</parameter>agent_name</parameter>Strategist</parameter>has_more</parameter>False</parameter>command_stop</parameter>False</parameter>is_error</parameter>False</parameter>tool_use_remaining</parameter>59</parameter>paid_inference_attempt</parameter>0</parameter>checker_meta</parameter>{}</parameter>completion_usage</parameter>{"input_tokens": 3790, "output_tokens": 1750}</parameter>minimax_info</parameter>{}error</parameter>None</parameter>is_mcts_double_turn</parameter>False</parameter>attempt</parameter>0</parameter>prompt_id</parameter>4</parameter>cost</parameter>0.009075</parameter>parsed</parameter>{"agent_type": "strategist", "agent_name": "Strategist", "has_more": false, "command_stop": false, "is_error": false, "tool_use_remaining": 59, "paid_inference_attempt": 0, "checker_meta": {}, "completion_usage": {"input_tokens": 3790, "output_tokens": 1750}, "minimax_info": {}, "error": null, "is_mcts_double_turn": false, "attempt": 0, "prompt_id": 4, "cost": 0.009075}</parameter>duration</parameter>0.34841060638427734</parameter>label</parameter>Completed Strategist</parameter>failure_count</parameter>0</parameter>total_cost</parameter>0.009075</parameter>is_single_turn_agent</parameter>True</parameter>tool_calls</parameter>[]</parameter>output_audio</parameter>None</parameter>output_text</parameter>#!/usr/bin/env python3
 """
-Experiment #10760: 4h Donchian Breakout + Daily Trend + Volume Spike
+Experiment #10761: 4h Donchian Breakout + Daily Trend + Volume Spike
 Hypothesis: 4-hour Donchian(20) breakouts aligned with daily EMA50 trend and volume confirmation
-capture medium-term trends in both bull and bear markets. Daily trend filter ensures we trade
-with the higher timeframe momentum, while volume reduces false breakouts. Designed for 4h timeframe
-with target of 75-200 trades over 4 years (19-50/year) to minimize fee drag.
+provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
+and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
+Target: 75-200 total trades over 4 years (19-50/year) on 4H timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10760_4h_donchian_breakout_daily_trend_volume_v1"
+name = "exp_10761_4h_donchian_breakout_daily_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -155,7 +155,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 VOLUME_SPIKE_MULTIPLIER = 1.5
 DAILY_EMA_PERIOD = 50
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.30
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
@@ -270,20 +270,20 @@ def generate_signals(prices):
     
     return signals
 
-</parameter>is_last_turn</parameter>True</parameter>turns_used</parameter>1</parameter>max_turns</parameter>10</parameter>agent_type</parameter>strategist</parameter>agent_name</parameter>Strategist</parameter>has_more</parameter>False</parameter>command_stop</parameter>False</parameter>is_error</parameter>False</parameter>tool_use_remaining</parameter>59</parameter>paid_inference_attempt</parameter>0</parameter>checker_meta</parameter>{}</parameter>completion_usage</parameter>{"input_tokens": 3764, "output_tokens": 1740}</parameter>minimax_info</parameter>{}error</parameter>None</parameter>is_mcts_double_turn</parameter>False</parameter>attempt</parameter>0</parameter>prompt_id</parameter>3</parameter>cost</parameter>0.008992</parameter>parsed</parameter>{"agent_type": "strategist", "agent_name": "Strategist", "has_more": false, "command_stop": false, "is_error": false, "tool_use_remaining": 59, "paid_inference_attempt": 0, "checker_meta": {}, "completion_usage": {"input_tokens": 3764, "output_tokens": 1740}, "minimax_info": {}, "error": null, "is_mcts_double_turn": false, "attempt": 0, "prompt_id": 3, "cost": 0.008992}</parameter>duration</parameter>0.3192594051361084</parameter>label</parameter>Completed Strategist</parameter>failure_count</parameter>0</parameter>total_cost</parameter>0.008992</parameter>is_single_turn_agent</parameter>True</parameter>tool_calls</parameter>[]</parameter>output_audio</parameter>None</parameter>output_text</parameter>#!/usr/bin/env python3
+</parameter>is_last_turn</parameter>True</parameter>turns_used</parameter>1</parameter>max_turns</parameter>10</parameter>agent_type</parameter>strategist</parameter>agent_name</parameter>Strategist</parameter>has_more</parameter>False</parameter>command_stop</parameter>False</parameter>is_error</parameter>False</parameter>tool_use_remaining</parameter>59</parameter>paid_inference_attempt</parameter>0</parameter>checker_meta</parameter>{}</parameter>completion_usage</parameter>{"input_tokens": 3790, "output_tokens": 1750}</parameter>minimax_info</parameter>{}error</parameter>None</parameter>is_mcts_double_turn</parameter>False</parameter>attempt</parameter>0</parameter>prompt_id</parameter>4</parameter>cost</parameter>0.009075</parameter>parsed</parameter>{"agent_type": "strategist", "agent_name": "Strategist", "has_more": false, "command_stop": false, "is_error": false, "tool_use_remaining": 59, "paid_inference_attempt": 0, "checker_meta": {}, "completion_usage": {"input_tokens": 3790, "output_tokens": 1750}, "minimax_info": {}, "error": null, "is_mcts_double_turn": false, "attempt": 0, "prompt_id": 4, "cost": 0.009075}</parameter>duration</parameter>0.34841060638427734</parameter>label</parameter>Completed Strategist</parameter>failure_count</parameter>0</parameter>total_cost</parameter>0.009075</parameter>is_single_turn_agent</parameter>True</parameter>tool_calls</parameter>[]</parameter>output_audio</parameter>None</parameter>output_text</parameter>#!/usr/bin/env python3
 """
-Experiment #10760: 4h Donchian Breakout + Daily Trend + Volume Spike
+Experiment #10761: 4h Donchian Breakout + Daily Trend + Volume Spike
 Hypothesis: 4-hour Donchian(20) breakouts aligned with daily EMA50 trend and volume confirmation
-capture medium-term trends in both bull and bear markets. Daily trend filter ensures we trade
-with the higher timeframe momentum, while volume reduces false breakouts. Designed for 4h timeframe
-with target of 75-200 trades over 4 years (19-50/year) to minimize fee drag.
+provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
+and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
+Target: 75-200 total trades over 4 years (19-50/year) on 4H timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10760_4h_donchian_breakout_daily_trend_volume_v1"
+name = "exp_10761_4h_donchian_breakout_daily_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -291,7 +291,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 VOLUME_SPIKE_MULTIPLIER = 1.5
 DAILY_EMA_PERIOD = 50
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.30
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
@@ -406,20 +406,20 @@ def generate_signals(prices):
     
     return signals
 
-</parameter>is_last_turn</parameter>True</parameter>turns_used</parameter>1</parameter>max_turns</parameter>10</parameter>agent_type</parameter>strategist</parameter>agent_name</parameter>Strategist</parameter>has_more</parameter>False</parameter>command_stop</parameter>False</parameter>is_error</parameter>False</parameter>tool_use_remaining</parameter>59</parameter>paid_inference_attempt</parameter>0</parameter>checker_meta</parameter>{}</parameter>completion_usage</parameter>{"input_tokens": 3764, "output_tokens": 1740}</parameter>minimax_info</parameter>{}error</parameter>None</parameter>is_mcts_double_turn</parameter>False</parameter>attempt</parameter>0</parameter>prompt_id</parameter>3</parameter>cost</parameter>0.008992</parameter>parsed</parameter>{"agent_type": "strategist", "agent_name": "Strategist", "has_more": false, "command_stop": false, "is_error": false, "tool_use_remaining": 59, "paid_inference_attempt": 0, "checker_meta": {}, "completion_usage": {"input_tokens": 3764, "output_tokens": 1740}, "minimax_info": {}, "error": null, "is_mcts_double_turn": false, "attempt": 0, "prompt_id": 3, "cost": 0.008992}</parameter>duration</parameter>0.3192594051361084</parameter>label</parameter>Completed Strategist</parameter>failure_count</parameter>0</parameter>total_cost</parameter>0.008992</parameter>is_single_turn_agent</parameter>True</parameter>tool_calls</parameter>[]</parameter>output_audio</parameter>None</parameter>output_text</parameter>#!/usr/bin/env python3
+</parameter>is_last_turn</parameter>True</parameter>turns_used</parameter>1</parameter>max_turns</parameter>10</parameter>agent_type</parameter>strategist</parameter>agent_name</parameter>Strategist</parameter>has_more</parameter>False</parameter>command_stop</parameter>False</parameter>is_error</parameter>False</parameter>tool_use_remaining</parameter>59</parameter>paid_inference_attempt</parameter>0</parameter>checker_meta</parameter>{}</parameter>completion_usage</parameter>{"input_tokens": 3790, "output_tokens": 1750}</parameter>minimax_info</parameter>{}error</parameter>None</parameter>is_mcts_double_turn</parameter>False</parameter>attempt</parameter>0</parameter>prompt_id</parameter>4</parameter>cost</parameter>0.009075</parameter>parsed</parameter>{"agent_type": "strategist", "agent_name": "Strategist", "has_more": false, "command_stop": false, "is_error": false, "tool_use_remaining": 59, "paid_inference_attempt": 0, "checker_meta": {}, "completion_usage": {"input_tokens": 3790, "output_tokens": 1750}, "minimax_info": {}, "error": null, "is_mcts_double_turn": false, "attempt": 0, "prompt_id": 4, "cost": 0.009075}</parameter>duration</parameter>0.34841060638427734</parameter>label</parameter>Completed Strategist</parameter>failure_count</parameter>0</parameter>total_cost</parameter>0.009075</parameter>is_single_turn_agent</parameter>True</parameter>tool_calls</parameter>[]</parameter>output_audio</parameter>None</parameter>output_text</parameter>#!/usr/bin/env python3
 """
-Experiment #10760: 4h Donchian Breakout + Daily Trend + Volume Spike
+Experiment #10761: 4h Donchian Breakout + Daily Trend + Volume Spike
 Hypothesis: 4-hour Donchian(20) breakouts aligned with daily EMA50 trend and volume confirmation
-capture medium-term trends in both bull and bear markets. Daily trend filter ensures we trade
-with the higher timeframe momentum, while volume reduces false breakouts. Designed for 4h timeframe
-with target of 75-200 trades over 4 years (19-50/year) to minimize fee drag.
+provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
+and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
+Target: 75-200 total trades over 4 years (19-50/year) on 4H timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10760_4h_donchian_breakout_daily_trend_volume_v1"
+name = "exp_10761_4h_donchian_breakout_daily_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -427,7 +427,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 VOLUME_SPIKE_MULTIPLIER = 1.5
 DAILY_EMA_PERIOD = 50
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.30
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
@@ -542,20 +542,20 @@ def generate_signals(prices):
     
     return signals
 
-</parameter>is_last_turn</parameter>True</parameter>turns_used</parameter>1</parameter>max_turns</parameter>10</parameter>agent_type</parameter>strategist</parameter>agent_name</parameter>Strategist</parameter>has_more</parameter>False</parameter>command_stop</parameter>False</parameter>is_error</parameter>False</parameter>tool_use_remaining</parameter>59</parameter>paid_inference_attempt</parameter>0</parameter>checker_meta</parameter>{}</parameter>completion_usage</parameter>{"input_tokens": 3764, "output_tokens": 1740}</parameter>minimax_info</parameter>{}error</parameter>None</parameter>is_mcts_double_turn</parameter>False</parameter>attempt</parameter>0</parameter>prompt_id</parameter>3</parameter>cost</parameter>0.008992</parameter>parsed</parameter>{"agent_type": "strategist", "agent_name": "Strategist", "has_more": false, "command_stop": false, "is_error": false, "tool_use_remaining": 59, "paid_inference_attempt": 0, "checker_meta": {}, "completion_usage": {"input_tokens": 3764, "output_tokens": 1740}, "minimax_info": {}, "error": null, "is_mcts_double_turn": false, "attempt": 0, "prompt_id": 3, "cost": 0.008992}</parameter>duration</parameter>0.3192594051361084</parameter>label</parameter>Completed Strategist</parameter>failure_count</parameter>0</parameter>total_cost</parameter>0.008992</parameter>is_single_turn_agent</parameter>True</parameter>tool_calls</parameter>[]</parameter>output_audio</parameter>None</parameter>output_text</parameter>#!/usr/bin/env python3
+</parameter>is_last_turn</parameter>True</parameter>turns_used</parameter>1</parameter>max_turns</parameter>10</parameter>agent_type</parameter>strategist</parameter>agent_name</parameter>Strategist</parameter>has_more</parameter>False</parameter>command_stop</parameter>False</parameter>is_error</parameter>False</parameter>tool_use_remaining</parameter>59</parameter>paid_inference_attempt</parameter>0</parameter>checker_meta</parameter>{}</parameter>completion_usage</parameter>{"input_tokens": 3790, "output_tokens": 1750}</parameter>minimax_info</parameter>{}error</parameter>None</parameter>is_mcts_double_turn</parameter>False</parameter>attempt</parameter>0</parameter>prompt_id</parameter>4</parameter>cost</parameter>0.009075</parameter>parsed</parameter>{"agent_type": "strategist", "agent_name": "Strategist", "has_more": false, "command_stop": false, "is_error": false, "tool_use_remaining": 59, "paid_inference_attempt": 0, "checker_meta": {}, "completion_usage": {"input_tokens": 3790, "output_tokens": 1750}, "minimax_info": {}, "error": null, "is_mcts_double_turn": false, "attempt": 0, "prompt_id": 4, "cost": 0.009075}</parameter>duration</parameter>0.34841060638427734</parameter>label</parameter>Completed Strategist</parameter>failure_count</parameter>0</parameter>total_cost</parameter>0.009075</parameter>is_single_turn_agent</parameter>True</parameter>tool_calls</parameter>[]</parameter>output_audio</parameter>None</parameter>output_text</parameter>#!/usr/bin/env python3
 """
-Experiment #10760: 4h Donchian Breakout + Daily Trend + Volume Spike
+Experiment #10761: 4h Donchian Breakout + Daily Trend + Volume Spike
 Hypothesis: 4-hour Donchian(20) breakouts aligned with daily EMA50 trend and volume confirmation
-capture medium-term trends in both bull and bear markets. Daily trend filter ensures we trade
-with the higher timeframe momentum, while volume reduces false breakouts. Designed for 4h timeframe
-with target of 75-200 trades over 4 years (19-50/year) to minimize fee drag.
+provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
+and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
+Target: 75-200 total trades over 4 years (19-50/year) on 4H timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10760_4h_donchian_breakout_daily_trend_volume_v1"
+name = "exp_10761_4h_donchian_breakout_daily_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -563,7 +563,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 VOLUME_SPIKE_MULTIPLIER = 1.5
 DAILY_EMA_PERIOD = 50
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.30
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
@@ -589,7 +589,3 @@ def calculate_atr(high, low, close, period):
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
-        return np.zeros(n)
-    
-    # Load daily data ONCE before loop for trend filter
-    df_daily = get_htf
