@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #7785: 12-hour Donchian breakout with 1-day trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.8x 20-period MA and aligned 1d trend captures sustained moves while avoiding whipsaw. 1d trend provides stable trend filtering for 12h entries. Targets 50-150 trades over 4 years.
+Experiment #7786: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.8x 20-period MA and aligned 1d trend captures sustained moves while avoiding whipsaw. Daily trend provides stronger filtering than 12h for 4h entries, reducing whipsaw in both bull and bear markets. Targets 75-200 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7785_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_7786_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -123,16 +123,16 @@ def generate_signals(prices):
 </think>
 #!/usr/bin/env python3
 """
-Experiment #7785: 12-hour Donchian breakout with 1-day trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.8x 20-period MA and aligned 1d trend captures sustained moves while avoiding whipsaw. 1d trend provides stable trend filtering for 12h entries. Targets 50-150 trades over 4 years.
+Experiment #7786: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.8x 20-period MA and aligned 1d trend captures sustained moves while avoiding whipsaw. Daily trend provides stronger filtering than 12h for 4h entries, reducing whipsaw in both bull and bear markets. Targets 75-200 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7785_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_7786_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
