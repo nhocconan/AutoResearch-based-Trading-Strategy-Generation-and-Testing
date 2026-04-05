@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
 """
-exp_6867_6h_donchian20_1d_pivot_v1
-Hypothesis: 6h Donchian(20) breakout filtered by 1d Camarilla pivot levels and volume confirmation.
-In bull markets (price > 1d EMA50): long breakouts above R4, short reversals at S3/S4.
-In bear markets (price < 1d EMA50): short breakdowns below S4, long reversals at R3/R4.
-Uses 1d HTF for pivot calculation and trend filter, 6s for execution.
-Designed for 6h timeframe to capture medium-term swings with ~12-37 trades/year (50-150 total over 4 years).
-Camarilla pivots provide institutional support/resistance levels that work in both trending and ranging markets.
-Volume confirmation reduces false breakouts.
+exp_6869_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with daily EMA trend filter and volume confirmation.
+In bull markets (price > daily EMA50): long breakouts only. In bear markets (price < daily EMA50): short breakouts only.
+Daily EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
+Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
+Uses ATR stoploss and max hold period to limit drawdown.
+Works in both bull and bear markets by aligning with daily trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6867_6h_donchian20_1d_pivot_v1"
-timeframe = "6h"
+name = "exp_6869_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -25,45 +24,23 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # ~2.5 days (6h bars)
+MAX_HOLD_BARS = 30  # ~5 days (4h bars)
 EMA_PERIOD = 50
-PIVOT_LOOKBACK = 1  # Use previous day's pivot
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for Camarilla pivots and EMA
+    # Load HTF data ONCE before loop - using 1d for daily EMA
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA50 for trend filter
+    # Calculate daily EMA50
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Calculate Camarilla pivot levels from previous day's OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].values
-    
-    # True range for volatility
-    tr_1d = np.maximum(high_1d - low_1d, 
-                       np.maximum(np.abs(high_1d - np.roll(close_1d_prev, 1)),
-                                  np.abs(low_1d - np.roll(close_1d_prev, 1))))
-    # Camarilla levels (based on previous day)
-    pivot = (high_1d_prev + low_1d_prev + close_1d_prev) / 3
-    range_1d = high_1d_prev - low_1d_prev
-    r3 = pivot + range_1d * 1.1 / 4
-    r4 = pivot + range_1d * 1.1 / 2
-    s3 = pivot - range_1d * 1.1 / 4
-    s4 = pivot - range_1d * 1.1 / 2
-    
-    # Align to LTF (6h)
+    # Align to LTF (4h)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -97,7 +74,7 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(r3_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -129,28 +106,18 @@ def generate_signals(prices):
         daily_uptrend = close[i] > ema_1d_aligned[i]
         daily_downtrend = close[i] < ema_1d_aligned[i]
         
-        # Breakout and reversal signals
-        # Bull market: long breakouts above R4, short reversals at S3/S4
-        long_breakout = daily_uptrend and (close[i] > highest_high[i]) and vol_confirmed and (close[i] > r4_aligned[i])
-        short_reversal = daily_uptrend and vol_confirmed and (
-            (close[i] < s3_aligned[i] and low[i] < s3_aligned[i]) or 
-            (close[i] < s4_aligned[i] and low[i] < s4_aligned[i])
-        )
-        # Bear market: short breakdowns below S4, long reversals at R3/R4
-        short_breakout = daily_downtrend and (close[i] < lowest_low[i]) and vol_confirmed and (close[i] < s4_aligned[i])
-        long_reversal = daily_downtrend and vol_confirmed and (
-            (close[i] > r3_aligned[i] and high[i] > r3_aligned[i]) or 
-            (close[i] > r4_aligned[i] and high[i] > r4_aligned[i])
-        )
+        # Breakout signals aligned with daily trend
+        long_breakout = daily_uptrend and (close[i] > highest_high[i]) and vol_confirmed
+        short_breakout = daily_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if long_breakout or long_reversal:
+            if long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif short_breakout or short_reversal:
+            elif short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
