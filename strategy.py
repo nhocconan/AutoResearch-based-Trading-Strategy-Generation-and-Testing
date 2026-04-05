@@ -1,33 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #10229: 4h Donchian Breakout + Daily Trend + Volume Spike
-Hypothesis: Donchian(20) breakouts in the direction of daily trend (EMA50) with volume confirmation
-provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
-and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
-Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #10231: 6h Camarilla Pivot Reversal with Daily Trend Filter
+Hypothesis: Camarilla pivot levels (R3/S3) act as strong reversal zones in the direction of the daily trend.
+In trending markets (price above/below daily EMA50), price rejects at R3/S3 and continues the trend.
+In ranging markets, reversals at R3/S3 still occur but with smaller size. Volume confirmation filters false signals.
+Works in both bull (buy R3 bounces in uptrend) and bear (sell S3 rejections in downtrend).
+Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10229_4h_donchian_breakout_daily_trend_volume_v1"
-timeframe = "4h"
+name = "exp_10231_6h_camarilla_pivot_reversal_daily_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
+CAMARILLA_MULT = 1.1
 DAILY_EMA_PERIOD = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
+VOLUME_SPIKE_MULTIPLIER = 1.5
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for intraday trading"""
+    pivot = (high + low + close) / 3.0
+    range_val = high - low
+    r3 = pivot + (range_val * CAMARILLA_MULT * 1.1)
+    s3 = pivot - (range_val * CAMARILLA_MULT * 1.1)
+    return r3, s3
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -47,27 +50,21 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for trend filter
+    # Load daily data ONCE before loop for trend filter and pivot points
     df_daily = get_htf_data(prices, '1d')
     
     # Calculate daily EMA for trend direction
     daily_close = df_daily['close'].values
     daily_ema = calculate_ema(daily_close, DAILY_EMA_PERIOD)
     
-    # Align daily EMA to 4h timeframe
+    # Align daily EMA to 6h timeframe
     daily_ema_aligned = align_htf_to_ltf(prices, df_daily, daily_ema)
     
-    # Calculate 4h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channels
-    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
-    
-    # Volume moving average for spike detection
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -78,7 +75,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, 20) + 1
+    start = max(DAILY_EMA_PERIOD, 2) + 1
     
     for i in range(start, n):
         # Skip if daily EMA not available
@@ -98,20 +95,29 @@ def generate_signals(prices):
                 position = 0
                 continue
         
+        # Calculate Camarilla levels for previous day (using previous bar's data)
+        prev_high = high[i-1]
+        prev_low = low[i-1]
+        prev_close = close[i-1]
+        camarilla_r3, camarilla_s3 = calculate_camarilla(prev_high, prev_low, prev_close)
+        
         # Volume spike confirmation
-        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
+        volume_ma = pd.Series(volume[:i+1]).rolling(window=20, min_periods=20).mean().iloc[-1] if i >= 20 else np.nan
+        volume_spike = volume[i] > (volume_ma * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma) else False
         
         # Trend filter: price above/below daily EMA
         above_daily_ema = close[i] > daily_ema_aligned[i]
         below_daily_ema = close[i] < daily_ema_aligned[i]
         
-        # Breakout conditions
-        bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
-        bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
+        # Reversal conditions at Camarilla levels
+        # Long: price touches/bounces off S3 in uptrend
+        long_setup = (close[i] <= camarilla_s3 * 1.002) and above_daily_ema  # Allow small penetration
+        # Short: price touches/rejects at R3 in downtrend
+        short_setup = (close[i] >= camarilla_r3 * 0.998) and below_daily_ema  # Allow small penetration
         
-        # Entry conditions: breakout in direction of daily trend with volume
-        long_entry = bullish_breakout and above_daily_ema and volume_spike
-        short_entry = bearish_breakout and below_daily_ema and volume_spike
+        # Entry conditions: reversal at Camarilla level with volume and trend alignment
+        long_entry = long_setup and volume_spike
+        short_entry = short_setup and volume_spike
         
         # Generate signals
         if position == 0:
@@ -133,4 +139,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</response>
