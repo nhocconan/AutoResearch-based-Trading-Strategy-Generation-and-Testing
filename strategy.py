@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #9667: 6h Donchian Breakout + Weekly Trend + Volume Confirmation.
-Hypothesis: Donchian(20) breakouts on 6h timeframe, filtered by weekly trend direction 
-and volume confirmation, provide high-probability entries. In bull markets (weekly 
-trend up), we take long breakouts; in bear markets (weekly trend down), we take 
-short breakouts. This adapts to market regime while maintaining clear entry/exit rules.
-Targets 75-150 total trades over 4 years (19-38/year) to balance opportunity and cost.
+Hypothesis: Donchian(20) breakouts aligned with weekly trend (price above/below weekly EMA20) 
+and volume confirmation provide high-probability trend-following entries. 
+Weekly trend filter ensures we only take longs in weekly uptrend and shorts in weekly downtrend, 
+reducing whipsaws in sideways markets. Targets 75-150 total trades over 4 years (19-38/year).
+Works in bull (breakouts with weekly uptrend) and bear (breakdowns with weekly downtrend).
 """
 
 import numpy as np
@@ -18,17 +18,11 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.8
-WEEKLY_TREND_PERIOD = 50
+VOLUME_SPIKE_MULTIPLIER = 1.5
+EMA_WEEKLY_PERIOD = 20
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.2
-
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -39,22 +33,18 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_sma(arr, period):
-    """Calculate simple moving average"""
-    return pd.Series(arr).rolling(window=period, min_periods=period).mean().values
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop (weekly for trend filter)
-    df_weekly = get_htf_data(prices, '1w')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly trend (SMA 50)
-    weekly_close = df_weekly['close'].values
-    weekly_sma = calculate_sma(weekly_close, WEEKLY_TREND_PERIOD)
-    weekly_sma_aligned = align_htf_to_ltf(prices, df_weekly, weekly_sma)
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=EMA_WEEKLY_PERIOD, adjust=False, min_periods=EMA_WEEKLY_PERIOD).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate LTF indicators (6h)
     high = prices['high'].values
@@ -63,13 +53,14 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Donchian channels
-    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
-    
-    # ATR for volatility and stop loss
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for risk management
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,11 +68,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, WEEKLY_TREND_PERIOD, ATR_PERIOD, 20) + 1
+    start = max(DONCHIAN_PERIOD, EMA_WEEKLY_PERIOD, 20) + 1
     
     for i in range(start, n):
         # Skip if weekly trend data not available
-        if np.isnan(weekly_sma_aligned[i]):
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -100,28 +91,26 @@ def generate_signals(prices):
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Weekly trend direction
-        weekly_trend_up = weekly_sma_aligned[i] > weekly_close[0]  # Using first value as baseline, better: compare to previous
-        # Actually, let's use slope: current vs previous weekly SMA
-        if i >= 1 and not np.isnan(weekly_sma_aligned[i-1]):
-            weekly_trend_up = weekly_sma_aligned[i] > weekly_sma_aligned[i-1]
-        else:
-            weekly_trend_up = True  # default to allow trading until we have data
+        # Weekly trend filter
+        weekly_uptrend = close[i] > ema_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_1w_aligned[i]
         
         # Donchian breakout signals
-        # Long: price breaks above upper band in uptrend
-        # Short: price breaks below lower band in downtrend
-        long_breakout = close[i] > donch_upper[i] and weekly_trend_up and volume_spike
-        short_breakout = close[i] < donch_lower[i] and not weekly_trend_up and volume_spike
+        breakout_long = highest_low[i] != 0 and close[i] > highest_high[i-1]  # Break above previous high
+        breakdown_short = lowest_low[i] != 0 and close[i] < lowest_low[i-1]   # Break below previous low
         
-        # Entry conditions
+        # Entry conditions: breakout + volume spike + weekly trend alignment
+        long_entry = breakout_long and volume_spike and weekly_uptrend
+        short_entry = breakdown_short and volume_spike and weekly_downtrend
+        
+        # Generate signals
         if position == 0:
-            if long_breakout:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_breakout:
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
