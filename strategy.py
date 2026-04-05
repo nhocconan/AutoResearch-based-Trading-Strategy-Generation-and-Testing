@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #10318: 1d Donchian Breakout + Weekly Trend + Volume Spike
+Experiment #10319: 6h Donchian Breakout + Weekly Trend + Volume Spike
 Hypothesis: Donchian(20) breakouts in the direction of weekly trend (EMA40) with volume confirmation
 provide high-probability trend continuation trades. Works in bull markets (breakouts above weekly EMA)
 and bear markets (breakdowns below weekly EMA). Volume filters reduce false breakouts.
@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10318_1d_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "exp_10319_6h_donchian_breakout_weekly_trend_volume_v2"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
@@ -54,10 +54,10 @@ def generate_signals(prices):
     weekly_close = df_weekly['close'].values
     weekly_ema = calculate_ema(weekly_close, WEEKLY_EMA_PERIOD)
     
-    # Align weekly EMA to daily timeframe
+    # Align weekly EMA to 6h timeframe
     weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
     
-    # Calculate daily indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -133,4 +133,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</s>
