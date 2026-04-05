@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #8340: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.5x 20-period MA 
-and aligned 1d trend (price above/below 1d EMA50) captures sustained moves while avoiding 
-whipsaw in both bull and bear markets. The 1d trend filter provides long-term trend 
-context, reducing false breakouts during consolidation periods. Targeting 75-200 total trades 
-over 4 years for optimal balance of signal quality and cost.
+Experiment #8339: 6-hour Williams Alligator + Elder Ray + 12h trend filter
+Hypothesis: In trending markets (12h close above/below EMA50), Williams Alligator 
+(jaw/teeth/lips aligned) confirms direction while Elder Ray (bull/bear power) 
+filters for strength. Enter on bull/bear power confirmation with Alligator alignment.
+Aims for 50-150 total trades over 4 years by requiring multiple confluence factors.
+Works in bull (buy strength) and bear (sell weakness) via symmetric long/short logic.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_ath_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8340_4h_donchian20_1d_vol_v1"
-timeframe = "4h"
+name = "exp_8339_6w_alligator_elder_12h"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
-EMA_PERIOD = 50
+ALLIGATOR_PERIOD = 13
+ELDER_RAY_PERIOD = 13
+EMA_TREND_PERIOD = 50
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-ATR_TARGET_MULTIPLIER = 3.0
+ATR_STOP_MULTIPLIER = 2.5
+SIGNAL_SIZE = 0.25
 
 def generate_signals(prices):
     n = len(prices)
@@ -32,28 +30,47 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
-    
-    # Price relative to EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=EMA_TREND_PERIOD, adjust=False, min_periods=EMA_TREND_PERIOD).mean().values
+    trend_up = close_12h > ema_12h   # bullish trend
+    trend_down = close_12h < ema_12h  # bearish trend
+    trend_up_aligned = align_htf_to_ltf(prices, df_12h, trend_up)
+    trend_down_aligned = align_htf_to_ltf(prices, df_12h, trend_down)
     
     # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Price channel (Donchian)
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Williams Alligator: SMMA (smoothed MA) of median price
+    median_price = (high + low) / 2.0
+    # Jaw (13), Teeth (8), Lips (5) - all SMMA
+    def smma(series, period):
+        s = pd.Series(series)
+        # First value is SMA, then smoothed
+        sma = s.rolling(window=period, min_periods=period).mean()
+        result = np.full_like(s, np.nan, dtype=float)
+        for i in range(len(s)):
+            if i < period:
+                result[i] = sma[i]
+            else:
+                if not np.isnan(sma[i]):
+                    result[i] = (result[i-1] * (period-1) + sma[i]) / period
+                else:
+                    result[i] = result[i-1]
+        return result
     
-    # Volume moving average
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    jaw = smma(median_price, ALLIGATOR_PERIOD)
+    teeth = smma(median_price, ALLIGATOR_PERIOD - 3)  # 8
+    lips = smma(median_price, ALLIGATOR_PERIOD - 8)  # 5
+    
+    # Elder Ray Power: Bull Power = High - EMA13, Bear Power = EMA13 - Low
+    ema13 = pd.Series(close).ewm(span=ELDER_RAY_PERIOD, adjust=False, min_periods=ELDER_RAY_PERIOD).mean().values
+    bull_power = high - ema13
+    bear_power = ema13 - low
     
     # ATR for risk management
     tr1 = pd.Series(high - low)
@@ -66,43 +83,45 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
-    target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(ALLIGATOR_PERIOD, ELDER_RAY_PERIOD, EMA_TREND_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if HTF data not available
-        if np.isnan(price_vs_ema_aligned[i]):
+        # Skip if HTF trend data not available
+        if np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
-        # Check stoploss or target
+        # Check stoploss
         if position == 1:  # long position
-            if close[i] <= stop_price or close[i] >= target_price:
+            if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            if close[i] >= stop_price or close[i] <= target_price:
+            if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Determine market bias from 1d EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
+        # Alligator alignment: check if jaws, teeth, lips are aligned in trend direction
+        # In uptrend: lips > teeth > jaw
+        # In downtrend: lips < teeth < jaw
+        if not (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i])):
+            alligator_long = lips[i] > teeth[i] and teeth[i] > jaw[i]
+            alligator_short = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        else:
+            alligator_long = False
+            alligator_short = False
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Elder Ray: bull power > 0 and bear power > 0 indicate strength
+        bull_strength = bull_power[i] > 0
+        bear_strength = bear_power[i] > 0
         
-        # Breakout conditions - require close beyond channel bands to avoid wicks
-        upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
-        lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
-        
-        # Entry conditions
-        long_entry = bull_bias and upper_breakout and volume_confirmed
-        short_entry = bear_bias and lower_breakout and volume_confirmed
+        # Entry conditions require trend + alligator alignment + power confirmation
+        long_entry = trend_up_aligned[i] and alligator_long and bull_strength
+        short_entry = trend_down_aligned[i] and alligator_short and bear_strength
         
         # Generate signals
         if position == 0:
@@ -111,13 +130,11 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
