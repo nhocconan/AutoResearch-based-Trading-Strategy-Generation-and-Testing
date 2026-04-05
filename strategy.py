@@ -1,52 +1,36 @@
 #!/usr/bin/env python3
 """
-Experiment #8567: 6h Ichimoku Cloud + 1d trend filter + volume confirmation.
-Hypothesis: Ichimoku on 6h provides clear trend context and support/resistance, 
-filtered by 1d trend direction to avoid counter-trend trades. Volume confirmation 
-ensures institutional participation. Designed for 50-150 trades over 4 years 
-(12-37/year) to balance opportunity with fee control in both bull and bear markets.
+Experiment #8571: 6h Williams %R reversal with 1d trend filter and volume confirmation.
+Hypothesis: Williams %R identifies overbought/oversold conditions. Combined with daily trend filter (EMA50) 
+and volume confirmation, it captures mean-reversion within the trend. Works in both bull (oversold bounces) 
+and bear (overbought reversals) markets. Targets 75-150 trades over 4 years.
 """
 
-from mtf_data import get_alt_htf_data, align_htf_to_ltf
+from mtf_data import get_ath_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8567_6h_ichimoku_1d_trend_vol_v1"
+name = "exp_8571_6h_williamsr_1d_trend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-TENKAN_PERIOD = 9
-KIJUN_PERIOD = 26
-SENKOU_B_PERIOD = 52
+WILLIAMS_PERIOD = 14
+WILLIAMS_OVERBOUGHT = -20
+WILLIAMS_OVERSOLD = -80
 TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_ichimoku(high, low, close):
-    """Calculate Ichimoku Cloud components"""
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan = (pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
-              pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun = (pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
-             pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2).shift(KIJUN_PERIOD)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    senkou_b = ((pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
-                 pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2).shift(KIJUN_PERIOD)
-    
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind
-    chikou = pd.Series(close).shift(-KIJUN_PERIOD)
-    
-    return tenkan.values, kijun.values, senkou_a.values, senkou_b.values, chikou.values
+def calculate_williams_r(high, low, close, period):
+    """Calculate Williams %R"""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
+    return wr.fillna(0).values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -80,13 +64,8 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Ichimoku Cloud
-    tenkan, kijun, senkou_a, senkou_b, chikou = calculate_ichimoku(high, low, close)
-    
-    # Cloud top and bottom (accounting for look-ahead in Senkou spans)
-    # Senkou spans are already shifted, so we use current values
-    cloud_top = np.maximum(senkou_a, senkou_b)
-    cloud_bottom = np.minimum(senkou_a, senkou_b)
+    # Williams %R
+    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -97,8 +76,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_B_PERIOD, TREND_PERIOD, 
-                VOLUME_MA_PERIOD, ATR_PERIOD) + KIJUN_PERIOD  # Extra for Ichimoku shift
+    start = max(WILLIAMS_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
@@ -122,21 +100,16 @@ def generate_signals(prices):
         bull_bias = price_vs_ema_aligned[i] == 1   # 1d price above EMA50
         bear_bias = price_vs_ema_aligned[i] == -1  # 1d price below EMA50
         
-        # Ichimoku signals
-        # Price above cloud = bullish, below cloud = bearish
-        price_above_cloud = close[i] > cloud_top[i] if not np.isnan(cloud_top[i]) else False
-        price_below_cloud = close[i] < cloud_bottom[i] if not np.isnan(cloud_bottom[i]) else False
-        
-        # TK Cross (Tenkan-Kijun crossover)
-        tk_cross_bull = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]
-        tk_cross_bear = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]
+        # Williams %R conditions
+        oversold = williams_r[i] < WILLIAMS_OVERSOLD   # Oversold condition
+        overbought = williams_r[i] > WILLIAMS_OVERBOUGHT  # Overbought condition
         
         # Volume confirmation
-        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_confirmed = volume[i] > (volume[i-1] * VOLUME_THRESHOLD) if i > 0 and not np.isnan(volume[i-1]) else False
         
-        # Entry conditions
-        long_entry = bull_bias and price_above_cloud and tk_cross_bull and volume_confirmed
-        short_entry = bear_bias and price_below_cloud and tk_cross_bear and volume_confirmed
+        # Entry conditions: counter-trend entries within trend
+        long_entry = bull_bias and oversold and volume_confirmed
+        short_entry = bear_bias and overbought and volume_confirmed
         
         # Generate signals
         if position == 0:
