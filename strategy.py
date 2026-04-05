@@ -23,7 +23,7 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 30  # 30 days max hold
+MAX_HOLD_BARS = 15  # ~15 days max hold
 EMA_PERIOD = 50
 
 def generate_signals(prices):
@@ -128,3 +128,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
