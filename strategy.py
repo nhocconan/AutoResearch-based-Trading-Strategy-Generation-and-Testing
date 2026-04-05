@@ -1,87 +1,71 @@
 #!/usr/bin/env python3
 """
-Experiment #9679: 6h Elder Ray + ADX Regime Filter
-Hypothesis: Elder Ray (Bull Power/Bear Power) identifies bull/bear pressure, while ADX filters regime.
-In trending markets (ADX > 25): trade with Elder Ray direction. In ranging markets (ADX < 20): fade extremes.
-Combines momentum and mean reversion to work in both bull and bear markets.
-Targets 100-180 total trades over 4 years (25-45/year) for statistical validity.
+Experiment #9680: 4h Donchian Breakout + 1d EMA Trend + Volume Confirmation.
+Hypothesis: Donchian(20) breakouts on 4h timeframe, filtered by 1d EMA50 trend direction
+and confirmed by volume spikes, capture strong directional moves in both bull and bear markets.
+Volume confirmation reduces false breakouts, while EMA50 trend filter ensures alignment
+with higher timeframe momentum. Targets 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9679_6h_elder_ray_adx_regime_v1"
-timeframe = "6h"
+name = "exp_9680_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-ELDER_RAY_PERIOD = 13
-ADX_PERIOD = 14
-ADX_TREND_THRESHOLD = 25
-ADX_RANGE_THRESHOLD = 20
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
+VOLUME_SPIKE_MULTIPLIER = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_true_range(high, low, close):
-    """Calculate True Range"""
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).values
+
+def calculate_atr(high, low, close, period):
+    """Calculate ATR"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    return tr
-
-def calculate_adx(high, low, close, period):
-    """Calculate ADX using Wilder's smoothing"""
-    tr = calculate_true_range(high, low, close)
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    
-    # Smooth using Wilder's smoothing (alpha = 1/period)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
-    
-    dx = np.where((plus_di + minus_di) != 0, 
-                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return adx
-
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
-    tr = calculate_true_range(high, low, close)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    tr[0] = tr1[0]  # First TR is just high-low
+    atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
     return atr
-
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Calculate LTF indicators (6h)
+    # Load HTF data ONCE before loop (1d for EMA trend filter)
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d EMA50 for trend filter
+    ema_1d = calculate_ema(df_1d['close'].values, EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Calculate LTF indicators (4h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA for Elder Ray (13-period EMA)
-    ema = calculate_ema(close, ELDER_RAY_PERIOD)
+    # Donchian channels
+    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     
-    # Bull Power = High - EMA
-    bull_power = high - ema
-    
-    # Bear Power = Low - EMA
-    bear_power = low - ema
-    
-    # ADX for regime filtering
-    adx = calculate_adx(high, low, close, ADX_PERIOD)
+    # Volume moving average for spike detection
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -92,9 +76,14 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ELDER_RAY_PERIOD, ADX_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, 20, ATR_PERIOD) + 1
     
     for i in range(start, n):
+        # Skip if HTF data not available
+        if np.isnan(ema_1d_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
+            
         # Check stoploss
         if position == 1:  # long position
             if close[i] <= stop_price:
@@ -107,22 +96,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Regime filters
-        trending = adx[i] >= ADX_TREND_THRESHOLD   # Trending market
-        ranging = adx[i] <= ADX_RANGE_THRESHOLD    # Ranging market
+        # Volume spike confirmation
+        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend following signals (ADX > 25): follow Elder Ray direction
-        trend_long = trending and bull_power[i] > 0
-        trend_short = trending and bear_power[i] < 0
+        # Breakout conditions
+        breakout_up = close[i] > donch_upper[i]
+        breakout_down = close[i] < donch_lower[i]
         
-        # Mean reversion signals (ADX < 20): fade extreme Elder Ray readings
-        # In ranging markets, fade when Bull/Bear Power reaches extremes
-        range_long = ranging and bear_power[i] < 0 and bear_power[i] < np.percentile(bear_power[max(0, i-50):i+1], 10)
-        range_short = ranging and bull_power[i] > 0 and bull_power[i] > np.percentile(bull_power[max(0, i-50):i+1], 90)
+        # Trend filter: EMA50 direction (up if close > EMA, down if close < EMA)
+        trend_up = close[i] > ema_1d_aligned[i]
+        trend_down = close[i] < ema_1d_aligned[i]
         
-        # Entry conditions
-        long_entry = trend_long or range_long
-        short_entry = trend_short or range_short
+        # Entry conditions: breakout + volume spike + trend alignment
+        long_entry = breakout_up and volume_spike and trend_up
+        short_entry = breakout_down and volume_spike and trend_down
         
         # Generate signals
         if position == 0:
@@ -144,3 +131,5 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+
+</think>
