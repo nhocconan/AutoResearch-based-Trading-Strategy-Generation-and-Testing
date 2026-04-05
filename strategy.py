@@ -3,7 +3,7 @@
 exp_7062_12h_donchian20_1d_ema_vol_v1
 Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
 In bull markets (price > 1d EMA50): long breakouts only. In bear markets (price < 1d EMA50): short breakouts only.
-1d EMA50 provides intermediate-term trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
+1d EMA50 provides long-term trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
 Designed for 12h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
 Works in both bull and bear markets by aligning with 1d trend direction.
 """
@@ -128,3 +128,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
