@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #7814: 1-hour Donchian breakout with 4h/1d trend and volume confirmation.
-Hypothesis: Price breaking beyond 1-hour 20-period high/low with volume >1.8x 20-period MA, aligned with 4h and 1d EMA trends, captures momentum while avoiding whipsaw. Uses 4h/1d for directional bias, 1h only for entry timing. Targets 60-150 total trades over 4 years with session filter (08-20 UTC) to reduce noise.
+Experiment #7815: 6-hour Donchian breakout with weekly pivot direction and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 6h with volume >1.8x 20-period MA and aligned weekly trend captures sustained moves while avoiding whipsaw. Weekly trend provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 75-200 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7814_1h_donchian20_4h1d_ema_vol_sess_v1"
-timeframe = "1h"
+name = "exp_7815_6h_donchian20_1w_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.8
-SIGNAL_SIZE = 0.20
-EMA_PERIOD = 50
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
@@ -28,23 +27,13 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
-    
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
-    
-    # Trend bias: above EMA = bullish, below EMA = bearish
-    trend_bias_4h = np.where(close_4h > ema_4h, 1, -1)  # 1=bullish, -1=bearish
-    trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
-    
-    trend_bias_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_bias_4h)
-    trend_bias_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
+    # Calculate weekly trend: price above/below 200-week EMA
+    close_1w = df_1w['close'].values
+    ema_200w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    trend_bias_1w = np.where(close_1w > ema_200w, 1, -1)  # 1=bullish, -1=bearish
+    trend_bias_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_bias_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -66,9 +55,6 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -76,18 +62,12 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, EMA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(trend_bias_4h_aligned[i]) or np.isnan(trend_bias_1d_aligned[i]):
+        if np.isnan(trend_bias_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-            continue
-            
-        # Check session
-        if not (8 <= hours[i] <= 20):
-            signals[i] = 0.0
-            position = 0
             continue
             
         # Check stoploss or target
@@ -102,9 +82,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 4h and 1d EMA (both must agree)
-        bull_bias = (trend_bias_4h_aligned[i] == 1) and (trend_bias_1d_aligned[i] == 1)
-        bear_bias = (trend_bias_4h_aligned[i] == -1) and (trend_bias_1d_aligned[i] == -1)
+        # Determine market bias from weekly EMA200
+        bull_bias = trend_bias_1w_aligned[i] == 1   # weekly close above EMA200
+        bear_bias = trend_bias_1w_aligned[i] == -1  # weekly close below EMA200
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
