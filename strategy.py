@@ -1,68 +1,46 @@
 #!/usr/bin/env python3
 """
-exp_7255_6h_donchian20_1w_pivot_v1
-Hypothesis: 6h Donchian(20) breakout with weekly pivot regime filter.
-In bull weekly regime (price above weekly pivot): long breakouts only.
-In bear weekly regime (price below weekly pivot): short breakouts only.
-In neutral regime (price near weekly pivot): no trades.
-Uses volume confirmation to avoid false breakouts.
-Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by adapting to weekly pivot-defined regime.
+exp_7256_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+In trending markets (price > EMA): continuation breakouts in breakout direction.
+In ranging markets (price near EMA): mean reversion at Donchian extremes with volume confirmation.
+Uses 1d EMA for trend regime and 12h volume for confirmation.
+Designed for 12h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
+Works in both bull and bear markets by adapting to EMA-defined trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7255_6h_donchian20_1w_pivot_v1"
-timeframe = "6h"
+name = "exp_7256_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 20  # ~5 days (20 * 6h = 120h = 5d)
+MAX_HOLD_BARS = 10  # ~5 days (10 * 12h)
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1w for weekly pivot
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop - using 1d for EMA trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points (standard floor trader pivots)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d EMA
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Pivot = (H + L + C) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # R1 = 2*P - L
-    r1_1w = 2 * pivot_1w - low_1w
-    # S1 = 2*P - H
-    s1_1w = 2 * pivot_1w - high_1w
-    # R2 = P + (H - L)
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    # S2 = P - (H - L)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    # R3 = H + 2*(P - L)
-    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
-    # S3 = L - 2*(H - P)
-    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
-    
-    # Align to LTF (6h)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    # Align to LTF (12h)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -90,13 +68,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(pivot_1w_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -124,30 +102,31 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine weekly regime
-        above_r1 = close[i] > r1_1w_aligned[i]  # Bullish: above R1
-        below_s1 = close[i] < s1_1w_aligned[i]  # Bearish: below S1
-        near_pivot = np.abs(close[i] - pivot_1w_aligned[i]) < (0.5 * atr[i])  # Neutral: near pivot
+        # Determine market regime based on EMA
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
+        near_ema = np.abs(close[i] - ema_1d_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of EMA
         
-        # Breakout conditions with volume confirmation
-        breakout_long = close[i] > highest_high[i] and vol_confirmed
-        breakout_short = close[i] < lowest_low[i] and vol_confirmed
+        # Fade at extremes in ranging market (near EMA)
+        fade_long = near_ema and (close[i] <= lowest_low[i]) and vol_confirmed
+        fade_short = near_ema and (close[i] >= highest_high[i]) and vol_confirmed
+        
+        # Continuation breakouts in trending market
+        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            # Bull regime: only take long breakouts
-            if above_r1 and breakout_long:
+            if fade_long or continuation_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            # Bear regime: only take short breakouts
-            elif below_s1 and breakout_short:
+            elif fade_short or continuation_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 bars_since_entry = 0
-            # Neutral regime: no trades
             else:
                 signals[i] = 0.0
         else:
