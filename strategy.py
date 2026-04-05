@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #9640: 4h Donchian Breakout + Volume Spike + Daily Trend + ATR Stop
-Hypothesis: Donchian(20) breakouts on 4h with volume confirmation and daily trend filter
-provide high-probability trend continuation. Works in bull (breakouts above upper band)
-and bear (breakdowns below lower band) with volatility filter to avoid chop.
-Targets 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost.
+Experiment #9641: 4h Donchian Breakout + Volume Spike + ATR Stop
+Hypothesis: Donchian(20) breakouts with volume confirmation capture true breakouts
+while avoiding false breakouts. Works in bull markets (upside breakouts) and bear
+markets (downside breakdowns) by capturing strong directional moves. Targets
+75-200 total trades over 4 years to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9640_4h_donchian_breakout_volume_daily_trend_v1"
+name = "exp_9641_4h_donchian_breakout_volume_spike_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 2.0
+VOLUME_SPIKE_MULTIPLIER = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -50,9 +50,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period high/low)
-    highest = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Donchian channels
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -66,7 +66,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, 20, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, 50, 20) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
@@ -89,22 +89,22 @@ def generate_signals(prices):
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below daily EMA50
+        # Trend filter: only trade in direction of 1d EMA
         uptrend = close[i] > ema_1d_aligned[i]
         downtrend = close[i] < ema_1d_aligned[i]
         
-        # Breakout conditions with volume and trend confirmation
-        breakout_long = (high[i] >= highest[i]) and volume_spike and uptrend
-        breakdown_short = (low[i] <= lowest[i]) and volume_spike and downtrend
-        
         # Entry conditions
+        long_breakout = (not np.isnan(donchian_high[i-1])) and (close[i] > donchian_high[i-1]) and volume_spike and uptrend
+        short_breakout = (not np.isnan(donchian_low[i-1])) and (close[i] < donchian_low[i-1]) and volume_spike and downtrend
+        
+        # Generate signals
         if position == 0:
-            if breakout_long:
+            if long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakdown_short:
+            elif short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
