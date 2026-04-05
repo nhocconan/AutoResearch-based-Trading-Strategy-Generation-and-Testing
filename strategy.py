@@ -1,27 +1,26 @@
-#!/usr/bin/env python3
-"""
-Experiment #11721: 4h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: 4h Donchian(20) breakouts capture intermediate trends. 1d EMA provides trend bias,
-and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 trades over 4 years.
-"""
+# 12h Donchian Breakout with 1d Trend and Volume Confirmation
+# Hypothesis: 12-hour Donchian channel breakouts capture medium-term trends in BTC/ETH/SOL.
+# The daily (1d) EMA filter provides trend bias to avoid counter-trend trades, while volume
+# confirmation ensures institutional participation. This strategy works in bull markets by
+# catching continuation breakouts and in bear markets by quickly reversing on failed breakouts
+# via the trend filter. Target: 50-150 total trades over 4 years (12-37/year).
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11721_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_11725_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
-# Parameters - optimized for trade count
+# Parameters optimized for 12h timeframe
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 21
+TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
@@ -54,7 +53,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
