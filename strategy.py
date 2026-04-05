@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-exp_6941_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with daily EMA50 trend filter and volume confirmation.
+exp_6940_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with daily EMA trend filter and volume confirmation.
 In bull markets (price > daily EMA50): long breakouts only. In bear markets (price < daily EMA50): short breakouts only.
 Daily EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
 Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6941_4h_donchian20_1d_ema_vol_v1"
+name = "exp_6940_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,7 +23,7 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 30  # ~5 days (4h bars)
+MAX_HOLD_BARS = 30  # ~5 months (4h bars)
 EMA_PERIOD = 50
 
 def generate_signals(prices):
@@ -128,3 +128,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
