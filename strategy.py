@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
 Experiment #9398: 1d Donchian breakout + 1w trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Daily Donchian breakouts capture major trends; weekly EMA filter ensures directional alignment; volume confirms institutional participation.
-Targets 30-100 total trades over 4 years (7-25/year) to minimize fee drag while capturing significant moves. Works in bull (breakouts) and bear (filtered shorts).
+Hypothesis: Daily Donchian breakouts capture medium-term trends; weekly EMA filter ensures directional alignment; volume confirms institutional participation.
+Targets 30-100 total trades over 4 years (7-25/year) to balance opportunity and cost. Works in bull (breakouts) and bear (filtered shorts).
 """
 
+from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
 name = "exp_9398_1d_donchian20_1w_trend_vol_v1"
 timeframe = "1d"
@@ -125,3 +125,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</lyrics>
