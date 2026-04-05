@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #10148: 12h Donchian Breakout + Weekly Trend + Volume Spike
-Hypothesis: Donchian(20) breakouts on 12h in the direction of weekly trend (EMA40) with volume confirmation
+Experiment #10150: 1d Donchian Breakout + Weekly Trend + Volume Spike
+Hypothesis: Donchian(20) breakouts in the direction of weekly trend (EMA40) with volume confirmation
 provide high-probability trend continuation trades. Works in bull markets (breakouts above weekly EMA)
 and bear markets (breakdowns below weekly EMA). Volume filters reduce false breakouts.
-Target: 50-150 total trades over 4 years (12-37/year) as per 12h timeframe requirements.
+Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10148_12h_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "12h"
+name = "exp_10150_1d_donchian_breakout_weekly_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
-# Parameters - tuned for 12h timeframe
+# Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 2.0  # Higher threshold for 12h to reduce frequency
+VOLUME_SPIKE_MULTIPLIER = 1.5
 WEEKLY_EMA_PERIOD = 40
-SIGNAL_SIZE = 0.25  # Within 0.20-0.30 range, discrete to minimize churn
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
@@ -54,10 +54,10 @@ def generate_signals(prices):
     weekly_close = df_weekly['close'].values
     weekly_ema = calculate_ema(weekly_close, WEEKLY_EMA_PERIOD)
     
-    # Align weekly EMA to 12h timeframe
+    # Align weekly EMA to 1d timeframe
     weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -77,7 +77,7 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period - ensure all indicators are valid
+    # Start from warmup period
     start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, 20) + 1
     
     for i in range(start, n):
@@ -98,7 +98,7 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume spike confirmation - higher threshold for 12h
+        # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter: price above/below weekly EMA
