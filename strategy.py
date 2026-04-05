@@ -1,59 +1,73 @@
 #!/usr/bin/env python3
-
 """
-Hypothesis: 1-day Donchian breakout with weekly trend filter and volume confirmation
-Works in bull markets via breakout momentum; in bear markets via shorting breakdowns.
-Weekly trend filter ensures alignment with higher timeframe momentum, reducing whipsaws.
-Volume confirmation ensures breakouts have institutional participation.
-Target: 30-100 trades over 4 years (7-25/year) by requiring confluence of trend, breakout, and volume.
+Experiment #8339: 6-hour Williams Alligator with 12h/1d trend filter.
+Hypothesis: In trending markets (60-80% of time), Williams Alligator (3 SMAs) provides clear trend direction.
+We use 12h and 1d timeframes to filter for strong trends: price above/both 12h and 1d EMA50 for longs,
+below both for shorts. This avoids whipsaw in sideways markets. Target: 50-150 total trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8338_1d_donchian20_1w_vol_v1"
-timeframe = "1d"
+name = "exp_8339_6w_alligator_12h1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
-WEEKLY_EMA_PERIOD = 21
+ALLIGATOR_JAW_PERIOD = 13   # SMMA(13, 8)
+ALLIGATOR_TEETH_PERIOD = 8  # SMMA(8, 5)
+ALLIGATOR_LIPS_PERIOD = 5   # SMMA(5, 3)
+EMA_PERIOD = 50
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-ATR_TARGET_MULTIPLIER = 3.0
+ATR_STOP_MULTIPLIER = 2.5
+SIGNAL_SIZE = 0.25
+
+def smma(series, period):
+    """Smoothed Moving Average (SMMA) - also called RMA or Wilder's MA"""
+    return pd.Series(series).ewm(alpha=1/period, adjust=False).mean().values
 
 def generate_signals(prices):
-    n = len(prrices)
+    n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - weekly data
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=WEEKLY_EMA_PERIOD, adjust=False, min_periods=WEEKLY_EMA_PERIOD).mean().values
+    # Calculate 12h and 1d EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    close_1d = df_1d['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Price relative to weekly EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_1w > ema_1w, 1, -1)  # 1=bullish, -1=bearish
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
+    # Trend: 1 = bullish (price > both EMAs), -1 = bearish (price < both EMAs), 0 = mixed/no trend
+    bullish_trend = (close_12h > ema_12h) & (close_1d > ema_1d)
+    bearish_trend = (close_12h < ema_12h) & (close_1d < ema_1d)
+    trend_filter = np.where(bullish_trend, 1, np.where(bearish_trend, -1, 0))
+    trend_filter_12h = align_htf_to_ltf(prices, df_12h, trend_filter)
+    trend_filter_1d = align_htf_to_ltf(prices, df_1d, trend_filter)
+    # Require both timeframes to agree
+    trend_agreement = (trend_filter_12h == trend_filter_1d) & (trend_filter_12h != 0)
+    trend_direction = trend_filter_12h  # same as trend_filter_1d when agreed
     
-    # Calculate daily indicators
+    # Calculate Williams Alligator on 6h
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
     
-    # Price channel (Donchian)
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # SMMA (Smoothed Moving Average) for Alligator lines
+    jaw = smma(close, ALLIGATOR_JAW_PERIOD)    # Blue line: 13-period, 8 bars ahead
+    teeth = smma(close, ALLIGATOR_TEETH_PERIOD) # Red line: 8-period, 5 bars ahead
+    lips = smma(close, ALLIGATOR_LIPS_PERIOD)   # Green line: 5-period, 3 bars ahead
     
-    # Volume moving average
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    # Alligator signals: 
+    # - Mouth open (trending): jaws, teeth, lips are separated and ordered
+    # - Mouth closed (sleeping): lines are intertwined
+    # For trend following: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
+    bullish_alligator = (lips > teeth) & (teeth > jaw)
+    bearish_alligator = (lips < teeth) & (teeth < jaw)
     
     # ATR for risk management
     tr1 = pd.Series(high - low)
@@ -66,43 +80,39 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
-    target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, WEEKLY_EMA_PERIOD) + 1
+    start = max(ALLIGATOR_JAW_PERIOD, ALLIGATOR_TEETH_PERIOD, ALLIGATOR_LIPS_PERIOD, EMA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if HTF data not available
-        if np.isnan(price_vs_ema_aligned[i]):
+        # Skip if trend data not available
+        if np.isnan(trend_direction[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
-        # Check stoploss or target
+        # Check stoploss
         if position == 1:  # long position
-            if close[i] <= stop_price or close[i] >= target_price:
+            if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            if close[i] >= stop_price or close[i] <= target_price:
+            if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Determine market bias from weekly EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # weekly close above EMA
-        bear_bias = price_vs_ema_aligned[i] == -1  # weekly close below EMA
+        # Determine Alligator signal
+        bullish_alli = bullish_alligator[i] if not np.isnan(bullish_alligator[i]) else False
+        bearish_alli = bearish_alligator[i] if not np.isnan(bearish_alligator[i]) else False
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Determine trend direction from agreement of 12h and 1d
+        bullish_trend = trend_direction[i] == 1
+        bearish_trend = trend_direction[i] == -1
         
-        # Breakout conditions - require close beyond channel bands
-        upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
-        lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
-        
-        # Entry conditions
-        long_entry = bull_bias and upper_breakout and volume_confirmed
-        short_entry = bear_bias and lower_breakout and volume_confirmed
+        # Entry conditions: Alligator alignment + trend filter agreement
+        long_entry = bullish_alli and bullish_trend
+        short_entry = bearish_alli and bearish_trend
         
         # Generate signals
         if position == 0:
@@ -111,13 +121,11 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
@@ -126,4 +134,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</dict>
