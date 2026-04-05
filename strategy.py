@@ -1,28 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #7663: 4-hour Donchian(20) breakout with 12-hour EMA trend filter and volume confirmation.
-Hypothesis: Price above 12h EMA indicates bullish regime, below bearish. 
-Breakouts from Donchian(20) with volume > 1.5x average trigger entries.
-Exit on opposite breakout or stoploss (2x ATR). 
-Targets 75-200 trades over 4 years (19-50/year) with strict breakout conditions.
+Experiment #7665: 12-hour Donchian(20) breakout with 1-day EMA50 trend filter and volume confirmation.
+Hypothesis: In bull markets (price > 1d EMA50), go long on breakout above 12h Donchian upper.
+In bear markets (price < 1d EMA50), go short on breakdown below 12h Donchian lower.
+Volume must be above 1.5x average to confirm breakout strength.
+Targeting 50-150 trades over 4 years (12-37/year) with tight breakout conditions.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7663_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7665_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_TREND = 50  # 12h EMA50 for trend filter
+EMA_TREND = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5  # volume must be 1.5x average
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,12 +29,12 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h_50 = pd.Series(close_12h).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_12h_50_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_50)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d_50 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -67,11 +66,11 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_12h_50_aligned[i]):
+        if np.isnan(ema_1d_50_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
-        # Check stoploss
+        # Check stoploss (2x ATR)
         if position == 1:  # long position
             if close[i] <= stop_price:
                 signals[i] = 0.0
@@ -84,13 +83,13 @@ def generate_signals(prices):
                 continue
         
         # Determine market regime
-        bull_regime = close[i] > ema_12h_50_aligned[i]   # price above 12h EMA50
-        bear_regime = close[i] < ema_12h_50_aligned[i]   # price below 12h EMA50
+        bull_regime = close[i] > ema_1d_50_aligned[i]   # price above 1d EMA50
+        bear_regime = close[i] < ema_1d_50_aligned[i]   # price below 1d EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions
+        # Breakout conditions (use previous bar's Donchian levels)
         upper_breakout = (high[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
         lower_breakout = (low[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
@@ -98,35 +97,23 @@ def generate_signals(prices):
         long_entry = bull_regime and upper_breakout and volume_confirmed
         short_entry = bear_regime and lower_breakout and volume_confirmed
         
-        # Exit on opposite breakout
-        exit_long = bear_regime and lower_breakout
-        exit_short = bull_regime and upper_breakout
-        
         # Generate signals
         if position == 0:
             if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price - (2.0 * atr[i])
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price + (2.0 * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            if exit_long:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = SIGNAL_SIZE
+            signals[i] = SIGNAL_SIZE
         elif position == -1:
-            if exit_short:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -SIGNAL_SIZE
+            signals[i] = -SIGNAL_SIZE
     
     return signals
