@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """
-Experiment #10888: 12h Donchian Breakout with Weekly Trend and Volume Confirmation
-Hypothesis: Donchian(20) breakouts on 12h capture major price moves, filtered by weekly EMA trend (1w) and volume confirmation. This combination works in both bull and bear markets by only taking breakouts in the direction of the long-term trend, reducing whipsaws. Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+Experiment #10888: 12h Donchian Breakout with Weekly Trend Filter and Volume Confirmation
+Hypothesis: Donchian channel breakouts capture strong momentum moves. Weekly trend filter ensures
+we trade in the direction of the higher timeframe trend, reducing false signals. Volume confirmation
+ensures institutional participation. This combination should work in both bull and bear markets by
+filtering for high-probability breakouts with strong momentum.
+Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
 """
 
 import numpy as np
@@ -9,7 +13,7 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 name = "exp_10888_12h_donchian20_weekly_trend_volume_v1"
-timezone = "12h"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -22,7 +26,7 @@ ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian Channels"""
+    """Calculate Donchian channels: upper and lower bands"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -92,8 +96,8 @@ def generate_signals(prices):
                 continue
         
         # Donchian breakout conditions
-        breakout_up = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
-        breakout_down = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
+        long_breakout = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
+        short_breakout = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -103,8 +107,8 @@ def generate_signals(prices):
         downtrend_weekly = close[i] < ema_weekly_aligned[i]
         
         # Entry conditions
-        long_entry = breakout_up and volume_ok and uptrend_weekly
-        short_entry = breakout_down and volume_ok and downtrend_weekly
+        long_entry = long_breakout and volume_ok and uptrend_weekly
+        short_entry = short_breakout and volume_ok and downtrend_weekly
         
         # Generate signals
         if position == 0:
@@ -126,3 +130,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</|endoftext|>
