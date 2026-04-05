@@ -1,44 +1,68 @@
 #!/usr/bin/env python3
 """
-exp_7249_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-In uptrends (price > EMA): long breakouts above upper channel. In downtrends (price < EMA): short breakouts below lower channel.
-Volume > 1.5x 20-period MA confirms breakout strength. ATR-based stoploss at 2.5x ATR.
-Designed for 4h timeframe to achieve 19-50 trades/year (75-200 total over 4 years).
-Uses 1d EMA for trend regime to avoid whipsaw in ranging markets while capturing trends.
+exp_7250_1d_donchian20_1w_hma_v2
+Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter and volume confirmation.
+In trending markets (price > HMA): take continuation breakouts.
+In ranging markets (price near HMA): fade extremes with volume.
+Uses ATR stoploss and time-based exit to limit losing trades.
+Target: 30-100 trades over 4 years by requiring volume confirmation and strict regime alignment.
+Works in both bull and bear markets by adapting to HMA-defined trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7249_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7250_1d_donchian20_1w_hma_v2"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+HMA_PERIOD = 21
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5
+VOL_BASE_THRESHOLD = 2.0  # Increased to reduce trades
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 15  # Increased to reduce trade frequency
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA trend
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - using 1w for HMA trend
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate 1w HMA (Hull Moving Average)
+    close_1w = df_1w['close'].values
+    half_period = HMA_PERIOD // 2
+    sqrt_period = int(np.sqrt(HMA_PERIOD))
     
-    # Align to LTF (4h)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # WMA function
+    def wma(values, period):
+        if len(values) < period:
+            return np.full_like(values, np.nan)
+        weights = np.arange(1, period + 1)
+        return np.convolve(values, weights / weights.sum(), mode='valid')
+    
+    # HMA calculation
+    wma_half = wma(close_1w, half_period)
+    wma_full = wma(close_1w, HMA_PERIOD)
+    
+    # Handle array lengths
+    if len(wma_half) > 0 and len(wma_full) > 0:
+        raw_hma = 2 * wma_half - wma_full
+        hma_values = wma(raw_hma, sqrt_period)
+        # Pad to original length
+        hma_1w = np.full_like(close_1w, np.nan)
+        hma_1w[half_period - 1:half_period - 1 + len(hma_values)] = hma_values
+    else:
+        hma_1w = np.full_like(close_1w, np.nan)
+    
+    # Align to LTF (1d)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -63,14 +87,17 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD)
+    start = max(DONCHIAN_PERIOD, HMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
+        bars_since_entry += 1
+        
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
-            signals[i] = 0.0
+        if np.isnan(hma_1w_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
         # Check stoploss
@@ -78,34 +105,51 @@ def generate_signals(prices):
             if close[i] <= entry_price - ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= entry_price + ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
                 
-        # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        # Time-based exit
+        if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
+            signals[i] = 0.0
+            position = 0
+            bars_since_entry = 0
+            continue
+            
+        # Volume confirmation - require significant volume spike
+        vol_confirmed = (not np.isnan(vol_ma[i]) and 
+                        volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD)
         
-        # Determine market trend based on EMA
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
+        # Determine market regime based on HMA
+        above_hma = close[i] > hma_1w_aligned[i]
+        below_hma = close[i] < hma_1w_aligned[i]
+        near_hma = np.abs(close[i] - hma_1w_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of HMA
         
-        # Breakout conditions with volume confirmation
-        breakout_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
-        breakout_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
+        # Fade at extremes in ranging market (near HMA)
+        fade_long = near_hma and (close[i] <= lowest_low[i]) and vol_confirmed
+        fade_short = near_hma and (close[i] >= highest_high[i]) and vol_confirmed
+        
+        # Continuation breakouts in trending market
+        continuation_long = above_hma and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_hma and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if breakout_long:
+            if fade_long or continuation_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-            elif breakout_short:
+                bars_since_entry = 0
+            elif fade_short or continuation_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         else:
