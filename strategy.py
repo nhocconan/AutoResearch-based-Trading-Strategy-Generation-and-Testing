@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #7890: Daily Donchian breakout with weekly trend and volume confirmation.
-Hypothesis: Price breaking beyond 20-day high/low with volume >1.5x 20-day MA and aligned weekly EMA trend captures sustained moves while avoiding whipsaw. Weekly EMA provides structural bias from higher timeframe to reduce false breakouts. Targets 30-100 trades over 4 years with controlled risk via ATR-based stops.
+Experiment #7890: 1-day Donchian breakout with weekly EMA trend and volume control.
+Hypothesis: Daily price breaking beyond 20-period high/low with volume >1.5x 20-period MA and aligned weekly EMA trend captures sustained moves while avoiding whipsaw. Weekly EMA provides structural bias from higher timeframe to reduce false breakouts. Targets 30-100 trades over 4 years with controlled risk via ATR-based stops.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -16,7 +16,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.30
 EMA_PERIOD = 50
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
