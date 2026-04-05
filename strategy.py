@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #10880: 4h Donchian(20) breakout + 1d EMA(21) trend + volume confirmation + ATR stoploss
-Hypothesis: Donchian breakouts capture trend continuation, while 1d EMA provides multi-day trend bias.
-Volume confirmation ensures institutional participation. ATR-based stoploss limits downside.
-Works in bull markets (breakouts continue uptrend) and bear markets (breakouts continue downtrend).
-Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
+Experiment #10882: 12h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Donchian(20) breakouts capture strong momentum, while 1d EMA trend filter ensures trades align with higher timeframe bias.
+Volume confirmation filters weak breakouts. Works in both bull and bear markets by trading breakouts in direction of 1d trend.
+Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10880_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_10882_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -55,7 +54,7 @@ def generate_signals(prices):
     ema_daily = calculate_ema(df_daily['close'].values, DAILY_EMA_PERIOD)
     ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -94,7 +93,7 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout conditions
+        # Breakout conditions
         breakout_up = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
         breakout_down = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
         
