@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 exp_6958_1d_donchian20_1w_ema_vol_v2
-Hypothesis: 1d Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation. 
-Improved from failed exp_6950 by reducing signal size to 0.20, tightening volume threshold to 1.5x, 
-adding ATR(14) stoploss at 2.0x, and ensuring proper warmup. Target: 50-150 total trades over 4 years 
-(12-37/year) to avoid fee drag. Works in bull/bear by only taking breakouts aligned with weekly trend.
+Hypothesis: 1d Donchian(20) breakout with weekly EMA200 trend filter and volume confirmation.
+Weekly EMA200 provides stronger structural trend than EMA50, reducing whipsaw in sideways markets.
+In bull markets (price > weekly EMA200): long breakouts only. In bear markets (price < weekly EMA200): short breakouts only.
+Volume confirmation ensures breakouts have conviction. ATR-based stoploss manages risk.
+Target: 15-25 trades/year (60-100 total over 4 years) to minimize fee drag.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -15,29 +16,29 @@ name = "exp_6958_1d_donchian20_1w_ema_vol_v2"
 timeframe = "1d"
 leverage = 1.0
 
-# Parameters - tightened to reduce trade frequency
+# Parameters
 DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5  # reduced from 2.0 to increase signal reliability
-SIGNAL_SIZE = 0.20        # reduced from 0.25 to lower risk per trade
+VOL_BASE_THRESHOLD = 1.8  # Slightly lower to increase signal frequency slightly
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0 # reduced from 2.5 for tighter risk control
-MAX_HOLD_BARS = 40        # increased from 30 to allow trends to develop
-EMA_PERIOD = 50
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 40  # ~1.3 months (1d bars)
+EMA_PERIOD = 200  # Increased from 50 to 200 for stronger trend filter
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1w for weekly EMA
+    # Load HTF data ONCE before loop - using 1w for weekly EMA200
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly EMA50 with proper min_periods
+    # Calculate weekly EMA200
     close_1w = df_1w['close'].values
     ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align to LTF (1d) - align_htf_to_ltf handles shift(1) for completed bars only
+    # Align to LTF (1d)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate LTF indicators
@@ -46,20 +47,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels with min_periods
+    # Donchian channels
     highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
     lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Volume MA for confirmation with min_periods
+    # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
-    # ATR for stoploss with proper calculation
-    high_low = high - low
-    high_close = np.abs(high - np.roll(close, 1))
-    low_close = np.abs(low - np.roll(close, 1))
-    tr1 = pd.Series(high_low)
-    tr2 = pd.Series(high_close)
-    tr3 = pd.Series(low_close)
+    # ATR for stoploss
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
@@ -68,13 +66,13 @@ def generate_signals(prices):
     entry_price = 0.0
     bars_since_entry = 0
     
-    # Start from warmup period - ensure all indicators are valid
+    # Start from warmup period
     start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if HTF data not available (shouldn't happen with align_htf_to_ltf)
+        # Skip if HTF data not available
         if np.isnan(ema_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
@@ -100,12 +98,10 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Volume confirmation - avoid division by zero or NaN
-        vol_confirmed = False
-        if not np.isnan(vol_ma[i]) and vol_ma[i] > 0:
-            vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD
+        # Volume confirmation
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend direction from weekly EMA50
+        # Determine trend direction from weekly EMA200
         weekly_uptrend = close[i] > ema_1w_aligned[i]
         weekly_downtrend = close[i] < ema_1w_aligned[i]
         
@@ -132,4 +128,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-</file>
