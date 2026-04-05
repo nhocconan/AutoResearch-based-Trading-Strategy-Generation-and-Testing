@@ -1,43 +1,48 @@
 #!/usr/bin/env python3
 """
-Experiment #7653: 4-hour Donchian(20) breakout with 12-hour EMA50 trend filter and volume confirmation.
-Hypothesis: In bull markets (price > 12h EMA50), go long on breakout above 4h Donchian upper.
-In bear markets (price < 12h EMA50), go short on breakdown below 4h Donchian lower.
-Volume must be above 1.3x average to confirm breakout strength.
-ATR-based stoploss (1.5x) and target (3x) for risk management.
-Targets 75-200 trades over 4 years (19-50/year) with strict breakout conditions.
+Experiment #7654: 1-hour Donchian(20) breakout with 4h/1d trend filter and volume confirmation.
+Hypothesis: Use 4h trend (price > 4h EMA50) and 1d trend (price > 1d EMA200) for direction,
+enter on 1h Donchian breakout with volume > 1.5x average. Targets 60-150 trades over 4 years.
+Uses session filter (08-20 UTC) to reduce noise. Fixed position size 0.20.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7653_4h_donchian20_12h_ema50_vol_v1"
-timeframe = "4h"
+name = "exp_7654_1h_donchian20_4h_1d_ema_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_TREND = 50
+EMA_4H = 50
+EMA_1D = 200
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.3  # volume must be 1.3x average
-SIGNAL_SIZE = 0.25
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 1.5
+ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h EMA50 for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h_50 = pd.Series(close_12h).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_12h_50_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_50)
+    # Calculate 4h EMA50 for trend filter
+    close_4h = df_4h['close'].values
+    ema_4h_50 = pd.Series(close_4h).ewm(span=EMA_4H, adjust=False, min_periods=EMA_4H).mean().values
+    ema_4h_50_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_50)
+    
+    # Calculate 1d EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_1D, adjust=False, min_periods=EMA_1D).mean().values
+    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -59,6 +64,9 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -66,12 +74,18 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_4H, EMA_1D, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_12h_50_aligned[i]):
+        if np.isnan(ema_4h_50_aligned[i]) or np.isnan(ema_1d_200_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
+            
+        # Check session
+        if not (8 <= hours[i] <= 20):
+            signals[i] = 0.0
+            position = 0
             continue
             
         # Check stoploss or target
@@ -86,9 +100,14 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market regime
-        bull_regime = close[i] > ema_12h_50_aligned[i]   # price above 12h EMA50
-        bear_regime = close[i] < ema_12h_50_aligned[i]   # price below 12h EMA50
+        # Determine market regime (both 4h and 1d must agree)
+        bull_4h = close[i] > ema_4h_50_aligned[i]
+        bull_1d = close[i] > ema_1d_200_aligned[i]
+        bear_4h = close[i] < ema_4h_50_aligned[i]
+        bear_1d = close[i] < ema_1d_200_aligned[i]
+        
+        bull_regime = bull_4h and bull_1d
+        bear_regime = bear_4h and bear_1d
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -123,4 +142,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</lyrics>
