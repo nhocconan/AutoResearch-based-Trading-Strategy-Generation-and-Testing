@@ -2,8 +2,9 @@
 """
 exp_7368_12h_donchian20_1w_ema_vol_v1
 Hypothesis: 12h Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
-Uses weekly HTF for strong trend filter to reduce whipsaw, targeting 50-150 trades over 4 years.
+Uses 1w HTF for strong trend filtering to reduce false breakouts, targeting 50-150 trades over 4 years.
 Discrete position sizing (0.0, ±0.25) minimizes fee churn. Works in bull/bear via EMA regime filter.
+12h timeframe balances trade frequency and noise reduction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -18,11 +19,11 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0
+VOL_BASE_THRESHOLD = 2.0  # Volume spike threshold for confirmation
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 8  # ~4 days for 12h timeframe
+MAX_HOLD_BARS = 16  # ~8 days max hold to avoid prolonged drawdowns
 
 def generate_signals(prices):
     n = len(prices)
@@ -99,7 +100,7 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on EMA
+        # Determine market regime based on 1w EMA
         above_ema = close[i] > ema_1w_aligned[i]
         below_ema = close[i] < ema_1w_aligned[i]
         
