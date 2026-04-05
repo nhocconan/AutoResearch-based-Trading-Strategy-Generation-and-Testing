@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #11500: 4h Donchian Breakout with 1d Trend and Volume Confirmation
+Experiment #11501: 4h Donchian Breakout with 1d Trend and Volume Confirmation (Optimized)
 Hypothesis: Donchian(20) breakouts capture strong directional moves. Daily EMA provides trend bias,
-and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 trades over 4 years.
+and volume filter ensures institutional participation. Optimized for 75-200 trades over 4 years
+by tightening entry conditions and adding volume surge requirement to reduce false signals.
+Works in bull (breakouts continue) and bear (breakouts reverse quickly) by using 1d trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11500_4h_donchian20_1d_ema_vol_v1"
+name = "exp_11501_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,7 +19,8 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 DAILY_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 2.0  # Increased from 1.5 to reduce trades
+VOLUME_SPIKE_LOOKBACK = 5  # Require volume spike over recent bars
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -64,13 +66,16 @@ def generate_signals(prices):
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
+    # Volume spike detection: current volume > average of last N bars
+    volume_recent_avg = pd.Series(volume).rolling(window=VOLUME_SPIKE_LOOKBACK, min_periods=1).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, VOLUME_MA_PERIOD, VOLUME_SPIKE_LOOKBACK) + 1
     
     for i in range(start, n):
         # Skip if daily EMA not available
@@ -97,8 +102,10 @@ def generate_signals(prices):
         breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
         breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Volume confirmation: current volume > threshold * MA AND volume spike
+        volume_ma_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_spike = volume[i] > volume_recent_avg[i] if not np.isnan(volume_recent_avg[i]) else False
+        volume_ok = volume_ma_ok and volume_spike
         
         # Trend filter (daily)
         uptrend_daily = close[i] > ema_daily_aligned[i]
