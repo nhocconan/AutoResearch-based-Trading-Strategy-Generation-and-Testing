@@ -1,33 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #7681: 4-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
-Hypothesis: In bull markets (price > 1d EMA200), go long on breakout above 4h Donchian upper.
-In bear markets (price < 1d EMA200), go short on breakdown below 4h Donchian lower.
-Volume must be above 1.4x average to confirm breakout strength.
+Experiment #7682: 12-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
+Hypothesis: In bull markets (price > 1d EMA200), go long on breakout above 12h Donchian upper.
+In bear markets (price < 1d EMA200), go short on breakdown below 12h Donchian lower.
+Volume must be above 1.3x average to confirm breakout strength.
 ATR-based stoploss (2x) and target (3x) for risk management.
-Targets 80-180 trades over 4 years (20-45/year).
+Targets 50-150 total trades over 4 years (12-37/year).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7681_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7682_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 EMA_TREND = 200
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.4  # volume must be 1.4x average (slightly higher to reduce trades)
-SIGNAL_SIZE = 0.25
+VOLUME_THRESHOLD = 1.3  # volume must be 1.3x average
+SIGNAL_SIZE = 0.28
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
-    n = len(prices)
+    n = len(prrices)
     if n < 200:
         return np.zeros(n)
     
@@ -39,7 +39,7 @@ def generate_signals(prices):
     ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
     ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
-    # Calculate LTF indicators
+    # Calculate LTF indicators (12h timeframe)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -128,28 +128,28 @@ def generate_signals(prices):
 
 #!/usr/bin/env python3
 """
-Experiment #7681: 4-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
-Hypothesis: In bull markets (price > 1d EMA200), go long on breakout above 4h Donchian upper.
-In bear markets (price < 1d EMA200), go short on breakdown below 4h Donchian lower.
-Volume must be above 1.4x average to confirm breakout strength.
+Experiment #7682: 12-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
+Hypothesis: In bull markets (price > 1d EMA200), go long on breakout above 12h Donchian upper.
+In bear markets (price < 1d EMA200), go short on breakdown below 12h Donchian lower.
+Volume must be above 1.3x average to confirm breakout strength.
 ATR-based stoploss (2x) and target (3x) for risk management.
-Targets 80-180 trades over 4 years (20-45/year).
+Targets 50-150 total trades over 4 years (12-37/year).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7681_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7682_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 EMA_TREND = 200
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.4  # volume must be 1.4x average (slightly higher to reduce trades)
-SIGNAL_SIZE = 0.25
+VOLUME_THRESHOLD = 1.3  # volume must be 1.3x average
+SIGNAL_SIZE = 0.28
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
@@ -167,7 +167,7 @@ def generate_signals(prices):
     ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
     ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
-    # Calculate LTF indicators
+    # Calculate LTF indicators (12h timeframe)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
