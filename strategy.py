@@ -1,24 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #8759: 6h Donchian breakout + 12h/1d trend filter + volume confirmation + ATR stoploss.
-Hypothesis: 6h timeframe balances trade frequency and signal quality. Using 12h/1d EMA trend filters ensures 
-alignment with higher timeframe momentum, reducing counter-trend trades. Volume confirmation filters breakouts 
-requiring institutional participation. ATR-based stops manage risk. Targets 75-150 total trades over 4 years 
-(19-38/year) to balance statistical validity with fee minimization.
+Experiment #8759: 6h Donchian breakout + 12h trend filter + volume confirmation + ATR stoploss.
+Hypothesis: The 6h timeframe balances trade frequency and trend capture, while the 12h trend filter ensures alignment with higher timeframe momentum. Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk in volatile markets. Designed to work in both bull and bear markets by following the 12h trend direction.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8759_6h_donchian20_12h_1d_trend_vol_v1"
+name = "exp_8759_6h_donchian20_12h_trend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_FAST = 20  # 12h EMA
-TREND_SLOW = 50  # 1d EMA
+TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -41,21 +37,15 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_12h = get_htf_data(prices, '12h')
-    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h EMA for fast trend
+    # Calculate 12h EMA for trend filter
     close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=TREND_FAST, adjust=False, min_periods=TREND_FAST).mean().values
+    ema_12h = pd.Series(close_12h).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
     
-    # Calculate 1d EMA for slow trend
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=TREND_SLOW, adjust=False, min_periods=TREND_SLOW).mean().values
-    
-    # Trend alignment: both EMAs must agree
-    trend_bullish = (close_12h > ema_12h) & (close_1d > ema_1d)
-    trend_bearish = (close_12h < ema_12h) & (close_1d < ema_1d)
-    trend_bullish_aligned = align_htf_to_ltf(prices, df_12h, trend_bullish.astype(float))
-    trend_bearish_aligned = align_htf_to_ltf(prices, df_12h, trend_bearish.astype(float))
+    # Price relative to 12h EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_12h > ema_12h, 1, 
+                     np.where(close_12h < ema_12h, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_12h, price_vs_ema)
     
     # Calculate LTF indicators (6h)
     high = prices['high'].values
@@ -79,11 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_FAST, TREND_SLOW, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]):
+        if np.isnan(price_vs_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -99,9 +89,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 12h/1d EMA alignment
-        bull_bias = trend_bullish_aligned[i] == 1.0   # Both EMAs bullish
-        bear_bias = trend_bearish_aligned[i] == 1.0   # Both EMAs bearish
+        # Determine market bias from 12h EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 12h price above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 12h price below EMA50
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
