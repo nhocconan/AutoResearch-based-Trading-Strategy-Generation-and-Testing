@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #11189: 4h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: Donchian(20) breakouts capture strong directional moves. Daily EMA provides trend bias,
+Hypothesis: Donchian(20) breakouts on 4h capture strong directional moves. Daily EMA provides trend bias,
 and volume filter ensures institutional participation. Works in bull (breakouts continue) and
 bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 trades over 4 years.
 """
