@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #10750: 1D Donchian Breakout + Weekly Trend + Volume Spike
-Hypothesis: Daily Donchian(20) breakouts in the direction of weekly EMA50 trend with volume confirmation provide high-probability trend continuation trades. Works in bull markets (breakouts above weekly EMA) and bear markets (breakdowns below weekly EMA). Volume filters reduce false breakouts. Target: 30-100 total trades over 4 years (7-25/year) on 1D timeframe.
+Experiment #10750: 1d Donchian Breakout + Weekly Trend + Volume Spike
+Hypothesis: Daily Donchian(20) breakouts in the direction of weekly EMA50 trend with volume confirmation
+provide high-probability trend continuation trades. Works in bull markets (breakouts above weekly EMA)
+and bear markets (breakdowns below weekly EMA). Volume filters reduce false breakouts.
+Target: 30-100 total trades over 4 years (7-25/year) on 1D timeframe.
 """
 
 import numpy as np
