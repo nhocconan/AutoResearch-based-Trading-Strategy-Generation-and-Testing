@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #10551: 6h Donchian Breakout + Daily Trend + Volume Spike
-Hypothesis: 6-hour Donchian(20) breakouts in the direction of daily EMA50 trend with volume confirmation
-provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
-and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
+Hypothesis: 6-hour Donchian(20) breakouts in the direction of daily EMA(50) trend with volume confirmation
+provide high-probability trend continuation trades. The 6h timeframe balances signal quality with trade frequency
+to avoid overtrading while capturing multi-day trends in both bull and bear markets.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -133,4 +133,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</s>
