@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #7854: 1-hour Donchian breakout with 4-hour trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 1h with volume >1.5x 20-period MA and aligned 4h trend (EMA) captures sustained moves while avoiding whipsaw. The 4h trend filter provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 60-150 trades over 4 years with controlled risk via ATR-based stops and session filter (08-20 UTC).
+Experiment #7855: 6-hour Donchian breakout with weekly pivot direction and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 6h with volume >2.0x 20-period MA and aligned weekly trend (price above/below weekly pivot) captures sustained moves while avoiding whipsaw. Weekly pivot provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 50-150 trades over 4 years with controlled risk via ATR-based stops.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7854_1h_donchian20_4h_ema_vol_v1"
-timeframe = "1h"
+name = "exp_7855_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
-EMA_PERIOD = 50
+VOLUME_THRESHOLD = 2.0
+SIGNAL_SIZE = 0.25
+PIVOT_LOOKBACK = 5
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
@@ -28,15 +28,19 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate weekly pivot points (using previous week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Trend bias: above EMA = bullish, below EMA = bearish
-    trend_bias_4h = np.where(close_4h > ema_4h, 1, -1)  # 1=bullish, -1=bearish
-    trend_bias_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_bias_4h)
+    # Weekly pivot point: (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    
+    # Trend bias: above pivot = bullish, below pivot = bearish
+    trend_bias_1w = np.where(close_1w > pivot_1w, 1, -1)  # 1=bullish, -1=bearish
+    trend_bias_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_bias_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -58,10 +62,6 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Session filter: 08-20 UTC (pre-compute for efficiency)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -69,25 +69,12 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, EMA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if outside session
-        if not in_session[i]:
-            signals[i] = 0.0
-            position = 0
-            entry_price = 0.0
-            stop_price = 0.0
-            target_price = 0.0
-            continue
-            
         # Skip if HTF data not available
-        if np.isnan(trend_bias_4h_aligned[i]):
-            signals[i] = 0.0
-            position = 0
-            entry_price = 0.0
-            stop_price = 0.0
-            target_price = 0.0
+        if np.isnan(trend_bias_1w_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
         # Check stoploss or target
@@ -95,22 +82,16 @@ def generate_signals(prices):
             if close[i] <= stop_price or close[i] >= target_price:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                stop_price = 0.0
-                target_price = 0.0
                 continue
         elif position == -1:  # short position
             if close[i] >= stop_price or close[i] <= target_price:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                stop_price = 0.0
-                target_price = 0.0
                 continue
         
-        # Determine market bias from 4h EMA
-        bull_bias = trend_bias_4h_aligned[i] == 1   # 4h close above EMA
-        bear_bias = trend_bias_4h_aligned[i] == -1  # 4h close below EMA
+        # Determine market bias from weekly pivot
+        bull_bias = trend_bias_1w_aligned[i] == 1   # weekly close above pivot
+        bear_bias = trend_bias_1w_aligned[i] == -1  # weekly close below pivot
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -147,26 +128,27 @@ def generate_signals(prices):
     return signals
 
 </think>
+
 #!/usr/bin/env python3
 """
-Experiment #7854: 1-hour Donchian breakout with 4-hour trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 1h with volume >1.5x 20-period MA and aligned 4h trend (EMA) captures sustained moves while avoiding whipsaw. The 4h trend filter provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 60-150 trades over 4 years with controlled risk via ATR-based stops and session filter (08-20 UTC).
+Experiment #7855: 6-hour Donchian breakout with weekly pivot direction and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 6h with volume >2.0x 20-period MA and aligned weekly trend (price above/below weekly pivot) captures sustained moves while avoiding whipsaw. Weekly pivot provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 50-150 trades over 4 years with controlled risk via ATR-based stops.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7854_1h_donchian20_4h_ema_vol_v1"
-timeframe = "1h"
+name = "exp_7855_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
-EMA_PERIOD = 50
+VOLUME_THRESHOLD = 2.0
+SIGNAL_SIZE = 0.25
+PIVOT_LOOKBACK = 5
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
@@ -177,15 +159,19 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate weekly pivot points (using previous week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Trend bias: above EMA = bullish, below EMA = bearish
-    trend_bias_4h = np.where(close_4h > ema_4h, 1, -1)  # 1=bullish, -1=bearish
-    trend_bias_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_bias_4h)
+    # Weekly pivot point: (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    
+    # Trend bias: above pivot = bullish, below pivot = bearish
+    trend_bias_1w = np.where(close_1w > pivot_1w, 1, -1)  # 1=bullish, -1=bearish
+    trend_bias_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_bias_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -207,10 +193,6 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Session filter: 08-20 UTC (pre-compute for efficiency)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -218,25 +200,12 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, EMA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if outside session
-        if not in_session[i]:
-            signals[i] = 0.0
-            position = 0
-            entry_price = 0.0
-            stop_price = 0.0
-            target_price = 0.0
-            continue
-            
         # Skip if HTF data not available
-        if np.isnan(trend_bias_4h_aligned[i]):
-            signals[i] = 0.0
-            position = 0
-            entry_price = 0.0
-            stop_price = 0.0
-            target_price = 0.0
+        if np.isnan(trend_bias_1w_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
         # Check stoploss or target
@@ -244,22 +213,16 @@ def generate_signals(prices):
             if close[i] <= stop_price or close[i] >= target_price:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                stop_price = 0.0
-                target_price = 0.0
                 continue
         elif position == -1:  # short position
             if close[i] >= stop_price or close[i] <= target_price:
                 signals[i] = 0.0
                 position = 0
-                entry_price = 0.0
-                stop_price = 0.0
-                target_price = 0.0
                 continue
         
-        # Determine market bias from 4h EMA
-        bull_bias = trend_bias_4h_aligned[i] == 1   # 4h close above EMA
-        bear_bias = trend_bias_4h_aligned[i] == -1  # 4h close below EMA
+        # Determine market bias from weekly pivot
+        bull_bias = trend_bias_1w_aligned[i] == 1   # weekly close above pivot
+        bear_bias = trend_bias_1w_aligned[i] == -1  # weekly close below pivot
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
