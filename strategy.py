@@ -1,20 +1,21 @@
-# 2025-06-03
-# Experiment #11615: 6h Donchian Breakout with Weekly Pivot Direction and Volume Confirmation
-# Hypothesis: 6h Donchian(20) breakouts capture medium-term trends. Weekly pivot (from 1w) provides directional bias from higher timeframe,
-# and volume filter ensures institutional participation. Works in bull (breakouts continue) and bear (breakouts reverse quickly) by using
-# weekly pivot filter. Target: 100-200 trades over 4 years.
+# 2025-06-20
+# Strategy: 1d Donchian breakout with 1w EMA trend and volume confirmation
+# Hypothesis: 1d Donchian(20) breakouts capture long-term trends. 1w EMA provides trend bias,
+# and volume filter ensures institutional participation. Works in bull (breakouts continue) and
+# bear (breakouts reverse quickly) by using 1w trend filter. Target: 30-100 trades over 4 years.
+# Uses 1d timeframe with 1w HTF as requested.
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11615_6h_donchian20_1w_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_11618_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-WEEKLY_PIVOT_LENGTH = 26  # For weekly pivot calculation (similar to Ichimoku)
+TREND_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -27,6 +28,10 @@ def calculate_donchian_channels(high, low, period):
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
     tr1 = high - low
@@ -36,33 +41,19 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_weekly_pivot(high, low, close):
-    """
-    Calculate weekly pivot points (similar to Ichimoku but simpler)
-    Returns pivot line as (highest high + lowest low)/2 over period
-    """
-    highest_high = pd.Series(high).rolling(window=WEEKLY_PIVOT_LENGTH, min_periods=WEEKLY_PIVOT_LENGTH).max().values
-    lowest_low = pd.Series(low).rolling(window=WEEKLY_PIVOT_LENGTH, min_periods=WEEKLY_PIVOT_LENGTH).min().values
-    pivot = (highest_high + lowest_low) / 2
-    return pivot, highest_high, lowest_low
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1w data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot for trend bias
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate 1w EMA for trend
+    ema_1w = calculate_ema(df_1w['close'].values, TREND_EMA_PERIOD)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    weekly_pivot, weekly_highest, weekly_lowest = calculate_weekly_pivot(weekly_high, weekly_low, weekly_close)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
-    
-    # Calculate 6h indicators
+    # Calculate 1d indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -78,11 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, WEEKLY_PIVOT_LENGTH, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly pivot not available
-        if np.isnan(weekly_pivot_aligned[i]):
+        # Skip if 1w EMA not available
+        if np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -108,13 +99,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Weekly pivot filter (directional bias)
-        above_pivot = close[i] > weekly_pivot_aligned[i]
-        below_pivot = close[i] < weekly_pivot_aligned[i]
+        # Trend filter (1w)
+        uptrend_1w = close[i] > ema_1w_aligned[i]
+        downtrend_1w = close[i] < ema_1w_aligned[i]
         
         # Entry conditions
-        long_entry = breakout_up and volume_ok and above_pivot
-        short_entry = breakout_down and volume_ok and below_pivot
+        long_entry = breakout_up and volume_ok and uptrend_1w
+        short_entry = breakout_down and volume_ok and downtrend_1w
         
         # Generate signals
         if position == 0:
