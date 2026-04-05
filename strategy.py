@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-exp_7069_4h_donchian20_1d_ema_vol_v1
+exp_7070_4h_donchian20_1d_ema_vol_v1
 Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
 In bull markets (price > 1d EMA50): long breakouts only. In bear markets (price < 1d EMA50): short breakouts only.
 1d EMA50 provides intermediate-term trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
@@ -12,7 +12,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7069_4h_donchian20_1d_ema_vol_v1"
+name = "exp_7070_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -102,12 +102,12 @@ def generate_signals(prices):
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Determine trend direction from 1d EMA50
-        daily_uptrend = close[i] > ema_1d_aligned[i]
-        daily_downtrend = close[i] < ema_1d_aligned[i]
+        weekly_uptrend = close[i] > ema_1d_aligned[i]
+        weekly_downtrend = close[i] < ema_1d_aligned[i]
         
         # Breakout signals aligned with 1d trend
-        long_breakout = daily_uptrend and (close[i] > highest_high[i]) and vol_confirmed
-        short_breakout = daily_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
+        long_breakout = weekly_uptrend and (close[i] > highest_high[i]) and vol_confirmed
+        short_breakout = weekly_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
