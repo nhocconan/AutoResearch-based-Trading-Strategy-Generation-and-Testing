@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #7730: Daily Donchian(20) breakout with weekly EMA trend filter, volume confirmation, and ATR risk management.
-Hypothesis: Daily price breaking beyond 20-period high/low with volume >1.5x 20-period MA and aligned weekly trend (EMA50) captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above weekly EMA) and bear markets (short breakdowns below weekly EMA). Targets 30-100 trades over 4 years (7-25/year) for low frequency and minimal fee drag.
+Experiment #7731: 6-hour Donchian(20) breakout with 1-day daily pivot direction, volume confirmation, and ATR risk management.
+Hypothesis: Price breaking beyond 20-period high/low on 6f with volume >1.5x 20-period MA and aligned with daily pivot bias (bullish above pivot, bearish below pivot) captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above pivot) and bear markets (short breakdowns below pivot). Targets 50-150 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7730_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_7731_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_TREND = 50
+PIVOT_PERIOD = 1  # daily pivot from previous day
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -27,15 +27,21 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (weekly)
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate daily pivot points (using previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Pivot bias: bullish if price above pivot, bearish if below
+    pivot_bias = pivot  # we'll compare current price to this
     
-    # Calculate LTF indicators (daily)
+    # Align pivot bias to 6f timeframe
+    pivot_bias_aligned = align_htf_to_ltf(prices, df_1d, pivot_bias)
+    
+    # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -62,11 +68,11 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1w_aligned[i]):
+        if np.isnan(pivot_bias_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -82,9 +88,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market regime
-        bull_regime = close[i] > ema_1w_aligned[i]   # price above weekly EMA
-        bear_regime = close[i] < ema_1w_aligned[i]   # price below weekly EMA
+        # Determine pivot bias
+        bull_bias = close[i] > pivot_bias_aligned[i]   # price above daily pivot
+        bear_bias = close[i] < pivot_bias_aligned[i]   # price below daily pivot
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -94,8 +100,137 @@ def generate_signals(prices):
         lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
         # Entry conditions
-        long_entry = bull_regime and upper_breakout and volume_confirmed
-        short_entry = bear_regime and lower_breakout and volume_confirmed
+        long_entry = bull_bias and upper_breakout and volume_confirmed
+        short_entry = bear_bias and lower_breakout and volume_confirmed
+        
+        # Generate signals
+        if position == 0:
+            if long_entry:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
+            elif short_entry:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            signals[i] = -SIGNAL_SIZE
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #7731: 6-hour Donchian(20) breakout with 1-day daily pivot direction, volume confirmation, and ATR risk management.
+Hypothesis: Price breaking beyond 20-period high/low on 6f with volume >1.5x 20-period MA and aligned with daily pivot bias (bullish above pivot, bearish below pivot) captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above pivot) and bear markets (short breakdowns below pivot). Targets 50-150 trades over 4 years.
+"""
+
+from mtf_data import get_htf_data, align_htf_to_ltf
+import numpy as np
+import pandas as pd
+
+name = "exp_7731_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
+leverage = 1.0
+
+# Parameters
+DONCHIAN_PERIOD = 20
+PIVOT_PERIOD = 1  # daily pivot from previous day
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
+ATR_TARGET_MULTIPLIER = 3.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate daily pivot points (using previous day's OHLC)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    # Pivot bias: bullish if price above pivot, bearish if below
+    pivot_bias = pivot  # we'll compare current price to this
+    
+    # Align pivot bias to 6f timeframe
+    pivot_bias_aligned = align_htf_to_ltf(prices, df_1d, pivot_bias)
+    
+    # Calculate LTF indicators
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR for risk management
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
+    target_price = 0.0
+    
+    # Start from warmup period
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    
+    for i in range(start, n):
+        # Skip if HTF data not available
+        if np.isnan(pivot_bias_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
+            
+        # Check stoploss or target
+        if position == 1:  # long position
+            if close[i] <= stop_price or close[i] >= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price or close[i] <= target_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # Determine pivot bias
+        bull_bias = close[i] > pivot_bias_aligned[i]   # price above daily pivot
+        bear_bias = close[i] < pivot_bias_aligned[i]   # price below daily pivot
+        
+        # Volume confirmation
+        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        
+        # Breakout conditions - require close beyond Donchian bands to avoid wicks
+        upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
+        lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
+        
+        # Entry conditions
+        long_entry = bull_bias and upper_breakout and volume_confirmed
+        short_entry = bear_bias and lower_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
