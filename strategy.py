@@ -1,33 +1,40 @@
 #!/usr/bin/env python3
 """
-Experiment #10150: 1d Donchian Breakout + Weekly Trend + Volume Spike
-Hypothesis: Donchian(20) breakouts in the direction of weekly trend (EMA40) with volume confirmation
-provide high-probability trend continuation trades. Works in bull markets (breakouts above weekly EMA)
-and bear markets (breakdowns below weekly EMA). Volume filters reduce false breakouts.
-Target: 75-150 total trades over 4 years (19-38/year).
+Experiment #10151: 6h Time-Weighted Average Price (TWAP) Deviation + Daily Trend + Volume
+Hypothesis: Price deviations from daily TWAP (volume-weighted average price) tend to revert toward the mean when the daily trend (EMA50) is strong, but continue in the direction of the trend when deviation is extreme with volume confirmation. Works in both bull and bear markets by fading moderate deviations and catching strong trending moves. Target: 80-160 total trades over 4 years (20-40/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10150_1d_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "exp_10151_6h_twap_deviation_daily_trend_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
-WEEKLY_EMA_PERIOD = 40
-SIGNAL_SIZE = 0.25
+TWAP_LOOKBACK = 24  # 24 * 6h = 6 days for daily VWAP approximation
+TWAP_DEV_THRESHOLD_LOW = 0.015   # 1.5% deviation for mean reversion
+TWAP_DEV_THRESHOLD_HIGH = 0.04   # 4% deviation for trend continuation
+DAILY_EMA_PERIOD = 50
+VOLUME_SPIKE_MULTIPLIER = 1.8
+SIGNAL_SIZE_MEAN = 0.25   # Mean reversion position
+SIGNAL_SIZE_TREND = 0.35  # Trend continuation position
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_vwap(high, low, close, volume, window):
+    """Calculate Volume Weighted Average Price"""
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.convolve(typical_price * volume, np.ones(window), 'same')
+    vwap_den = np.convolve(volume, np.ones(window), 'same')
+    # Avoid division by zero
+    vwap_den[vwap_den == 0] = 1e-10
+    vwap = vwap_num / vwap_den
+    # Handle edges
+    vwap[:window-1] = vwap[window-1]
+    vwap[-window+1:] = vwap[-window+1]
+    return vwap
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -47,27 +54,37 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for trend filter
-    df_weekly = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop for VWAP and trend
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend direction
-    weekly_close = df_weekly['close'].values
-    weekly_ema = calculate_ema(weekly_close, WEEKLY_EMA_PERIOD)
+    # Calculate daily VWAP (approximation)
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
+    daily_volume = df_daily['volume'].values
     
-    # Align weekly EMA to 1d timeframe
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
+    # Daily VWAP (using typical price * volume / volume)
+    daily_typical = (daily_high + daily_low + daily_close) / 3.0
+    vwap_num = np.convolve(daily_typical * daily_volume, np.ones(TWAP_LOOKBACK), 'same')
+    vwap_den = np.convolve(daily_volume, np.ones(TWAP_LOOKBACK), 'same')
+    vwap_den[vwap_den == 0] = 1e-10
+    daily_vwap = vwap_num / vwap_den
+    # Handle edges for convolution
+    daily_vwap[:TWAP_LOOKBACK-1] = daily_vwap[TWAP_LOOKBACK-1]
+    daily_vwap[-TWAP_LOOKBACK+1:] = daily_vwap[-TWAP_LOOKBACK+1]
     
-    # Calculate 1d indicators
+    # Calculate daily EMA for trend direction
+    daily_ema = calculate_ema(daily_close, DAILY_EMA_PERIOD)
+    
+    # Align daily indicators to 6h timeframe
+    daily_vwap_aligned = align_htf_to_ltf(prices, df_daily, daily_vwap)
+    daily_ema_aligned = align_htf_to_ltf(prices, df_daily, daily_ema)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channels
-    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
-    
-    # Volume moving average for spike detection
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -78,12 +95,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, 20) + 1
+    start = max(TWAP_LOOKBACK, DAILY_EMA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(weekly_ema_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        # Skip if daily indicators not available
+        if np.isnan(daily_vwap_aligned[i]) or np.isnan(daily_ema_aligned[i]):
+            signals[i] = position * (SIGNAL_SIZE_MEAN if position > 0 else SIGNAL_SIZE_TREND) if position != 0 else 0.0
             continue
             
         # Check stoploss
@@ -98,38 +115,52 @@ def generate_signals(prices):
                 position = 0
                 continue
         
+        # Calculate TWAP deviation percentage
+        twap_dev = (close[i] - daily_vwap_aligned[i]) / daily_vwap_aligned[i]
+        
         # Volume spike confirmation
-        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
+        volume_ma = np.mean(volume[max(0, i-19):i+1]) if i >= 20 else volume[i]
+        volume_spike = volume[i] > (volume_ma * VOLUME_SPIKE_MULTIPLIER) if volume_ma > 0 else False
         
-        # Trend filter: price above/below weekly EMA
-        above_weekly_ema = close[i] > weekly_ema_aligned[i]
-        below_weekly_ema = close[i] < weekly_ema_aligned[i]
+        # Trend filter: price above/below daily EMA
+        above_daily_ema = close[i] > daily_ema_aligned[i]
+        below_daily_ema = close[i] < daily_ema_aligned[i]
         
-        # Breakout conditions
-        bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
-        bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
+        # Mean reversion: fade moderate deviations
+        mean_reversion_long = (twap_dev < -TWAP_DEV_THRESHOLD_LOW) and above_daily_ema and not volume_spike
+        mean_reversion_short = (twap_dev > TWAP_DEV_THRESHOLD_LOW) and below_daily_ema and not volume_spike
         
-        # Entry conditions: breakout in direction of weekly trend with volume
-        long_entry = bullish_breakout and above_weekly_ema and volume_spike
-        short_entry = bearish_breakout and below_weekly_ema and volume_spike
+        # Trend continuation: extreme deviations with volume
+        trend_continuation_long = (twap_dev > TWAP_DEV_THRESHOLD_HIGH) and above_daily_ema and volume_spike
+        trend_continuation_short = (twap_dev < -TWAP_DEV_THRESHOLD_HIGH) and below_daily_ema and volume_spike
         
         # Generate signals
         if position == 0:
-            if long_entry:
-                signals[i] = SIGNAL_SIZE
+            if mean_reversion_long:
+                signals[i] = SIGNAL_SIZE_MEAN
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
-                signals[i] = -SIGNAL_SIZE
+            elif mean_reversion_short:
+                signals[i] = -SIGNAL_SIZE_MEAN
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            elif trend_continuation_long:
+                signals[i] = SIGNAL_SIZE_TREND
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif trend_continuation_short:
+                signals[i] = -SIGNAL_SIZE_TREND
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            signals[i] = SIGNAL_SIZE
+            signals[i] = SIGNAL_SIZE_MEAN if position > 0 else SIGNAL_SIZE_TREND
         elif position == -1:
-            signals[i] = -SIGNAL_SIZE
+            signals[i] = -SIGNAL_SIZE_MEAN if position > 0 else -SIGNAL_SIZE_TREND
     
     return signals
