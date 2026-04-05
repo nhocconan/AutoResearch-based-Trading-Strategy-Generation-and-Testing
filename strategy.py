@@ -3,7 +3,7 @@
 Experiment #7712: 12-hour Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
 Hypothesis: Price breaking beyond 20-period high/low on 12h with volume confirmation and aligned 1d trend
 captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above EMA) and bear
-markets (short breakdowns below EMA). Targets 50-150 trades over 4 years.
+markets (short breakdowns below EMA). Targets 50-150 trades over 4 years for optimal trade frequency.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
