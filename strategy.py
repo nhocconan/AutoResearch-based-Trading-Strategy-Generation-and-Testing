@@ -1,23 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #8831: 6h Donchian breakout + 1d market regime filter + volume confirmation.
-Hypothesis: The 6h timeframe balances trade frequency and trend capture. Using 1d regime filter (price vs EMA200) ensures
-alignment with longer-term trend, avoiding counter-trend trades in both bull and bear markets. Volume confirmation filters
-breakouts requiring institutional participation. Targets 75-200 trades over 4 years (19-50/year) to balance opportunity
-and fee drag.
+Experiment #8831: 6h Donchian breakout + 1d ADX trend filter + volume confirmation + ATR stoploss.
+Hypothesis: 6h timeframe balances trade frequency and trend capture. ADX(14) > 25 filters for trending markets only, avoiding whipsaws in ranges. Donchian(20) breakouts capture momentum with volume confirmation ensuring institutional participation. Works in both bull/bear as ADX identifies trend strength regardless of direction. Targets 75-150 total trades over 4 years (~19-38/year).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8831_6h_donchian20_1d_regime_vol_v1"
+name = "exp_8831_6h_donchian20_1d_adx_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-REGIME_PERIOD = 200
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -33,6 +31,34 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_adx(high, low, close, period):
+    """Calculate ADX (Average Directional Index)"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    # Smooth TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
+    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -41,14 +67,15 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA200 for regime filter
+    # Calculate 1d ADX for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=REGIME_PERIOD, adjust=False, min_periods=REGIME_PERIOD).mean().values
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, ADX_PERIOD)
     
-    # Regime: 1 = bullish (price above EMA200), -1 = bearish (price below EMA200)
-    regime = np.where(close_1d > ema_1d, 1, 
-               np.where(close_1d < ema_1d, -1, 0))
-    regime_aligned = align_htf_to_ltf(prices, df_1d, regime)
+    # ADX > threshold indicates trending market
+    adx_trending = adx_1d > ADX_THRESHOLD
+    adx_trending_aligned = align_htf_to_ltf(prices, df_1d, adx_trending)
     
     # Calculate LTF indicators (6h)
     high = prices['high'].values
@@ -72,11 +99,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, REGIME_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, ADX_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(regime_aligned[i]):
+        if np.isnan(adx_trending_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -92,9 +119,8 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market regime from 1d EMA200
-        bull_regime = regime_aligned[i] == 1   # 1d price above EMA200
-        bear_regime = regime_aligned[i] == -1  # 1d price below EMA200
+        # Determine if market is trending (ADX > threshold)
+        trending = adx_trending_aligned[i]
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
@@ -103,9 +129,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry conditions: only trade in direction of regime
-        long_entry = bull_regime and long_breakout and volume_confirmed
-        short_entry = bear_regime and short_breakout and volume_confirmed
+        # Entry conditions: only in trending markets
+        long_entry = trending and long_breakout and volume_confirmed
+        short_entry = trending and short_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
@@ -127,3 +153,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</x>
