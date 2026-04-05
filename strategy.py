@@ -2,7 +2,9 @@
 """
 Experiment #7962: 12-hour Donchian breakout with 1d trend filter and volume confirmation.
 Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA 
-and aligned 1d trend (price above/below 1d EMA50) captures sustained moves with low trade frequency. 
+and aligned 1d trend (price above/below 1d EMA50) captures sustained moves while maintaining 
+appropriate trade frequency for 12h timeframe. The 1d timeframe provides stronger trend context 
+to improve performance in both bull and bear markets while avoiding overtrading.
 Target: 50-150 total trades over 4 years.
 """
 
