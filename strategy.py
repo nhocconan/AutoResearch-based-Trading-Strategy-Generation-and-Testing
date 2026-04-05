@@ -1,77 +1,58 @@
 #!/usr/bin/env python3
 """
-Experiment #7611: 6h Ichimoku Cloud with 1-day trend filter.
-Hypothesis: In bull markets (price > 1d Tenkan-Sen), go long when TK crosses above and price above cloud.
-In bear markets (price < 1d Tenkan-Sen), go short when TK crosses below and price below cloud.
-This combines trend-following with momentum and avoids whipsaws in sideways markets.
-Targets 50-150 total trades over 4 years (12-37/year) with strict Ichimoku conditions.
+Experiment #7612: 12h Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
+Hypothesis: In bull markets (price > 1d EMA200), go long on breakout above 12h Donchian upper.
+In bear markets (price < 1d EMA200), go short on breakdown below 12h Donchian lower.
+Volume must be above 1.5x average to confirm breakout strength.
+ATR-based stoploss (2x) and target (3x) for risk management.
+Targets 50-150 trades over 4 years (12-37/year) with strict breakout conditions.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7611_6h_ichimoku_1d_trend_v1"
-timeframe = "6h"
+name = "exp_7612_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-TENKAN_SEN = 9
-KIJUN_SEN = 26
-SENKOU_SPAN_B = 52
-DISPLACEMENT = 26
+DONCHIAN_PERIOD = 20
+EMA_TREND = 200
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5  # volume must be 1.5x average
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < SENKOU_SPAN_B + DISPLACEMENT:
+    if n < 200:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Ichimoku components for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA200 for trend filter
     close_1d = df_1d['close'].values
+    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen_1d = (pd.Series(high_1d).rolling(window=TENKAN_SEN, min_periods=TENKAN_SEN).max() + 
-                     pd.Series(low_1d).rolling(window=TENKAN_SEN, min_periods=TENKAN_SEN).min()) / 2
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen_1d = (pd.Series(high_1d).rolling(window=KIJUN_SEN, min_periods=KIJUN_SEN).max() + 
-                    pd.Series(low_1d).rolling(window=KIJUN_SEN, min_periods=KIJUN_SEN).min()) / 2
-    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
-    senkou_span_a_1d = (tenkan_sen_1d + kijun_sen_1d) / 2
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
-    senkou_span_b_1d = (pd.Series(high_1d).rolling(window=SENKOU_SPAN_B, min_periods=SENKOU_SPAN_B).max() + 
-                        pd.Series(low_1d).rolling(window=SENKOU_SPAN_B, min_periods=SENKOU_SPAN_B).min()) / 2
-    
-    # Align 1d Ichimoku components to 6h timeframe
-    tenkan_sen_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen_1d.values)
-    senkou_span_a_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a_1d.values)
-    senkou_span_b_1d_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b_1d.values)
-    
-    # Calculate LTF Ichimoku components for entry signals
+    # Calculate LTF indicators
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Tenkan-sen (Conversion Line)
-    tenkan_sen = (pd.Series(high).rolling(window=TENKAN_SEN, min_periods=TENKAN_SEN).max() + 
-                  pd.Series(low).rolling(window=TENKAN_SEN, min_periods=TENKAN_SEN).min()) / 2
-    # Kijun-sen (Base Line)
-    kijun_sen = (pd.Series(high).rolling(window=KIJUN_SEN, min_periods=KIJUN_SEN).max() + 
-                 pd.Series(low).rolling(window=KIJUN_SEN, min_periods=KIJUN_SEN).min()) / 2
-    # Senkou Span A (Leading Span A)
-    senkou_span_a = (tenkan_sen + kijun_sen) / 2
-    # Senkou Span B (Leading Span B)
-    senkou_span_b = (pd.Series(high).rolling(window=SENKOU_SPAN_B, min_periods=SENKOU_SPAN_B).max() + 
-                     pd.Series(low).rolling(window=SENKOU_SPAN_B, min_periods=SENKOU_SPAN_B).min()) / 2
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Calculate ATR for risk management
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR for risk management
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
@@ -82,48 +63,43 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
+    target_price = 0.0
     
     # Start from warmup period
-    start = max(SENKOU_SPAN_B + DISPLACEMENT, KIJUN_SEN) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(tenkan_sen_1d_aligned[i]) or np.isnan(senkou_span_a_1d_aligned[i]) or np.isnan(senkou_span_b_1d_aligned[i]):
+        if np.isnan(ema_1d_200_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
-        
-        # Check stoploss
+            
+        # Check stoploss or target
         if position == 1:  # long position
-            if close[i] <= stop_price:
+            if close[i] <= stop_price or close[i] >= target_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            if close[i] >= stop_price:
+            if close[i] >= stop_price or close[i] <= target_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Determine 1d trend regime using Tenkan-sen
-        bull_regime = close[i] > tenkan_sen_1d_aligned[i]   # price above 1d Tenkan-sen
-        bear_regime = close[i] < tenkan_sen_1d_aligned[i]   # price below 1d Tenkan-sen
+        # Determine market regime
+        bull_regime = close[i] > ema_1d_200_aligned[i]   # price above 1d EMA200
+        bear_regime = close[i] < ema_1d_200_aligned[i]   # price below 1d EMA200
         
-        # Ichimoku signals on 6h
-        tk_cross_above = (tenkan_sen[i-1] <= kijun_sen[i-1]) and (tenkan_sen[i] > kijun_sen[i]) and (i-1 >= 0)
-        tk_cross_below = (tenkan_sen[i-1] >= kijun_sen[i-1]) and (tenkan_sen[i] < kijun_sen[i]) and (i-1 >= 0)
+        # Volume confirmation
+        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Cloud boundaries (using displaced Senkou Span)
-        # Note: Senkou Span is plotted 26 periods ahead, so we use current values for cloud
-        upper_cloud = np.maximum(senkou_span_a[i], senkou_span_b[i])
-        lower_cloud = np.minimum(senkou_span_a[i], senkou_span_b[i])
-        
-        # Price above/below cloud
-        price_above_cloud = close[i] > upper_cloud
-        price_below_cloud = close[i] < lower_cloud
+        # Breakout conditions
+        upper_breakout = (high[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
+        lower_breakout = (low[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
         # Entry conditions
-        long_entry = bull_regime and tk_cross_above and price_above_cloud
-        short_entry = bear_regime and tk_cross_below and price_below_cloud
+        long_entry = bull_regime and upper_breakout and volume_confirmed
+        short_entry = bear_regime and lower_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
@@ -132,11 +108,13 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
@@ -145,3 +123,5 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+
+</think>
