@@ -2,7 +2,7 @@
 """
 exp_7416_12h_donchian20_1d_ema_vol_v1
 Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drift.
+Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag.
 Works in bull/bear via 1d EMA filter: only long when above 1d EMA, short when below.
 """
 
