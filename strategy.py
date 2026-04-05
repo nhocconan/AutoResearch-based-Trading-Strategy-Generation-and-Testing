@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 """
-exp_7419_6d_donchian20_1d_ema_vol_v1
-Hypothesis: 6-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation.
-Targets 50-150 trades over 4 years by requiring strong breakouts with volume in trending regimes.
-Works in bull/bear markets: only long when price > 1d EMA (bullish bias), short when price < 1d EMA (bearish bias).
+exp_7420_4h_donchian20_1d_ema_vol_v2
+Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+Improved version with reduced trade frequency by tightening volume confirmation and adding volatility filter.
+Designed for low trade frequency (target: 75-200 total over 4 years) to minimize fee drag.
+Works in bull/bear via 1d EMA filter: only long when above 1d EMA, short when below.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7419_6d_donchian20_1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_7420_4h_donchian20_1d_ema_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0
+VOL_BASE_THRESHOLD = 2.5  # Increased for fewer trades
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 8
+MAX_HOLD_BARS = 12  # Increased for fewer trades
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,7 +37,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align to LTF (6h)
+    # Align to LTF (4h)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -96,29 +97,25 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Volume confirmation
+        # Volume confirmation with higher threshold
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Determine market regime based on 1d EMA
         above_ema = close[i] > ema_1d_aligned[i]
         below_ema = close[i] < ema_1d_aligned[i]
         
-        # Continuation breakouts in trending market
+        # Only trade strong breakouts with volume confirmation
         continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
         continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
         
-        # Breakout retest entries (pullback to breakout level with volume)
-        retest_long = above_ema and (close[i] <= highest_high[i-1] * 1.005) and (close[i] >= lowest_low[i-1]) and vol_confirmed
-        retest_short = below_ema and (close[i] >= lowest_low[i-1] * 0.995) and (close[i] <= highest_high[i-1]) and vol_confirmed
-        
         # Enter new positions only if flat
         if position == 0:
-            if continuation_long or retest_long:
+            if continuation_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif continuation_short or retest_short:
+            elif continuation_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
