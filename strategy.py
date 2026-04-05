@@ -1,28 +1,26 @@
-#!/usr/bin/env python3
-"""
-Experiment #8550: 1d Donchian breakout + 1w trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Daily timeframe reduces trade frequency to combat fee drag while capturing major trends.
-Using 1-week trend filter (EMA50) ensures alignment with multi-week momentum, avoiding counter-trend trades.
-Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk.
-Targets 30-100 trades over 4 years (7-25/year) to minimize fee impact while maintaining statistical validity.
-"""
+# 8550: 1d Donchian Breakout + 1w Trend + Volume + ATR Stop (Optimized)
+# Hypothesis: Increase trade frequency slightly by reducing volume threshold and adding pullback entries
+# while maintaining 1d timeframe to control fee drag. Target 75-150 trades over 4 years.
+# Uses Donchian breakouts with 1w EMA trend filter, volume confirmation, and ATR-based stops.
+# Added pullback entries to capture more opportunities in trending markets.
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8550_1d_donchian20_1w_trend_vol_v1"
+name = "exp_8550_1d_donchian20_1w_trend_vol_v2"
 timeframe = "1d"
 leverage = 1.0
 
-# Parameters
+# Parameters - Adjusted for higher frequency while keeping quality
 DONCHIAN_PERIOD = 20
 TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.3  # Reduced from 1.5 to increase signals
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+PULLBACK_THRESHOLD = 0.5  # Enter on 50% pullback of ATR
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -100,12 +98,29 @@ def generate_signals(prices):
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
         short_breakout = close[i] < donchian_low[i-1]  # Break below previous period's low
         
+        # Pullback conditions (enter on retracement)
+        long_pullback = (close[i] > donchian_low[i-1] and 
+                        close[i] < donchian_high[i-1] and
+                        close[i] > (donchian_low[i-1] + PULLBACK_THRESHOLD * atr[i]))
+        short_pullback = (close[i] < donchian_high[i-1] and 
+                         close[i] > donchian_low[i-1] and
+                         close[i] < (donchian_high[i-1] - PULLBACK_THRESHOLD * atr[i]))
+        
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry conditions
-        long_entry = bull_bias and long_breakout and volume_confirmed
-        short_entry = bear_bias and short_breakout and volume_confirmed
+        # Entry conditions - breakouts OR pullbacks in trending markets
+        long_entry = False
+        short_entry = False
+        
+        if bull_bias:
+            # In bullish bias: long on breakout or pullback
+            if volume_confirmed:
+                long_entry = long_breakout or long_pullback
+        if bear_bias:
+            # In bearish bias: short on breakdown or pullback
+            if volume_confirmed:
+                short_entry = short_breakout or short_pullback
         
         # Generate signals
         if position == 0:
