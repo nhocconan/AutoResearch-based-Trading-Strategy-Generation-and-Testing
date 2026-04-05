@@ -1,37 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #9720: 4h Donchian Breakout + Volume Spike + 1d Trend Filter.
-Hypothesis: Donchian(20) breakouts on 4h with volume confirmation and 1d EMA trend filter 
-provide high-probability trend-following entries. Works in bull (breakouts above EMA) 
-and bear (breakouts below EMA) with volume confirmation filtering false breakouts. 
-Targets 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost.
+Experiment #9722: 12h Donchian Breakout + 1d Trend + Volume Confirmation
+Hypothesis: 12h Donchian(20) breakouts in the direction of 1d EMA50 trend, confirmed by volume spikes, 
+provide high-probability trend continuation with controlled trade frequency. Works in bull (breakouts above EMA50) 
+and bear (breakdowns below EMA50) by aligning with higher timeframe trend. Targets 50-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9720_4h_donchian_breakout_volume_1dtrend_v1"
-timeframe = "4h"
+name = "exp_9722_12h_donchian_breakout_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
 EMA_PERIOD = 50
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+VOLUME_SPIKE_MULTIPLIER = 2.0
 SIGNAL_SIZE = 0.25
-
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -47,22 +36,23 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for EMA trend filter)
+    # Load HTF data ONCE before loop (1d for EMA trend)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA for trend filter
+    # Calculate 1d EMA50 for trend filter
     close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate LTF indicators (4h)
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donch_upper, donch_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -99,17 +89,17 @@ def generate_signals(prices):
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below 1d EMA
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
-        
         # Breakout conditions
-        upper_breakout = donch_upper[i] > 0 and close[i] >= donch_upper[i]
-        lower_breakout = donch_lower[i] > 0 and close[i] <= donch_lower[i]
+        bullish_breakout = high[i] > highest_high[i-1]  # Break above previous high
+        bearish_breakout = low[i] < lowest_low[i-1]     # Break below previous low
         
-        # Entry conditions: breakout + volume + trend filter
-        long_entry = upper_breakout and volume_spike and above_ema
-        short_entry = lower_breakout and volume_spike and below_ema
+        # Trend filter: 1d EMA50
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
+        
+        # Entry conditions
+        long_entry = bullish_breakout and uptrend and volume_spike
+        short_entry = bearish_breakout and downtrend and volume_spike
         
         # Generate signals
         if position == 0:
