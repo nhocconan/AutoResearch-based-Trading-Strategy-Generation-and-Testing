@@ -1,28 +1,52 @@
 #!/usr/bin/env python3
 """
-Experiment #8565: 12h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
-Hypothesis: 12-hour timeframe balances trade frequency (12-37/year) with trend capture.
-Using 1-day trend filter (EMA50) ensures alignment with daily momentum, avoiding counter-trend trades.
-Volume confirmation filters breakouts requiring participation. ATR-based stops manage risk.
-Targets 50-150 trades over 4 years (12-37/year) to minimize fee impact while maintaining statistical validity.
+Experiment #8567: 6h Ichimoku Cloud + 1d trend filter + volume confirmation.
+Hypothesis: Ichimoku on 6h provides clear trend context and support/resistance, 
+filtered by 1d trend direction to avoid counter-trend trades. Volume confirmation 
+ensures institutional participation. Designed for 50-150 trades over 4 years 
+(12-37/year) to balance opportunity with fee control in both bull and bear markets.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_alt_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8565_12h_donchian20_1d_trend_vol_v1"
-timezone = "12h"
+name = "exp_8567_6h_ichimoku_1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+TENKAN_PERIOD = 9
+KIJUN_PERIOD = 26
+SENKOU_B_PERIOD = 52
 TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+
+def calculate_ichimoku(high, low, close):
+    """Calculate Ichimoku Cloud components"""
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan = (pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
+              pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun = (pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
+             pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2).shift(KIJUN_PERIOD)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_b = ((pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
+                 pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2).shift(KIJUN_PERIOD)
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind
+    chikou = pd.Series(close).shift(-KIJUN_PERIOD)
+    
+    return tenkan.values, kijun.values, senkou_a.values, senkou_b.values, chikou.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -50,18 +74,19 @@ def generate_signals(prices):
                      np.where(close_1d < ema_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
     price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
     
-    # Calculate LTF indicators (12h)
+    # Calculate LTF indicators (6h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Ichimoku Cloud
+    tenkan, kijun, senkou_a, senkou_b, chikou = calculate_ichimoku(high, low, close)
     
-    # Volume moving average
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    # Cloud top and bottom (accounting for look-ahead in Senkou spans)
+    # Senkou spans are already shifted, so we use current values
+    cloud_top = np.maximum(senkou_a, senkou_b)
+    cloud_bottom = np.minimum(senkou_a, senkou_b)
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -72,7 +97,8 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_B_PERIOD, TREND_PERIOD, 
+                VOLUME_MA_PERIOD, ATR_PERIOD) + KIJUN_PERIOD  # Extra for Ichimoku shift
     
     for i in range(start, n):
         # Skip if HTF data not available
@@ -96,16 +122,21 @@ def generate_signals(prices):
         bull_bias = price_vs_ema_aligned[i] == 1   # 1d price above EMA50
         bear_bias = price_vs_ema_aligned[i] == -1  # 1d price below EMA50
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
-        short_breakout = close[i] < donchian_low[i-1]  # Break below previous period's low
+        # Ichimoku signals
+        # Price above cloud = bullish, below cloud = bearish
+        price_above_cloud = close[i] > cloud_top[i] if not np.isnan(cloud_top[i]) else False
+        price_below_cloud = close[i] < cloud_bottom[i] if not np.isnan(cloud_bottom[i]) else False
+        
+        # TK Cross (Tenkan-Kijun crossover)
+        tk_cross_bull = tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1]
+        tk_cross_bear = tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1]
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Entry conditions
-        long_entry = bull_bias and long_breakout and volume_confirmed
-        short_entry = bear_bias and short_breakout and volume_confirmed
+        long_entry = bull_bias and price_above_cloud and tk_cross_bull and volume_confirmed
+        short_entry = bear_bias and price_below_cloud and tk_cross_bear and volume_confirmed
         
         # Generate signals
         if position == 0:
