@@ -2,11 +2,9 @@
 """
 exp_7552_12h_donchian20_1d_ema_vol_v1
 Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
-In bull markets (price > 1d EMA200): long breakout above 12h Donchian upper.
-In bear markets (price < 1d EMA200): short breakdown below 12h Donchian lower.
-Volume must be above 1.5x average to confirm breakout strength.
+Trades only in direction of higher timeframe trend (1d EMA200). Uses volume > 1.5x average for confirmation.
 ATR-based stoploss (2x) and target (3x) for risk management.
-Targets 50-150 trades over 4 years (12-37/year) with strict breakout conditions.
+Designed for 50-150 total trades over 4 years (12-37/year) with strict breakout conditions.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -124,4 +122,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</es>
