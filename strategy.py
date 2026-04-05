@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #9100: 4h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
+Experiment #9101: 4h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
 Hypothesis: Donchian breakouts capture trends; 1d EMA filter ensures directional alignment; volume confirms institutional participation.
 Targets 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost. Works in bull (breakouts) and bear (filtered shorts).
 """
@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_9100_4h_donchian20_1d_trend_vol_v1"
+name = "exp_9101_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,10 +17,10 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.2
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
