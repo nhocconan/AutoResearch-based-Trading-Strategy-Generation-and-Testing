@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
 """
-exp_7320_4h_donchian20_1d_ema_vol_v2
-Hypothesis: Refined 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+exp_7322_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
 In trending markets (price > EMA): continuation breakouts in breakout direction.
 In ranging markets (price near EMA): mean reversion at Donchian extremes with volume confirmation.
-Uses 1d EMA for trend regime and 4h volume for confirmation.
-Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
+Uses 1d EMA for trend regime and 12h volume for confirmation.
+Designed for 12h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
 Works in both bull and bear markets by adapting to EMA-defined trend regime.
-Added tighter volume filter and reduced signal size to reduce trade frequency.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7320_4h_donchian20_1d_ema_vol_v2"
-timeframe = "4h"
+name = "exp_7322_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
-# Parameters - tightened for fewer trades
+# Parameters
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0  # Increased from 1.5 to reduce false signals
-SIGNAL_SIZE = 0.20  # Reduced from 0.25 to lower risk per trade
+VOL_BASE_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # ~40 hours
+MAX_HOLD_BARS = 10  # ~5 days
 
 def generate_signals(prices):
     n = len(prices)
@@ -40,7 +39,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align to LTF (4h)
+    # Align to LTF (12h)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -100,7 +99,7 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Volume confirmation - stricter threshold
+        # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Determine market regime based on EMA
@@ -135,3 +134,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
