@@ -2,11 +2,11 @@
 """
 exp_7266_4h_donchian20_1d_ema_vol_v1
 Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-In trending markets (price > EMA): continuation breakouts in breakout direction.
-In ranging markets (price near EMA): mean reversion at Donchian extremes with volume confirmation.
-Uses 1d EMA for trend regime and 4h volume for confirmation.
-Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
-Works in both bull and bear markets by adapting to EMA-defined trend regime.
+In trending markets (price > EMA50): take breakout continuations in breakout direction.
+In ranging markets (price near EMA50): take mean reversion at Donchian extremes with volume.
+Uses 1d EMA for trend regime and 4h volume spike for confirmation. Designed for 4h timeframe
+to capture swings with ~19-50 trades/year (75-200 total over 4 years). Volume filter reduces
+false breakouts, regime filter adapts to bull/bear markets. ATR-based stoploss manages risk.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -21,11 +21,11 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5
+VOL_SPIKE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # ~40 hours (~1.7 days)
+MAX_HOLD_BARS = 20  # ~20*4h = ~3.3 days
 
 def generate_signals(prices):
     n = len(prices)
@@ -99,8 +99,8 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        # Volume confirmation (volume spike)
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_SPIKE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Determine market regime based on EMA
         above_ema = close[i] > ema_1d_aligned[i]
