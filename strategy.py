@@ -1,8 +1,11 @@
-# 10076: 12h Donchian Breakout + Daily Trend + Volume Spike
-# Hypothesis: 12h Donchian(20) breakouts in the direction of daily trend (EMA40) with volume confirmation
-# provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
-# and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
-# Target: 50-150 total trades over 4 years (12-37/year) as per experiment guidelines.
+#!/usr/bin/env python3
+"""
+Experiment #10076: 12h Donchian Breakout + Daily Trend + Volume Spike
+Hypothesis: Donchian(20) breakouts in the direction of daily trend (EMA50) with volume confirmation
+provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
+and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
+Target: 75-150 total trades over 4 years (19-38/year) with minimal drawdown.
+"""
 
 import numpy as np
 import pandas as pd
@@ -12,10 +15,10 @@ name = "exp_10076_12h_donchian_breakout_daily_trend_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
-# Parameters - tuned for 12h timeframe to achieve target trade frequency
+# Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.8  # Higher threshold to reduce trades
-DAILY_EMA_PERIOD = 40
+VOLUME_SPIKE_MULTIPLIER = 1.5
+DAILY_EMA_PERIOD = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -95,7 +98,7 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume spike confirmation (higher threshold to reduce trades)
+        # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter: price above/below daily EMA
