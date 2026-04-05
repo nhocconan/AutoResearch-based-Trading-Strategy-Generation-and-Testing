@@ -1,83 +1,63 @@
 #!/usr/bin/env python3
 """
-exp_7434_1h_rsi_divergence_volatility_filter_v1
-Hypothesis: 1h RSI divergence (bullish/bearish) with volatility filter and volume confirmation.
-Uses 4h EMA(50) for trend direction to avoid counter-trend trades, targeting 80-150 trades over 4 years.
-Designed to work in both bull and bear markets by combining mean reversion (RSI) with trend filter.
+exp_7435_6d_donchian20_1w_ema_vol_v1
+Hypothesis: 6h Donchian(20) breakout with weekly EMA(50) trend filter and volume confirmation.
+Targets 50-150 total trades over 4 years by following weekly trend to reduce whipsaws.
+Uses volume confirmation to ensure breakout strength. Designed for both bull and bear markets.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7434_1h_rsi_divergence_volatility_filter_v1"
-timeframe = "1h"
+name = "exp_7435_6d_donchian20_1w_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-VOLATILITY_LOOKBACK = 20
-VOLATILITY_THRESHOLD = 1.5
-VOLUME_CONFIRM = 1.5
-EMA_TREND_PERIOD = 50
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
+VOL_MA_PERIOD = 20
+VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
-MAX_HOLD_BARS = 24  # 24 hours max hold
-
-def calculate_rsi(prices, period=14):
-    """Calculate RSI with proper handling"""
-    delta = np.diff(prices, prepend=prices[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 12  # Adjusted for 6h timeframe (approx 3 days)
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 4h for trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Load HTF data ONCE before loop - using 1w for EMA trend
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA for trend direction
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=EMA_TREND_PERIOD, adjust=False, min_periods=EMA_TREND_PERIOD).mean().values
+    # Calculate 1w EMA
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align 4h EMA to 1h timeframe
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Align to LTF (6h)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 1h indicators
+    # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI
-    rsi = calculate_rsi(close, RSI_PERIOD)
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Volatility (ATR-based)
-    tr1 = high - low
-    tr2 = np.abs(np.roll(close, 1) - high)
-    tr3 = np.abs(np.roll(close, 1) - low)
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    # Volume MA for confirmation
+    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
-    # Volatility filter: current ATR vs average ATR
-    atr_ma = pd.Series(atr).rolling(window=VOLATILITY_LOOKBACK, min_periods=VOLATILITY_LOOKBACK).mean().values
-    volatility_filter = atr > (atr_ma * VOLATILITY_THRESHOLD) if not np.isnan(atr_ma[-1]) else False
-    
-    # Volume confirmation
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_confirmed = volume > (volume_ma * VOLUME_CONFIRM) if not np.isnan(volume_ma[-1]) else False
+    # ATR for stoploss
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -85,13 +65,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, ATR_PERIOD, VOLATILITY_LOOKBACK, 20) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_4h_aligned[i]):
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -116,62 +96,38 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Check volatility and volume filters
-        vol_filter = volatility_filter[i] if hasattr(volatility_filter, '__len__') else volatility_filter
-        vol_conf = volume_confirmed[i] if hasattr(volume_confirmed, '__len__') else volume_confirmed
+        # Volume confirmation
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # RSI divergence detection (simplified: look for RSI extremes with price action)
-        # Bullish divergence: price makes lower low, RSI makes higher low
-        # Bearish divergence: price makes higher high, RSI makes lower high
-        # Using 3-bar lookback for divergence
+        # Determine market regime based on 1w EMA
+        above_ema = close[i] > ema_1w_aligned[i]
+        below_ema = close[i] < ema_1w_aligned[i]
         
-        if i >= 3:
-            # Price action
-            price_lower_low = low[i] < low[i-1] and low[i-1] < low[i-2]
-            price_higher_high = high[i] > high[i-1] and high[i-1] > high[i-2]
-            
-            # RSI action
-            rsi_higher_low = rsi[i] > rsi[i-1] and rsi[i-1] < rsi[i-2]
-            rsi_lower_high = rsi[i] < rsi[i-1] and rsi[i-1] > rsi[i-2]
-            
-            # Bullish divergence: price down, RSI up
-            bullish_div = price_lower_low and rsi_higher_low
-            
-            # Bearish divergence: price up, RSI down
-            bearish_div = price_higher_high and rsi_lower_high
-            
-            # Additional filters
-            oversold = rsi[i] < RSI_OVERSOLD
-            overbought = rsi[i] > RSI_OVERBOUGHT
-            
-            # Trend filter from 4h EMA
-            uptrend = close[i] > ema_4h_aligned[i]
-            downtrend = close[i] < ema_4h_aligned[i]
-            
-            # Entry conditions
-            if position == 0:
-                # Long: bullish divergence in oversold area OR oversold bounce in uptrend
-                long_signal = (bullish_div and oversold) or (oversold and uptrend and vol_filter and vol_conf)
-                
-                # Short: bearish divergence in overbought area OR overbought rejection in downtrend
-                short_signal = (bearish_div and overbought) or (overbought and downtrend and vol_filter and vol_conf)
-                
-                if long_signal:
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                elif short_signal:
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                else:
-                    signals[i] = 0.0
+        # Continuation breakouts in trending market
+        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
+        
+        # Breakout retest entries (pullback to breakout level with volume)
+        retest_long = above_ema and (close[i] <= highest_high[i-1] * 1.005) and (close[i] >= lowest_low[i-1]) and vol_confirmed
+        retest_short = below_ema and (close[i] >= lowest_low[i-1] * 0.995) and (close[i] <= highest_high[i-1]) and vol_confirmed
+        
+        # Enter new positions only if flat
+        if position == 0:
+            if continuation_long or retest_long:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+            elif continuation_short or retest_short:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                bars_since_entry = 0
             else:
-                # Hold current position
-                signals[i] = position * SIGNAL_SIZE
+                signals[i] = 0.0
         else:
-            signals[i] = 0.0
+            # Hold current position
+            signals[i] = position * SIGNAL_SIZE
     
     return signals
+</text>
