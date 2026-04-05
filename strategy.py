@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-exp_7121_4h_donchian20_1d_pivot_v1
-Hypothesis: 4h Donchian(20) breakout with 1d Camarilla pivot regime filter.
-In ranging markets (price between S3/R3): mean reversion at extremes with volume confirmation.
-In trending markets (breaks S4/R4): continuation breakouts in breakout direction.
+exp_7120_4h_donchian20_1d_pivot_v1
+Hypothesis: 4h Donchian(20) breakout with 1d Camarilla pivot continuation/fade logic.
+In ranging markets (price between R3/S3): fade extremes at R3/S3 with reversal confirmation.
+In trending markets (breaks R4/S4): continuation breakouts in breakout direction.
 Uses 1d Camarilla pivots for structure and 4h volume for confirmation.
 Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
 Works in both bull and bear markets by adapting to pivot-defined regimes.
@@ -13,7 +13,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7121_4h_donchian20_1d_pivot_v1"
+name = "exp_7120_4h_donchian20_1d_pivot_v1"
 timeframe = "4h"
 leverage = 1.0
 
