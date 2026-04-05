@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #10840: 4h Donchian Breakout + Daily Trend + Volume Spike
+Experiment #10841: 4h Donchian Breakout + Daily Trend + Volume Spike
 Hypothesis: 4h Donchian(20) breakouts in the direction of daily EMA50 trend with volume confirmation
 provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
 and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10840_4h_donchian_breakout_daily_trend_volume_v1"
+name = "exp_10841_4h_donchian_breakout_daily_trend_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
