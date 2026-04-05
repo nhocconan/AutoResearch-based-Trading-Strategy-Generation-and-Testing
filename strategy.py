@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #7930: 1-day Donchian breakout with 1-week trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on daily chart with volume >1.5x 20-period MA 
-and aligned weekly trend (price above/below weekly EMA50) captures sustained moves in both bull and bear markets.
-Target: 30-100 total trades over 4 years (7-25/year).
+Experiment #7930: Daily Donchian breakout with weekly trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period daily high/low with volume >1.5x 20-period MA 
+and aligned weekly trend (price above/below weekly EMA50) captures sustained moves. 
+Weekly timeframe provides stronger trend context than daily to improve performance in 
+both bull and bear markets while maintaining reasonable trade frequency (target: 30-100 total trades).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -40,7 +41,7 @@ def generate_signals(prices):
     price_vs_ema = np.where(close_1w > ema_1w, 1, -1)  # 1=bullish, -1=bearish
     price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
     
-    # Calculate LTF indicators (daily)
+    # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
