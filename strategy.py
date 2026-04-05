@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-exp_7279_6h_donchian20_12h_pivot_vol_v1
-Hypothesis: 6h Donchian(20) breakout with 12h weekly pivot (from 1d HTF) direction filter and volume confirmation.
-In trending markets (price > weekly pivot R1): continuation breakouts above R2.
-In ranging markets (price between R1/S1): mean reversion at Donchian extremes with volume confirmation.
-Uses weekly pivot levels calculated from 1d HTF data for regime and 6h volume for confirmation.
+exp_7279_6h_donchian20_12h_pivot_v1
+Hypothesis: 6h Donchian(20) breakout with 12h Camarilla pivot levels as directional filter.
+In trending markets (price above/below pivot midpoint): continuation breakouts in breakout direction.
+In ranging markets (price near pivot midpoint): mean reversion at Donchian extremes.
+Uses 12h Camarilla pivot for regime and 6h volume for confirmation.
 Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
 Works in both bull and bear markets by adapting to pivot-defined trend regime.
 """
@@ -13,14 +13,14 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7279_6h_donchian20_12h_pivot_vol_v1"
+name = "exp_7279_6h_donchian20_12h_pivot_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.8
+VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -31,43 +31,29 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 12h for weekly pivot calculation
+    # Load HTF data ONCE before loop - using 12h for Camarilla pivot
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly pivot points from 12h data (using prior week's high/low/close)
+    # Calculate 12h Camarilla pivot levels
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Calculate prior week's OHLC (5 * 12h bars = 60h ≈ 2.5 days, use prior 5 bars for weekly)
-    # We'll use prior 5 periods to approximate weekly
-    lookback = 5
-    if len(high_12h) >= lookback:
-        # Rolling window for weekly high/low/close
-        weekly_high = pd.Series(high_12h).rolling(window=lookback, min_periods=lookback).max().shift(1).values
-        weekly_low = pd.Series(low_12h).rolling(window=lookback, min_periods=lookback).min().shift(1).values
-        weekly_close = pd.Series(close_12h).rolling(window=lookback, min_periods=lookback).last().shift(1).values
-        
-        # Calculate pivot points
-        pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-        r1 = 2 * pivot - weekly_low
-        s1 = 2 * pivot - weekly_high
-        r2 = pivot + (weekly_high - weekly_low)
-        s2 = pivot - (weekly_high - weekly_low)
-        r3 = weekly_high + 2 * (pivot - weekly_low)
-        s3 = weekly_low - 2 * (weekly_high - pivot)
-        
-        # Align to LTF (6h)
-        pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
-        r1_aligned = align_htf_to_ltf(prices, df_12h, r1)
-        s1_aligned = align_htf_to_ltf(prices, df_12h, s1)
-        r2_aligned = align_htf_to_ltf(prices, df_12h, r2)
-        s2_aligned = align_htf_to_ltf(prices, df_12h, s2)
-        r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
-        s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
-    else:
-        # Not enough data
-        pivot_aligned = r1_aligned = s1_aligned = r2_aligned = s2_aligned = r3_aligned = s3_aligned = np.full(n, np.nan)
+    pivot = (high_12h + low_12h + close_12h) / 3
+    range_12h = high_12h - low_12h
+    r3 = pivot + (range_12h * 1.1 / 2)
+    s3 = pivot - (range_12h * 1.1 / 2)
+    r4 = pivot + (range_12h * 1.1)
+    s4 = pivot - (range_12h * 1.1)
+    pivot_mid = pivot  # Midpoint for regime detection
+    
+    # Align to LTF (6h)
+    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_12h, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_12h, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_12h, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_12h, s4)
+    pivot_mid_aligned = align_htf_to_ltf(prices, df_12h, pivot_mid)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -101,7 +87,7 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
+        if np.isnan(pivot_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -129,18 +115,18 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on pivot levels
-        above_r1 = close[i] > r1_aligned[i]
-        below_s1 = close[i] < s1_aligned[i]
-        between_r1_s1 = (close[i] >= s1_aligned[i]) and (close[i] <= r1_aligned[i])
+        # Determine market regime based on pivot
+        above_pivot = close[i] > pivot_mid_aligned[i]
+        below_pivot = close[i] < pivot_mid_aligned[i]
+        near_pivot = np.abs(close[i] - pivot_mid_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of pivot
         
-        # Fade at Donchian extremes in ranging market (between R1/S1)
-        fade_long = between_r1_s1 and (close[i] <= lowest_low[i]) and vol_confirmed
-        fade_short = between_r1_s1 and (close[i] >= highest_high[i]) and vol_confirmed
+        # Fade at extremes in ranging market (near pivot)
+        fade_long = near_pivot and (close[i] <= lowest_low[i]) and vol_confirmed
+        fade_short = near_pivot and (close[i] >= highest_high[i]) and vol_confirmed
         
         # Continuation breakouts in trending market
-        continuation_long = above_r1 and (close[i] > highest_high[i]) and vol_confirmed
-        continuation_short = below_s1 and (close[i] < lowest_low[i]) and vol_confirmed
+        continuation_long = above_pivot and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_pivot and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
