@@ -1,25 +1,25 @@
 #!/usr/bin/env python3
 """
-exp_7579_6d_donchian20_12h_pivot_vol_v1
-Hypothesis: 6-hour Donchian(20) breakout with 12-hour pivot direction and volume confirmation.
-Pivots calculated from 12h OHLC: R1 = 2*P - L, S1 = 2*P - H, where P = (H+L+C)/3.
-In bull regime (close > pivot): long breakout above 6h Donchian upper.
-In bear regime (close < pivot): short breakdown below 6h Donchian lower.
+exp_7580_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
+In bull markets (price > 1d EMA200): long breakout above 4h Donchian upper.
+In bear markets (price < 1d EMA200): short breakdown below 4h Donchian lower.
 Volume must be above 1.5x average to confirm breakout strength.
 ATR-based stoploss (2x) and target (3x) for risk management.
-Targets 100-180 trades over 4 years (25-45/year) with strict breakout conditions.
+Targets 75-200 trades over 4 years (19-50/year) with strict breakout conditions.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7579_6d_donchian20_12h_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_7580_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+EMA_TREND = 200
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5  # volume must be 1.5x average
 SIGNAL_SIZE = 0.25
@@ -29,24 +29,16 @@ ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h pivot points
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    pivot_12h = (high_12h + low_12h + close_12h) / 3.0
-    r1_12h = 2 * pivot_12h - low_12h
-    s1_12h = 2 * pivot_12h - high_12h
-    
-    pivot_aligned = align_htf_to_ltf(prices, df_12h, pivot_12h)
-    r1_aligned = align_htf_to_ltf(prices, df_12h, r1_12h)
-    s1_aligned = align_htf_to_ltf(prices, df_12h, s1_12h)
+    # Calculate 1d EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -75,11 +67,11 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
+        if np.isnan(ema_1d_200_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -95,9 +87,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market regime using 12h pivot
-        bull_regime = close[i] > pivot_aligned[i]   # price above 12h pivot
-        bear_regime = close[i] < pivot_aligned[i]   # price below 12h pivot
+        # Determine market regime
+        bull_regime = close[i] > ema_1d_200_aligned[i]   # price above 1d EMA200
+        bear_regime = close[i] < ema_1d_200_aligned[i]   # price below 1d EMA200
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
