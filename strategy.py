@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Experiment #9072: 12h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Donchian breakouts capture trends; 1d EMA filter ensures directional alignment; volume confirms institutional participation.
-Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost. Works in bull (breakouts) and bear (filtered shorts).
+Hypothesis: 12h timeframe balances noise and signal; Donchian breakouts capture trends; 1d EMA filter ensures directional alignment; volume confirms institutional participation.
+Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag while maintaining statistical significance. Works in bull (breakouts) and bear (filtered shorts).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -125,4 +125,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</s>
