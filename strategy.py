@@ -1,16 +1,15 @@
-# 16/48/16
 #!/usr/bin/env python3
 """
-Experiment #9116: 12h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
+Experiment #9122: 12h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
 Hypothesis: Donchian breakouts capture trends; 1d EMA filter ensures directional alignment; volume confirms institutional participation.
-Targets 100-150 total trades over 4 years (25-38/year). Works in bull (breakouts) and bear (filtered shorts).
+Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost. Works in bull (breakouts) and bear (filtered shorts).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_9116_12h_donchian20_1d_trend_vol_v1"
+name = "exp_9122_12h_donchian20_1d_trend_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
