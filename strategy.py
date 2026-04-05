@@ -2,7 +2,6 @@
 """
 exp_7562_12h_donchian20_1d_ema_vol_v1
 Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
-Uses 12h primary timeframe to reduce trade frequency while capturing major trends.
 In bull markets (price > 1d EMA200): long breakout above 12h Donchian upper.
 In bear markets (price < 1d EMA200): short breakdown below 12h Donchian lower.
 Volume must be above 1.5x average to confirm breakout strength.
@@ -131,7 +130,6 @@ def generate_signals(prices):
 """
 exp_7562_12h_donchian20_1d_ema_vol_v1
 Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
-Uses 12h primary timeframe to reduce trade frequency while capturing major trends.
 In bull markets (price > 1d EMA200): long breakout above 12h Donchian upper.
 In bear markets (price < 1d EMA200): short breakdown below 12h Donchian lower.
 Volume must be above 1.5x average to confirm breakout strength.
@@ -254,5 +252,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
-</think>
