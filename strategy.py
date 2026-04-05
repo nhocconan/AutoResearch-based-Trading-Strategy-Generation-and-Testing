@@ -1,9 +1,11 @@
+#0x04f30c6102011123456789abcdef0123456789abcd
 #!/usr/bin/env python3
 """
 Experiment #8230: 1-day Donchian breakout with 1-week trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on daily timeframe with volume >1.5x 20-period MA 
-and aligned weekly trend (price above/below 1w EMA50) captures sustained moves while avoiding whipsaw.
-The 1w trend filter provides stronger trend context than daily, reducing false breakouts during consolidation.
+Hypothesis: Price breaking beyond 20-period high/low on daily with volume >1.5x 20-period MA 
+and aligned weekly trend (price above/below weekly EMA50) captures sustained moves while avoiding 
+whipsaw in both bull and bear markets. The weekly trend filter provides stronger trend context 
+than shorter timeframes, reducing false breakouts during consolidation periods. 
 Targeting 30-100 total trades over 4 years for optimal balance of signal quality and cost.
 """
 
