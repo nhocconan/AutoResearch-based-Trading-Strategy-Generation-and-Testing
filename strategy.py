@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #8377: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
-Hypothesis: Price breaking above/below the 20-period Donchian channel on 4h with volume >1.5x 20-period MA 
+Experiment #8376: 12-hour Donchian breakout with 1-day trend filter and volume confirmation.
+Hypothesis: Price breaking above/below the 20-period Donchian channel on 12h with volume >1.5x 20-period MA 
 and aligned daily trend (price above/below daily EMA50) captures sustained moves while avoiding whipsaw. 
 Daily timeframe provides longer-term context, reducing false breakouts during consolidation. 
-Targeting 75-200 total trades over 4 years for optimal balance.
+Targeting 50-150 total trades over 4 years for optimal balance.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8377_4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "exp_8376_12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -20,7 +20,7 @@ DONCHIAN_PERIOD = 20
 EMA_TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.30
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
@@ -48,7 +48,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel on 4h
+    # Donchian channel on 12h
     donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
     donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
