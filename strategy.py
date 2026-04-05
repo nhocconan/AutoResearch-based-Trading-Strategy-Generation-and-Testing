@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #9761: 4h Donchian Breakout + Volume Spike + ADX Filter.
-Hypothesis: Donchian(20) breakouts on 4h combined with volume spikes and ADX regime filtering
-capture strong momentum moves while avoiding whipsaws in low-momentum environments.
-Works in bull markets (breakouts up) and bear markets (breakdowns down) with volatility filter.
-Targets 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost.
+Experiment #9762: 12h Donchian Breakout + Volume Confirmation + ADX Filter
+Hypothesis: Donchian(20) breakouts on 12h timeframe, filtered by volume spikes and ADX regime,
+provide robust trend-following signals that work in both bull and bear markets.
+Targets 50-150 total trades over 4 years (12-37/year) by requiring confluence of breakout,
+volume confirmation, and trend strength (ADX > 25). Uses 1d timeframe for trend context.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9761_4h_donchian_breakout_volume_adx_v1"
-timeframe = "4h"
+name = "exp_9762_12h_donchian_breakout_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -30,6 +30,7 @@ def calculate_true_range(high, low, close):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = np.nan  # First value has no previous close
     return tr
 
 def calculate_adx(high, low, close, period):
@@ -39,6 +40,10 @@ def calculate_adx(high, low, close, period):
                        np.maximum(high - np.roll(high, 1), 0), 0)
     minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
                         np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    # Handle first values
+    plus_dm[0] = 0
+    minus_dm[0] = 0
     
     # Smooth using Wilder's smoothing (alpha = 1/period)
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
@@ -64,10 +69,10 @@ def calculate_donchian(high, low, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for context filter)
+    # Load HTF data ONCE before loop (1d for trend context)
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d EMA for trend filter
@@ -75,7 +80,7 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate LTF indicators (4h)
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -87,7 +92,7 @@ def generate_signals(prices):
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ADX for regime filtering
+    # ADX for trend strength
     adx = calculate_adx(high, low, close, ADX_PERIOD)
     
     # ATR for risk management
@@ -103,7 +108,9 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if indicators not ready
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(ema_1d_aligned[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
+           np.isnan(volume_ma[i]) or np.isnan(adx[i]) or np.isnan(atr[i]) or \
+           np.isnan(ema_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -120,22 +127,22 @@ def generate_signals(prices):
                 continue
         
         # Volume spike confirmation
-        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
+        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER)
         
-        # Regime filter: ADX > 25 for trending market (breakout friendly)
-        trending = adx[i] >= ADX_THRESHOLD
+        # Trend filter: EMA > price for uptrend, EMA < price for downtrend
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # Trend filter: price above/below 1d EMA
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
+        # ADX filter: only take strong trend signals
+        strong_trend = adx[i] > ADX_THRESHOLD
         
         # Breakout conditions
-        breakout_up = close[i] > donchian_upper[i-1]  # Break above previous period's high
-        breakout_down = close[i] < donchian_lower[i-1]  # Break below previous period's low
+        breakout_up = close[i] > donchian_upper[i]
+        breakout_down = close[i] < donchian_lower[i]
         
         # Entry conditions
-        long_entry = trending and volume_spike and above_ema and breakout_up
-        short_entry = trending and volume_spike and below_ema and breakout_down
+        long_entry = breakout_up and volume_spike and uptrend and strong_trend
+        short_entry = breakout_down and volume_spike and downtrend and strong_trend
         
         # Generate signals
         if position == 0:
