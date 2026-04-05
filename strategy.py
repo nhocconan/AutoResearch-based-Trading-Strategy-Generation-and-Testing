@@ -5,7 +5,7 @@ Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20
 and aligned 1d trend (price above/below 1d EMA34) captures sustained moves. 
 The 1d timeframe provides higher trend context to reduce whipsaw in 
 both bull and bear markets while maintaining moderate trade frequency. 
-Target: 50-150 total trades over 4 years.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
