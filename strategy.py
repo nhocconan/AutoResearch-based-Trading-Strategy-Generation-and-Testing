@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #8111: 6-hour Donchian breakout with 1-day trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 6h with volume >1.5x 20-period MA 
-and aligned daily trend (price above/below daily EMA50) captures sustained moves with 
-appropriate frequency for 6h timeframe. Uses daily timeframe for stronger trend context 
-than 12h, reducing whipsaw while targeting 75-200 trades over 4 years.
+Experiment #8111: 6-hour Ichimoku Cloud with 1-day filter and volume confirmation.
+Hypothesis: Price crossing above/below Tenkan-sen (conversion line) on 6h with price outside Kumo (cloud) from 1d and volume >1.5x 20-period MA captures trend continuation with controlled frequency. Uses 1d Ichimoku for stronger trend filter than 12h, reducing whipsaw while targeting 75-200 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8111_6h_donchian20_1d_ema_vol_v1"
+name = "exp_8111_6h_ichimoku1d_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+TENKAN_PERIOD = 9      # Conversion line
+KIJUN_PERIOD = 26      # Base line
+SENKOU_B_PERIOD = 52   # Leading span B
+KUMO_SHIFT = 26        # Cloud shift
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-EMA_PERIOD = 50
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
@@ -33,13 +32,37 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA
+    # Calculate 1d Ichimoku components
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Price relative to EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan_sen = (pd.Series(high_1d).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
+                  pd.Series(low_1d).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun_sen = (pd.Series(high_1d).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
+                 pd.Series(low_1d).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen)/2
+    senkou_span_a = (tenkan_sen + kijun_sen) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2
+    senkou_span_b = (pd.Series(high_1d).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
+                     pd.Series(low_1d).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2
+    
+    # Shift Senkou spans forward by 26 periods
+    senkou_span_a_shifted = senkou_span_a.shift(KUMO_SHIFT)
+    senkou_span_b_shifted = senkou_span_b.shift(KUMO_SHIFT)
+    
+    # Determine Kumo (cloud) boundaries
+    kumo_top = np.maximum(senkou_span_a_shifted, senkou_span_b_shifted)
+    kumo_bottom = np.minimum(senkou_span_a_shifted, senkou_span_b_shifted)
+    
+    # Price above/below cloud: 1=above (bullish), -1=below (bearish), 0=inside (neutral)
+    price_vs_kumo = np.where(close_1d > kumo_top, 1, np.where(close_1d < kumo_bottom, -1, 0))
+    price_vs_kumo_aligned = align_htf_to_ltf(prices, df_1d, price_vs_kumo)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -47,9 +70,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Price channel (Donchian)
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Tenkan-sen on 6h
+    tenkan_sen_6h = (pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
+                     pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
     
     # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -68,11 +91,11 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_B_PERIOD, KUMO_SHIFT, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(price_vs_ema_aligned[i]):
+        if np.isnan(price_vs_kumo_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -88,20 +111,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1d EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
+        # Determine market bias from 1d Ichimoku cloud
+        bull_bias = price_vs_kumo_aligned[i] == 1   # 1d price above cloud
+        bear_bias = price_vs_kumo_aligned[i] == -1  # 1d price below cloud
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions - require close beyond channel bands to avoid wicks
-        upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
-        lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
+        # Tenkan-sen cross conditions - require close cross to avoid wicks
+        tenkan_cross_up = (close[i] > tenkan_sen_6h[i]) and (close[i-1] <= tenkan_sen_6h[i-1]) if i-1 >= 0 and not np.isnan(tenkan_sen_6h[i]) and not np.isnan(tenkan_sen_6h[i-1]) else False
+        tenkan_cross_down = (close[i] < tenkan_sen_6h[i]) and (close[i-1] >= tenkan_sen_6h[i-1]) if i-1 >= 0 and not np.isnan(tenkan_sen_6h[i]) and not np.isnan(tenkan_sen_6h[i-1]) else False
         
         # Entry conditions
-        long_entry = bull_bias and upper_breakout and volume_confirmed
-        short_entry = bear_bias and lower_breakout and volume_confirmed
+        long_entry = bull_bias and tenkan_cross_up and volume_confirmed
+        short_entry = bear_bias and tenkan_cross_down and volume_confirmed
         
         # Generate signals
         if position == 0:
