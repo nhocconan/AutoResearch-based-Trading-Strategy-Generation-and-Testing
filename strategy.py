@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Experiment #8859: 6h Donchian breakout + 12h trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Combining 6h price channel breakouts with 12h trend alignment reduces whipsaw in volatile markets.
-Volume confirmation ensures institutional participation, while ATR stops manage risk.
-Targets 75-200 total trades over 4 years (19-50/year) to balance opportunity with fee efficiency.
+Experiment #8859: 6h Donchian(20) breakout + 12h trend filter + volume confirmation + ATR stoploss.
+Hypothesis: The 6h timeframe balances trade frequency (target ~25/year) and responsiveness to trends. 
+Using 12h EMA50 as trend filter ensures alignment with multi-day momentum, avoiding counter-trend trades. 
+Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk.
+Targets 100-150 trades over 4 years (25-37/year) to balance statistical validity with fee minimization.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_ftf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
@@ -126,4 +127,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</x>
