@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #7857: 4-hour Donchian breakout with 1-day EMA trend and volume confirmation.
+Experiment #7857: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
 Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.8x 20-period MA and aligned 1d trend (EMA) captures sustained moves while avoiding whipsaw. The 1d trend filter provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 75-200 trades over 4 years with controlled risk via ATR-based stops.
 """
 
@@ -122,5 +122,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
-</think>
