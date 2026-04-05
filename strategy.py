@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #7928: 12-hour Donchian breakout with 1w trend filter and volume confirmation.
+Experiment #7928: 12-hour Donchian breakout with weekly trend filter and volume confirmation.
 Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA 
-and aligned 1w trend (price above/below 1w EMA50) captures sustained moves. 
-The 1w timeframe provides stronger trend context than 1d to improve performance in 
-both bull and bear markets while maintaining reasonable trade frequency. 
-Target: 50-150 total trades over 4 years.
+and aligned weekly trend (price above/below weekly EMA50) captures sustained moves. 
+The weekly timeframe provides strong trend context to improve performance in 
+both bull and bear markets while maintaining low trade frequency (target: 50-150 total over 4 years).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7928_12h_donchian20_1w_ema_vol_v1"
+name = "exp_7928_12h_donchian20_weekly_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -31,18 +30,18 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop (weekly)
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 1w EMA
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate weekly EMA
+    close_weekly = df_weekly['close'].values
+    ema_weekly = pd.Series(close_weekly).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
     # Price relative to EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_1w > ema_1w, 1, -1)  # 1=bullish, -1=bearish
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
+    price_vs_ema = np.where(close_weekly > ema_weekly, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_weekly, price_vs_ema)
     
-    # Calculate LTF indicators
+    # Calculate LTF indicators (12h)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -89,9 +88,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1w EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1w close above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1w close below EMA50
+        # Determine market bias from weekly EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # weekly close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # weekly close below EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
