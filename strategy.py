@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Experiment #7971: 6-hour Donchian breakout with 1d trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 6h with volume >1.5x 20-period MA 
+Experiment #7972: 12-hour Donchian breakout with 1d trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA 
 and aligned 1d trend (price above/below 1d EMA50) captures sustained moves. 
 The 1d timeframe provides stronger trend context than 12h to improve performance in 
 both bull and bear markets while maintaining reasonable trade frequency. 
@@ -12,8 +12,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7971_6h_donchian20_1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_7972_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -126,3 +126,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</think>
