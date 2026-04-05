@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #8109: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.5x 20-period MA 
+Experiment #8111: 6-hour Donchian breakout with 1-day trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 6h with volume >1.5x 20-period MA 
 and aligned daily trend (price above/below daily EMA50) captures sustained moves with 
-appropriate frequency for 4h timeframe. Uses daily timeframe for stronger trend context 
+appropriate frequency for 6h timeframe. Uses daily timeframe for stronger trend context 
 than 12h, reducing whipsaw while targeting 75-200 trades over 4 years.
 """
 
@@ -11,8 +11,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8109_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_8111_6h_donchian20_1d_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
