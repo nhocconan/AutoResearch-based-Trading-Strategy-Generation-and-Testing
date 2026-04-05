@@ -1,41 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #11571: 6h Weekly Pivot Reversal with Volume Confirmation
-Hypothesis: Weekly pivot levels (R3/S3) act as strong support/resistance on 6b timeframe.
-Price rejecting these levels with volume confirmation indicates institutional interest.
-Works in bull (buying dips to S3) and bear (selling rallies to R3) by fading extremes.
-Target: 50-150 trades over 4 years using strict pivot/volume confluence.
+Experiment #11572: 12h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: 12h Donchian(20) breakouts capture longer-term trends with fewer trades than lower timeframes.
+1d EMA provides trend bias, and volume filter ensures institutional participation.
+Designed to work in both bull and bear markets by using 1d trend filter and volatility-adjusted position sizing.
+Target: 50-150 trades over 4 years as per experiment parameters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11571_6h_weekly_pivot_rev_vol_v1"
-timeframe = "6h"
+name = "exp_11572_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
-# Parameters
-PIVOT_LOOKBACK = 5  # weeks for weekly pivot calculation
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
-SIGNAL_SIZE = 0.25
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MIN_HOLD_BARS = 4  # minimum 1-day hold (4x6h bars)
+# Parameters - tuned for lower trade frequency
+DONCHIAN_PERIOD = 25          # Increased from 20 for fewer breakouts
+TREND_EMA_PERIOD = 50         # Longer EMA for stronger trend filter
+VOLUME_MA_PERIOD = 30         # Longer MA for volume filter
+VOLUME_THRESHOLD = 2.0        # Higher threshold for institutional volume
+SIGNAL_SIZE = 0.25            # Position size
+ATR_PERIOD = 20               # Longer ATR period
+ATR_STOP_MULTIPLIER = 2.5     # Wider stop to avoid premature exits
 
-def calculate_weekly_pivot(high, low, close):
-    """Calculate weekly pivot points from prior week"""
-    # Typical price
-    pp = (high + low + close) / 3.0
-    # Support and resistance levels
-    r1 = 2 * pp - low
-    s1 = 2 * pp - high
-    r2 = pp + (high - low)
-    s2 = pp - (high - low)
-    r3 = high + 2 * (pp - low)
-    s3 = low - 2 * (high - pp)
-    return pp, r1, r2, r3, s1, s2, s3
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -47,101 +40,80 @@ def calculate_atr(high, low, close, period):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    # Handle first value
+    tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop (using 1d as proxy for weekly aggregation)
-    df_weekly = get_htf_data(prices, '1d')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot levels from prior week data
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate 1d EMA for trend
+    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Shift by 1 to use prior week's data (no look-ahead)
-    pp, r1, r2, r3, s1, s2, s3 = calculate_weekly_pivot(
-        np.roll(weekly_high, 1), 
-        np.roll(weekly_low, 1), 
-        np.roll(weekly_close, 1)
-    )
-    # First value will be NaN due to roll, that's correct (no prior week)
-    
-    # Align weekly pivot levels to 6b timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_weekly, pp)
-    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
-    
-    # Calculate 6b indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_held = 0
+    stop_price = 0.0
     
     # Start from warmup period
-    start = max(PIVOT_LOOKBACK, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        bars_held += 1
-        
-        # Skip if weekly data not available (first week)
-        if np.isnan(pp_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
-            if position != 0 and bars_held >= MIN_HOLD_BARS:
+        # Skip if 1d EMA not available
+        if np.isnan(ema_1d_aligned[i]):
+            if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
-                if position != 0:
-                    position = 0
-                    bars_held = 0
             continue
         
-        # Check stoploss and minimum hold
-        if position != 0:
-            if bars_held < MIN_HOLD_BARS:
-                signals[i] = position * SIGNAL_SIZE
+        # Check stoploss
+        if position == 1:  # long position
+            if close[i] <= stop_price:
+                signals[i] = 0.0
+                position = 0
                 continue
-                
-            # Stoploss: 2.5 * ATR
-            if position == 1:  # long
-                if close[i] <= entry_price - (ATR_STOP_MULTIPLIER * atr[i]):
-                    signals[i] = 0.0
-                    position = 0
-                    bars_held = 0
-                    continue
-            elif position == -1:  # short
-                if close[i] >= entry_price + (ATR_STOP_MULTIPLIER * atr[i]):
-                    signals[i] = 0.0
-                    position = 0
-                    bars_held = 0
-                    continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # Donchian breakout conditions (require previous bar close outside bands)
+        if i >= 1:
+            breakout_up = close[i-1] <= donchian_upper[i-1] and high[i] > donchian_upper[i-1]
+            breakout_down = close[i-1] >= donchian_lower[i-1] and low[i] < donchian_lower[i-1]
+        else:
+            breakout_up = False
+            breakout_down = False
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = not np.isnan(volume_ma[i]) and volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Price action at pivot levels
-        # Long setup: price near S3 with rejection (low touching/below S3 but close above)
-        near_s3 = low[i] <= s3_aligned[i] * 1.002  # within 0.2% of S3
-        rejecting_s3 = close[i] > s3_aligned[i] and close[i] > open[i]  # bullish close
-        
-        # Short setup: price near R3 with rejection (high touching/above R3 but close below)
-        near_r3 = high[i] >= r3_aligned[i] * 0.998  # within 0.2% of R3
-        rejecting_r3 = close[i] < r3_aligned[i] and close[i] < open[i]  # bearish close
+        # Trend filter (1d)
+        uptrend_1d = close[i] > ema_1d_aligned[i]
+        downtrend_1d = close[i] < ema_1d_aligned[i]
         
         # Entry conditions
-        long_entry = near_s3 and rejecting_s3 and volume_ok
-        short_entry = near_r3 and rejecting_r3 and volume_ok
+        long_entry = breakout_up and volume_ok and uptrend_1d
+        short_entry = breakout_down and volume_ok and downtrend_1d
         
         # Generate signals
         if position == 0:
@@ -149,12 +121,12 @@ def generate_signals(prices):
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                bars_held = 0
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                bars_held = 0
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
