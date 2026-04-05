@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 exp_6950_1d_donchian20_1w_ema_vol_v1
-Hypothesis: 1d Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation.
-Only take breakouts aligned with weekly trend direction to avoid counter-trend trades.
-Weekly EMA50 acts as structural trend filter. Volume confirms breakout legitimacy.
-Designed for 1d timeframe targeting ~7-25 trades/year (30-100 total over 4 years).
-Uses ATR stoploss and time-based exit to manage risk.
+Hypothesis: 1d Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
+In bull markets (price > weekly EMA50): long breakouts only. In bear markets (price < weekly EMA50): short breakouts only.
+Weekly EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
+Designed for 1d timeframe to capture major swings with ~7-25 trades/year (30-100 total over 4 years).
+Works in both bull and bear markets by aligning with weekly trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
