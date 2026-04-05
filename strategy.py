@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #10811: 6h Donchian Breakout + Daily Trend + Volume Spike
-Hypothesis: 6h Donchian(20) breakouts in the direction of daily EMA50 trend with volume confirmation
+Experiment #10812: 12h Donchian Breakout + Daily Trend + Volume Spike
+Hypothesis: 12h Donchian(20) breakouts in the direction of daily EMA50 trend with volume confirmation
 provide high-probability trend continuation trades. Works in bull markets (breakouts above daily EMA)
 and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
-Target: 50-150 total trades over 4 years (12-37/year) on 6h timeframe.
+Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10811_6h_donchian_breakout_daily_trend_volume_v1"
-timeframe = "6h"
+name = "exp_10812_12h_donchian_breakout_daily_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
+VOLUME_SPIKE_MULTIPLIER = 2.0  # Increased from 1.5 to reduce trades
 DAILY_EMA_PERIOD = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
@@ -54,10 +54,10 @@ def generate_signals(prices):
     daily_close = df_daily['close'].values
     daily_ema = calculate_ema(daily_close, DAILY_EMA_PERIOD)
     
-    # Align daily EMA to 6h timeframe
+    # Align daily EMA to 12h timeframe
     daily_ema_aligned = align_htf_to_ltf(prices, df_daily, daily_ema)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
