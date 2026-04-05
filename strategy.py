@@ -1,47 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #11255: 6h Volume Spike + Weekly Support/Resistance
-Hypothesis: Volume spikes at key weekly levels indicate strong directional moves. 
-In bull markets, volume spikes break weekly resistance; in bear markets, 
-volume spikes break weekly support. Uses 1w levels for structure and 6h for timing.
+Experiment #11257: 4h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Donchian(20) breakouts capture strong directional moves. Daily EMA provides trend bias,
+and volume filter ensures institutional participation. Works in bull (breakouts continue) and
+bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11255_6h_vol_spike_weekly_sr_v1"
-timeframe = "6h"
+name = "exp_11257_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
+DONCHIAN_PERIOD = 20
+DAILY_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
-VOLUME_SPIKE_THRESHOLD = 2.0
-WEEKLY_LOOKBACK = 12  # ~3 months for weekly high/low
-SUPPORT_RESISTANCE_BUFFER = 0.002  # 0.2% buffer
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_weekly_high_low(prices):
-    """Calculate weekly high and low from daily data"""
-    # Resample to weekly using actual weekly data from parquet
-    weekly_data = get_htf_data(prices, '1w')
-    if len(weekly_data) < 2:
-        return np.full(len(prices), np.nan), np.full(len(prices), np.nan)
-    
-    weekly_high = weekly_data['high'].values
-    weekly_low = weekly_data['low'].values
-    
-    # Expand rolling window for weekly high/low
-    roll_high = pd.Series(weekly_high).rolling(window=WEEKLY_LOOKBACK, min_periods=1).max().values
-    roll_low = pd.Series(weekly_low).rolling(window=WEEKLY_LOOKBACK, min_periods=1).min().values
-    
-    # Align to 6h timeframe
-    weekly_high_aligned = align_htf_to_ltf(prices, weekly_data, roll_high)
-    weekly_low_aligned = align_htf_to_ltf(prices, weekly_data, roll_low)
-    
-    return weekly_high_aligned, weekly_low_aligned
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -57,20 +47,22 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Calculate 6h indicators
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
+    
+    # Calculate daily EMA for trend
+    ema_daily = calculate_ema(df_daily['close'].values, DAILY_EMA_PERIOD)
+    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
+    
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike detection
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Weekly support/resistance
-    weekly_high, weekly_low = calculate_weekly_high_low(prices)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,11 +70,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly levels not available
-        if np.isnan(weekly_high[i]) or np.isnan(weekly_low[i]):
+        # Skip if daily EMA not available
+        if np.isnan(ema_daily_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -101,21 +93,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume spike condition
-        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Donchian breakout conditions
+        breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
+        breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # Distance to weekly levels
-        dist_to_high = (weekly_high[i] - close[i]) / close[i] if weekly_high[i] > 0 else 1
-        dist_to_low = (close[i] - weekly_low[i]) / close[i] if weekly_low[i] > 0 else 1
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Near weekly resistance (within buffer) - potential breakout
-        near_resistance = dist_to_high < SUPPORT_RESISTANCE_BUFFER and dist_to_high > 0
-        # Near weekly support (within buffer) - potential breakdown
-        near_support = dist_to_low < SUPPORT_RESISTANCE_BUFFER and dist_to_low > 0
+        # Trend filter (daily)
+        uptrend_daily = close[i] > ema_daily_aligned[i]
+        downtrend_daily = close[i] < ema_daily_aligned[i]
         
         # Entry conditions
-        long_entry = volume_spike and near_resistance and close[i] > weekly_high[i]
-        short_entry = volume_spike and near_support and close[i] < weekly_low[i]
+        long_entry = breakout_up and volume_ok and uptrend_daily
+        short_entry = breakout_down and volume_ok and downtrend_daily
         
         # Generate signals
         if position == 0:
