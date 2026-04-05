@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #8700: 4h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
-Hypothesis: 4h balances trade frequency and signal quality. 1d EMA200 trend filter avoids counter-trend trades.
-Volume confirmation ensures institutional participation. ATR stops manage risk.
-Targets 75-200 trades over 4 years (19-50/year) to balance opportunity and cost.
-Works in bull (trend following) and bear (avoids shorts in uptrend, longs in downtrend).
+Experiment #8701: 4h Donchian(20) breakout + 1d trend filter (EMA50) + volume confirmation + ATR stoploss.
+Hypothesis: Using 4h primary timeframe with 1d trend filter balances trade frequency and trend alignment.
+Donchian breakouts capture momentum, EMA50 filter ensures alignment with daily trend, volume confirmation
+adds conviction, and ATR stoploss manages risk. Targets 75-200 trades over 4 years (19-50/year) to minimize
+fee drag while maintaining statistical validity across bull and bear markets.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8700_4h_donchian20_1d_trend_vol_v1"
+name = "exp_8701_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_PERIOD = 200
+TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -35,7 +35,7 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -93,8 +93,8 @@ def generate_signals(prices):
                 continue
         
         # Determine market bias from 1d EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1d price above EMA200
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1d price below EMA200
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d price above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d price below EMA50
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
