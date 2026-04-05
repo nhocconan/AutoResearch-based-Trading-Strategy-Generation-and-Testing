@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-exp_7400_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+exp_7402_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
 Designed to work in both bull and bear markets by using 1d EMA to filter trend direction,
-avoiding counter-trend trades. Focus on fewer, higher-quality trades (target: 75-200 total over 4 years).
+avoiding counter-trend trades. Focus on fewer, higher-quality trades (target: 50-150 total over 4 years).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7400_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7402_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -22,7 +22,7 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 8
+MAX_HOLD_BARS = 4  # ~2 days for 12h timeframe
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,7 +36,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align to LTF (4h)
+    # Align to LTF (12h)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
