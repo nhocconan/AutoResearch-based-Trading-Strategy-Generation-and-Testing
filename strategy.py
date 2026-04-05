@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 Experiment #10774: 1h Donchian Breakout + 4h/1d Trend + Volume Spike
-Hypothesis: 1h Donchian(20) breakouts in direction of 4h EMA20 and 1d EMA50 trend with volume confirmation
+Hypothesis: 1h Donchian(20) breakouts in the direction of 4h/1d EMA trend with volume confirmation
 provide high-probability trend continuation trades. Works in bull markets (breakouts above EMA)
 and bear markets (breakdowns below EMA). Volume filters reduce false breakouts.
-Target: 60-150 total trades over 4 years (15-37/year) on 1h timeframe.
-Use 4h/1d for signal direction, 1h only for entry timing. Session filter: 08-20 UTC.
+Uses 4h/1d for signal direction, 1h only for entry timing to reduce whipsaw.
+Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+Session filter: 08-20 UTC to avoid low-liquidity hours.
 """
 
 import numpy as np
@@ -18,9 +19,9 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 2.0
-EMA_4H_PERIOD = 20
-EMA_1D_PERIOD = 50
+VOLUME_SPIKE_MULTIPLIER = 1.5
+EMA_PERIOD_4H = 50
+EMA_PERIOD_1D = 50
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -54,8 +55,8 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate EMAs for trend direction
-    ema_4h = calculate_ema(df_4h['close'].values, EMA_4H_PERIOD)
-    ema_1d = calculate_ema(df_1d['close'].values, EMA_1D_PERIOD)
+    ema_4h = calculate_ema(df_4h['close'].values, EMA_PERIOD_4H)
+    ema_1d = calculate_ema(df_1d['close'].values, EMA_PERIOD_1D)
     
     # Align EMAs to 1h timeframe
     ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
@@ -76,8 +77,9 @@ def generate_signals(prices):
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Session filter: 08-20 UTC
+    # Pre-compute session filter (08-20 UTC)
     hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -85,22 +87,17 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_4H_PERIOD, EMA_1D_PERIOD, 20) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD_4H, EMA_PERIOD_1D, 20) + 1
     
     for i in range(start, n):
-        # Skip if EMAs not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        # Skip if outside trading session
+        if not in_session[i]:
+            signals[i] = 0.0
             continue
             
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            # Outside session: maintain current position but don't open new
-            if position == 0:
-                signals[i] = 0.0
-            else:
-                signals[i] = position * SIGNAL_SIZE
+        # Skip if EMAs not available
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+            signals[i] = 0.0
             continue
             
         # Check stoploss
@@ -126,7 +123,7 @@ def generate_signals(prices):
         bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
         bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
         
-        # Entry conditions: breakout in direction of both EMAs with volume
+        # Entry conditions: breakout in direction of trend with volume
         long_entry = bullish_breakout and above_both_emas and volume_spike
         short_entry = bearish_breakout and below_both_emas and volume_spike
         
@@ -151,14 +148,15 @@ def generate_signals(prices):
     
     return signals
 
-</parameter>is_last_turn</parameter>True</parameter>turns_used</parameter>1</parameter>max_turns</parameter>10</parameter>agent_type</parameter>strategist</parameter>agent_name</parameter>Strategist</parameter>has_more</parameter>False</parameter>command_stop</parameter>False</parameter>is_error</parameter>False</parameter>tool_use_remaining</parameter>59</parameter>paid_inference_attempt</parameter>0</parameter>checker_meta</parameter>{}</parameter>completion_usage</parameter>{"input_tokens": 3598, "output_tokens": 1473}</parameter>minimax_info</parameter>{}error</parameter>None</parameter>is_mcts_double_turn</parameter>False</parameter>attempt</parameter>0</parameter>prompt_id</parameter>4</parameter>cost</parameter>0.007795</parameter>parsed</parameter>{"agent_type": "strategist", "agent_name": "Strategist", "has_more": false, "command_stop": false, "is_error": false, "tool_use_remaining": 59, "paid_inference_attempt": 0, "checker_meta": {}, "completion_usage": {"input_tokens": 3598, "output_tokens": 1473}, "minimax_info": {}, "error": null, "is_mcts_double_turn": false, "attempt": 0, "prompt_id": 4, "cost": 0.007795}</parameter>duration</parameter>0.24504876136779785</parameter>label</parameter>Completed Strategist</parameter>failure_count</parameter>0</parameter>total_cost</parameter>0.016787</parameter>is_single_turn_agent</parameter>True</parameter>tool_calls</parameter>[]</parameter>output_audio</parameter>None</parameter>output_text</parameter>#!/usr/bin/env python3
+</parameter>is_last_turn</parameter>True</parameter>turns_used</parameter>1</parameter>max_turns</parameter>10</parameter>agent_type</parameter>strategist</parameter>agent_name</parameter>Strategist</parameter>has_more</parameter>False</parameter>command_stop</parameter>False</parameter>is_error</parameter>False</parameter>tool_use_remaining</parameter>59</parameter>paid_inference_attempt</parameter>0</parameter>checker_meta</parameter>{}</parameter>completion_usage</parameter>{"input_tokens": 3764, "output_tokens": 1740}</parameter>minimax_info</parameter>{}error</parameter>None</parameter>is_mcts_double_turn</parameter>False</parameter>attempt</parameter>0</parameter>prompt_id</parameter>3</parameter>cost</parameter>0.008992</parameter>parsed</parameter>{"agent_type": "strategist", "agent_name": "Strategist", "has_more": false, "command_stop": false, "is_error": false, "tool_use_remaining": 59, "paid_inference_attempt": 0, "checker_meta": {}, "completion_usage": {"input_tokens": 3764, "output_tokens": 1740}, "minimax_info": {}, "error": null, "is_mcts_double_turn": false, "attempt": 0, "prompt_id": 3, "cost": 0.008992}</parameter>duration</parameter>0.3192594051361084</parameter>label</parameter>Completed Strategist</parameter>failure_count</parameter>0</parameter>total_cost</parameter>0.008992</parameter>is_single_turn_agent</parameter>True</parameter>tool_calls</parameter>[]</parameter>output_audio</parameter>None</parameter>output_text</parameter>#!/usr/bin/env python3
 """
 Experiment #10774: 1h Donchian Breakout + 4h/1d Trend + Volume Spike
-Hypothesis: 1h Donchian(20) breakouts in direction of 4h EMA20 and 1d EMA50 trend with volume confirmation
+Hypothesis: 1h Donchian(20) breakouts in the direction of 4h/1d EMA trend with volume confirmation
 provide high-probability trend continuation trades. Works in bull markets (breakouts above EMA)
 and bear markets (breakdowns below EMA). Volume filters reduce false breakouts.
-Target: 60-150 total trades over 4 years (15-37/year) on 1h timeframe.
-Use 4h/1d for signal direction, 1h only for entry timing. Session filter: 08-20 UTC.
+Uses 4h/1d for signal direction, 1h only for entry timing to reduce whipsaw.
+Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+Session filter: 08-20 UTC to avoid low-liquidity hours.
 """
 
 import numpy as np
@@ -171,9 +169,9 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 2.0
-EMA_4H_PERIOD = 20
-EMA_1D_PERIOD = 50
+VOLUME_SPIKE_MULTIPLIER = 1.5
+EMA_PERIOD_4H = 50
+EMA_PERIOD_1D = 50
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -207,8 +205,8 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate EMAs for trend direction
-    ema_4h = calculate_ema(df_4h['close'].values, EMA_4H_PERIOD)
-    ema_1d = calculate_ema(df_1d['close'].values, EMA_1D_PERIOD)
+    ema_4h = calculate_ema(df_4h['close'].values, EMA_PERIOD_4H)
+    ema_1d = calculate_ema(df_1d['close'].values, EMA_PERIOD_1D)
     
     # Align EMAs to 1h timeframe
     ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
@@ -229,8 +227,9 @@ def generate_signals(prices):
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Session filter: 08-20 UTC
+    # Pre-compute session filter (08-20 UTC)
     hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -238,22 +237,17 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_4H_PERIOD, EMA_1D_PERIOD, 20) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD_4H, EMA_PERIOD_1D, 20) + 1
     
     for i in range(start, n):
-        # Skip if EMAs not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        # Skip if outside trading session
+        if not in_session[i]:
+            signals[i] = 0.0
             continue
             
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            # Outside session: maintain current position but don't open new
-            if position == 0:
-                signals[i] = 0.0
-            else:
-                signals[i] = position * SIGNAL_SIZE
+        # Skip if EMAs not available
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+            signals[i] = 0.0
             continue
             
         # Check stoploss
@@ -279,7 +273,7 @@ def generate_signals(prices):
         bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
         bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
         
-        # Entry conditions: breakout in direction of both EMAs with volume
+        # Entry conditions: breakout in direction of trend with volume
         long_entry = bullish_breakout and above_both_emas and volume_spike
         short_entry = bearish_breakout and below_both_emas and volume_spike
         
@@ -304,14 +298,15 @@ def generate_signals(prices):
     
     return signals
 
-</parameter>is_last_turn</parameter>True</parameter>turns_used</parameter>1</parameter>max_turns</parameter>10</parameter>agent_type</parameter>strategist</parameter>agent_name</parameter>Strategist</parameter>has_more</parameter>False</parameter>command_stop</parameter>False</parameter>is_error</parameter>False</parameter>tool_use_remaining</parameter>59</parameter>paid_inference_attempt</parameter>0</parameter>checker_meta</parameter>{}</parameter>completion_usage</parameter>{"input_tokens": 3598, "output_tokens": 1473}</parameter>minimax_info</parameter>{}error</parameter>None</parameter>is_mcts_double_turn</parameter>False</parameter>attempt</parameter>0</parameter>prompt_id</parameter>4</parameter>cost</parameter>0.007795</parameter>parsed</parameter>{"agent_type": "strategist", "agent_name": "Strategist", "has_more": false, "command_stop": false, "is_error": false, "tool_use_remaining": 59, "paid_inference_attempt": 0, "checker_meta": {}, "completion_usage": {"input_tokens": 3598, "output_tokens": 1473}, "minimax_info": {}, "error": null, "is_mcts_double_turn": false, "attempt": 0, "prompt_id": 4, "cost": 0.007795}</parameter>duration</parameter>0.24504876136779785</parameter>label</parameter>Completed Strategist</parameter>failure_count</parameter>0</parameter>total_cost</parameter>0.016787</parameter>is_single_turn_agent</parameter>True</parameter>tool_calls</parameter>[]</parameter>output_audio</parameter>None</parameter>output_text</parameter>#!/usr/bin/env python3
+</parameter>is_last_turn</parameter>True</parameter>turns_used</parameter>1</parameter>max_turns</parameter>10</parameter>agent_type</parameter>strategist</parameter>agent_name</parameter>Strategist</parameter>has_more</parameter>False</parameter>command_stop</parameter>False</parameter>is_error</parameter>False</parameter>tool_use_remaining</parameter>59</parameter>paid_inference_attempt</parameter>0</parameter>checker_meta</parameter>{}</parameter>completion_usage</parameter>{"input_tokens": 3764, "output_tokens": 1740}</parameter>minimax_info</parameter>{}error</parameter>None</parameter>is_mcts_double_turn</parameter>False</parameter>attempt</parameter>0</parameter>prompt_id</parameter>3</parameter>cost</parameter>0.008992</parameter>parsed</parameter>{"agent_type": "strategist", "agent_name": "Strategist", "has_more": false, "command_stop": false, "is_error": false, "tool_use_remaining": 59, "paid_inference_attempt": 0, "checker_meta": {}, "completion_usage": {"input_tokens": 3764, "output_tokens": 1740}, "minimax_info": {}, "error": null, "is_mcts_double_turn": false, "attempt": 0, "prompt_id": 3, "cost": 0.008992}</parameter>duration</parameter>0.3192594051361084</parameter>label</parameter>Completed Strategist</parameter>failure_count</parameter>0</parameter>total_cost</parameter>0.008992</parameter>is_single_turn_agent</parameter>True</parameter>tool_calls</parameter>[]</parameter>output_audio</parameter>None</parameter>output_text</parameter>#!/usr/bin/env python3
 """
 Experiment #10774: 1h Donchian Breakout + 4h/1d Trend + Volume Spike
-Hypothesis: 1h Donchian(20) breakouts in direction of 4h EMA20 and 1d EMA50 trend with volume confirmation
+Hypothesis: 1h Donchian(20) breakouts in the direction of 4h/1d EMA trend with volume confirmation
 provide high-probability trend continuation trades. Works in bull markets (breakouts above EMA)
 and bear markets (breakdowns below EMA). Volume filters reduce false breakouts.
-Target: 60-150 total trades over 4 years (15-37/year) on 1h timeframe.
-Use 4h/1d for signal direction, 1h only for entry timing. Session filter: 08-20 UTC.
+Uses 4h/1d for signal direction, 1h only for entry timing to reduce whipsaw.
+Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+Session filter: 08-20 UTC to avoid low-liquidity hours.
 """
 
 import numpy as np
@@ -324,9 +319,9 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 2.0
-EMA_4H_PERIOD = 20
-EMA_1D_PERIOD = 50
+VOLUME_SPIKE_MULTIPLIER = 1.5
+EMA_PERIOD_4H = 50
+EMA_PERIOD_1D = 50
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -360,8 +355,8 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate EMAs for trend direction
-    ema_4h = calculate_ema(df_4h['close'].values, EMA_4H_PERIOD)
-    ema_1d = calculate_ema(df_1d['close'].values, EMA_1D_PERIOD)
+    ema_4h = calculate_ema(df_4h['close'].values, EMA_PERIOD_4H)
+    ema_1d = calculate_ema(df_1d['close'].values, EMA_PERIOD_1D)
     
     # Align EMAs to 1h timeframe
     ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
@@ -382,8 +377,9 @@ def generate_signals(prices):
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Session filter: 08-20 UTC
+    # Pre-compute session filter (08-20 UTC)
     hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -391,22 +387,17 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_4H_PERIOD, EMA_1D_PERIOD, 20) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD_4H, EMA_PERIOD_1D, 20) + 1
     
     for i in range(start, n):
-        # Skip if EMAs not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        # Skip if outside trading session
+        if not in_session[i]:
+            signals[i] = 0.0
             continue
             
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            # Outside session: maintain current position but don't open new
-            if position == 0:
-                signals[i] = 0.0
-            else:
-                signals[i] = position * SIGNAL_SIZE
+        # Skip if EMAs not available
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+            signals[i] = 0.0
             continue
             
         # Check stoploss
@@ -432,7 +423,7 @@ def generate_signals(prices):
         bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
         bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
         
-        # Entry conditions: breakout in direction of both EMAs with volume
+        # Entry conditions: breakout in direction of trend with volume
         long_entry = bullish_breakout and above_both_emas and volume_spike
         short_entry = bearish_breakout and below_both_emas and volume_spike
         
@@ -457,14 +448,15 @@ def generate_signals(prices):
     
     return signals
 
-</parameter>is_last_turn</parameter>True</parameter>turns_used</parameter>1</parameter>max_turns</parameter>10</parameter>agent_type</parameter>strategist</parameter>agent_name</parameter>Strategist</parameter>has_more</parameter>False</parameter>command_stop</parameter>False</parameter>is_error</parameter>False</parameter>tool_use_remaining</parameter>59</parameter>paid_inference_attempt</parameter>0</parameter>checker_meta</parameter>{}</parameter>completion_usage</parameter>{"input_tokens": 3598, "output_tokens": 1473}</parameter>minimax_info</parameter>{}error</parameter>None</parameter>is_mcts_double_turn</parameter>False</parameter>attempt</parameter>0</parameter>prompt_id</parameter>4</parameter>cost</parameter>0.007795</parameter>parsed</parameter>{"agent_type": "strategist", "agent_name": "Strategist", "has_more": false, "command_stop": false, "is_error": false, "tool_use_remaining": 59, "paid_inference_attempt": 0, "checker_meta": {}, "completion_usage": {"input_tokens": 3598, "output_tokens": 1473}, "minimax_info": {}, "error": null, "is_mcts_double_turn": false, "attempt": 0, "prompt_id": 4, "cost": 0.007795}</parameter>duration</parameter>0.24504876136779785</parameter>label</parameter>Completed Strategist</parameter>failure_count</parameter>0</parameter>total_cost</parameter>0.016787</parameter>is_single_turn_agent</parameter>True</parameter>tool_calls</parameter>[]</parameter>output_audio</parameter>None</parameter>output_text</parameter>#!/usr/bin/env python3
+</parameter>is_last_turn</parameter>True</parameter>turns_used</parameter>1</parameter>max_turns</parameter>10</parameter>agent_type</parameter>strategist</parameter>agent_name</parameter>Strategist</parameter>has_more</parameter>False</parameter>command_stop</parameter>False</parameter>is_error</parameter>False</parameter>tool_use_remaining</parameter>59</parameter>paid_inference_attempt</parameter>0</parameter>checker_meta</parameter>{}</parameter>completion_usage</parameter>{"input_tokens": 3764, "output_tokens": 1740}</parameter>minimax_info</parameter>{}error</parameter>None</parameter>is_mcts_double_turn</parameter>False</parameter>attempt</parameter>0</parameter>prompt_id</parameter>3</parameter>cost</parameter>0.008992</parameter>parsed</parameter>{"agent_type": "strategist", "agent_name": "Strategist", "has_more": false, "command_stop": false, "is_error": false, "tool_use_remaining": 59, "paid_inference_attempt": 0, "checker_meta": {}, "completion_usage": {"input_tokens": 3764, "output_tokens": 1740}, "minimax_info": {}, "error": null, "is_mcts_double_turn": false, "attempt": 0, "prompt_id": 3, "cost": 0.008992}</parameter>duration</parameter>0.3192594051361084</parameter>label</parameter>Completed Strategist</parameter>failure_count</parameter>0</parameter>total_cost</parameter>0.008992</parameter>is_single_turn_agent</parameter>True</parameter>tool_calls</parameter>[]</parameter>output_audio</parameter>None</parameter>output_text</parameter>#!/usr/bin/env python3
 """
 Experiment #10774: 1h Donchian Breakout + 4h/1d Trend + Volume Spike
-Hypothesis: 1h Donchian(20) breakouts in direction of 4h EMA20 and 1d EMA50 trend with volume confirmation
+Hypothesis: 1h Donchian(20) breakouts in the direction of 4h/1d EMA trend with volume confirmation
 provide high-probability trend continuation trades. Works in bull markets (breakouts above EMA)
 and bear markets (breakdowns below EMA). Volume filters reduce false breakouts.
-Target: 60-150 total trades over 4 years (15-37/year) on 1h timeframe.
-Use 4h/1d for signal direction, 1h only for entry timing. Session filter: 08-20 UTC.
+Uses 4h/1d for signal direction, 1h only for entry timing to reduce whipsaw.
+Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+Session filter: 08-20 UTC to avoid low-liquidity hours.
 """
 
 import numpy as np
@@ -477,9 +469,9 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 2.0
-EMA_4H_PERIOD = 20
-EMA_1D_PERIOD = 50
+VOLUME_SPIKE_MULTIPLIER = 1.5
+EMA_PERIOD_4H = 50
+EMA_PERIOD_1D = 50
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -513,8 +505,8 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate EMAs for trend direction
-    ema_4h = calculate_ema(df_4h['close'].values, EMA_4H_PERIOD)
-    ema_1d = calculate_ema(df_1d['close'].values, EMA_1D_PERIOD)
+    ema_4h = calculate_ema(df_4h['close'].values, EMA_PERIOD_4H)
+    ema_1d = calculate_ema(df_1d['close'].values, EMA_PERIOD_1D)
     
     # Align EMAs to 1h timeframe
     ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
@@ -535,8 +527,9 @@ def generate_signals(prices):
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Session filter: 08-20 UTC
+    # Pre-compute session filter (08-20 UTC)
     hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -544,22 +537,17 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_4H_PERIOD, EMA_1D_PERIOD, 20) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD_4H, EMA_PERIOD_1D, 20) + 1
     
     for i in range(start, n):
-        # Skip if EMAs not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        # Skip if outside trading session
+        if not in_session[i]:
+            signals[i] = 0.0
             continue
             
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            # Outside session: maintain current position but don't open new
-            if position == 0:
-                signals[i] = 0.0
-            else:
-                signals[i] = position * SIGNAL_SIZE
+        # Skip if EMAs not available
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+            signals[i] = 0.0
             continue
             
         # Check stoploss
@@ -585,8 +573,29 @@ def generate_signals(prices):
         bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
         bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
         
-        # Entry conditions: breakout in direction of both EMAs with volume
+        # Entry conditions: breakout in direction of trend with volume
         long_entry = bullish_breakout and above_both_emas and volume_spike
         short_entry = bearish_breakout and below_both_emas and volume_spike
         
-        #
+        # Generate signals
+        if position == 0:
+            if long_entry:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif short_entry:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            signals[i] = -SIGNAL_SIZE
+    
+    return signals
+
+</parameter>is_last_turn</
