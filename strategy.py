@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #8773: 4h Donchian breakout + 12h trend filter + volume confirmation + ATR stoploss.
-Hypothesis: 4h timeframe captures sufficient trend while minimizing trade frequency.
-12h EMA200 provides strong trend filter to avoid counter-trend trades in both bull and bear markets.
-Volume confirmation ensures breakouts have institutional participation.
-ATR-based stops manage risk during volatile periods.
-Targets 75-200 trades over 4 years (19-50/year) to balance statistical validity with fee efficiency.
+Hypothesis: 4h timeframe balances trade frequency and trend capture. Using 12h trend filter ensures alignment with intermediate-term momentum, avoiding counter-trend trades. Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk. Targets 75-200 trades over 4 years (19-50/year) to balance opportunity and cost.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -18,7 +14,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_PERIOD = 200
+TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -36,7 +32,7 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
@@ -94,8 +90,8 @@ def generate_signals(prices):
                 continue
         
         # Determine market bias from 12h EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 12h price above EMA200
-        bear_bias = price_vs_ema_aligned[i] == -1  # 12h price below EMA200
+        bull_bias = price_vs_ema_aligned[i] == 1   # 12h price above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 12h price below EMA50
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
