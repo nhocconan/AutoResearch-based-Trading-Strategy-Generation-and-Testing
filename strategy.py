@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-exp_7427_6d_donchian20_1w_ema_vol_v1
-Hypothesis: 6d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
-Uses weekly EMA for even smoother trend to reduce whipsaws and capture major trends.
-Daily timeframe allows capture of multi-day trends while avoiding lower timeframe noise.
+exp_7428_12h_donchian20_1w_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1w EMA(20) trend filter and volume confirmation.
+Uses weekly EMA for trend filtering to reduce whipsaws and capture major trends.
 Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag.
 """
 
@@ -11,23 +10,23 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7427_6d_donchian20_1w_ema_vol_v1"
-timeframe = "6d"
+name = "exp_7428_12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+EMA_PERIOD = 20
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10
+MAX_HOLD_BARS = 20
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 80:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop - using 1w for EMA trend
@@ -37,7 +36,7 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align to LTF (6d)
+    # Align to LTF (12h)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate LTF indicators
