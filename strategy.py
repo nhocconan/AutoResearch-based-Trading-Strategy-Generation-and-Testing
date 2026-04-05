@@ -1,139 +1,78 @@
 #!/usr/bin/env python3
 """
-Experiment #9494: 1h Momentum with 4h/1d Trend Filter.
-Hypothesis: In trending markets (identified by 4h EMA20 > 1d EMA50), take 1h pullback entries 
-using RSI(14) < 30 for longs and RSI(14) > 70 for shorts. In ranging markets (ADX < 25), 
-fade extremes at Bollinger Bands(20,2). Uses session filter (08-20 UTC) to avoid low-liquidity 
-hours. Targets 60-150 total trades over 4 years (15-38/year) by requiring multiple confluences.
-Works in bull (trend-following pullbacks) and bear (mean reversion in ranges).
+Experiment #9494: 1h EMA Crossover with 4h/1d Trend Filter and Volume Spike
+Hypothesis: Use 4h EMA(50) for trend direction, 1d EMA(200) for long-term trend filter, 
+and 1h EMA(12/26) crossover for entry timing. Add volume spike confirmation 
+and session filter (08-20 UTC) to reduce noise. Targets 60-150 total trades 
+over 4 years (15-38/year) to balance opportunity and cost. Works in bull 
+(bullish EMA alignment) and bear (bearish EMA alignment) with entries only 
+in trend direction. Volume spike ensures institutional participation.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9494_1h_momentum_4h1d_trend_filter_v1"
+name = "exp_9494_1h_ema_crossover_4h_1d_trend_filter_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-BB_PERIOD = 20
-BB_STD = 2.0
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
-EMA_FAST = 20
-EMA_SLOW = 50
-VOLUME_MA_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
+EMA_FAST = 12
+EMA_SLOW = 26
+EMA_TREND_4H = 50
+EMA_LONG_1D = 200
+VOLUME_SPIKE_MULTIPLIER = 2.0
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_rsi(close, period):
-    """Calculate Relative Strength Index"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def calculate_bbands(close, period, std_dev):
-    """Calculate Bollinger Bands"""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = sma + (std * std_dev)
-    lower = sma - (std * std_dev)
-    return upper, lower
-
-def calculate_adx(high, low, close, period):
-    """Calculate ADX using Wilder's smoothing"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
-    
-    dx = np.where((plus_di + minus_di) != 0, 
-                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return adx
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
+    """Calculate ATR"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
     return atr
-
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA20 and 1d EMA50 for trend filter
+    # Calculate HTF indicators
     close_4h = df_4h['close'].values
-    ema20_4h = calculate_ema(close_4h, EMA_FAST)
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    ema_4h = calculate_ema(close_4h, EMA_TREND_4H)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
     close_1d = df_1d['close'].values
-    ema50_1d = calculate_ema(close_1d, EMA_SLOW)
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema_1d = calculate_ema(close_1d, EMA_LONG_1D)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Trend: bullish when 4h EMA20 > 1d EMA50
-    bullish_trend = ema20_4h_aligned > ema50_1d_aligned
-    
-    # Calculate LTF indicators (1h)
+    # Calculate LTF indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI for momentum
-    rsi = calculate_rsi(close, RSI_PERIOD)
-    
-    # Bollinger Bands for mean reversion
-    bb_upper, bb_lower = calculate_bbands(close, BB_PERIOD, BB_STD)
-    
-    # ADX for regime detection
-    adx = calculate_adx(high, low, close, ADX_PERIOD)
-    low_volatility = adx < ADX_THRESHOLD  # Ranging market
-    
-    # Volume filter
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    volume_ok = volume > (volume_ma * VOLUME_SPIKE_MULTIPLIER)
-    
-    # ATR for risk management
+    ema_fast = calculate_ema(close, EMA_FAST)
+    ema_slow = calculate_ema(close, EMA_SLOW)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Volume moving average for spike detection
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -141,23 +80,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, BB_PERIOD, ADX_PERIOD, EMA_SLOW, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_SLOW, EMA_TREND_4H, EMA_LONG_1D, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if not in trading session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-            
         # Skip if HTF data not available
-        if np.isnan(ema20_4h_aligned[i]) or np.isnan(ema50_1d_aligned[i]):
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
         # Check stoploss
@@ -172,25 +100,29 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market regime
-        is_bullish_trend = bullish_trend[i]
-        is_ranging = low_volatility[i]
+        # Session filter: only trade 08-20 UTC
+        if not (8 <= hours[i] <= 20):
+            signals[i] = 0.0
+            position = 0
+            continue
+        
+        # Volume spike confirmation
+        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
+        
+        # Trend filters
+        bullish_4h = ema_4h_aligned[i] > close[i]  # Price above 4h EMA50 = bullish
+        bearish_4h = ema_4h_aligned[i] < close[i]  # Price below 4h EMA50 = bearish
+        
+        bullish_1d = ema_1d_aligned[i] > close[i]  # Price above 1d EMA200 = long-term bullish
+        bearish_1d = ema_1d_aligned[i] < close[i]  # Price below 1d EMA200 = long-term bearish
+        
+        # EMA crossover signals
+        ema_cross_up = ema_fast[i] > ema_slow[i] and ema_fast[i-1] <= ema_slow[i-1]
+        ema_cross_down = ema_fast[i] < ema_slow[i] and ema_fast[i-1] >= ema_slow[i-1]
         
         # Entry conditions
-        long_entry = False
-        short_entry = False
-        
-        if is_bullish_trend:
-            # Trend following: buy pullbacks in uptrend
-            if rsi[i] < RSI_OVERSOLD and volume_ok[i]:
-                long_entry = True
-        elif is_ranging:
-            # Mean reversion: fade extremes in ranging market
-            if close[i] <= bb_lower[i] and volume_ok[i]:
-                long_entry = True
-            if close[i] >= bb_upper[i] and volume_ok[i]:
-                short_entry = True
-        # In bearish trend (4h EMA20 < 1d EMA50), stay flat to avoid whipsaws
+        long_entry = ema_cross_up and bullish_4h and bullish_1d and volume_spike
+        short_entry = ema_cross_down and bearish_4h and bearish_1d and volume_spike
         
         # Generate signals
         if position == 0:
