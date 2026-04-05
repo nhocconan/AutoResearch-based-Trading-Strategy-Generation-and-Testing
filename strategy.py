@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #8388: 12-hour Donchian breakout with weekly trend filter and volume confirmation.
+Experiment #8388: 12-hour Donchian breakout with 1-week trend filter and volume confirmation.
 Hypothesis: Price breaking above/below the 20-period Donchian channel on 12h with volume >1.5x 20-period MA 
-and aligned weekly trend (price above/below weekly EMA25) captures sustained moves while avoiding whipsaw. 
-The weekly timeframe provides long-term context, reducing false breakouts during consolidation. 
-Targeting 120-180 total trades over 4 years for optimal balance.
+and aligned 1-week trend (price above/below 1w EMA50) captures sustained moves while avoiding whipsaw. 
+The 1-week timeframe provides long-term context, reducing false breakouts during consolidation. 
+Targeting 50-150 total trades over 4 years for optimal balance.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -17,7 +17,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-WEEKLY_EMA_PERIOD = 25
+EMA_TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -33,11 +33,11 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly EMA for trend filter
+    # Calculate 1w EMA for trend filter
     close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=WEEKLY_EMA_PERIOD, adjust=False, min_periods=WEEKLY_EMA_PERIOD).mean().values
+    ema_1w = pd.Series(close_1w).ewm(span=EMA_TREND_PERIOD, adjust=False, min_periods=EMA_TREND_PERIOD).mean().values
     
-    # Price relative to weekly EMA: above = bullish bias, below = bearish bias
+    # Price relative to 1w EMA: above = bullish bias, below = bearish bias
     price_vs_ema = np.where(close_1w > ema_1w, 1, 
                      np.where(close_1w < ema_1w, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
     price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
@@ -69,7 +69,7 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
@@ -89,9 +89,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from weekly EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # weekly price above EMA25
-        bear_bias = price_vs_ema_aligned[i] == -1  # weekly price below EMA25
+        # Determine market bias from 1w EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1w price above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1w price below EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
