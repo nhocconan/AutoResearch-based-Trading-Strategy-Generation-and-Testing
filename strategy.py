@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #9130: 1d Donchian breakout + 1w trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Donchian breakouts capture trends; 1w EMA filter ensures directional alignment; volume confirms institutional participation.
-Targets 30-100 total trades over 4 years (7-25/year) to balance opportunity and cost. Works in bull (breakouts) and bear (filtered shorts).
+Hypothesis: Daily Donchian(20) breakouts capture major trends; 1-week EMA filter ensures alignment with weekly momentum; volume confirms breakout strength. Designed for low trade frequency (15-25/year) to minimize fee drag while capturing sustained moves in both bull and bear markets.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -15,12 +14,12 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_PERIOD = 30
+TREND_PERIOD = 20  # For EMA calculation
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 2.0  # Higher threshold for daily data
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.2
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -91,8 +90,8 @@ def generate_signals(prices):
                 continue
         
         # Determine market bias from 1w EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1w price above EMA30
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1w price below EMA30
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1w price above EMA
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1w price below EMA
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
@@ -125,4 +124,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</p>
+</file>
