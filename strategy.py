@@ -3,8 +3,10 @@
 Experiment #8096: 12-hour Donchian breakout with 1-day trend filter and volume confirmation.
 Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA 
 and aligned daily trend (price above/below daily EMA50) captures sustained moves with 
-appropriate frequency for 12h timeframe. Uses daily timeframe for stronger trend context 
-to reduce whipsaw in both bull and bear markets, targeting 50-150 trades over 4 years.
+appropriate frequency for 12h timeframe (target: 50-150 trades over 4 years). 
+Uses daily timeframe for stronger trend context, reducing whipsaw while targeting 
+fewer trades to minimize fee drag. Works in both bull (breakouts with trend) and bear 
+(breakouts against trend filtered out) markets.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -125,3 +127,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</think>
