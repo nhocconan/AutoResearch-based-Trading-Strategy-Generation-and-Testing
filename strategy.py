@@ -1,44 +1,56 @@
 #!/usr/bin/env python3
 """
-exp_7354_1h_donchian20_4h_ema_vol_session_v1
-Hypothesis: 1h Donchian(20) breakout with 4h EMA(50) trend filter, volume confirmation, and UTC 08-20 session filter.
-Uses 4h HTF for trend direction to reduce noise, 1h for precise entry timing. Targets 60-150 trades over 4 years.
-Discrete position sizing (0.0, ±0.20) minimizes fee churn. Session filter avoids low-liquidity hours.
-Works in bull/bear via EMA regime filter: long only above EMA, short only below EMA.
+exp_7355_6h_donchian20_1w_pivot_vol_v1
+Hypothesis: 6h Donchian(20) breakout with 1w Camarilla pivot direction filter and volume confirmation.
+Uses weekly pivot levels (R3/S3 for fade, R4/S4 for breakout) to capture institutional levels.
+Volume spike confirms breakout legitimacy. Discrete sizing (0.0, ±0.25) minimizes fee churn.
+Designed for 6h timeframe targeting 50-150 total trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7354_1h_donchian20_4h_ema_vol_session_v1"
-timeframe = "1h"
+name = "exp_7355_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0  # Volume must be 2x MA to confirm
-SIGNAL_SIZE = 0.20  # 20% position size
+VOL_BASE_THRESHOLD = 2.0
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 24  # ~1 day max hold
+MAX_HOLD_BARS = 8  # ~2 days
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 4h for EMA trend
-    df_4h = get_htf_data(prices, '4h')
+    # Load HTF data ONCE before loop - using 1w for Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate 1w OHLC for Camarilla pivots
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align to LTF (1h) - gives completed 4h bars only
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate Camarilla levels: based on previous week's range
+    # R4 = close + 1.5*(high-low), R3 = close + 1.1*(high-low)
+    # S3 = close - 1.1*(high-low), S4 = close - 1.5*(high-low)
+    pivot_range = high_1w - low_1w
+    camarilla_r4 = close_1w + 1.5 * pivot_range
+    camarilla_r3 = close_1w + 1.1 * pivot_range
+    camarilla_s3 = close_1w - 1.1 * pivot_range
+    camarilla_s4 = close_1w - 1.5 * pivot_range
+    
+    # Align to LTF (6h)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1w, camarilla_s4)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -60,34 +72,19 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Session filter: UTC 08-20 (avoid low-liquidity hours)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if outside trading session
-        if not in_session[i]:
-            # Force flat outside session
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-            else:
-                signals[i] = 0.0
-            continue
-            
         # Skip if HTF data not available
-        if np.isnan(ema_4h_aligned[i]):
+        if np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_s4_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -115,22 +112,28 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on 4h EMA
-        above_ema = close[i] > ema_4h_aligned[i]
-        below_ema = close[i] < ema_4h_aligned[i]
+        # Determine Camarilla zones
+        above_r4 = close[i] > camarilla_r4_aligned[i]
+        below_s4 = close[i] < camarilla_s4_aligned[i]
+        between_r3_r4 = camarilla_r3_aligned[i] < close[i] < camarilla_r4_aligned[i]
+        between_s3_s4 = camarilla_s4_aligned[i] < close[i] < camarilla_s3_aligned[i]
         
-        # Breakout entries with volume confirmation and regime filter
-        breakout_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
-        breakout_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
+        # Breakout continuation at R4/S4 with volume
+        breakout_long = above_r4 and vol_confirmed
+        breakout_short = below_s4 and vol_confirmed
+        
+        # Fade at R3/S3 (mean reversion from extreme levels)
+        fade_long = between_s3_s4 and not vol_confirmed and close[i] > camarilla_s3_aligned[i]
+        fade_short = between_r3_r4 and not vol_confirmed and close[i] < camarilla_r3_aligned[i]
         
         # Enter new positions only if flat
         if position == 0:
-            if breakout_long:
+            if breakout_long or fade_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif breakout_short:
+            elif breakout_short or fade_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
