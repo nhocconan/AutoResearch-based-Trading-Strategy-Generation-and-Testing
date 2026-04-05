@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #7801: 4-hour Donchian breakout with 1-day EMA trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.8x 20-period MA and aligned 1d EMA trend captures sustained moves while avoiding whipsaw. The 1d EMA provides strong trend filtering suitable for 4h entries in both bull and bear markets. Targets 75-200 trades over 4 years.
+Experiment #7802: 12-hour Donchian breakout with 1-day EMA trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.8x 20-period MA and aligned 1d EMA trend captures sustained moves while avoiding whipsaw. The 1d EMA provides strong trend filtering suitable for 12h entries in both bull and bear markets. Targets 50-150 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7801_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7802_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
