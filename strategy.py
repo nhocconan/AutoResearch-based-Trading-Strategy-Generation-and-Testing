@@ -1,32 +1,30 @@
 #!/usr/bin/env python3
 """
-exp_6938_1d_donchian20_1w_ema_vol_v2
-Hypothesis: 1d Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation, 
-adjusted for higher trade frequency by relaxing volume threshold slightly and adding 
-choppiness regime filter to avoid whipsaws in ranging markets. 
-Targets 50-150 total trades over 4 years (12-38/year) by allowing entries in both 
-trending and ranging regimes with appropriate filters.
+exp_6938_1d_donchian20_1w_ema_vol_v1
+Hypothesis: 1d Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
+In bull markets (price > weekly EMA50): long breakouts only. In bear markets (price < weekly EMA50): short breakouts only.
+Weekly EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
+Designed for 1d timeframe to capture major swings with ~7-25 trades/year (30-100 total over 4 years).
+Works in both bull and bear markets by aligning with weekly trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6938_1d_donchian20_1w_ema_vol_v2"
+name = "exp_6938_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5  # Reduced from 2.0 to increase trade frequency
+VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 MAX_HOLD_BARS = 30  # ~1.5 months (1d bars)
 EMA_PERIOD = 50
-CHOPPINESS_PERIOD = 14
-CHOPPINESS_THRESHOLD = 61.8  # Above this = ranging market
 
 def generate_signals(prices):
     n = len(prices)
@@ -63,25 +61,13 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Choppiness Index for regime detection
-    atr_rolling = tr.rolling(window=CHOPPINESS_PERIOD, min_periods=CHOPPINESS_PERIOD).mean().values
-    highest_high_rolling = pd.Series(high).rolling(window=CHOPPINESS_PERIOD, min_periods=CHOPPINESS_PERIOD).max().values
-    lowest_low_rolling = pd.Series(low).rolling(window=CHOPPINESS_PERIOD, min_periods=CHOPPINESS_PERIOD).min().values
-    
-    # Avoid division by zero
-    range_max_min = highest_high_rolling - lowest_low_rolling
-    range_max_min = np.where(range_max_min == 0, 1e-10, range_max_min)
-    
-    chop = 100 * np.log10(atr_rolling * CHOPPINESS_PERIOD / range_max_min) / np.log10(CHOPPINESS_PERIOD)
-    chopping_market = chop > CHOPPINESS_THRESHOLD  # True when ranging
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD, CHOPPINESS_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
@@ -119,17 +105,9 @@ def generate_signals(prices):
         weekly_uptrend = close[i] > ema_1w_aligned[i]
         weekly_downtrend = close[i] < ema_1w_aligned[i]
         
-        # Breakout signals with regime adaptation
-        # In trending markets: follow weekly trend
-        # In ranging markets: trade both directions but with stricter volume
-        if chopping_market:
-            # Ranging market: look for breakouts in either direction with volume
-            long_breakout = (close[i] > highest_high[i]) and vol_confirmed
-            short_breakout = (close[i] < lowest_low[i]) and vol_confirmed
-        else:
-            # Trending market: follow weekly trend direction
-            long_breakout = weekly_uptrend and (close[i] > highest_high[i]) and vol_confirmed
-            short_breakout = weekly_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
+        # Breakout signals aligned with weekly trend
+        long_breakout = weekly_uptrend and (close[i] > highest_high[i]) and vol_confirmed
+        short_breakout = weekly_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
