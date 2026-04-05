@@ -15,14 +15,14 @@ name = "exp_8430_1d_donchian20_1w_trend_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
-# Parameters - tuned for higher trade frequency
+# Parameters
 DONCHIAN_PERIOD = 20
 TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5  # Lowered from 1.8 to increase triggers
-SIGNAL_SIZE = 0.30      # Increased from 0.25 for better returns
+VOLUME_THRESHOLD = 1.8
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5  # Slightly wider stop to reduce premature exits
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
