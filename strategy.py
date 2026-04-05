@@ -1,67 +1,60 @@
 #!/usr/bin/env python3
 """
-Experiment #7775: 6-hour weekly pivot range with volume confirmation and ATR-based risk management.
-Hypothesis: Weekly pivot ranges (from Sunday candle) act as strong support/resistance on 6h timeframe. 
-Price bouncing off S1/R1 with volume >1.5x 20-period MA and weekly trend filter (price > weekly EMA50) captures 
-reversals in ranging markets and continuations in trending markets. Works in both bull and bear by fading extremes 
-in range and following breakouts in trends. Targets 60-120 trades over 4 years.
+Experiment #7776: 12-hour Camarilla pivot reversal with 1-day trend filter, volume confirmation, and ATR-based risk management.
+Hypothesis: Price reversing from Camarilla pivot levels (S3/S4 for long, R3/R4 for short) on 12h with volume >1.5x 20-period MA and aligned 1d trend (EMA50) captures mean reversion in ranging markets while avoiding false breakouts. Works in bull markets (long reversals above EMA) and bear markets (short reversals below EMA). Targets 50-150 trades over 4 years.
 """
 
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_athf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7775_6h_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "exp_7776_12h_camarilla_pivot_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-PIVOT_LOOKBACK = 5  # bars to confirm pivot hold
+PIVOT_LOOKBACK = 1  # Use previous day for pivot calculation
+EMA_TREND = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_pivot(high, low, close):
-    """Calculate standard pivot points: P = (H+L+C)/3, S1 = 2P-H, R1 = 2P-L"""
-    p = (high + low + close) / 3.0
-    s1 = 2 * p - high
-    r1 = 2 * p - low
-    return p, s1, r1
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points from previous week
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate pivots for each weekly bar
-    weekly_p = np.full_like(weekly_close, np.nan)
-    weekly_s1 = np.full_like(weekly_close, np.nan)
-    weekly_r1 = np.full_like(weekly_close, np.nan)
+    # Calculate daily high, low, close for pivot points
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    for i in range(1, len(weekly_close)):  # Start from 1 to use previous week
-        p, s1, r1 = calculate_pivot(weekly_high[i-1], weekly_low[i-1], weekly_close[i-1])
-        weekly_p[i] = p
-        weekly_s1[i] = s1
-        weekly_r1[i] = r1
+    # Calculate Camarilla pivot levels for each day
+    # R4 = close + ((high - low) * 1.1/2)
+    # R3 = close + ((high - low) * 1.1/4)
+    # S3 = close - ((high - low) * 1.1/4)
+    # S4 = close - ((high - low) * 1.1/2)
+    pivot_range = high_1d - low_1d
+    r4 = close_1d + (pivot_range * 1.1 / 2)
+    r3 = close_1d + (pivot_range * 1.1 / 4)
+    s3 = close_1d - (pivot_range * 1.1 / 4)
+    s4 = close_1d - (pivot_range * 1.1 / 2)
     
-    # Align weekly pivots to 6h timeframe
-    weekly_p_aligned = align_ltf_to_htf(prices, df_weekly, weekly_p)
-    weekly_s1_aligned = align_ltf_to_htf(prices, df_weekly, weekly_s1)
-    weekly_r1_aligned = align_ltf_to_htf(prices, df_weekly, weekly_r1)
-    
-    # Calculate weekly EMA for trend filter
-    weekly_ema = pd.Series(weekly_close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    weekly_ema_aligned = align_ltf_to_htf(prices, df_weekly, weekly_ema)
+    # Align pivot levels to 12h timeframe (use previous day's levels)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -85,11 +78,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, PIVOT_LOOKBACK) + 1
+    start = max(EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly data not available
-        if np.isnan(weekly_p_aligned[i]) or np.isnan(weekly_ema_aligned[i]):
+        # Skip if HTF data not available
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -105,41 +98,33 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine weekly trend
-        weekly_uptrend = close[i] > weekly_ema_aligned[i]
-        weekly_downtrend = close[i] < weekly_ema_aligned[i]
+        # Determine market regime
+        bull_regime = close[i] > ema_1d_aligned[i]   # price above 1d EMA
+        bear_regime = close[i] < ema_1d_aligned[i]   # price below 1d EMA
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Price near weekly S1/R1 (within 0.5% tolerance)
-        near_s1 = np.abs((close[i] - weekly_s1_aligned[i]) / weekly_s1_aligned[i]) < 0.005 if weekly_s1_aligned[i] != 0 else False
-        near_r1 = np.abs((close[i] - weekly_r1_aligned[i]) / weekly_r1_aligned[i]) < 0.005 if weekly_r1_aligned[i] != 0 else False
-        
-        # Entry logic: 
-        # In weekly uptrend: buy near S1 (support), sell near R1 (resistance) 
-        # In weekly downtrend: sell near R1, buy near S1
-        long_entry = False
-        short_entry = False
-        
-        if weekly_uptrend:
-            # In uptrend, buy dips to S1, sell rallies to R1
-            long_entry = near_s1 and volume_confirmed
-            # Short on R1 rejection in uptrend (less common)
-            short_entry = near_r1 and volume_confirmed and close[i] < weekly_r1_aligned[i]  # rejection
-        else:  # weekly_downtrend
-            # In downtrend, sell rallies to R1, buy dips to S1
-            short_entry = near_r1 and volume_confirmed
-            long_entry = near_s1 and volume_confirmed and close[i] > weekly_s1_aligned[i]  # bounce
+        # Reversal conditions at Camarilla levels
+        # Long: price touches or goes below S3/S4 and reverses up in bull regime
+        long_reversal = bull_regime and volume_confirmed and (
+            (low[i] <= s3_aligned[i] and close[i] > s3_aligned[i]) or 
+            (low[i] <= s4_aligned[i] and close[i] > s4_aligned[i])
+        )
+        # Short: price touches or goes above R3/R4 and reverses down in bear regime
+        short_reversal = bear_regime and volume_confirmed and (
+            (high[i] >= r3_aligned[i] and close[i] < r3_aligned[i]) or 
+            (high[i] >= r4_aligned[i] and close[i] < r4_aligned[i])
+        )
         
         # Generate signals
         if position == 0:
-            if long_entry:
+            if long_reversal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
+            elif short_reversal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -152,20 +137,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
-def align_ltf_to_htf(ltf_df, htf_df, htf_values):
-    """Helper function to align HTF values to LTF using forward fill"""
-    # Create a DatetimeIndex for LTF
-    ltf_index = ltf_df.index if isinstance(ltf_df.index, pd.DatetimeIndex) else pd.to_datetime(ltf_df['open_time'])
-    # Create a DatetimeIndex for HTF
-    htf_index = htf_df.index if isinstance(htf_df.index, pd.DatetimeIndex) else pd.to_datetime(htf_df['open_time'])
-    
-    # Create series with HTF values indexed by HTF timestamps
-    htf_series = pd.Series(htf_values, index=htf_index)
-    # Forward fill to LTF index
-    aligned_series = htf_series.reindex(ltf_index, method='ffill')
-    return aligned_series.values
-
-# Override the import to use our local function
-from mtf_data import get_htf_data
-align_htf_to_ltf = align_ltf_to_htf  # rename for compatibility
