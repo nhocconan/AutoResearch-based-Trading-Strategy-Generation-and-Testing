@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #10050: 1d Donchian Breakout + Weekly Trend + Volume Spike
-Hypothesis: Donchian(20) breakouts on the daily timeframe in the direction of weekly trend (EMA40) 
-with volume confirmation provide high-probability trend continuation trades that work in both 
-bull and bear markets. The weekly EMA filter prevents counter-trend trades, while volume 
-confirmation filters false breakouts. Target: 75-250 total trades over 4 years (19-62/year).
+Experiment #10053: 4h Donchian Breakout + 12h Trend + Volume Spike
+Hypothesis: Donchian(20) breakouts in the direction of 12h EMA(40) with volume confirmation
+provide high-probability trend continuation trades. Works in bull markets (breakouts above 12h EMA)
+and bear markets (breakdowns below 12h EMA). Volume filters reduce false breakouts.
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10050_1d_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "exp_10053_4h_donchian_breakout_12h_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_SPIKE_MULTIPLIER = 1.5
-WEEKLY_EMA_PERIOD = 40
+TREND_EMA_PERIOD = 40
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -47,17 +47,17 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for trend filter
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop for trend filter
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly EMA for trend direction
-    weekly_close = df_weekly['close'].values
-    weekly_ema = calculate_ema(weekly_close, WEEKLY_EMA_PERIOD)
+    # Calculate 12h EMA for trend direction
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
     
-    # Align weekly EMA to daily timeframe
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
+    # Align 12h EMA to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate daily indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -78,11 +78,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, 20) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, 20) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(weekly_ema_aligned[i]):
+        # Skip if 12h EMA not available
+        if np.isnan(ema_12h_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -101,17 +101,17 @@ def generate_signals(prices):
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        above_weekly_ema = close[i] > weekly_ema_aligned[i]
-        below_weekly_ema = close[i] < weekly_ema_aligned[i]
+        # Trend filter: price above/below 12h EMA
+        above_ema = close[i] > ema_12h_aligned[i]
+        below_ema = close[i] < ema_12h_aligned[i]
         
         # Breakout conditions
         bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
         bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
         
-        # Entry conditions: breakout in direction of weekly trend with volume
-        long_entry = bullish_breakout and above_weekly_ema and volume_spike
-        short_entry = bearish_breakout and below_weekly_ema and volume_spike
+        # Entry conditions: breakout in direction of 12h trend with volume
+        long_entry = bullish_breakout and above_ema and volume_spike
+        short_entry = bearish_breakout and below_ema and volume_spike
         
         # Generate signals
         if position == 0:
