@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #8417: 4h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
+Experiment #8420: 4h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
 Hypothesis: Price breaking out of Donchian channels (20-period) with 1-day trend alignment and volume spikes
 captures strong directional moves while avoiding false breakouts in chop. 1d EMA provides trend bias,
 Donchian breakouts provide entry signals, volume confirms institutional participation. 
@@ -11,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8417_4h_donchian20_1d_trend_vol_v1"
+name = "exp_8420_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
