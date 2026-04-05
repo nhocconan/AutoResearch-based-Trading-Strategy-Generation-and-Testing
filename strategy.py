@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #7918: Daily Donchian breakout with weekly trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-day high/low on 1d with volume >1.5x 20-period MA 
-and aligned weekly trend (price above/below weekly EMA20) captures sustained moves. 
-Weekly timeframe provides stronger trend context to reduce whipsaw and improve performance 
-in both bull and bear markets while targeting 30-100 total trades over 4 years.
+Experiment #7918: 1-day Donchian breakout with 1-week trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 1d with volume >1.5x 20-period MA 
+and aligned 1w trend (price above/below 1w EMA20) captures sustained moves. 
+The 1w timeframe provides stronger trend context to improve performance in 
+both bull and bear markets while maintaining low trade frequency (target: 30-100 total trades over 4 years).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -27,7 +27,7 @@ ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
