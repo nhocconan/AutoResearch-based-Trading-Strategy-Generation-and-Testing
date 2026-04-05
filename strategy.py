@@ -1,68 +1,55 @@
 #!/usr/bin/env python3
 """
-exp_7515_6h_1w_1d_donchian_vol_v1
-Hypothesis: 6s Donchian(20) breakout with weekly pivot direction filter and volume confirmation.
-Weekly pivot defines long-term trend: price above weekly pivot = bullish bias (long breakouts),
-price below weekly pivot = bearish bias (short breakdowns). Volume > 1.5x 20-period average
-confirms breakout strength. Targets 50-150 trades over 4 years (12-37/year) with strict
-breakout conditions + trend alignment. Works in bull/bear by following weekly trend.
+exp_7516_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian channel breakout with 1d EMA trend filter and volume confirmation.
+Goes long when price breaks above 20-period upper band in bull regime (price > 1d EMA200),
+short when breaks below lower band in bear regime (price < 1d EMA200).
+Volume must be above 20-period average to confirm breakout.
+Designed for 50-150 total trades over 4 years with strict breakout conditions.
+Works in bull via long breakouts, bear via short breakdowns.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7515_6h_1w_1d_donchian_vol_v1"
-timeframe = "6h"
+name = "exp_7516_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_AVG_PERIOD = 20
-VOLUME_THRESHOLD = 1.5  # 1.5x average volume
+EMA_TREND = 200
+VOLUME_MA_PERIOD = 20
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly pivot: P = (H + L + C) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # Support/resistance levels
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    
-    # Align weekly pivot to 6s timeframe (use pivot for trend bias)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    
-    # Calculate 1d average volume for confirmation
-    volume_1d = df_1d['volume'].values
-    avg_volume_1d = pd.Series(volume_1d).rolling(window=VOLUME_AVG_PERIOD, min_periods=VOLUME_AVG_PERIOD).mean().values
-    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
+    # Calculate 1d EMA200 for regime filter
+    close_1d = df_1d['close'].values
+    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
     # Calculate LTF indicators
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
+    # Donchian channels (20-period high/low)
     highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
     lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR for stoploss
     tr1 = pd.Series(high - low)
@@ -76,11 +63,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_AVG_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(pivot_1w_aligned[i]) or np.isnan(avg_volume_1d_aligned[i]):
+        if np.isnan(ema_1d_200_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -96,24 +83,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine weekly trend bias
-        bullish_bias = close[i] > pivot_1w_aligned[i]   # price above weekly pivot
-        bearish_bias = close[i] < pivot_1w_aligned[i]   # price below weekly pivot
+        # Determine market regime
+        bull_regime = close[i] > ema_1d_200_aligned[i]   # price above 1d EMA200
+        bear_regime = close[i] < ema_1d_200_aligned[i]   # price below 1d EMA200
         
         # Volume confirmation
-        volume_confirmed = volume[i] > (VOLUME_THRESHOLD * avg_volume_1d_aligned[i])
+        volume_ok = volume[i] > volume_ma[i] if not np.isnan(volume_ma[i]) else False
         
         # Breakout conditions
-        bullish_breakout = (high[i] > highest_high[i]) and volume_confirmed
-        bearish_breakout = (low[i] < lowest_low[i]) and volume_confirmed
+        upper_break = high[i] > highest_high[i-1] if i > 0 and not np.isnan(highest_high[i-1]) else False
+        lower_break = low[i] < lowest_low[i-1] if i > 0 and not np.isnan(lowest_low[i-1]) else False
         
-        # Entry conditions: follow weekly trend bias
-        long_entry = bullish_bias and bullish_breakout
-        short_entry = bearish_bias and bearish_breakout
-        
-        # Exit conditions: opposite breakout or reversal
-        long_exit = bearish_breakout  # exit long on bearish breakout
-        short_exit = bullish_breakout  # exit short on bullish breakout
+        # Entry conditions
+        long_entry = bull_regime and upper_break and volume_ok
+        short_entry = bear_regime and lower_break and volume_ok
         
         # Generate signals
         if position == 0:
@@ -128,16 +111,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            if long_exit:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = SIGNAL_SIZE
+            signals[i] = SIGNAL_SIZE  # hold position
         elif position == -1:
-            if short_exit:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -SIGNAL_SIZE
+            signals[i] = -SIGNAL_SIZE  # hold position
     
     return signals
