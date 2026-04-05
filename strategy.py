@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #8587: 6h Donchian breakout + 1d volume confirmation + 1w trend filter + ATR stoploss.
-Hypothesis: 6h timeframe balances trade frequency and trend capture. Using daily volume confirmation ensures institutional participation in breakouts, while weekly EMA filter avoids counter-trend trades. Targets 50-150 trades over 4 years (12-37/year) to balance edge and fee drag.
+Experiment #8590: 1d Donchian breakout + 1w trend filter + volume confirmation + ATR stoploss.
+Hypothesis: Daily timeframe reduces trade frequency to combat fee drag while capturing major trends.
+Using 1-week trend filter (EMA50) ensures alignment with multi-week momentum, avoiding counter-trend trades.
+Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk.
+Targets 30-100 trades over 4 years (7-25/year) to minimize fee impact while maintaining statistical validity.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8587_6h_donchian20_1d_vol_1w_trend_v1"
-timeframe = "6h"
+name = "exp_8590_1d_donchian20_1w_trend_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-TREND_PERIOD = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -37,7 +40,6 @@ def generate_signals(prices):
     
     # Load HTF data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1w EMA for trend filter
     close_1w = df_1w['close'].values
@@ -48,7 +50,7 @@ def generate_signals(prices):
                      np.where(close_1w < ema_1w, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
     price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
     
-    # Calculate LTF indicators (6h)
+    # Calculate LTF indicators (daily)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -58,10 +60,8 @@ def generate_signals(prices):
     donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
     donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Daily volume moving average (from 1d data)
-    volume_1d = df_1d['volume'].values
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -76,7 +76,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(price_vs_ema_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]):
+        if np.isnan(price_vs_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -100,8 +100,8 @@ def generate_signals(prices):
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
         short_breakout = close[i] < donchian_low[i-1]  # Break below previous period's low
         
-        # Volume confirmation (daily volume above MA)
-        volume_confirmed = volume[i] > (volume_ma_1d_aligned[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma_1d_aligned[i]) else False
+        # Volume confirmation
+        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Entry conditions
         long_entry = bull_bias and long_breakout and volume_confirmed
