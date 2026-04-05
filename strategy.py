@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #7776: 12-hour price channel breakout with 1-day trend filter, volume confirmation, and ATR-based risk management.
-Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >2.0x 20-period MA and aligned 1d trend (EMA50) captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above EMA) and bear markets (short breakdowns below EMA). Targets 50-150 trades over 4 years.
+Experiment #7777: 4-hour Donchian breakout with 1-day trend filter, volume confirmation, and ATR-based risk management.
+Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.8x 20-period MA and aligned 1d trend (EMA50) captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above EMA) and bear markets (short breakdowns below EMA). Targets 75-200 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7776_12h_price_channel_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_7777_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-CHANNEL_PERIOD = 20
+DONCHIAN_PERIOD = 20
 EMA_TREND = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -41,8 +42,8 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Price channel (Donchian)
-    highest_high = pd.Series(high).rolling(window=CHANNEL_PERIOD, min_periods=CHANNEL_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=CHANNEL_PERIOD, min_periods=CHANNEL_PERIOD).min().values
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -58,9 +59,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
+    target_price = 0.0
     
     # Start from warmup period
-    start = max(CHANNEL_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
@@ -68,14 +70,14 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
-        # Check stoploss
+        # Check stoploss or target
         if position == 1:  # long position
-            if close[i] <= stop_price:
+            if close[i] <= stop_price or close[i] >= target_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            if close[i] >= stop_price:
+            if close[i] >= stop_price or close[i] <= target_price:
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -102,11 +104,13 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
