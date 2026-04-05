@@ -2,8 +2,8 @@
 """
 Experiment #8297: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
 Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.5x 20-period MA 
-and aligned 1-day trend (price above/below 1-day EMA50) captures sustained moves while avoiding 
-whipsaw in both bull and bear markets. The 1-day trend filter provides intermediate-term trend 
+and aligned 1d trend (price above/below 1d EMA50) captures sustained moves while avoiding 
+whipsaw in both bull and bear markets. The 1d trend filter provides longer-term trend 
 context, reducing false breakouts during consolidation periods. Targeting 75-200 total trades 
 over 4 years for optimal balance of signal quality and cost.
 """
@@ -126,3 +126,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</output>
