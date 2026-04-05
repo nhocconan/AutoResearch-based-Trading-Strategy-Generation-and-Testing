@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #9093: 4h Donchian breakout + 12h trend filter + volume confirmation + ATR stoploss.
+Experiment #9093: 4h Donchian breakout + 12h EMA trend + volume confirmation + ATR stoploss.
 Hypothesis: Donchian breakouts capture trends; 12h EMA filter ensures directional alignment; volume confirms institutional participation.
 Targets 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost. Works in bull (breakouts) and bear (filtered shorts).
 """
@@ -125,4 +125,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</lyrics>
