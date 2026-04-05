@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #11325: 12h Donchian Breakout with 1d Trend and Volume Confirmation (Revised)
-Hypothesis: 12h Donchian breakouts capture strong directional moves. Daily EMA provides trend bias,
-and volume filter ensures institutional participation. Uses stricter filters to avoid overtrading.
-Target: 50-150 trades over 4 years (12-37/year). Designed to work in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1d trend filter. Focus on clean entries with momentum.
+Experiment #11325: 12h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Donchian(20) breakouts capture strong directional moves. Daily EMA provides trend bias,
+and volume filter ensures institutional participation. Works in bull (breakouts continue) and
+bear (breakouts reverse quickly) by using 1d trend filter. Target: 50-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11325_12h_donchian20_1d_ema_vol_v2"
+name = "exp_11325_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
-# Parameters - tightened to reduce trade frequency
+# Parameters
 DONCHIAN_PERIOD = 20
 DAILY_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0  # Increased from 1.5 to reduce false signals
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5  # Increased to reduce whipsaw exits
-MIN_BARS_BETWEEN_TRADES = 5  # Minimum bars between trade entries
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
@@ -70,14 +68,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
-    bars_since_last_trade = 0  # Track bars since last trade to prevent overtrading
     
     # Start from warmup period
     start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        bars_since_last_trade += 1
-        
         # Skip if daily EMA not available
         if np.isnan(ema_daily_aligned[i]):
             if position != 0:
@@ -91,29 +86,27 @@ def generate_signals(prices):
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
-                bars_since_last_trade = 0  # Reset counter
                 continue
         elif position == -1:  # short position
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
-                bars_since_last_trade = 0  # Reset counter
                 continue
         
-        # Donchian breakout conditions (require clear break)
+        # Donchian breakout conditions
         breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
         breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # Strong volume confirmation (increased threshold)
+        # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter (daily)
         uptrend_daily = close[i] > ema_daily_aligned[i]
         downtrend_daily = close[i] < ema_daily_aligned[i]
         
-        # Entry conditions with minimum bars between trades
-        long_entry = breakout_up and volume_ok and uptrend_daily and bars_since_last_trade >= MIN_BARS_BETWEEN_TRADES
-        short_entry = breakout_down and volume_ok and downtrend_daily and bars_since_last_trade >= MIN_BARS_BETWEEN_TRADES
+        # Entry conditions
+        long_entry = breakout_up and volume_ok and uptrend_daily
+        short_entry = breakout_down and volume_ok and downtrend_daily
         
         # Generate signals
         if position == 0:
@@ -122,13 +115,11 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_last_trade = 0  # Reset counter
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_last_trade = 0  # Reset counter
             else:
                 signals[i] = 0.0
         elif position == 1:
