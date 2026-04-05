@@ -1,30 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #10942: 12h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: Donchian(20) breakouts on 12h timeframe capture strong directional moves. 
-Daily EMA provides trend bias, volume filter ensures institutional participation, and 
-weekly trend filter adds additional confirmation. Designed to work in both bull (breakouts 
-continue) and bear (breakouts reverse quickly) by using multi-timeframe trend filters. 
-Target: 50-150 trades over 4 years (12-37/year).
+Experiment #10943: 4h Donchian Breakout with 12h Trend and Volume Confirmation
+Hypothesis: 4h Donchian(20) breakouts capture directional moves with proper risk management.
+12h EMA provides trend bias to avoid counter-trend trades, volume filter ensures institutional
+participation. ATR-based stoploss limits drawdown. Designed for 15-40 trades/year to minimize
+fee drag while maintaining statistical significance.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10942_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_10943_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
-# Parameters
+# Parameters - tuned for optimal trade frequency
 DONCHIAN_PERIOD = 20
-DAILY_EMA_PERIOD = 21
-WEEKLY_EMA_PERIOD = 21
+TREND_EMA_PERIOD = 25  # 12h EMA for trend filter
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8  # Higher threshold to reduce trades
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5  # Wider stop to reduce whipsaws
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
@@ -47,20 +45,17 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load daily and weekly data ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily and weekly EMA for trend
-    ema_daily = calculate_ema(df_daily['close'].values, DAILY_EMA_PERIOD)
-    ema_weekly = calculate_ema(df_weekly['close'].values, WEEKLY_EMA_PERIOD)
-    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
-    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    # Calculate 12h EMA for trend
+    ema_12h = calculate_ema(df_12h['close'].values, TREND_EMA_PERIOD)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -76,11 +71,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, WEEKLY_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily or weekly EMA not available
-        if np.isnan(ema_daily_aligned[i]) or np.isnan(ema_weekly_aligned[i]):
+        # Skip if 12h EMA not available
+        if np.isnan(ema_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -106,15 +101,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filters (daily and weekly)
-        uptrend_daily = close[i] > ema_daily_aligned[i]
-        downtrend_daily = close[i] < ema_daily_aligned[i]
-        uptrend_weekly = close[i] > ema_weekly_aligned[i]
-        downtrend_weekly = close[i] < ema_weekly_aligned[i]
+        # Trend filter (12h)
+        uptrend_12h = close[i] > ema_12h_aligned[i]
+        downtrend_12h = close[i] < ema_12h_aligned[i]
         
-        # Entry conditions - require both daily and weekly trend alignment
-        long_entry = breakout_up and volume_ok and uptrend_daily and uptrend_weekly
-        short_entry = breakout_down and volume_ok and downtrend_daily and downtrend_weekly
+        # Entry conditions
+        long_entry = breakout_up and volume_ok and uptrend_12h
+        short_entry = breakout_down and volume_ok and downtrend_12h
         
         # Generate signals
         if position == 0:
