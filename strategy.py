@@ -15,11 +15,11 @@ name = "exp_8544_1d_donchian20_1w_trend_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
-# Parameters
+# Parameters - optimized for more trades while maintaining quality
 DONCHIAN_PERIOD = 20
 TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.3  # Reduced from 1.5 to increase trade frequency
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -103,7 +103,7 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry conditions
+        # Entry conditions - relaxed to increase trade frequency
         long_entry = bull_bias and long_breakout and volume_confirmed
         short_entry = bear_bias and short_breakout and volume_confirmed
         
