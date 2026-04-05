@@ -22,7 +22,7 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 4
+MAX_HOLD_BARS = 4  # Reduced for 12h to prevent overtrading
 
 def generate_signals(prices):
     n = len(prices)
