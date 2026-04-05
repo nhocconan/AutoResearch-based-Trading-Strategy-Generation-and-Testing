@@ -1,44 +1,65 @@
 #!/usr/bin/env python3
 """
-exp_7040_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation. 
-In bull markets (price > 1d EMA50): long Donchian(20) breakouts with volume spike.
-In bear markets (price < 1d EMA50): short Donchian(20) breakdowns with volume spike.
-Volume confirms institutional participation in breakouts. Designed for 4h timeframe 
-to capture 19-50 trades/year (75-200 total over 4 years) with discrete sizing.
-Uses ATR-based stoploss for risk management. Works in both bull and bear by 
-adapting to daily trend regime.
+exp_7039_6h_camarilla1d_pivot_vol_v1
+Hypothesis: 6h Camarilla pivot fade/breakout strategy using 1d pivots. At R3/S3 levels, fade (mean revert) with volume confirmation. At R4/S4 levels, breakout continuation with volume confirmation. Uses 12h EMA50 as trend filter to align with intermediate trend. Designed for low trade frequency (~15-30/year) to minimize fee drag while capturing reversals and continuations at key levels.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7040_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7039_6h_camarilla1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0
+VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 50  # ~8.3 months (4h bars)
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 20  # ~5 days
+EMA_PERIOD = 50
+PIVOT_LOOKBACK = 1  # use prior day's pivot
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA trend filter
+    # Load HTF data ONCE before loop - using 1d for pivots and EMA
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA for trend filter
+    # Calculate 1d Camarilla pivot levels from prior day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    
+    # Prior day's values (shifted by 1 to avoid look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_ = prev_high - prev_low
+    
+    # Camarilla levels
+    r3 = pivot + (range_ * 1.1 / 4)
+    s3 = pivot - (range_ * 1.1 / 4)
+    r4 = pivot + (range_ * 1.1 / 2)
+    s4 = pivot - (range_ * 1.1 / 2)
+    
+    # Calculate 1d EMA50 for trend filter
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    
+    # Align to LTF (6h)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -47,10 +68,6 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
     # ATR for stoploss
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
@@ -58,22 +75,19 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Volume MA for confirmation
-    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(r3_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -99,31 +113,37 @@ def generate_signals(prices):
             continue
             
         # Volume confirmation
+        vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Trend filter: 1d EMA50
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Determine trend direction from 1d EMA50
+        daily_uptrend = close[i] > ema_1d_aligned[i]
+        daily_downtrend = close[i] < ema_1d_aligned[i]
         
-        # Entry logic: Donchian breakout/breakdown with volume and trend filter
-        long_signal = False
-        short_signal = False
-        
-        if uptrend and vol_confirmed:
-            # In uptrend: long Donchian breakout
-            long_signal = close[i] > highest_high[i]
-        elif downtrend and vol_confirmed:
-            # In downtrend: short Donchian breakdown
-            short_signal = close[i] < lowest_low[i]
+        # Camarilla-based signals
+        fade_long = (close[i] <= s3_aligned[i]) and daily_uptrend and vol_confirmed
+        fade_short = (close[i] >= r3_aligned[i]) and daily_downtrend and vol_confirmed
+        breakout_long = (close[i] >= r4_aligned[i]) and daily_uptrend and vol_confirmed
+        breakout_short = (close[i] <= s4_aligned[i]) and daily_downtrend and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if long_signal:
+            if fade_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif short_signal:
+            elif fade_short:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+            elif breakout_long:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -135,3 +155,164 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+exp_7039_6h_camarilla1d_pivot_vol_v1
+Hypothesis: 6h Camarilla pivot fade/breakout strategy using 1d pivots. At R3/S3 levels, fade (mean revert) with volume confirmation. At R4/S4 levels, breakout continuation with volume confirmation. Uses 12h EMA50 as trend filter to align with intermediate trend. Designed for low trade frequency (~15-30/year) to minimize fee drag while capturing reversals and continuations at key levels.
+"""
+
+from mtf_data import get_htf_data, align_htf_to_ltf
+import numpy as np
+import pandas as pd
+
+name = "exp_7039_6h_camarilla1d_pivot_vol_v1"
+timeframe = "6h"
+leverage = 1.0
+
+# Parameters
+VOL_MA_PERIOD = 20
+VOL_BASE_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 20  # ~5 days
+EMA_PERIOD = 50
+PIVOT_LOOKBACK = 1  # use prior day's pivot
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 60:
+        return np.zeros(n)
+    
+    # Load HTF data ONCE before loop - using 1d for pivots and EMA
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d Camarilla pivot levels from prior day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Prior day's values (shifted by 1 to avoid look-ahead)
+    prev_high = np.roll(high_1d, 1)
+    prev_low = np.roll(low_1d, 1)
+    prev_close = np.roll(close_1d, 1)
+    prev_high[0] = np.nan
+    prev_low[0] = np.nan
+    prev_close[0] = np.nan
+    
+    pivot = (prev_high + prev_low + prev_close) / 3.0
+    range_ = prev_high - prev_low
+    
+    # Camarilla levels
+    r3 = pivot + (range_ * 1.1 / 4)
+    s3 = pivot - (range_ * 1.1 / 4)
+    r4 = pivot + (range_ * 1.1 / 2)
+    s4 = pivot - (range_ * 1.1 / 2)
+    
+    # Calculate 1d EMA50 for trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    
+    # Align to LTF (6h)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Calculate LTF indicators
+    close = prices['close'].values
+    high = prices['high'].values
+    low = prices['low'].values
+    volume = prices['volume'].values
+    
+    # ATR for stoploss
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    bars_since_entry = 0
+    
+    # Start from warmup period
+    start = max(VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    
+    for i in range(start, n):
+        bars_since_entry += 1
+        
+        # Skip if HTF data not available
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(r3_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
+            
+        # Check stoploss
+        if position == 1:  # long position
+            if close[i] <= entry_price - ATR_STOP_MULTIPLIER * atr[i]:
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= entry_price + ATR_STOP_MULTIPLIER * atr[i]:
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
+                continue
+                
+        # Time-based exit
+        if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
+            signals[i] = 0.0
+            position = 0
+            bars_since_entry = 0
+            continue
+            
+        # Volume confirmation
+        vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        
+        # Determine trend direction from 1d EMA50
+        daily_uptrend = close[i] > ema_1d_aligned[i]
+        daily_downtrend = close[i] < ema_1d_aligned[i]
+        
+        # Camarilla-based signals
+        fade_long = (close[i] <= s3_aligned[i]) and daily_uptrend and vol_confirmed
+        fade_short = (close[i] >= r3_aligned[i]) and daily_downtrend and vol_confirmed
+        breakout_long = (close[i] >= r4_aligned[i]) and daily_uptrend and vol_confirmed
+        breakout_short = (close[i] <= s4_aligned[i]) and daily_downtrend and vol_confirmed
+        
+        # Enter new positions only if flat
+        if position == 0:
+            if fade_long:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+            elif fade_short:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+            elif breakout_long:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+            elif breakout_short:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                bars_since_entry = 0
+            else:
+                signals[i] = 0.0
+        else:
+            # Hold current position
+            signals[i] = position * SIGNAL_SIZE
+    
+    return signals
+
+</think>
