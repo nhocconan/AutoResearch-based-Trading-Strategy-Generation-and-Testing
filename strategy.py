@@ -1,9 +1,10 @@
-# 2025-06-20
-# Strategy: 1d Donchian breakout with 1w EMA trend and volume confirmation
-# Hypothesis: 1d Donchian(20) breakouts capture long-term trends. 1w EMA provides trend bias,
-# and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-# bear (breakouts reverse quickly) by using 1w trend filter. Target: 30-100 trades over 4 years.
-# Uses 1d timeframe with 1w HTF as requested.
+#!/usr/bin/env python3
+"""
+Experiment #11618: 1d Donchian Breakout with 1w Trend and Volume Confirmation
+Hypothesis: Daily Donchian(20) breakouts capture major trends. Weekly EMA provides trend bias,
+and volume filter ensures institutional participation. Works in bull (breakouts continue) and
+bear (breakouts reverse quickly) by using weekly trend filter. Target: 30-100 trades over 4 years.
+"""
 
 import numpy as np
 import pandas as pd
@@ -46,14 +47,14 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data ONCE before loop
+    # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1w EMA for trend
+    # Calculate weekly EMA for trend
     ema_1w = calculate_ema(df_1w['close'].values, TREND_EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 1d indicators
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -72,7 +73,7 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 1w EMA not available
+        # Skip if weekly EMA not available
         if np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
@@ -99,7 +100,7 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (1w)
+        # Trend filter (weekly)
         uptrend_1w = close[i] > ema_1w_aligned[i]
         downtrend_1w = close[i] < ema_1w_aligned[i]
         
