@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #10448: 12h Donchian Breakout + Weekly Trend + Volume Spike
-Hypothesis: Donchian(20) breakouts on 12h timeframe in the direction of weekly trend (EMA50) with volume confirmation
-provide high-probability trend continuation trades. The 12h timeframe reduces trade frequency to avoid fee drag,
-while weekly trend filter ensures alignment with major market cycles. Volume filters reduce false breakouts.
-Designed to work in both bull markets (breakouts above weekly EMA) and bear markets (breakdowns below weekly EMA).
-Target: 50-150 total trades over 4 years (12-37/year).
+Experiment #10450: 1d Donchian Breakout + Weekly Trend + Volume Spike
+Hypothesis: Daily Donchian(20) breakouts in the direction of weekly EMA50 trend with volume confirmation
+provide high-probability trend continuation trades. Works in bull markets (breakouts above weekly EMA)
+and bear markets (breakdowns below weekly EMA). Volume filters reduce false breakouts.
+Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10448_12h_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "12h"
+name = "exp_10450_1d_donchian_breakout_weekly_trend_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
@@ -55,10 +54,10 @@ def generate_signals(prices):
     weekly_close = df_weekly['close'].values
     weekly_ema = calculate_ema(weekly_close, WEEKLY_EMA_PERIOD)
     
-    # Align weekly EMA to 12h timeframe
+    # Align weekly EMA to daily timeframe
     weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
     
-    # Calculate 12h indicators
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -134,4 +133,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</response>
