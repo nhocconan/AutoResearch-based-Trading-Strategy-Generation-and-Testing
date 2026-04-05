@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #10284: 1d Donchian Breakout + Weekly Trend + Volume Spike
-Hypothesis: Daily Donchian(20) breakouts in the direction of weekly trend (EMA40) with volume confirmation
+Experiment #10288: 12h Donchian Breakout + Weekly Trend + Volume Spike
+Hypothesis: Donchian(20) breakouts in the direction of weekly trend (EMA40) with volume confirmation
 provide high-probability trend continuation trades. Works in bull markets (breakouts above weekly EMA)
 and bear markets (breakdowns below weekly EMA). Volume filters reduce false breakouts.
-Target: 30-100 total trades over 4 years (7-25/year).
+Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10284_1d_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "exp_10288_12h_donchian_breakout_weekly_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -26,7 +26,7 @@ ATR_STOP_MULTIPLIER = 2.5
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    lower = pd.Series(high).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
 def calculate_ema(close, period):
@@ -54,10 +54,10 @@ def generate_signals(prices):
     weekly_close = df_weekly['close'].values
     weekly_ema = calculate_ema(weekly_close, WEEKLY_EMA_PERIOD)
     
-    # Align weekly EMA to 1d timeframe
+    # Align weekly EMA to 12h timeframe
     weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
     
-    # Calculate 1d indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -133,4 +133,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</>
