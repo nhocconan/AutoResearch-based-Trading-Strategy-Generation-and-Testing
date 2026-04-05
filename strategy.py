@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-exp_7541_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
-In bull markets (price > 1d EMA200): long breakout above 4h Donchian upper.
-In bear markets (price < 1d EMA200): short breakdown below 4h Donchian lower.
+exp_7542_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
+In bull markets (price > 1d EMA200): long breakout above 12h Donchian upper.
+In bear markets (price < 1d EMA200): short breakdown below 12h Donchian lower.
 Volume must be above 20-period average to confirm breakout strength.
 Uses ATR-based stoploss and target-based exits.
-Targets 75-200 trades over 4 years (19-50/year) with strict breakout conditions.
+Targets 50-150 trades over 4 years (12-37/year) with strict breakout conditions.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7541_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7542_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
