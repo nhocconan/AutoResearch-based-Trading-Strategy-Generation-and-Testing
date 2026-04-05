@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 exp_7175_6h_donchian20_1w_pivot_v1
-Hypothesis: 6h Donchian(20) breakout with 1w Camarilla pivot direction filter.
-In weekly bullish regime (price > weekly pivot): only take long breakouts.
-In weekly bearish regime (price < weekly pivot): only take short breakouts.
-Volume confirmation required. Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
-Uses weekly Camarilla pivot for trend regime and 6h volume for confirmation.
-Works in both bull and bear markets by adapting to weekly pivot-defined trend regime.
+Hypothesis: 6h Donchian(20) breakout with 1w pivot point regime filter for BTC/ETH/SOL.
+- In bull/bear regimes (price > weekly pivot): trade breakout continuation only
+- In range regimes (price near weekly pivot): trade mean reversion at Donchian extremes
+- Uses volume confirmation to avoid false breakouts
+- Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years)
+- Works in both bull and bear markets by adapting to weekly pivot-defined regime
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -20,40 +20,42 @@ leverage = 1.0
 # Parameters
 DONCHIAN_PERIOD = 20
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5
+VOL_BASE_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 8  # ~8 bars * 6h = ~2 days
+ATR_STOP_MULTIPLIER = 2.0
+MAX_HOLD_BARS = 8  # ~32 hours
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1w for Camarilla pivot
+    # Load HTF data ONCE before loop - using 1w for pivot points
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1w Camarilla pivot levels
+    # Calculate weekly pivot points (standard formula)
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    range_1w = high_1w - low_1w
-    
-    # Camarilla levels
-    r4_1w = pivot_1w + range_1w * 1.1 / 2
-    r3_1w = pivot_1w + range_1w * 1.1 / 4
-    s3_1w = pivot_1w - range_1w * 1.1 / 4
-    s4_1w = pivot_1w - range_1w * 1.1 / 2
+    # Pivot point = (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Support 1 = (2 * Pivot) - High
+    s1_1w = (2 * pivot_1w) - high_1w
+    # Resistance 1 = (2 * Pivot) - Low
+    r1_1w = (2 * pivot_1w) - low_1w
+    # Support 2 = Pivot - (High - Low)
+    s2_1w = pivot_1w - (high_1w - low_1w)
+    # Resistance 2 = Pivot + (High - Low)
+    r2_1w = pivot_1w + (high_1w - low_1w)
     
     # Align to LTF (6h)
     pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -115,22 +117,27 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine weekly regime
-        weekly_bullish = close[i] > pivot_1w_aligned[i]
-        weekly_bearish = close[i] < pivot_1w_aligned[i]
+        # Determine market regime based on weekly pivot
+        above_pivot = close[i] > pivot_1w_aligned[i]
+        below_pivot = close[i] < pivot_1w_aligned[i]
+        near_pivot = np.abs(close[i] - pivot_1w_aligned[i]) < (1.0 * atr[i])  # Within 1 ATR of pivot
         
-        # Breakout conditions with volume confirmation
-        breakout_long = (close[i] > highest_high[i]) and vol_confirmed
-        breakout_short = (close[i] < lowest_low[i]) and vol_confirmed
+        # Fade at extremes in range regime (near pivot)
+        fade_long = near_pivot and (close[i] <= lowest_low[i]) and vol_confirmed
+        fade_short = near_pivot and (close[i] >= highest_high[i]) and vol_confirmed
+        
+        # Continuation breakouts in trending regime (above/below pivot)
+        continuation_long = above_pivot and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_pivot and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if weekly_bullish and breakout_long:
+            if fade_long or continuation_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif weekly_bearish and breakout_short:
+            elif fade_short or continuation_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -142,3 +149,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
