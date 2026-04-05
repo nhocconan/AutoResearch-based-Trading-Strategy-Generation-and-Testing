@@ -2,9 +2,11 @@
 """
 exp_7278_1d_donchian20_1w_ema_vol_v1
 Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
-Uses weekly EMA to define trend regime (bull/bear/range) and 1d Donchian breakouts with volume confirmation for entries.
-Designed for 1d timeframe to capture major swings with ~7-25 trades/year (30-100 total over 4 years).
-Works in bull markets via continuation breakouts and in bear markets via mean reversion at extremes when price is near weekly EMA (range regime).
+In trending markets (price > 1w EMA): continuation breakouts in breakout direction.
+In ranging markets (price near 1w EMA): mean reversion at Donchian extremes with volume confirmation.
+Uses 1w EMA for trend regime and 1d volume for confirmation.
+Designed for 1d timeframe to capture swings with ~7-25 trades/year (30-100 total over 4 years).
+Works in both bull and bear markets by adapting to EMA-defined trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -17,13 +19,13 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-WEEKLY_EMA_PERIOD = 50
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.8
+VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 15  # ~15 days
+MAX_HOLD_BARS = 10  # ~10 days
 
 def generate_signals(prices):
     n = len(prices)
@@ -35,7 +37,7 @@ def generate_signals(prices):
     
     # Calculate 1w EMA
     close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=WEEKLY_EMA_PERIOD, adjust=False, min_periods=WEEKLY_EMA_PERIOD).mean().values
+    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
     # Align to LTF (1d)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
@@ -66,7 +68,7 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
@@ -100,12 +102,12 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on weekly EMA
+        # Determine market regime based on EMA
         above_ema = close[i] > ema_1w_aligned[i]
         below_ema = close[i] < ema_1w_aligned[i]
-        near_ema = np.abs(close[i] - ema_1w_aligned[i]) < (1.0 * atr[i])  # Within 1.0 ATR of weekly EMA (range regime)
+        near_ema = np.abs(close[i] - ema_1w_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of EMA
         
-        # Fade at extremes in ranging market (near weekly EMA)
+        # Fade at extremes in ranging market (near EMA)
         fade_long = near_ema and (close[i] <= lowest_low[i]) and vol_confirmed
         fade_short = near_ema and (close[i] >= highest_high[i]) and vol_confirmed
         
