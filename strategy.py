@@ -1,10 +1,7 @@
-#!/usr/bin/env python3
-"""
-Experiment #11588: 12h Donchian Breakout with 1w Trend and Volume Confirmation
-Hypothesis: 12h Donchian(20) breakouts capture medium-term trends. 1w EMA provides trend bias,
-and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1w trend filter. Target: 50-150 trades over 4 years.
-"""
+# 2025-06-23 11:00:00 - Experiment #11588: 12h Donchian Breakout with 1w Trend and Volume Confirmation
+# Hypothesis: 12h Donchian(20) breakouts capture long-term trends. 1w EMA provides trend bias,
+# and volume filter ensures institutional participation. Works in bull (breakouts continue) and
+# bear (breakouts reverse quickly) by using 1w trend filter. Target: 50-150 trades over 4 years.
 
 import numpy as np
 import pandas as pd
@@ -18,10 +15,10 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.2
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
