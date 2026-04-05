@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #8758: 1d Donchian breakout + 1w trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Daily timeframe reduces trade frequency to combat fee drag while capturing major trends.
-Using 1-week trend filter (EMA50) ensures alignment with multi-week momentum, avoiding counter-trend trades.
-Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk.
-Targets 30-100 trades over 4 years (7-25/year) to minimize fee impact while maintaining statistical validity.
+Experiment #8759: 6h Donchian breakout + 12h/1d trend filter + volume confirmation + ATR stoploss.
+Hypothesis: 6h timeframe balances trade frequency and signal quality. Using 12h/1d EMA trend filters ensures 
+alignment with higher timeframe momentum, reducing counter-trend trades. Volume confirmation filters breakouts 
+requiring institutional participation. ATR-based stops manage risk. Targets 75-150 total trades over 4 years 
+(19-38/year) to balance statistical validity with fee minimization.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8758_1d_donchian20_1w_trend_vol_v1"
-timeframe = "1d"
+name = "exp_8759_6h_donchian20_12h_1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_PERIOD = 50
+TREND_FAST = 20  # 12h EMA
+TREND_SLOW = 50  # 1d EMA
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -39,18 +40,24 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
+    # Calculate 12h EMA for fast trend
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=TREND_FAST, adjust=False, min_periods=TREND_FAST).mean().values
     
-    # Price relative to 1w EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_1w > ema_1w, 1, 
-                     np.where(close_1w < ema_1w, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
+    # Calculate 1d EMA for slow trend
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=TREND_SLOW, adjust=False, min_periods=TREND_SLOW).mean().values
     
-    # Calculate LTF indicators (daily)
+    # Trend alignment: both EMAs must agree
+    trend_bullish = (close_12h > ema_12h) & (close_1d > ema_1d)
+    trend_bearish = (close_12h < ema_12h) & (close_1d < ema_1d)
+    trend_bullish_aligned = align_htf_to_ltf(prices, df_12h, trend_bullish.astype(float))
+    trend_bearish_aligned = align_htf_to_ltf(prices, df_12h, trend_bearish.astype(float))
+    
+    # Calculate LTF indicators (6h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -72,11 +79,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_FAST, TREND_SLOW, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(price_vs_ema_aligned[i]):
+        if np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -92,9 +99,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1w EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1w price above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1w price below EMA50
+        # Determine market bias from 12h/1d EMA alignment
+        bull_bias = trend_bullish_aligned[i] == 1.0   # Both EMAs bullish
+        bear_bias = trend_bearish_aligned[i] == 1.0   # Both EMAs bearish
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
