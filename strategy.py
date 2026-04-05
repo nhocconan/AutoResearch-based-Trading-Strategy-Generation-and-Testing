@@ -1,46 +1,47 @@
 #!/usr/bin/env python3
 """
-exp_7323_4h_donchian20_12h_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 12h EMA(50) trend filter and volume confirmation.
-In trending markets (price > 12h EMA): continuation breakouts in breakout direction.
-In ranging markets (price near 12h EMA): mean reversion at Donchian extremes with volume confirmation.
-Uses 12h EMA for trend regime and 4h volume for confirmation.
-Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
-Uses 12h timeframe to better capture multi-day trends while reducing whipsaw vs 1d EMA.
+exp_7324_1d_donchian20_1w_ema_vol_v1
+Hypothesis: Daily Donchian(20) breakout with weekly EMA(20) trend filter and volume confirmation.
+Uses weekly EMA to define trend regime: above EMA = bullish (favor longs), below EMA = bearish (favor shorts).
+In trending markets: trade Donchian breakouts in direction of weekly trend.
+In ranging markets (price near weekly EMA): mean reversion at Donchian extremes with volume confirmation.
+Designed for 1d timeframe to capture swings with ~7-25 trades/year (30-100 total over 4 years).
+Volume confirmation reduces false breakouts. ATR-based stoploss manages risk.
+Works in both bull and bear markets by adapting to weekly EMA-defined trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7323_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7324_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+WEEKLY_EMA_PERIOD = 20
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # ~40 hours
+MAX_HOLD_BARS = 30  # ~30 days max hold
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 12h for EMA trend
-    df_12h = get_htf_data(prices, '12h')
+    # Load HTF data ONCE before loop - using 1w for EMA trend
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 12h EMA
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate 1w EMA
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=WEEKLY_EMA_PERIOD, adjust=False, min_periods=WEEKLY_EMA_PERIOD).mean().values
     
-    # Align to LTF (4h)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align to LTF (1d)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -68,13 +69,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_12h_aligned[i]):
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -102,12 +103,12 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on 12h EMA
-        above_ema = close[i] > ema_12h_aligned[i]
-        below_ema = close[i] < ema_12h_aligned[i]
-        near_ema = np.abs(close[i] - ema_12h_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of EMA
+        # Determine market regime based on weekly EMA
+        above_ema = close[i] > ema_1w_aligned[i]
+        below_ema = close[i] < ema_1w_aligned[i]
+        near_ema = np.abs(close[i] - ema_1w_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of EMA
         
-        # Fade at extremes in ranging market (near EMA)
+        # Fade at extremes in ranging market (near weekly EMA)
         fade_long = near_ema and (close[i] <= lowest_low[i]) and vol_confirmed
         fade_short = near_ema and (close[i] >= highest_high[i]) and vol_confirmed
         
@@ -134,5 +135,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
