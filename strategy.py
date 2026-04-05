@@ -1,151 +1,120 @@
 #!/usr/bin/env python3
 """
-Experiment #7679: 6-hour ADX/ATR Breakout with 12-hour ATR Regime Filter.
-Hypothesis: Use ADX to detect trending markets and ATR-based breakouts for entry.
-In trending regimes (ADX > 25), enter on ATR-based breakouts in the direction of the trend.
-In ranging regimes (ADX < 20), fade at extreme ATR deviations from mean.
-12-hour ATR regime filter prevents entries during extreme volatility expansions.
-Targets 80-150 total trades over 4 years (20-38/year).
+Experiment #7680: 4-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
+Hypothesis: In bull markets (price > 1d EMA200), go long on breakout above 4h Donchian upper.
+In bear markets (price < 1d EMA200), go short on breakdown below 4h Donchian lower.
+Volume must be above 1.3x average to confirm breakout strength.
+ATR-based stoploss (2x) and target (3x) for risk management.
+Targets 75-200 trades over 4 years (19-50/year).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7679_6h_adxatr_regime_v1"
-timeframe = "6h"
+name = "exp_7680_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
+DONCHIAN_PERIOD = 20
+EMA_TREND = 200
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.3  # volume must be 1.3x average
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ADX_PERIOD = 14
-ATR_MA_PERIOD = 50
-ADX_TREND_THRESHOLD = 25
-ADX_RANGE_THRESHOLD = 20
-ATR_MULT_BREAKOUT = 1.5
-ATR_MULT_FADE = 2.5
-SIGNAL_SIZE = 0.28
+ATR_STOP_MULTIPLIER = 2.0
+ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 200:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h ATR for regime filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    
-    tr1_12h = pd.Series(high_12h - low_12h)
-    tr2_12h = pd.Series(np.abs(high_12h - np.roll(close_12h, 1)))
-    tr3_12h = pd.Series(np.abs(low_12h - np.roll(close_12h, 1)))
-    tr_12h = pd.concat([tr1_12h, tr2_12h, tr3_12h], axis=1).max(axis=1)
-    atr_12h = tr_12h.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
-    atr_ma_12h = pd.Series(atr_12h).ewm(span=ATR_MA_PERIOD, adjust=False, min_periods=ATR_MA_PERIOD).mean().values
-    atr_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_ma_12h)
+    # Calculate 1d EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
     # Calculate LTF indicators
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
+    volume = prices['volume'].values
     
-    # True Range and ATR
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR for risk management
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # ADX calculation
-    plus_dm = pd.Series(np.where((high - high.shift(1)) > (low.shift(1) - low), 
-                                 np.maximum(high - high.shift(1), 0), 0))
-    minus_dm = pd.Series(np.where((low.shift(1) - low) > (high - high.shift(1)), 
-                                  np.maximum(low.shift(1) - low, 0), 0))
-    
-    tr_for_adx = tr.copy()
-    atr_for_adx = tr_for_adx.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values
-    
-    plus_di = 100 * (plus_dm.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values / atr_for_adx)
-    minus_di = 100 * (minus_dm.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values / atr_for_adx)
-    
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
+    target_price = 0.0
     
     # Start from warmup period
-    start = max(ATR_PERIOD * 2, ADX_PERIOD * 2, ATR_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(atr_ma_12h_aligned[i]):
+        if np.isnan(ema_1d_200_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
-        # Volatility regime filter: avoid extreme ATR expansion
-        vol_regime_ok = atr[i] < (atr_ma_12h_aligned[i] * 2.0)
-        
-        # Skip if ATR data not ready
-        if np.isnan(atr[i]) or np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-            continue
-        
-        # Check stoploss (2x ATR)
+        # Check stoploss or target
         if position == 1:  # long position
-            if close[i] <= stop_price:
+            if close[i] <= stop_price or close[i] >= target_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            if close[i] >= stop_price:
+            if close[i] >= stop_price or close[i] <= target_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         # Determine market regime
-        trending = adx[i] > ADX_TREND_THRESHOLD
-        ranging = adx[i] < ADX_RANGE_THRESHOLD
+        bull_regime = close[i] > ema_1d_200_aligned[i]   # price above 1d EMA200
+        bear_regime = close[i] < ema_1d_200_aligned[i]   # price below 1d EMA200
         
-        # Calculate ATR-based bands
-        atr_mult = ATR_MULT_BREAKOUT if trending else ATR_MULT_FADE
-        upper_band = close[i-1] + (atr[i] * atr_mult) if i > 0 else close[i]
-        lower_band = close[i-1] - (atr[i] * atr_mult) if i > 0 else close[i]
+        # Volume confirmation
+        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        
+        # Breakout conditions
+        upper_breakout = (high[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
+        lower_breakout = (low[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
         # Entry conditions
-        long_entry = False
-        short_entry = False
-        
-        if trending:
-            # In trending markets: breakout in direction of DI crossover
-            if plus_di[i] > minus_di[i] and high[i] > upper_band:
-                long_entry = True
-            elif minus_di[i] > plus_di[i] and low[i] < lower_band:
-                short_entry = True
-        elif ranging:
-            # In ranging markets: fade at extreme deviations
-            if high[i] > upper_band:
-                short_entry = True  # fade the breakout
-            elif low[i] < lower_band:
-                long_entry = True   # fade the breakdown
+        long_entry = bull_regime and upper_breakout and volume_confirmed
+        short_entry = bear_regime and lower_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
-            if long_entry and vol_regime_ok:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (2.0 * atr[i])
-            elif short_entry and vol_regime_ok:
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (2.0 * atr[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
