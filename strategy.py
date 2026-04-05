@@ -3,12 +3,12 @@
 Experiment #7673: 4-hour Donchian(20) breakout with 12-hour EMA200 trend filter and volume confirmation.
 Hypothesis: In bull markets (price > 12h EMA200), go long on breakout above 4h Donchian upper.
 In bear markets (price < 12h EMA200), go short on breakdown below 4h Donchian lower.
-Volume must be above 1.3x average to confirm breakout strength.
+Volume must be above 1.5x average to confirm breakout strength.
 ATR-based stoploss (2x) and target (3x) for risk management.
-Targets 80-180 trades over 4 years (20-45/year).
+Targets 75-200 trades over 4 years (19-50/year) with strict breakout conditions.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_ft_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
@@ -20,8 +20,8 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_TREND = 200
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.3  # volume must be 1.3x average
-SIGNAL_SIZE = 0.28
+VOLUME_THRESHOLD = 1.5  # volume must be 1.5x average
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
