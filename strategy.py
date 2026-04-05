@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #7736: 12-hour Donchian(20) breakout with 1-day EMA trend filter, volume confirmation, and ATR risk management.
-Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA and aligned 1d trend (EMA50) captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above EMA) and bear markets (short breakdowns below EMA). Targets 50-150 trades over 4 years.
+Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA and aligned 1d trend (EMA50) captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above EMA) and bear markets (short breakdowns below EMA). Targets 75-200 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
