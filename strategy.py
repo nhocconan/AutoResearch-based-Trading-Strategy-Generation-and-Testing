@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 exp_7327_6h_donchian20_1d_pivot_vol_v1
-Hypothesis: 6h Donchian(20) breakout with 1d pivot point direction and volume confirmation.
+Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot levels and volume confirmation.
 In trending markets (price above/below daily pivot): continuation breakouts in breakout direction.
 In ranging markets (price near daily pivot): mean reversion at Donchian extremes with volume confirmation.
-Uses 1d pivot points for trend regime and 6h volume for confirmation.
+Uses 1d Camarilla pivot for trend regime and 6h volume for confirmation.
 Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
 Works in both bull and bear markets by adapting to pivot-defined trend regime.
 """
@@ -31,30 +31,29 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for pivot points
+    # Load HTF data ONCE before loop - using 1d for Camarilla pivot
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d pivot points (standard floor trader pivots)
+    # Calculate 1d Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - low_1d
-    s1 = 2 * pivot - high_1d
-    r2 = pivot + (high_1d - low_1d)
-    s2 = pivot - (high_1d - low_1d)
-    r3 = high_1d + 2 * (pivot - low_1d)
-    s3 = low_1d - 2 * (high_1d - pivot)
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels: R3, R4, S3, S4
+    r3 = pivot + (range_1d * 1.1 / 2)
+    r4 = pivot + (range_1d * 1.1)
+    s3 = pivot - (range_1d * 1.1 / 2)
+    s4 = pivot - (range_1d * 1.1)
     
     # Align to LTF (6h)
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -116,7 +115,7 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on pivot
+        # Determine market regime based on daily pivot
         above_pivot = close[i] > pivot_aligned[i]
         below_pivot = close[i] < pivot_aligned[i]
         near_pivot = np.abs(close[i] - pivot_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of pivot
@@ -148,3 +147,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
