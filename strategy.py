@@ -1,45 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #11199: 6h Williams Alligator + Elder Ray + 12h Trend
-Hypothesis: Williams Alligator identifies trend presence and direction, Elder Ray confirms
-momentum behind the trend, and 12h trend filter ensures alignment with higher timeframe.
-Works in bull (Alligator jaws up, Elder Bull Power positive) and bear (Alligator jaws down,
-Elder Bear Power negative) by requiring alignment. Target: 50-150 trades over 4 years.
+Experiment #11200: 4h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Donchian(20) breakouts capture strong directional moves. Daily EMA provides trend bias,
+and volume filter ensures institutional participation. Works in bull (breakouts continue) and
+bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11199_6h_alligator_elder_12h_trend_v1"
-timeframe = "6h"
+name = "exp_11200_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-ALLIGATOR_PERIOD = 13
-ELDER_RAY_PERIOD = 13
+DONCHIAN_PERIOD = 20
+DAILY_EMA_PERIOD = 21
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_alligator(close, period):
-    """Williams Alligator: Jaw (13-period SMMA, 8-shift), Teeth (8-period SMMA, 5-shift), Lips (5-period SMMA, 3-shift)"""
-    def smma(series, period):
-        sma = pd.Series(series).rolling(window=period, min_periods=period).mean().values
-        smma_vals = np.full_like(series, np.nan, dtype=float)
-        for i in range(len(series)):
-            if i < period - 1:
-                continue
-            elif i == period - 1:
-                smma_vals[i] = sma[i]
-            else:
-                smma_vals[i] = (smma_vals[i-1] * (period - 1) + series[i]) / period
-        return smma_vals
-    
-    jaw = smma(close, period)
-    teeth = smma(close, period // 2)  # 8-period
-    lips = smma(close, period // 3)   # 5-period (approx)
-    return jaw, teeth, lips
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -59,27 +47,21 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate 12h EMA for trend
-    ema_12h = calculate_ema(df_12h['close'].values, 21)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate daily EMA for trend
+    ema_daily = calculate_ema(df_daily['close'].values, DAILY_EMA_PERIOD)
+    ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator
-    jaw, teeth, lips = calculate_alligator(close, ALLIGATOR_PERIOD)
-    
-    # Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
-    ema_13 = calculate_ema(close, ELDER_RAY_PERIOD)
-    bull_power = high - ema_13
-    bear_power = ema_13 - low
-    
-    # ATR for stoploss
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -88,11 +70,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ALLIGATOR_PERIOD, ELDER_RAY_PERIOD) + 5  # extra for Alligator shifts
+    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 12h EMA not available
-        if np.isnan(ema_12h_aligned[i]):
+        # Skip if daily EMA not available
+        if np.isnan(ema_daily_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -111,23 +93,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Alligator conditions: Jaw > Teeth > Lips = uptrend, Jaw < Teeth < Lips = downtrend
-        alligator_long = (not np.isnan(jaw[i]) and not np.isnan(teeth[i]) and not np.isnan(lips[i]) and
-                         jaw[i] > teeth[i] and teeth[i] > lips[i])
-        alligator_short = (not np.isnan(jaw[i]) and not np.isnan(teeth[i]) and not np.isnan(lips[i]) and
-                          jaw[i] < teeth[i] and teeth[i] < lips[i])
+        # Donchian breakout conditions
+        breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
+        breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # Elder Ray conditions
-        elder_long = bull_power[i] > 0  # Bull Power positive
-        elder_short = bear_power[i] > 0  # Bear Power positive
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # 12h trend filter
-        uptrend_12h = close[i] > ema_12h_aligned[i]
-        downtrend_12h = close[i] < ema_12h_aligned[i]
+        # Trend filter (daily)
+        uptrend_daily = close[i] > ema_daily_aligned[i]
+        downtrend_daily = close[i] < ema_daily_aligned[i]
         
-        # Entry conditions: Alligator direction + Elder Ray momentum + 12h trend alignment
-        long_entry = alligator_long and elder_long and uptrend_12h
-        short_entry = alligator_short and elder_short and downtrend_12h
+        # Entry conditions
+        long_entry = breakout_up and volume_ok and uptrend_daily
+        short_entry = breakout_down and volume_ok and downtrend_daily
         
         # Generate signals
         if position == 0:
