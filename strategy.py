@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #7638: 1d Donchian(20) breakout with 1-week EMA200 trend filter and volume confirmation.
-Hypothesis: In bull markets (price > 1w EMA200), go long on breakout above 1d Donchian upper.
-In bear markets (price < 1w EMA200), go short on breakdown below 1d Donchian lower.
-Volume must be above 1.5x average to confirm breakout strength.
+Hypothesis: On daily timeframe, go long when price breaks above Donchian upper channel in bull regime (price > 1w EMA200),
+go short when price breaks below Donchian lower channel in bear regime (price < 1w EMA200).
+Volume must be above 2.0x average to confirm breakout strength.
 ATR-based stoploss (2x) and target (3x) for risk management.
-Targets 30-100 trades over 4 years (7-25/year) with strict breakout conditions.
+Targets 30-100 trades over 4 years (7-25/year) with strict breakout conditions on daily timeframe.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -20,18 +20,18 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_TREND = 200
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5  # volume must be 1.5x average
+VOLUME_THRESHOLD = 2.0  # volume must be 2.0x average to reduce trades
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
-    n = len(prices)
+    n = len(prrices)
     if n < 200:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (weekly)
+    # Load HTF data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate 1w EMA200 for trend filter
@@ -39,7 +39,7 @@ def generate_signals(prices):
     ema_1w_200 = pd.Series(close_1w).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
     ema_1w_200_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_200)
     
-    # Calculate LTF indicators (daily)
+    # Calculate LTF indicators (1d)
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -123,3 +123,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</python>
