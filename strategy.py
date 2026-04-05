@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-exp_7460_4h_donchian20_1d_ema_vol_v1
+exp_7461_4h_donchian20_1d_ema_vol_v1
 Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
 Uses daily EMA for primary trend to reduce whipsaws, targeting 100-200 trades over 4 years.
 Designed to work in both bull and bear markets by following the daily trend direction.
@@ -10,7 +10,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7460_4h_donchian20_1d_ema_vol_v1"
+name = "exp_7461_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,11 +18,11 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0
+VOL_BASE_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 8  # Reduced for 4h timeframe
+MAX_HOLD_BARS = 6  # Reduced for 4h timeframe to reduce overtrading
 
 def generate_signals(prices):
     n = len(prices)
