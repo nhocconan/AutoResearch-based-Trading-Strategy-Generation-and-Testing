@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #7707: 6-hour Donchian(20) breakout with 1-day weekly pivot filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 6h with volume confirmation and aligned with
-weekly pivot direction (bullish above weekly pivot, bearish below weekly pivot) captures sustained moves
-while avoiding whipsaw. Weekly pivot provides stronger trend bias than daily EMA. Targets 50-150 trades
-over 4 years.
+Experiment #7708: 12-hour Donchian(20) breakout with 1-week EMA trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 12h with volume confirmation and aligned 1-week trend
+captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above weekly EMA) and bear
+markets (short breakdowns below weekly EMA). Targets 50-150 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7707_6h_donchian20_1d_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_7708_12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-WEEKLY_PIVOT_METHOD = 'standard'  # standard pivot: (H+L+C)/3
+EMA_TREND = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -25,28 +24,18 @@ ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
 
-def calculate_weekly_pivot(high, low, close):
-    """Calculate weekly pivot point: (H + L + C) / 3"""
-    return (high + low + close) / 3.0
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d data to calculate weekly pivot
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot from daily data
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Weekly pivot: using the most recent week's data
-    # For simplicity, we'll use daily pivot as proxy for weekly bias
-    # In practice, would resample to weekly, but using daily to avoid resampling per rules
-    pivot_1d = calculate_weekly_pivot(high_1d, low_1d, close_1d)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
+    # Calculate 1w EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -75,11 +64,11 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(pivot_1d_aligned[i]):
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -95,9 +84,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market regime based on weekly pivot
-        bull_regime = close[i] > pivot_1d_aligned[i]   # price above weekly pivot
-        bear_regime = close[i] < pivot_1d_aligned[i]   # price below weekly pivot
+        # Determine market regime
+        bull_regime = close[i] > ema_1w_aligned[i]   # price above 1w EMA
+        bear_regime = close[i] < ema_1w_aligned[i]   # price below 1w EMA
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -132,3 +121,5 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+
+</think>
