@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 exp_7028_12h_donchian20_1w_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1w EMA200 trend filter and volume confirmation.
-In bull markets (price > 1w EMA200): long breakouts only. In bear markets (price < 1w EMA200): short breakouts only.
-1w EMA200 provides long-term trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
+Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+In bull markets (price > 1w EMA50): long breakouts only. In bear markets (price < 1w EMA50): short breakouts only.
+1w EMA50 provides long-term trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
 Designed for 12h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
 Works in both bull and bear markets by aligning with 1w trend direction.
 """
@@ -23,8 +23,8 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 20  # ~10 months (12h bars)
-EMA_PERIOD = 200
+MAX_HOLD_BARS = 30  # ~30*12h = 15 days
+EMA_PERIOD = 50
 
 def generate_signals(prices):
     n = len(prices)
@@ -34,7 +34,7 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop - using 1w for EMA
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1w EMA200
+    # Calculate 1w EMA50
     close_1w = df_1w['close'].values
     ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
@@ -101,7 +101,7 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend direction from 1w EMA200
+        # Determine trend direction from 1w EMA50
         weekly_uptrend = close[i] > ema_1w_aligned[i]
         weekly_downtrend = close[i] < ema_1w_aligned[i]
         
@@ -128,3 +128,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
