@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #9379: 6h Donchian breakout + 12h trend filter + volume confirmation + ATR stoploss.
+Experiment #9383: 4h Donchian breakout + 12h trend filter + volume confirmation + ATR stoploss.
 Hypothesis: Donchian breakouts capture trends; 12h EMA filter ensures directional alignment; volume confirms institutional participation.
 Targets 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost. Works in bull (breakouts) and bear (filtered shorts).
 """
@@ -9,8 +9,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_9379_6h_donchian20_12h_trend_vol_v1"
-timeframe = "6h"
+name = "exp_9383_4h_donchian20_12h_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -48,7 +48,7 @@ def generate_signals(prices):
                      np.where(close_12h < ema_12h, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
     price_vs_ema_aligned = align_htf_to_ltf(prices, df_12h, price_vs_ema)
     
-    # Calculate LTF indicators (6h)
+    # Calculate LTF indicators (4h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
