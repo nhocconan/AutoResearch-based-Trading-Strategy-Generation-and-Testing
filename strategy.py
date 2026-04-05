@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #11077: 4h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: Donchian(20) breakouts on 4h capture strong directional moves. 
-Daily EMA provides trend bias, and volume filter ensures institutional participation.
-This design targets 75-200 trades over 4 years (19-50/year) by requiring 
-three clear conditions: breakout, volume surge, and trend alignment.
-Works in bull markets (breakouts continue) and bear markets (breakouts reverse quickly)
-by using 1d trend filter to avoid counter-trend entries.
+Hypothesis: Donchian(20) breakouts capture strong directional moves. Daily EMA provides trend bias,
+and volume filter ensures institutional participation. Works in bull (breakouts continue) and
+bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
@@ -17,14 +14,14 @@ name = "exp_11077_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
-# Parameters - tuned for optimal trade frequency
+# Parameters
 DONCHIAN_PERIOD = 20
 DAILY_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0  # Higher threshold to reduce trades
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5  # Wider stop to reduce premature exits
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
@@ -100,14 +97,14 @@ def generate_signals(prices):
         breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
         breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # Volume confirmation - higher threshold for fewer trades
+        # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter (daily)
         uptrend_daily = close[i] > ema_daily_aligned[i]
         downtrend_daily = close[i] < ema_daily_aligned[i]
         
-        # Entry conditions - all three must be true
+        # Entry conditions
         long_entry = breakout_up and volume_ok and uptrend_daily
         short_entry = breakout_down and volume_ok and downtrend_daily
         
@@ -131,4 +128,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</p>
