@@ -2,10 +2,12 @@
 """
 exp_7297_4h_donchian20_1d_ema_vol_v2
 Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Enhanced version with stricter volume confirmation (2.0x vs 1.5x) and reduced max hold (8 bars) to decrease trade frequency.
-Targets 75-150 total trades over 4 years (19-38/year) to avoid fee drag while maintaining edge.
-Uses 1d EMA for trend regime: continuation breakouts in trend direction, mean reversion at extremes when ranging.
-Designed for 4h timeframe to capture medium-term swings with low turnover.
+In trending markets (price > EMA): continuation breakouts in breakout direction.
+In ranging markets (price near EMA): mean reversion at Donchian extremes with volume confirmation.
+Uses 1d EMA for trend regime and 4h volume for confirmation.
+Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
+Adds adaptive volume threshold based on volatility regime to reduce false signals.
+Works in both bull and bear markets by adapting to EMA-defined trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -20,15 +22,16 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0  # Increased from 1.5 to reduce false signals
+BASE_VOL_THRESHOLD = 1.3
+VOLATILITY_LOOKBACK = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 8  # Reduced from 10 to decrease trade frequency
+MAX_HOLD_BARS = 12  # ~48 hours
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop - using 1d for EMA trend
@@ -54,6 +57,10 @@ def generate_signals(prices):
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
+    # Volume volatility for adaptive threshold
+    vol_ratio = volume / (vol_ma + 1e-10)
+    vol_volatility = pd.Series(vol_ratio).rolling(window=VOLATILITY_LOOKBACK, min_periods=VOLATILITY_LOOKBACK).std().values
+    
     # ATR for stoploss
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
@@ -67,7 +74,7 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, VOLATILITY_LOOKBACK) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
@@ -95,11 +102,12 @@ def generate_signals(prices):
         if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
             signals[i] = 0.0
             position = 0
-                bars_since_entry = 0
+            bars_since_entry = 0
             continue
             
-        # Volume confirmation with stricter threshold
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        # Adaptive volume confirmation based on volatility regime
+        vol_threshold = BASE_VOL_THRESHOLD * (1.0 + 0.5 * np.tanh(vol_volatility[i]))
+        vol_confirmed = volume[i] > vol_ma[i] * vol_threshold if not np.isnan(vol_ma[i]) else False
         
         # Determine market regime based on EMA
         above_ema = close[i] > ema_1d_aligned[i]
