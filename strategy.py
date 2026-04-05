@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 exp_7428_12h_donchian20_1w_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1w EMA(20) trend filter and volume confirmation.
-Uses weekly EMA for trend filtering to reduce whipsaws and capture major trends.
-Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag.
+Hypothesis: 12h Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
+Uses weekly EMA for primary trend to reduce whipsaws, targeting 50-150 trades over 4 years.
+Designed to work in both bull and bear markets by following the weekly trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -16,17 +16,17 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 20
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 20
+MAX_HOLD_BARS = 8  # Reduced for 12h timeframe
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 80:
+    if n < 60:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop - using 1w for EMA trend
