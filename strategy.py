@@ -1,25 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #7979: 6-hour Williams %R with 12-hour trend filter and volume confirmation.
-Hypothesis: Williams %R (14) identifies overbought/oversold conditions on 6h, with trades taken only when aligned with 12h trend (price above/below 12h EMA50) and volume >1.5x 20-period MA. This combines mean reversion in ranging markets with trend alignment to avoid counter-trend trades, targeting 80-180 trades over 4 years.
+Experiment #7980: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.5x 20-period MA 
+and aligned daily trend (price above/below daily EMA34) captures sustained moves. 
+The daily timeframe provides robust trend context to improve performance in 
+both bull and bear markets while maintaining moderate trade frequency. 
+Target: 75-200 total trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7979_6h_williamsr14_12h_ema_vol_v1"
-timeframe = "6h"
+name = "exp_7980_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-WILLIAMS_R_PERIOD = 14
-WR_OVERBOUGHT = -20
-WR_OVERSOLD = -80
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-EMA_PERIOD = 50
+EMA_PERIOD = 34
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
@@ -30,15 +32,15 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h EMA
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate 1d EMA
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
     # Price relative to EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_12h > ema_12h, 1, -1)  # 1=bullish, -1=bearish
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_12h, price_vs_ema)
+    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -46,14 +48,9 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100
-    highest_high = pd.Series(high).rolling(window=WILLIAMS_R_PERIOD, min_periods=WILLIAMS_R_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=WILLIAMS_R_PERIOD, min_periods=WILLIAMS_R_PERIOD).min().values
-    williams_r = np.where(
-        (highest_high - lowest_low) != 0,
-        ((highest_high - close) / (highest_high - lowest_low)) * -100,
-        0  # Avoid division by zero
-    )
+    # Price channel (Donchian)
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -72,7 +69,7 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(WILLIAMS_R_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
@@ -92,20 +89,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 12h EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 12h close above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 12h close below EMA50
+        # Determine market bias from 1d EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA34
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA34
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Williams %R conditions
-        oversold = williams_r[i] <= WR_OVERSOLD   # Oversold condition
-        overbought = williams_r[i] >= WR_OVERBOUGHT  # Overbought condition
+        # Breakout conditions - require close beyond channel bands to avoid wicks
+        upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
+        lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
-        # Entry conditions - mean reversion with trend alignment
-        long_entry = bull_bias and oversold and volume_confirmed
-        short_entry = bear_bias and overbought and volume_confirmed
+        # Entry conditions
+        long_entry = bull_bias and upper_breakout and volume_confirmed
+        short_entry = bear_bias and lower_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
@@ -129,4 +126,5 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</p>
+
+</think>
