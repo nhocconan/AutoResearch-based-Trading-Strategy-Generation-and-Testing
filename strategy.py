@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #8871: 6h Donchian breakout + 1d trend filter + volume confirmation.
-Hypothesis: 6h timeframe balances trade frequency and signal quality. 
-1d EMA50 provides trend filter to avoid counter-trend trades in both bull/bear markets.
-Volume confirmation ensures breakouts have institutional participation.
-Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost.
+Experiment #8872: 12h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
+Hypothesis: 12-hour timeframe balances trend capture with reduced trade frequency to combat fee drag.
+Using 1-day EMA trend filter ensures alignment with daily momentum. Volume confirmation filters
+breakouts requiring institutional participation. ATR-based stops manage risk. Targets 50-150 trades
+over 4 years (12-37/year) to minimize fee impact while maintaining statistical validity.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8871_6h_donchian20_1d_trend_vol_v1"
-timeframe = "6h"
+name = "exp_8872_12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -50,7 +50,7 @@ def generate_signals(prices):
                      np.where(close_1d < ema_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
     price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
     
-    # Calculate LTF indicators (6h)
+    # Calculate LTF indicators (12h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -127,3 +127,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</x>
