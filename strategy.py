@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #9211: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation + ATR stoploss.
-Hypothesis: Donchian breakouts capture trends; weekly pivot direction (from 1d candles) filters for institutional bias; volume confirms participation.
-Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost. Works in bull (breakouts above weekly pivot) and bear (breakouts below weekly pivot).
+Experiment #9219: 6h Donchian breakout + 12h/1d trend filter + volume confirmation + ATR stoploss.
+Hypothesis: Donchian breakouts capture trends across timeframes; 12h EMA filter ensures directional alignment; 1d EMA filter provides stronger trend filter; volume confirms institutional participation. Works in bull (breakouts) and bear (filtered shorts).
 """
 
+from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9211_6h_donchian20_1d_pivot_vol_v1"
+name = "exp_9219_6h_donchian20_12h_1d_trend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-PIVOT_LOOKBACK = 5  # days for weekly pivot (5 trading days)
+TREND_PERIOD_12H = 30
+TREND_PERIOD_1D = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.2
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -31,29 +31,32 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_weekly_pivot(high, low, close):
-    """Calculate weekly pivot point from daily OHLC (simplified: average of weekly high/low/close)"""
-    # For weekly pivot, we use the weekly high, low, close
-    weekly_high = pd.Series(high).rolling(window=PIVOT_LOOKBACK, min_periods=PIVOT_LOOKBACK).max()
-    weekly_low = pd.Series(low).rolling(window=PIVOT_LOOKBACK, min_periods=PIVOT_LOOKBACK).min()
-    weekly_close = pd.Series(close).rolling(window=PIVOT_LOOKBACK, min_periods=PIVOT_LOOKBACK).last()
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    return pivot.values
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - 1d for weekly pivot
+    # Load HTF data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d weekly pivot
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=TREND_PERIOD_12H, adjust=False, min_periods=TREND_PERIOD_12H).mean().values
+    
+    # Calculate 1d EMA for trend filter
     close_1d = df_1d['close'].values
-    weekly_pivot = calculate_weekly_pivot(high_1d, low_1d, close_1d)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    ema_1d = pd.Series(close_1d).ewm(span=TREND_PERIOD_1D, adjust=False, min_periods=TREND_PERIOD_1D).mean().values
+    
+    # Price relative to 12h EMA: above = bullish bias, below = bearish bias
+    price_vs_ema_12h = np.where(close_12h > ema_12h, 1, 
+                       np.where(close_12h < ema_12h, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
+    price_vs_ema_12h_aligned = align_htf_to_ltf(prices, df_12h, price_vs_ema_12h)
+    
+    # Price relative to 1d EMA: above = bullish bias, below = bearish bias
+    price_vs_ema_1d = np.where(close_1d > ema_1d, 1, 
+                      np.where(close_1d < ema_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
+    price_vs_ema_1d_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema_1d)
     
     # Calculate LTF indicators (6h)
     high = prices['high'].values
@@ -77,11 +80,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, PIVOT_LOOKBACK, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_PERIOD_12H, TREND_PERIOD_1D, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(weekly_pivot_aligned[i]):
+        if np.isnan(price_vs_ema_12h_aligned[i]) or np.isnan(price_vs_ema_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -97,10 +100,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from weekly pivot
-        # Above weekly pivot = bullish bias, below = bearish bias
-        bull_bias = close[i] > weekly_pivot_aligned[i]
-        bear_bias = close[i] < weekly_pivot_aligned[i]
+        # Determine market bias from 12h EMA and 1d EMA (both must agree)
+        bull_bias = (price_vs_ema_12h_aligned[i] == 1) and (price_vs_ema_1d_aligned[i] == 1)   # Both timeframes bullish
+        bear_bias = (price_vs_ema_12h_aligned[i] == -1) and (price_vs_ema_1d_aligned[i] == -1)  # Both timeframes bearish
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
@@ -135,29 +137,30 @@ def generate_signals(prices):
     return signals
 
 </think>
+
 #!/usr/bin/env python3
 """
-Experiment #9211: 6h Donchian(20) breakout + 1d weekly pivot direction + volume confirmation + ATR stoploss.
-Hypothesis: Donchian breakouts capture trends; weekly pivot direction (from 1d candles) filters for institutional bias; volume confirms participation.
-Targets 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost. Works in bull (breakouts above weekly pivot) and bear (breakouts below weekly pivot).
+Experiment #9219: 6h Donchian breakout + 12h/1d trend filter + volume confirmation + ATR stoploss.
+Hypothesis: Donchian breakouts capture trends across timeframes; 12h EMA filter ensures directional alignment; 1d EMA filter provides stronger trend filter; volume confirms institutional participation. Works in bull (breakouts) and bear (filtered shorts).
 """
 
+from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9211_6h_donchian20_1d_pivot_vol_v1"
+name = "exp_9219_6h_donchian20_12h_1d_trend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-PIVOT_LOOKBACK = 5  # days for weekly pivot (5 trading days)
+TREND_PERIOD_12H = 30
+TREND_PERIOD_1D = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.2
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -168,29 +171,32 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_weekly_pivot(high, low, close):
-    """Calculate weekly pivot point from daily OHLC (simplified: average of weekly high/low/close)"""
-    # For weekly pivot, we use the weekly high, low, close
-    weekly_high = pd.Series(high).rolling(window=PIVOT_LOOKBACK, min_periods=PIVOT_LOOKBACK).max()
-    weekly_low = pd.Series(low).rolling(window=PIVOT_LOOKBACK, min_periods=PIVOT_LOOKBACK).min()
-    weekly_close = pd.Series(close).rolling(window=PIVOT_LOOKBACK, min_periods=PIVOT_LOOKBACK).last()
-    pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    return pivot.values
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - 1d for weekly pivot
+    # Load HTF data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d weekly pivot
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=TREND_PERIOD_12H, adjust=False, min_periods=TREND_PERIOD_12H).mean().values
+    
+    # Calculate 1d EMA for trend filter
     close_1d = df_1d['close'].values
-    weekly_pivot = calculate_weekly_pivot(high_1d, low_1d, close_1d)
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    ema_1d = pd.Series(close_1d).ewm(span=TREND_PERIOD_1D, adjust=False, min_periods=TREND_PERIOD_1D).mean().values
+    
+    # Price relative to 12h EMA: above = bullish bias, below = bearish bias
+    price_vs_ema_12h = np.where(close_12h > ema_12h, 1, 
+                       np.where(close_12h < ema_12h, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
+    price_vs_ema_12h_aligned = align_htf_to_ltf(prices, df_12h, price_vs_ema_12h)
+    
+    # Price relative to 1d EMA: above = bullish bias, below = bearish bias
+    price_vs_ema_1d = np.where(close_1d > ema_1d, 1, 
+                      np.where(close_1d < ema_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
+    price_vs_ema_1d_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema_1d)
     
     # Calculate LTF indicators (6h)
     high = prices['high'].values
@@ -214,11 +220,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, PIVOT_LOOKBACK, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_PERIOD_12H, TREND_PERIOD_1D, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(weekly_pivot_aligned[i]):
+        if np.isnan(price_vs_ema_12h_aligned[i]) or np.isnan(price_vs_ema_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -234,10 +240,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from weekly pivot
-        # Above weekly pivot = bullish bias, below = bearish bias
-        bull_bias = close[i] > weekly_pivot_aligned[i]
-        bear_bias = close[i] < weekly_pivot_aligned[i]
+        # Determine market bias from 12h EMA and 1d EMA (both must agree)
+        bull_bias = (price_vs_ema_12h_aligned[i] == 1) and (price_vs_ema_1d_aligned[i] == 1)   # Both timeframes bullish
+        bear_bias = (price_vs_ema_12h_aligned[i] == -1) and (price_vs_ema_1d_aligned[i] == -1)  # Both timeframes bearish
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
