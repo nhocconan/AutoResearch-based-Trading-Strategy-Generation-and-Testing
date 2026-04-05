@@ -1,23 +1,22 @@
+# 10276: 12h Donchian Breakout + Daily Trend + Volume Spike
+# Hypothesis: 12h Donchian(20) breakouts aligned with daily trend (EMA50) and volume spikes
+# capture sustained moves with fewer trades (target: 50-150/4y) to avoid fee drag.
+# Works in bull (breakouts above daily EMA) and bear (breakdowns below daily EMA).
+# Volume filter reduces false breakouts. ATR stop manages risk.
+
 #!/usr/bin/env python3
-"""
-Experiment #10272: 12h Donchian Breakout + Daily Trend + Volume Spike
-Hypothesis: Donchian(20) breakouts on 12h timeframe in the direction of daily trend (EMA50) with volume confirmation.
-This strategy targets 12h timeframe to reduce trade frequency and avoid fee drag. Uses daily EMA for trend filter to work in both bull and bear markets.
-Breakouts above daily EMA = long, below daily EMA = short. Volume spike filters false breakouts.
-Target: 50-150 total trades over 4 years (12-37/year).
-"""
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10272_12h_donchian_breakout_daily_trend_volume_v1"
+name = "exp_10276_12h_donchian_breakout_daily_trend_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
+VOLUME_SPIKE_MULTIPLIER = 1.8
 DAILY_EMA_PERIOD = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
