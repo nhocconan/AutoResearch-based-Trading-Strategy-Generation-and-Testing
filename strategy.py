@@ -1,64 +1,43 @@
 #!/usr/bin/env python3
 """
-exp_7375_6h_donchian20_1w_pivot_vol_v1
-Hypothesis: 6h Donchian(20) breakout with weekly pivot direction filter and volume confirmation.
-Weekly pivots provide structural support/resistance from higher timeframe, reducing false breakouts.
-Volume confirmation ensures breakout legitimacy. Designed for 50-150 total trades over 4 years.
-Works in bull/bear via pivot regime filter (long above weekly pivot, short below).
+exp_7377_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+Uses 1d HTF for trend to reduce noise vs 12h, targeting 75-200 trades over 4 years.
+Discrete position sizing (0.0, ±0.25) minimizes fee churn. Works in bull/bear via EMA regime filter.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7375_6h_donchian20_1w_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_7377_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 12  # ~3 days for 6h
+MAX_HOLD_BARS = 8
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1w for weekly pivots
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop - using 1d for EMA trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points (using prior week's OHLC)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d EMA
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Weekly pivot: P = (H + L + C) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    # Weekly R1, S1, R2, S2, R3, S3
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
-    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
-    r4_1w = r3_1w + (high_1w - low_1w)  # Extended levels
-    s4_1w = s3_1w - (high_1w - low_1w)
-    
-    # Align weekly pivot levels to 6h
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    # Align to LTF (4h)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -86,13 +65,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(pivot_1w_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -120,32 +99,26 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on weekly pivot
-        # Long bias: price above weekly pivot
-        # Short bias: price below weekly pivot
-        above_pivot = close[i] > pivot_1w_aligned[i]
-        below_pivot = close[i] < pivot_1w_aligned[i]
+        # Determine market regime based on EMA
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
         
-        # Continuation breakouts in direction of weekly pivot bias
-        continuation_long = above_pivot and (close[i] > highest_high[i]) and vol_confirmed
-        continuation_short = below_pivot and (close[i] < lowest_low[i]) and vol_confirmed
-        
-        # Fade at extreme weekly levels (R3/S3, R4/S4) with volume
-        fade_short = (close[i] >= r3_1w_aligned[i]) and vol_confirmed
-        fade_long = (close[i] <= s3_1w_aligned[i]) and vol_confirmed
+        # Continuation breakouts in trending market
+        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Breakout retest entries (pullback to breakout level with volume)
-        retest_long = above_pivot and (close[i] <= highest_high[i-1] * 1.005) and (close[i] >= lowest_low[i-1]) and vol_confirmed
-        retest_short = below_pivot and (close[i] >= lowest_low[i-1] * 0.995) and (close[i] <= highest_high[i-1]) and vol_confirmed
+        retest_long = above_ema and (close[i] <= highest_high[i-1] * 1.005) and (close[i] >= lowest_low[i-1]) and vol_confirmed
+        retest_short = below_ema and (close[i] >= lowest_low[i-1] * 0.995) and (close[i] <= highest_high[i-1]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if continuation_long or retest_long or fade_long:
+            if continuation_long or retest_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif continuation_short or retest_short or fade_short:
+            elif continuation_short or retest_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -157,5 +130,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
