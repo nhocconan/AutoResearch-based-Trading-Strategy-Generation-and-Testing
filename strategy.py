@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 """
-Experiment #10883: 4h Donchian Breakout with 12h Trend and Volume Confirmation
-Hypothesis: Donchian(20) breakout captures breakout momentum, while 12h EMA provides trend bias.
-Volume confirmation ensures institutional participation. ATR-based stop loss manages risk.
-Designed for 4h timeframe with target of 75-200 total trades over 4 years (19-50/year).
-Works in both bull and bear markets by using trend filter to align with higher timeframe direction.
+Experiment #10888: 12h Donchian Breakout with Weekly Trend and Volume Confirmation
+Hypothesis: Donchian(20) breakouts on 12h capture major price moves, filtered by weekly EMA trend (1w) and volume confirmation. This combination works in both bull and bear markets by only taking breakouts in the direction of the long-term trend, reducing whipsaws. Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10883_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_10888_12h_donchian20_weekly_trend_volume_v1"
+timezone = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+WEEKLY_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -25,10 +22,10 @@ ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels: upper and lower bands"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return highest_high, lowest_low
+    """Calculate Donchian Channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -40,8 +37,6 @@ def calculate_atr(high, low, close, period):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    # First TR is just high - low (no previous close)
-    tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
@@ -50,14 +45,14 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 12h EMA for trend
-    ema_12h = calculate_ema(df_12h['close'].values, EMA_PERIOD)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate weekly EMA for trend
+    ema_weekly = calculate_ema(df_weekly['close'].values, WEEKLY_EMA_PERIOD)
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -73,11 +68,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 12h EMA not available
-        if np.isnan(ema_12h_aligned[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(ema_weekly_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -96,24 +91,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Breakout conditions
-        long_breakout = close[i] > donchian_upper[i]
-        short_breakout = close[i] < donchian_lower[i]
+        # Donchian breakout conditions
+        breakout_up = close[i] > donchian_upper[i-1] if not np.isnan(donchian_upper[i-1]) else False
+        breakout_down = close[i] < donchian_lower[i-1] if not np.isnan(donchian_lower[i-1]) else False
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (12h)
-        uptrend_12h = close[i] > ema_12h_aligned[i]
-        downtrend_12h = close[i] < ema_12h_aligned[i]
+        # Trend filter (weekly)
+        uptrend_weekly = close[i] > ema_weekly_aligned[i]
+        downtrend_weekly = close[i] < ema_weekly_aligned[i]
         
         # Entry conditions
-        long_entry = long_breakout and volume_ok and uptrend_12h
-        short_entry = short_breakout and volume_ok and downtrend_12h
-        
-        # Exit conditions (optional: reverse on opposite breakout)
-        long_exit = short_breakout and volume_ok
-        short_exit = long_breakout and volume_ok
+        long_entry = breakout_up and volume_ok and uptrend_weekly
+        short_entry = breakout_down and volume_ok and downtrend_weekly
         
         # Generate signals
         if position == 0:
@@ -130,21 +121,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            if long_exit:
-                signals[i] = -SIGNAL_SIZE  # reverse to short
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-            else:
-                signals[i] = SIGNAL_SIZE
+            signals[i] = SIGNAL_SIZE
         elif position == -1:
-            if short_exit:
-                signals[i] = SIGNAL_SIZE  # reverse to long
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            else:
-                signals[i] = -SIGNAL_SIZE
+            signals[i] = -SIGNAL_SIZE
     
     return signals
-</truncated>
