@@ -2,12 +2,11 @@
 """
 exp_7138_1d_donchian20_1w_hma_v1
 Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter.
-Long when price breaks above Donchian(20) high AND 1w HMA rising.
-Short when price breaks below Donchian(20) low AND 1w HMA falling.
-Volume confirmation reduces false breakouts.
-ATR-based stoploss and 5-day max hold control risk.
-Designed for 1d timeframe to capture major swings with ~7-25 trades/year (30-100 total over 4 years).
-Works in both bull and bear markets by following 1w HMA trend direction.
+In trending markets (price > HMA21): Donchian breakouts in trend direction.
+In ranging markets (price near HMA21): mean reversion at Donchian bands with volume confirmation.
+Uses 1w HMA for regime and 1d Donchian for entries/exits.
+Designed for 1d timeframe to capture swings with ~7-25 trades/year (30-100 total over 4 years).
+Works in both bull and bear markets by adapting to HMA-defined trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -20,20 +19,19 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-HMA_PERIOD = 21
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 5  # 5 days
+HMA_PERIOD = 21
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1w for HMA trend
+    # Load HTF data ONCE before loop - using 1w for HMA
     df_1w = get_htf_data(prices, '1w')
     
     # Calculate 1w HMA (Hull Moving Average)
@@ -44,15 +42,27 @@ def generate_signals(prices):
     # WMA function
     def wma(values, period):
         weights = np.arange(1, period + 1)
-        return np.convolve(values, weights, mode='full')[-len(values):] / weights.sum()
+        return np.convolve(values, weights, mode='valid') / weights.sum()
     
-    wma_half = wma(close_1w, half_period)
-    wma_full = wma(close_1w, HMA_PERIOD)
-    hma_raw = 2 * wma_half - wma_full
-    hma = wma(hma_raw, sqrt_period)
+    # Calculate HMA: WMA(2 * WMA(n/2) - WMA(n), sqrt(n))
+    wma_half = np.full_like(close_1w, np.nan)
+    wma_full = np.full_like(close_1w, np.nan)
+    
+    for i in range(half_period - 1, len(close_1w)):
+        wma_half[i] = wma(close_1w[i - half_period + 1:i + 1], half_period)
+    
+    for i in range(HMA_PERIOD - 1, len(close_1w)):
+        wma_full[i] = wma(close_1w[i - HMA_PERIOD + 1:i + 1], HMA_PERIOD)
+    
+    raw_hma = 2 * wma_half - wma_full
+    hma_1w = np.full_like(close_1w, np.nan)
+    
+    for i in range(sqrt_period - 1, len(raw_hma)):
+        if not np.isnan(raw_hma[i - sqrt_period + 1:i + 1]).any():
+            hma_1w[i] = wma(raw_hma[i - sqrt_period + 1:i + 1], sqrt_period)
     
     # Align to LTF (1d)
-    hma_aligned = align_htf_to_ltf(prices, df_1w, hma)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -86,7 +96,7 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(hma_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -104,40 +114,59 @@ def generate_signals(prices):
                 bars_since_entry = 0
                 continue
                 
-        # Time-based exit
-        if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
-            signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
-            continue
-            
+        # Determine market regime based on HMA
+        bull_regime = close[i] > hma_1w_aligned[i]
+        bear_regime = close[i] < hma_1w_aligned[i]
+        
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Check for Donchian breakouts
-        bull_breakout = close[i] > highest_high[i]
-        bear_breakout = close[i] < lowest_low[i]
+        # Donchian breakout conditions
+        breakout_up = close[i] > highest_high[i]
+        breakout_down = close[i] < lowest_low[i]
         
-        # Check HMA trend (rising/falling)
-        hma_rising = hma_aligned[i] > hma_aligned[i-1]
-        hma_falling = hma_aligned[i] < hma_aligned[i-1]
+        # Mean reversion conditions (touch bands and reverse)
+        touch_upper = abs(close[i] - highest_high[i]) < (highest_high[i] - lowest_low[i]) * 0.02
+        touch_lower = abs(close[i] - lowest_low[i]) < (highest_high[i] - lowest_low[i]) * 0.02
         
-        # Enter new positions only if flat
+        # Entry logic
         if position == 0:
-            # Long: bull breakout + rising HMA + volume
-            if bull_breakout and hma_rising and vol_confirmed:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-            # Short: bear breakout + falling HMA + volume
-            elif bear_breakout and hma_falling and vol_confirmed:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                bars_since_entry = 0
+            # In bull regime: trade breakouts up, fade touches down
+            if bull_regime:
+                if breakout_up and vol_confirmed:
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                elif touch_lower and vol_confirmed:
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+            # In bear regime: trade breakouts down, fade touches up
+            elif bear_regime:
+                if breakout_down and vol_confirmed:
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                elif touch_upper and vol_confirmed:
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+            # In transition regime (near HMA): only trade with strong volume confirmation
             else:
-                signals[i] = 0.0
+                if breakout_up and vol_confirmed:
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                elif breakout_down and vol_confirmed:
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
         else:
             # Hold current position
             signals[i] = position * SIGNAL_SIZE
