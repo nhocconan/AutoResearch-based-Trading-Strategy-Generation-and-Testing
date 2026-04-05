@@ -2,7 +2,7 @@
 """
 Experiment #8170: 1-day Donchian breakout with 1-week trend filter and volume confirmation.
 Hypothesis: Price breaking beyond 20-period high/low on 1d with volume >1.5x 20-period MA 
-and aligned 1w trend (price above/below 1w EMA21) captures sustained moves while avoiding 
+and aligned 1w trend (price above/below 1w EMA50) captures sustained moves while avoiding 
 whipsaw in both bull and bear markets. The 1w trend filter provides stronger trend context 
 than shorter timeframes, reducing false breakouts during consolidation periods.
 """
@@ -20,7 +20,7 @@ DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-EMA_PERIOD = 21
+EMA_PERIOD = 50
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
@@ -89,8 +89,8 @@ def generate_signals(prices):
                 continue
         
         # Determine market bias from 1w EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1w close above EMA21
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1w close below EMA21
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1w close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1w close below EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -125,3 +125,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</|endoftext|>
