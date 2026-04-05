@@ -127,6 +127,7 @@ def generate_signals(prices):
     return signals
 
 </think>
+
 #!/usr/bin/env python3
 """
 Experiment #8141: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
@@ -254,5 +255,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
-</think>
