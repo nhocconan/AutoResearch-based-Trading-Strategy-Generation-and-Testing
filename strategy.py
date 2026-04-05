@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
 """
-exp_7563_4h_donchian20_1d_ema_vol_v2
-Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
-Tightened entry conditions to reduce trade frequency: require volume > 2.0x average (was 1.5x)
-and add ADX(14) > 25 filter to ensure trending markets only. Targets 50-150 trades over 4 years.
-In bull markets (price > 1d EMA200): long breakout above 4h Donchian upper.
-In bear markets (price < 1d EMA200): short breakdown below 4h Donchian lower.
+exp_7565_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
+In bull markets (price > 1d EMA200): long breakout above 12h Donchian upper.
+In bear markets (price < 1d EMA200): short breakdown below 12h Donchian lower.
+Volume must be above 1.5x average to confirm breakout strength.
 ATR-based stoploss (2x) and target (3x) for risk management.
+Targets 50-150 trades over 4 years (12-37/year) with strict breakout conditions.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_ft_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7563_4h_donchian20_1d_ema_vol_v2"
-timeframe = "4h"
+name = "exp_7565_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 EMA_TREND = 200
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0  # Increased from 1.5 to reduce trades
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
+VOLUME_THRESHOLD = 1.5  # volume must be 1.5x average
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -62,16 +60,6 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # ADX for trend strength filter
-    plus_dm = pd.Series(np.where((high - high.shift(1)) > (low.shift(1) - low), np.maximum(high - high.shift(1), 0), 0))
-    minus_dm = pd.Series(np.where((low.shift(1) - low) > (high - high.shift(1)), np.maximum(low.shift(1) - low, 0), 0))
-    tr_adx = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_adx = tr_adx.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean()
-    plus_di = 100 * (plus_dm.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean() / atr_adx)
-    minus_di = 100 * (minus_dm.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean() / atr_adx)
-    dx = (np.abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -79,11 +67,11 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD, ADX_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1d_200_aligned[i]) or np.isnan(adx[i]):
+        if np.isnan(ema_1d_200_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -106,16 +94,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend strength filter
-        strong_trend = adx[i] > ADX_THRESHOLD
-        
         # Breakout conditions
         upper_breakout = (high[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
         lower_breakout = (low[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
         # Entry conditions
-        long_entry = bull_regime and upper_breakout and volume_confirmed and strong_trend
-        short_entry = bear_regime and lower_breakout and volume_confirmed and strong_trend
+        long_entry = bull_regime and upper_breakout and volume_confirmed
+        short_entry = bear_regime and lower_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
