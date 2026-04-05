@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #10862: 12h Donchian Breakout with 1d Trend Filter and Volume Confirmation
-Hypothesis: 12-hour Donchian(20) breakouts in the direction of the 1-day EMA trend with volume confirmation
-provide high-probability trades. Works in bull markets (trend following) and bear markets (mean reversion within trend).
-Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+Experiment #10862: 12h Donchian Breakout with 1d Trend and Volume Filter
+Hypothesis: 12-hour Donchian(20) breakouts in the direction of 1d EMA trend,
+with volume confirmation, provide high-probability trades. Works in bull markets
+(trend following) and bear markets (mean reversion within trend). Target: 50-150
+total trades over 4 years (12-37/year) on 12h timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10862_12h_donchian_1d_trend_volume_v1"
-timezone = "12h"
+name = "exp_10862_12h_donchian_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -22,6 +23,16 @@ VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -50,10 +61,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate Donchian channels
-    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -63,7 +71,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_1D_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_1D_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if 1d EMA not available
@@ -87,8 +95,8 @@ def generate_signals(prices):
                 continue
         
         # Breakout conditions
-        breakout_up = (not np.isnan(donchian_high[i-1]) and close[i] > donchian_high[i-1])
-        breakout_down = (not np.isnan(donchian_low[i-1]) and close[i] < donchian_low[i-1])
+        breakout_up = close[i] > donchian_upper[i] if not np.isnan(donchian_upper[i]) else False
+        breakout_down = close[i] < donchian_lower[i] if not np.isnan(donchian_lower[i]) else False
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -121,7 +129,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
