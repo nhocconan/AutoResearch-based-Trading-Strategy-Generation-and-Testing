@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #10557: 4h Donchian Breakout + Daily Trend + Volume Spike
-Hypothesis: 4-hour Donchian(20) breakouts aligned with daily EMA50 trend and volume spikes capture high-probability momentum moves. 
-Works in bull markets (breakouts above daily EMA) and bear markets (breakdowns below daily EMA). Volume filters reduce false breakouts.
-Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #10557: 4h Donchian(20) Breakout + 1d EMA Trend + Volume Spike
+Hypothesis: 4h Donchian breakouts in the direction of 1d EMA50 trend with volume confirmation
+capture trend continuation in both bull and bear markets. 4h timeframe limits overtrading
+while volume and trend filters reduce false signals. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10557_4h_donchian_breakout_daily_trend_volume_v1"
+name = "exp_10557_4h_donchian_breakout_1d_ema_volume_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
+VOLUME_SPIKE_MULTIPLIER = 1.8
 DAILY_EMA_PERIOD = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
