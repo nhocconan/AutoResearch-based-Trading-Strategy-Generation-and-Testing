@@ -1,36 +1,47 @@
 #!/usr/bin/env python3
 """
-Experiment #11254: 1h Donchian Breakout with 4h Trend and Volume Confirmation
-Hypothesis: 1h Donchian(20) breakouts with 4h EMA trend filter and volume confirmation capture momentum with controlled frequency. Uses 1d trend filter for additional bias. Target: 60-150 trades over 4 years.
+Experiment #11255: 6h Volume Spike + Weekly Support/Resistance
+Hypothesis: Volume spikes at key weekly levels indicate strong directional moves. 
+In bull markets, volume spikes break weekly resistance; in bear markets, 
+volume spikes break weekly support. Uses 1w levels for structure and 6h for timing.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11254_1h_donchian20_4h_1d_ema_vol_v1"
-timeframe = "1h"
+name = "exp_11255_6h_vol_spike_weekly_sr_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-HOUR4_EMA_PERIOD = 21
-DAY_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+VOLUME_SPIKE_THRESHOLD = 2.0
+WEEKLY_LOOKBACK = 12  # ~3 months for weekly high/low
+SUPPORT_RESISTANCE_BUFFER = 0.002  # 0.2% buffer
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_weekly_high_low(prices):
+    """Calculate weekly high and low from daily data"""
+    # Resample to weekly using actual weekly data from parquet
+    weekly_data = get_htf_data(prices, '1w')
+    if len(weekly_data) < 2:
+        return np.full(len(prices), np.nan), np.full(len(prices), np.nan)
+    
+    weekly_high = weekly_data['high'].values
+    weekly_low = weekly_data['low'].values
+    
+    # Expand rolling window for weekly high/low
+    roll_high = pd.Series(weekly_high).rolling(window=WEEKLY_LOOKBACK, min_periods=1).max().values
+    roll_low = pd.Series(weekly_low).rolling(window=WEEKLY_LOOKBACK, min_periods=1).min().values
+    
+    # Align to 6h timeframe
+    weekly_high_aligned = align_htf_to_ltf(prices, weekly_data, roll_high)
+    weekly_low_aligned = align_htf_to_ltf(prices, weekly_data, roll_low)
+    
+    return weekly_high_aligned, weekly_low_aligned
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -46,27 +57,20 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 4h EMA for trend
-    ema_4h = calculate_ema(df_4h['close'].values, HOUR4_EMA_PERIOD)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # Calculate 1d EMA for trend
-    ema_1d = calculate_ema(df_1d['close'].values, DAY_EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    # Volume spike detection
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Weekly support/resistance
+    weekly_high, weekly_low = calculate_weekly_high_low(prices)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -74,11 +78,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, HOUR4_EMA_PERIOD, DAY_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 4h or 1d EMA not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+        # Skip if weekly levels not available
+        if np.isnan(weekly_high[i]) or np.isnan(weekly_low[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -97,22 +101,21 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout conditions
-        breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
-        breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
+        # Volume spike condition
+        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Distance to weekly levels
+        dist_to_high = (weekly_high[i] - close[i]) / close[i] if weekly_high[i] > 0 else 1
+        dist_to_low = (close[i] - weekly_low[i]) / close[i] if weekly_low[i] > 0 else 1
         
-        # Trend filters (4h and 1d)
-        uptrend_4h = close[i] > ema_4h_aligned[i]
-        downtrend_4h = close[i] < ema_4h_aligned[i]
-        uptrend_1d = close[i] > ema_1d_aligned[i]
-        downtrend_1d = close[i] < ema_1d_aligned[i]
+        # Near weekly resistance (within buffer) - potential breakout
+        near_resistance = dist_to_high < SUPPORT_RESISTANCE_BUFFER and dist_to_high > 0
+        # Near weekly support (within buffer) - potential breakdown
+        near_support = dist_to_low < SUPPORT_RESISTANCE_BUFFER and dist_to_low > 0
         
-        # Entry conditions (require both 4h and 1d trend agreement)
-        long_entry = breakout_up and volume_ok and uptrend_4h and uptrend_1d
-        short_entry = breakout_down and volume_ok and downtrend_4h and downtrend_1d
+        # Entry conditions
+        long_entry = volume_spike and near_resistance and close[i] > weekly_high[i]
+        short_entry = volume_spike and near_support and close[i] < weekly_low[i]
         
         # Generate signals
         if position == 0:
