@@ -1,26 +1,27 @@
+# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-Experiment #8014: 1-hour timeframe with 4h and 1d trend filters.
-Hypothesis: Use 4h Donchian breakout (20-period) for signal direction and 1d EMA (34) for trend filter, 
-but execute entries on 1h with volume confirmation (1.5x 20-period volume MA) and session filter (08-20 UTC).
-This reduces noise by aligning with higher timeframe trends while using 1h only for precise entry timing.
-Target: 60-150 total trades over 4 years (15-37/year) to avoid fee drag.
+Experiment #8015: 6-hour Donchian breakout with weekly trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 6h with volume >1.5x 20-period MA 
+and aligned weekly trend (price above/below weekly EMA50) captures sustained moves. 
+Weekly trend filter reduces whipsaw in both bull and bear markets while maintaining 
+moderate trade frequency. Target: 50-150 total trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8014_1h_4h_1d_trend_session_v1"
-timeframe = "1h"
+name = "exp_8015_6h_donchian20_1w_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
-EMA_PERIOD = 34
+SIGNAL_SIZE = 0.25
+EMA_PERIOD = 50
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
@@ -31,30 +32,25 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h Donchian channels
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    highest_high_4h = pd.Series(high_4h).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low_4h = pd.Series(low_4h).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Calculate weekly EMA
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
-    price_vs_ema_1d = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
-    
-    # Align HTF indicators to 1h timeframe
-    highest_high_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_high_4h)
-    lowest_low_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_low_4h)
-    price_vs_ema_1d_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema_1d)
+    # Price relative to EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_1w > ema_1w, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
     
     # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Price channel (Donchian)
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -66,10 +62,6 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -80,8 +72,8 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if outside trading session or HTF data not available
-        if not in_session[i] or np.isnan(highest_high_4h_aligned[i]) or np.isnan(price_vs_ema_1d_aligned[i]):
+        # Skip if HTF data not available
+        if np.isnan(price_vs_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -97,18 +89,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from higher timeframes
-        bull_bias_4h = close[i] > highest_high_4h_aligned[i-1] if i-1 >= 0 and not np.isnan(highest_high_4h_aligned[i-1]) else False
-        bear_bias_4h = close[i] < lowest_low_4h_aligned[i-1] if i-1 >= 0 and not np.isnan(lowest_low_4h_aligned[i-1]) else False
-        bull_bias_1d = price_vs_ema_1d_aligned[i] == 1   # 1d close above EMA34
-        bear_bias_1d = price_vs_ema_1d_aligned[i] == -1  # 1d close below EMA34
+        # Determine market bias from weekly EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # weekly close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # weekly close below EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry conditions - require alignment of 4h momentum and 1d trend
-        long_entry = bull_bias_4h and bull_bias_1d and volume_confirmed
-        short_entry = bear_bias_4h and bear_bias_1d and volume_confirmed
+        # Breakout conditions - require close beyond channel bands to avoid wicks
+        upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
+        lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
+        
+        # Entry conditions
+        long_entry = bull_bias and upper_breakout and volume_confirmed
+        short_entry = bear_bias and lower_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
