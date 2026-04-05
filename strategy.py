@@ -1,36 +1,35 @@
 #!/usr/bin/env python3
 """
-exp_7332_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-In trending markets (price > EMA): continuation breakouts in breakout direction.
-In ranging markets (price near EMA): mean reversion at Donchian extremes with volume confirmation.
-Uses 1d EMA for trend regime and 12h volume for confirmation.
-Designed for 12h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by adapting to EMA-defined trend regime.
+exp_7334_1h_donchian20_1d_ema_vol_v1
+Hypothesis: 1h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation, using 4h/1d for signal direction and 1h for entry timing. Target: 60-150 trades over 4 years (15-37/year) with session filter (08-20 UTC) to reduce noise. Uses discrete position sizing (0.20) to minimize fee churn.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7332_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_7334_1h_donchian20_1d_ema_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+VOL_BASE_THRESHOLD = 1.5  # Volume must be 1.5x MA for confirmation
+SIGNAL_SIZE = 0.20        # 20% position size (discrete level)
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 5  # ~60 hours
+MAX_HOLD_BARS = 24        # ~1 day max hold
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
+    
+    # Pre-compute session hours (08-20 UTC) once before loop
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
     
     # Load HTF data ONCE before loop - using 1d for EMA trend
     df_1d = get_htf_data(prices, '1d')
@@ -39,7 +38,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align to LTF (12h)
+    # Align to LTF (1h)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -99,17 +98,22 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
+        # Session filter: only trade during 08-20 UTC
+        if not in_session[i]:
+            signals[i] = 0.0
+            if position != 0:
+                # Close position outside session
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
+            continue
+            
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Determine market regime based on EMA
         above_ema = close[i] > ema_1d_aligned[i]
         below_ema = close[i] < ema_1d_aligned[i]
-        near_ema = np.abs(close[i] - ema_1d_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of EMA
-        
-        # Fade at extremes in ranging market (near EMA)
-        fade_long = near_ema and (close[i] <= lowest_low[i]) and vol_confirmed
-        fade_short = near_ema and (close[i] >= highest_high[i]) and vol_confirmed
         
         # Continuation breakouts in trending market
         continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
@@ -117,12 +121,12 @@ def generate_signals(prices):
         
         # Enter new positions only if flat
         if position == 0:
-            if fade_long or continuation_long:
+            if continuation_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif fade_short or continuation_short:
+            elif continuation_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -134,5 +138,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
