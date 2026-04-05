@@ -1,82 +1,74 @@
 #!/usr/bin/env python3
 """
-Experiment #9569: 4h Donchian Breakout + Volume + ADX Regime Filter.
-Hypothesis: Donchian(20) breakouts provide strong directional moves, especially when confirmed by volume spikes and regime-appropriate conditions (ADX < 25 for mean reversion at channel edges, ADX > 25 for breakout continuation). Uses 1d HTF for context. Targets 75-200 total trades over 4 years.
+Experiment #9570: 1d Donchian Breakout with Weekly EMA Trend and Volume Confirmation.
+Hypothesis: Donchian(20) breakouts on 1d timeframe, filtered by weekly EMA trend direction and volume spikes,
+provide high-probability trend-following signals. Weekly EMA ensures alignment with higher timeframe momentum,
+while volume confirmation filters false breakouts. Works in both bull and bear markets by following the trend.
+Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9569_4h_donchian_breakout_volume_adx_v1"
-timeframe = "4h"
+name = "exp_9570_1d_donchian20_weekly_ema_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 2.0
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
+WEEKLY_EMA_PERIOD = 20
+VOLUME_SPIKE_MULTIPLIER = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_true_range(high, low, close):
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
+def calculate_ema(values, period):
+    """Calculate EMA"""
+    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+def calculate_atr(high, low, close, period):
+    """Calculate ATR"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    return tr
-
-def calculate_adx(high, low, close, period):
-    tr = calculate_true_range(high, low, close)
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
-    dx = np.where((plus_di + minus_di) != 0, 
-                  100 * np.abs(plus_di - minus_di) / (plus_di + minus_di), 0)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return adx
-
-def calculate_atr(high, low, close, period):
-    tr = calculate_true_range(high, low, close)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    atr = pd.Series(tr).ewm(span=period, adjust=False, min_periods=period).mean().values
     return atr
-
-def calculate_donchian(high, low, period):
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for context)
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop (weekly for EMA trend)
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate LTF indicators (4h)
+    # Calculate weekly EMA for trend filter
+    weekly_close = df_weekly['close'].values
+    weekly_ema = calculate_ema(weekly_close, WEEKLY_EMA_PERIOD)
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
+    
+    # Calculate LTF indicators (1d)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # Donchian channels
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # ADX for regime filtering
-    adx = calculate_adx(high, low, close, ADX_PERIOD)
-    
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -84,11 +76,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, ADX_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, 20) + 1
     
     for i in range(start, n):
-        # Skip if indicators not ready
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(weekly_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -107,30 +99,24 @@ def generate_signals(prices):
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Regime filter: ADX < 25 for mean reversion, ADX > 25 for breakout
-        low_volatility = adx[i] < ADX_THRESHOLD   # Ranging market
-        high_volatility = adx[i] >= ADX_THRESHOLD  # Trending market
+        # Trend filter: weekly EMA direction
+        # For breakouts, we only take longs when price > weekly EMA (uptrend)
+        # and shorts when price < weekly EMA (downtrend)
+        uptrend = close[i] > weekly_ema_aligned[i]
+        downtrend = close[i] < weekly_ema_aligned[i]
         
-        # Mean reversion in ranging markets: fade at channel edges
-        mean_rev_long = low_volatility and volume_spike and close[i] <= donchian_lower[i]
-        mean_rev_short = low_volatility and volume_spike and close[i] >= donchian_upper[i]
-        
-        # Breakout in trending markets: continue the trend
-        breakout_long = high_volatility and volume_spike and close[i] >= donchian_upper[i]
-        breakout_short = high_volatility and volume_spike and close[i] <= donchian_lower[i]
+        # Breakout conditions with trend filter and volume confirmation
+        long_breakout = (close[i] >= donchian_upper[i]) and uptrend and volume_spike
+        short_breakout = (close[i] <= donchian_lower[i]) and downtrend and volume_spike
         
         # Entry conditions
-        long_entry = mean_rev_long or breakout_long
-        short_entry = mean_rev_short or breakout_short
-        
-        # Generate signals
         if position == 0:
-            if long_entry:
+            if long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
+            elif short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
