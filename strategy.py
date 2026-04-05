@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #8185: 12-hour Donchian breakout with 1-day trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA 
+Experiment #8186: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.5x 20-period MA 
 and aligned 1d trend (price above/below 1d EMA50) captures sustained moves while avoiding 
 whipsaw in both bull and bear markets. The 1d trend filter provides stronger trend context 
 than shorter timeframes, reducing false breakouts during consolidation periods. 
-Targeting 50-150 total trades over 4 years for optimal balance of signal quality and cost.
+Targeting 75-200 total trades over 4 years for optimal balance of signal quality and cost.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8185_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_8186_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
