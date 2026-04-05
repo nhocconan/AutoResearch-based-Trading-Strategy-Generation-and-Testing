@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #8788: 12h Donchian(20) breakout + 1w trend filter + volume confirmation + ATR stoploss.
-Hypothesis: 12h timeframe balances trade frequency and trend capture for BTC/ETH/SOL.
-1-week trend filter ensures alignment with multi-week momentum, avoiding counter-trend trades.
-Volume confirmation filters breakouts requiring institutional participation.
-ATR-based stops manage risk. Targets 50-150 trades over 4 years (12-37/year) to minimize fee impact.
+Experiment #8790: 1d Donchian breakout + 1w trend filter + volume confirmation + ATR stoploss.
+Hypothesis: Daily timeframe reduces trade frequency to combat fee drag while capturing major trends.
+Using 1-week trend filter (EMA50) ensures alignment with multi-week momentum, avoiding counter-trend trades.
+Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk.
+Targets 30-100 trades over 4 years (7-25/year) to minimize fee impact while maintaining statistical validity.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8788_12h_donchian20_1w_vol_v1"
-timeframe = "12h"
+name = "exp_8790_1d_donchian20_1w_trend_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
@@ -50,7 +50,7 @@ def generate_signals(prices):
                      np.where(close_1w < ema_1w, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
     price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
     
-    # Calculate LTF indicators (12h)
+    # Calculate LTF indicators (daily)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
