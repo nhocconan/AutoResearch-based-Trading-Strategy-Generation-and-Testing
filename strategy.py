@@ -2,9 +2,9 @@
 """
 Experiment #7986: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
 Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.5x 20-period MA 
-and aligned 1d trend (price above/below 1d EMA50) captures sustained moves. 
-The 1d timeframe provides strong trend context to reduce whipsaw in both bull and bear markets 
-while maintaining moderate trade frequency. Target: 75-200 total trades over 4 years.
+and aligned 1d trend (price above/below 1d EMA50) captures sustained moves in both bull and bear markets.
+The 1d timeframe provides stronger trend context to reduce whipsaw while maintaining moderate trade frequency.
+Target: 75-200 total trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -125,4 +125,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</p>
