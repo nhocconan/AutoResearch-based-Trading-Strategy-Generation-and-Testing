@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-Experiment #7621: 4h Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
-Hypothesis: In bull markets (price > 1d EMA200), go long on breakout above 4h Donchian upper.
-In bear markets (price < 1d EMA200), go short on breakdown below 4h Donchian lower.
+Experiment #7622: 12h Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
+Hypothesis: In bull markets (price > 1d EMA200), go long on breakout above 12h Donchian upper.
+In bear markets (price < 1d EMA200), go short on breakdown below 12h Donchian lower.
 Volume must be above 1.5x average to confirm breakout strength.
 ATR-based stoploss (2x) and target (3x) for risk management.
-Targets 75-200 trades over 4 years (19-50/year) with strict breakout conditions.
+Targets 50-150 trades over 4 years (12-37/year) with strict breakout conditions.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7621_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7622_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
