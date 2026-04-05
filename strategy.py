@@ -1,33 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #9954: 1h Donchian Breakout + 4h/1d Trend + Volume Spike
-Hypothesis: Donchian(20) breakouts on 1h in direction of 4h EMA20 and 1d EMA50, with volume confirmation.
-Uses 4h/1d for signal direction, 1h only for entry timing. Session filter (08-20 UTC) reduces noise.
-Target: 60-150 total trades over 4 years (15-37/year). Designed for both bull and bear markets.
+Experiment #9955: 6h Camarilla Pivot + Volume Spike + Trend Continuation
+Hypothesis: Camarilla pivot levels from daily timeframe provide high-probability reversal/continuation points. 
+Breakouts beyond R4/S4 with volume spike continue the trend, while reversals at R3/S3 with volume fade counter-trend.
+Works in bull markets (buy R3 bounces, sell R4 breakouts) and bear markets (sell S3 bounces, buy R4 breakdowns).
+Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9954_1h_donchian_4h_1d_trend_volume_v1"
-timeframe = "1h"
+name = "exp_9955_6h_camarilla_pivot_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
-EMA_4H_PERIOD = 20
-EMA_1D_PERIOD = 50
-SIGNAL_SIZE = 0.20
+CAMARILLA_PERIOD = 1  # Use previous day's OHLC
+VOLUME_SPIKE_MULTIPLIER = 2.0
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
+PIVOT_BUFFER = 0.001  # 0.1% buffer to avoid whipsaws
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_pivot_points(high, low, close):
+    """Calculate Camarilla pivot levels from previous day's OHLC"""
+    # Camarilla formulas
+    pivot = (high + low + close) / 3
+    range_hl = high - low
+    r3 = pivot + (range_hl * 1.1 / 6)
+    r4 = pivot + (range_hl * 1.1 / 2)
+    s3 = pivot - (range_hl * 1.1 / 6)
+    s4 = pivot - (range_hl * 1.1 / 2)
+    return pivot, r3, r4, s3, s4
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -44,29 +49,34 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load daily data ONCE before loop for pivot points
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate 4h and 1d EMAs for trend direction
-    ema_4h = calculate_ema(df_4h['close'].values, EMA_4H_PERIOD)
-    ema_1d = calculate_ema(df_1d['close'].values, EMA_1D_PERIOD)
+    # Calculate daily pivot points
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Align EMAs to 1h timeframe
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    pivot, r3, r4, s3, s4 = calculate_pivot_points(daily_high, daily_low, daily_close)
     
-    # Calculate 1h indicators
+    # Align pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_daily, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_daily, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_daily, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_daily, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_daily, s4)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    # EMA for trend filter (20-period)
+    ema_trend = calculate_ema(close, 20)
     
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -74,30 +84,19 @@ def generate_signals(prices):
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_4H_PERIOD, EMA_1D_PERIOD, 20) + 1
+    start = max(20, 20) + 1  # EMA and volume MA
     
     for i in range(start, n):
-        # Skip if outside session
-        if not in_session[i]:
-            signals[i] = 0.0
-            position = 0
-            entry_price = 0.0
-            stop_price = 0.0
-            continue
-            
-        # Skip if EMAs not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
-            signals[i] = 0.0
+        # Skip if pivot levels not available
+        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or \
+           np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
         # Check stoploss
@@ -115,17 +114,31 @@ def generate_signals(prices):
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/both EMAs
-        above_both_emas = close[i] > ema_4h_aligned[i] and close[i] > ema_1d_aligned[i]
-        below_both_emas = close[i] < ema_4h_aligned[i] and close[i] < ema_1d_aligned[i]
+        # Trend filter: price above/below 20 EMA
+        above_ema = close[i] > ema_trend[i]
+        below_ema = close[i] < ema_trend[i]
         
-        # Breakout conditions
-        bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
-        bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
+        # Price levels with buffer to avoid whipsaws
+        r3_level = r3_aligned[i] * (1 + PIVOT_BUFFER)
+        r4_level = r4_aligned[i] * (1 + PIVOT_BUFFER)
+        s3_level = s3_aligned[i] * (1 - PIVOT_BUFFER)
+        s4_level = s4_aligned[i] * (1 - PIVOT_BUFFER)
         
-        # Entry conditions: breakout in direction of trend with volume
-        long_entry = bullish_breakout and above_both_emas and volume_spike
-        short_entry = bearish_breakout and below_both_emas and volume_spike
+        # Trading logic:
+        # 1. Fade at R3/S3 (counter-trend reversal) - only in ranging markets
+        # 2. Breakout at R4/S4 (trend continuation) - only with volume spike
+        
+        # Fade signals at R3/S3 (only when NOT trending strongly)
+        fade_r3 = close[i] >= r3_level and close[i] <= r3_level * 1.002 and not above_ema  # Near R3, bearish bias
+        fade_s3 = close[i] <= s3_level and close[i] >= s3_level * 0.998 and not below_ema   # Near S3, bullish bias
+        
+        # Breakout signals at R4/S4 (with volume spike)
+        breakout_r4 = close[i] > r4_level and volume_spike
+        breakdown_s4 = close[i] < s4_level and volume_spike
+        
+        # Entry conditions
+        long_entry = fade_s3 or breakdown_s4
+        short_entry = fade_r3 or breakout_r4
         
         # Generate signals
         if position == 0:
