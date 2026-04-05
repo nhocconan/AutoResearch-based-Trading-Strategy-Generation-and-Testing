@@ -1,24 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #8627: 6h Donchian(20) breakout + weekly pivot direction + volume confirmation
-Hypothesis: Weekly pivot levels provide institutional-grade support/resistance that aligns with 
-multi-week trends. Combining with 6h Donchian breakouts captures momentum in trend direction 
-while volume confirms institutional participation. Weekly context reduces whipsaw in 6b timeframe.
-Targets 50-150 total trades over 4 years (12-37/year) with discrete sizing to minimize fee drag.
-Works in both bull (breakouts with trend) and bear (fades at extreme pivots) regimes.
+Experiment #8629: 4h Donchian(20) breakout + 1d trend filter + volume confirmation + ATR stoploss.
+Hypothesis: 4h balances trade frequency and responsiveness, using 1d EMA for trend bias to avoid counter-trend trades.
+Volume confirmation ensures institutional participation in breakouts. ATR stops manage risk in volatile markets.
+Targets 75-200 trades over 4 years (19-50/year) to minimize fee drag while maintaining statistical validity.
 """
 
-from mtf_data import get_athf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8627_6h_donchian20_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_8629_4h_donchian20_1d_vol_tf_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-PIVOT_LOOKBACK = 5  # weeks for pivot calculation
+TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -34,39 +32,24 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_weekly_pivot(high, low, close):
-    """Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H"""
-    pp = (high + low + close) / 3.0
-    r1 = 2 * pp - low
-    s1 = 2 * pp - high
-    r2 = pp + (high - low)
-    s2 = pp - (high - low)
-    r3 = high + 2 * (pp - low)
-    s3 = low - 2 * (high - pp)
-    return pp, r1, s1, r2, s2, r3, s3
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - weekly data for pivot calculation
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
     
-    pp, r1, s1, r2, s2, r3, s3 = calculate_weekly_pivot(high_1w, low_1w, close_1w)
+    # Price relative to 1d EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_1d > ema_1d, 1, 
+                     np.where(close_1d < ema_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
     
-    # Determine pivot zone: 
-    # -1 = below S3 (deep oversold), 1 = above R3 (deep overbought), 0 = between
-    zone = np.where(close_1w > r3, 1, 
-           np.where(close_1w < s3, -1, 0))
-    zone_aligned = align_htf_to_ltf(prices, df_1w, zone)
-    
-    # Calculate LTF indicators (6h)
+    # Calculate LTF indicators (4h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -88,11 +71,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, PIVOT_LOOKBACK, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(zone_aligned[i]):
+        if np.isnan(price_vs_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -108,10 +91,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market context from weekly pivot zone
-        extreme_overbought = zone_aligned[i] == 1   # Weekly close above R3
-        extreme_oversold = zone_aligned[i] == -1    # Weekly close below S3
-        neutral_zone = zone_aligned[i] == 0         # Between S3 and R3
+        # Determine market bias from 1d EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d price above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d price below EMA50
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
@@ -120,24 +102,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry logic:
-        # In extreme zones: fade (mean reversion)
-        # In neutral zone: breakout continuation (trend following)
-        if neutral_zone:
-            # Trend following mode: breakout in direction of momentum
-            long_entry = long_breakout and volume_confirmed
-            short_entry = short_breakout and volume_confirmed
-        elif extreme_oversold:
-            # Fade longs from extreme oversold
-            long_entry = long_breakout and volume_confirmed  # Buy the dip on breakout
-            short_entry = False
-        elif extreme_overbought:
-            # Fade shorts from extreme overbought
-            short_entry = short_breakout and volume_confirmed  # Sell the rally on breakdown
-            long_entry = False
-        else:
-            long_entry = False
-            short_entry = False
+        # Entry conditions
+        long_entry = bull_bias and long_breakout and volume_confirmed
+        short_entry = bear_bias and short_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
@@ -159,3 +126,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</lymph>
