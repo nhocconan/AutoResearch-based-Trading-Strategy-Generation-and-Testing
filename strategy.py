@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #7833: 4-hour Donchian breakout with 12-hour trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.8x 20-period MA and aligned 12h trend captures sustained moves while avoiding whipsaw. The 12h trend filter (using EMA) provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 75-200 trades over 4 years with controlled risk via ATR-based stops.
+Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.8x 20-period MA and aligned 12h trend (EMA) captures sustained moves while avoiding whipsaw. The 12h trend filter provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 75-200 trades over 4 years with controlled risk via ATR-based stops.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
