@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Experiment #10861: 4h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: 4-hour Donchian(20) breakouts in the direction of 1-day EMA trend with volume confirmation
-provide high-probability trades. Works in bull markets (trend continuation) and bear markets (trend continuation)
-by only trading in the direction of the higher timeframe trend. Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #10861: 4h Donchian Breakout with 1d Trend Filter and Volume Confirmation
+Hypothesis: Breakout above/below 20-period Donchian channel on 4h timeframe, 
+filtered by 1d EMA trend direction and volume spike, provides high-probability trades.
+Works in bull markets (breakouts in uptrend) and bear markets (breakouts in downtrend).
+Target: 75-200 total trades over 4 years (19-50/year) on 4h timeframe.
 """
 
 import numpy as np
@@ -18,20 +19,10 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_1D_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -60,8 +51,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    # Donchian channels
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -93,9 +90,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout conditions
-        breakout_up = close[i] > upper[i-1] if not np.isnan(upper[i-1]) else False
-        breakout_down = close[i] < lower[i-1] if not np.isnan(lower[i-1]) else False
+        # Breakout conditions
+        breakout_up = (donchian_high[i-1] > 0 and close[i] > donchian_high[i-1]) if i > 0 and not np.isnan(donchian_high[i-1]) else False
+        breakout_down = (donchian_low[i-1] > 0 and close[i] < donchian_low[i-1]) if i > 0 and not np.isnan(donchian_low[i-1]) else False
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -128,3 +125,7 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
