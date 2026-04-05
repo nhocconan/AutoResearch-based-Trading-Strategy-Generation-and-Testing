@@ -2,8 +2,8 @@
 """
 Experiment #8366: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
 Hypothesis: Price breaking above/below the 20-period Donchian channel on 4h with volume >1.5x 20-period MA 
-and aligned daily trend (price above/below daily EMA50) captures sustained moves while avoiding whipsaw. 
-Daily timeframe provides longer-term context, reducing false breakouts during consolidation. 
+and aligned daily trend (price above/below daily EMA100) captures sustained moves while avoiding whipsaw. 
+The daily trend filter provides long-term context, reducing false breakouts during consolidation. 
 Targeting 75-200 total trades over 4 years for optimal balance.
 """
 
@@ -17,7 +17,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_TREND_PERIOD = 50
+EMA_TREND_PERIOD = 100
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -90,8 +90,8 @@ def generate_signals(prices):
                 continue
         
         # Determine market bias from 1d EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1d price above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1d price below EMA50
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d price above EMA100
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d price below EMA100
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
