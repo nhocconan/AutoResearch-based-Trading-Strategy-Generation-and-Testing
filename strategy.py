@@ -1,16 +1,15 @@
-#!/usr/bin/env python3
-"""
-Experiment #9241: 4h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Donchian breakouts capture trends; 1d EMA filter ensures directional alignment; volume confirms institutional participation.
-Targets 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost. Works in bull (breakouts) and bear (filtered shorts).
-"""
+# 12h Donchian Breakout with 1D Trend and Volume Confirmation
+# Strategy: Breakouts above/below 20-period Donchian channels, filtered by 1-day EMA trend
+# Volume confirmation ensures institutional participation. ATR-based stoploss manages risk.
+# Designed for 12h timeframe targeting 50-150 trades over 4 years (12-37/year).
+# Works in bull markets (breakouts) and bear markets (filtered shorts via 1D trend).
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_9241_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_9242_12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -20,7 +19,7 @@ VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -39,16 +38,16 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA for trend filter
+    # Calculate 1D EMA for trend filter
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
     
-    # Price relative to 1d EMA: above = bullish bias, below = bearish bias
+    # Price relative to 1D EMA: above = bullish bias, below = bearish bias
     price_vs_ema = np.where(close_1d > ema_1d, 1, 
                      np.where(close_1d < ema_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
     price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
     
-    # Calculate LTF indicators (4h)
+    # Calculate LTF indicators (12h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -90,9 +89,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1d EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1d price above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1d price below EMA50
+        # Determine market bias from 1D EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1D price above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1D price below EMA50
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
