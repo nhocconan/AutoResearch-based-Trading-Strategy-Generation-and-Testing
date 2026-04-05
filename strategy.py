@@ -1,31 +1,28 @@
 #!/usr/bin/env python3
 """
-exp_7529_4h_donchian20_1d_ema_vol_v2
-Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation, optimized for fewer trades.
-In bull markets (price > 1d EMA200): long breakout above 4h Donchian upper.
-In bear markets (price < 1d EMA200): short breakdown below 4h Donchian lower.
-Volume must be above 25-period average and 2.0x average to confirm breakout strength.
-Uses ATR-based stoploss and target-based exits.
-Target: 50-150 trades over 4 years (12.5-37.5/year) to avoid overtrading.
+exp_7534_1h_4h_1d_donchian_vol_session_v1
+Hypothesis: 1-hour strategy using 4-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
+Trades only during 08:00-20:00 UTC to avoid low-liquidity hours. 4h/1d provide directional bias, 1h provides precise entry timing.
+Targets 60-150 total trades over 4 years (15-37/year) with strict entry conditions and session filtering.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7529_4h_donchian20_1d_ema_vol_v2"
-timeframe = "4h"
+name = "exp_7534_1h_4h_1d_donchian_vol_session_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 EMA_TREND = 200
-VOLUME_MA_PERIOD = 25
-VOLUME_THRESHOLD = 2.0  # Increased for stricter confirmation
-SIGNAL_SIZE = 0.25
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5  # Wider stop to reduce premature exits
-ATR_TARGET_MULTIPLIER = 4.0  # Wider target for better risk-reward
+ATR_STOP_MULTIPLIER = 2.0
+ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -33,11 +30,22 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 4h Donchian channels
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    highest_high_4h = pd.Series(high_4h).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low_4h = pd.Series(low_4h).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Calculate 1d EMA200 for trend filter
     close_1d = df_1d['close'].values
     ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    
+    # Align HTF indicators to LTF
+    highest_high_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_high_4h)
+    lowest_low_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_low_4h)
     ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
     # Calculate LTF indicators
@@ -45,10 +53,6 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -60,6 +64,9 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
+    # Pre-compute session hours (08:00-20:00 UTC)
+    hours = prices.index.hour
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -70,9 +77,17 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
+        # Session filter: only trade 08:00-20:00 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            signals[i] = 0.0
+            position = 0
+            continue
+            
         # Skip if HTF data not available
-        if np.isnan(ema_1d_200_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        if np.isnan(ema_1d_200_aligned[i]) or np.isnan(highest_high_4h_aligned[i]) or np.isnan(lowest_low_4h_aligned[i]):
+            signals[i] = 0.0
+            position = 0
             continue
             
         # Check stoploss or target
@@ -92,11 +107,11 @@ def generate_signals(prices):
         bear_regime = close[i] < ema_1d_200_aligned[i]   # price below 1d EMA200
         
         # Volume confirmation
-        volume_confirmed = (not np.isnan(volume_ma[i])) and (volume[i] > (volume_ma[i] * VOLUME_THRESHOLD))
+        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions
-        upper_breakout = (i-1 >= 0) and (not np.isnan(highest_high[i-1])) and (high[i] > highest_high[i-1])
-        lower_breakout = (i-1 >= 0) and (not np.isnan(lowest_low[i-1])) and (low[i] < lowest_low[i-1])
+        # Breakout conditions (using 4h Donchian)
+        upper_breakout = (high[i] > highest_high_4h_aligned[i-1]) and (i-1 >= 0) and not np.isnan(highest_high_4h_aligned[i-1])
+        lower_breakout = (low[i] < lowest_low_4h_aligned[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low_4h_aligned[i-1])
         
         # Entry conditions
         long_entry = bull_regime and upper_breakout and volume_confirmed
