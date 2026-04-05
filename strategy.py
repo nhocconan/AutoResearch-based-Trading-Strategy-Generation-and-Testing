@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #8861: 4h Donchian breakout + 1d trend + volume confirmation + ATR stoploss.
-Hypothesis: 4h timeframe balances trade frequency and trend capture. 
-1d trend filter ensures alignment with daily momentum, avoiding counter-trend trades.
-Volume confirmation filters breakouts requiring institutional participation.
-ATR-based stops manage risk. Targets 75-200 trades over 4 years (19-50/year).
+Experiment #8861: 4h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
+Hypothesis: 4h timeframe balances trade frequency and signal quality. Using 1-day trend filter (EMA50) ensures alignment with daily momentum, avoiding counter-trend trades.
+Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk.
+Targets 75-200 trades over 4 years (19-50/year) to minimize fee impact while maintaining statistical validity.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
