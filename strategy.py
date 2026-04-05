@@ -1,42 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #8799: 6h Williams Alligator + Elder Ray + 12h Trend Filter
-Hypothesis: Combines Alligator's trend detection (jaw/teeth/lips) with Elder Ray's bull/bear power
-and 12h trend filter to capture sustained trends while avoiding whipsaws. Works in both bull
-and bear markets by only taking trades aligned with higher timeframe trend. Targets 50-150
-trades over 4 years (12-37/year) with discrete position sizing to minimize fee drag.
+Experiment #8799: 6h Donchian breakout + 12h trend filter + volume confirmation.
+Hypothesis: Combines price channel breakouts with higher timeframe trend alignment to capture 
+trend continuation moves while avoiding counter-trend trades. Volume confirmation ensures 
+institutional participation. Targets 50-150 total trades over 4 years (12-37/year) to balance 
+statistical validity with fee minimization. Designed to work in both bull and bear markets 
+by following the 12h trend direction.
 """
 
-from mtf_data import get_afft_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8799_6h_alligator_elder_12h_trend_v1"
+name = "exp_8799_6h_donchian20_12h_trend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-ALLIGATOR_PERIOD = 13
-ELDER_RAY_PERIOD = 13
-TREND_EMA_PERIOD = 50
+DONCHIAN_PERIOD = 20
+TREND_PERIOD = 50
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_alligator(close, period):
-    """Williams Alligator: Jaw=SMMA(close,13,8), Teeth=SMMA(close,13,5), Lips=SMMA(close,13,3)"""
-    smma13 = pd.Series(close).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    jaw = smma13.shift(8)  # 8 periods ahead
-    teeth = smma13.shift(5)  # 5 periods ahead
-    lips = smma13.shift(3)  # 3 periods ahead
-    return jaw.values, teeth.values, lips.values
-
-def calculate_elder_ray(high, low, close, period):
-    """Elder Ray: Bull Power = High - EMA(close), Bear Power = Low - EMA(close)"""
-    ema = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean()
-    bull_power = high - ema.values
-    bear_power = low - ema.values
-    return bull_power, bear_power
+def calculate_atr(high, low, close, period):
+    """Calculate ATR using Wilder's smoothing"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return atr
 
 def generate_signals(prices):
     n = len(prices)
@@ -48,7 +44,7 @@ def generate_signals(prices):
     
     # Calculate 12h EMA for trend filter
     close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=TREND_EMA_PERIOD, adjust=False, min_periods=TREND_EMA_PERIOD).mean().values
+    ema_12h = pd.Series(close_12h).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
     
     # Price relative to 12h EMA: above = bullish bias, below = bearish bias
     price_vs_ema = np.where(close_12h > ema_12h, 1, 
@@ -59,19 +55,17 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator
-    jaw, teeth, lips = calculate_alligator(close, ALLIGATOR_PERIOD)
+    # Donchian channels
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Elder Ray
-    bull_power, bear_power = calculate_elder_ray(high, low, close, ELDER_RAY_PERIOD)
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR for risk management
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,7 +73,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ALLIGATOR_PERIOD + 8, ELDER_RAY_PERIOD, TREND_EMA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
@@ -103,18 +97,16 @@ def generate_signals(prices):
         bull_bias = price_vs_ema_aligned[i] == 1   # 12h price above EMA50
         bear_bias = price_vs_ema_aligned[i] == -1  # 12h price below EMA50
         
-        # Alligator conditions: Lips > Teeth > Jaw = bullish alignment
-        alligator_bull = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        # Alligator conditions: Jaw > Teeth > Lips = bearish alignment
-        alligator_bear = jaw[i] > teeth[i] and teeth[i] > lips[i]
+        # Donchian breakout conditions
+        long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
+        short_breakout = close[i] < donchian_low[i-1]  # Break below previous period's low
         
-        # Elder Ray conditions
-        elder_bull = bull_power[i] > 0  # Bullish when bull power positive
-        elder_bear = bear_power[i] < 0  # Bearish when bear power negative
+        # Volume confirmation
+        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Entry conditions
-        long_entry = bull_bias and alligator_bull and elder_bull
-        short_entry = bear_bias and alligator_bear and elder_bear
+        long_entry = bull_bias and long_breakout and volume_confirmed
+        short_entry = bear_bias and short_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
