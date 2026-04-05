@@ -1,45 +1,49 @@
 #!/usr/bin/env python3
 """
-exp_7232_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-In trending markets (price > EMA50): continuation breakouts in breakout direction.
-In ranging markets (price near EMA50): mean reversion at Donchian extremes with volume confirmation.
-Designed for 12h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
-Uses 1d EMA for trend regime and 12h volume for confirmation.
-Works in both bull and bear markets by adapting to EMA-defined trend regime.
+exp_7234_1h_donchian20_4h_ema1d_v1
+Hypothesis: 1h Donchian(20) breakout with 4h EMA(21) trend and 1d EMA(50) regime filter.
+Long when price > 4h EMA > 1d EMA (bullish alignment) and breaks Donchian high with volume.
+Short when price < 4h EMA < 1d EMA (bearish alignment) and breaks Donchian low with volume.
+Uses 4h/1d for signal direction, 1h only for entry timing. Session filter 08-20 UTC.
+Target: 60-150 trades over 4 years (15-37/year) to avoid fee drag.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7232_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_7234_1h_donchian20_4h_ema1d_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+EMA_4H_PERIOD = 21
+EMA_1D_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # ~10 * 12h = 5 days
+MAX_HOLD_BARS = 24  # ~1 day
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA trend
+    # Load HTF data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 4h EMA
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=EMA_4H_PERIOD, adjust=False, min_periods=EMA_4H_PERIOD).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
     # Calculate 1d EMA
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
-    
-    # Align to LTF (12h)
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_1D_PERIOD, adjust=False, min_periods=EMA_1D_PERIOD).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -62,19 +66,23 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_4H_PERIOD, EMA_1D_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -99,30 +107,36 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
+        # Session filter
+        if not in_session[i]:
+            # Force flat outside session
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
+            else:
+                signals[i] = 0.0
+            continue
+            
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on EMA
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
-        near_ema = np.abs(close[i] - ema_1d_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of EMA
+        # Determine trend alignment
+        bullish_alignment = ema_4h_aligned[i] > ema_1d_aligned[i] and close[i] > ema_4h_aligned[i]
+        bearish_alignment = ema_4h_aligned[i] < ema_1d_aligned[i] and close[i] < ema_4h_aligned[i]
         
-        # Fade at extremes in ranging market (near EMA)
-        fade_long = near_ema and (close[i] <= lowest_low[i]) and vol_confirmed
-        fade_short = near_ema and (close[i] >= highest_high[i]) and vol_confirmed
-        
-        # Continuation breakouts in trending market
-        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
-        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
+        # Breakout conditions
+        breakout_long = close[i] > highest_high[i]
+        breakout_short = close[i] < lowest_low[i]
         
         # Enter new positions only if flat
         if position == 0:
-            if fade_long or continuation_long:
+            if bullish_alignment and breakout_long and vol_confirmed:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif fade_short or continuation_short:
+            elif bearish_alignment and breakout_short and vol_confirmed:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
