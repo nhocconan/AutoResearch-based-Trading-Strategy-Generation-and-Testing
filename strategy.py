@@ -1,112 +1,151 @@
 #!/usr/bin/env python3
 """
-Experiment #7679: 6-hour Ichimoku Cloud with 12-hour Kumo Twist Filter and Volume Confirmation.
-Hypothesis: In bull markets (Tenkan > Kijun and price above Kumo), go long on TK cross up.
-In bear markets (Tenkan < Kijun and price below Kumo), go short on TK cross down.
-Volume must be above 1.5x average to confirm momentum.
-Uses 6h for entry timing, 12h for trend filter, targeting 50-150 total trades (12-37/year).
+Experiment #7679: 6-hour ADX/ATR Breakout with 12-hour ATR Regime Filter.
+Hypothesis: Use ADX to detect trending markets and ATR-based breakouts for entry.
+In trending regimes (ADX > 25), enter on ATR-based breakouts in the direction of the trend.
+In ranging regimes (ADX < 20), fade at extreme ATR deviations from mean.
+12-hour ATR regime filter prevents entries during extreme volatility expansions.
+Targets 80-150 total trades over 4 years (20-38/year).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7679_6h_ichimoku_12h_kumo_vol_v1"
+name = "exp_7679_6h_adxatr_regime_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-TK_PERIOD = 9
-KJ_PERIOD = 26
-SENB_SPAN_B_PERIOD = 52
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5  # volume must be 1.5x average
-SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ADX_PERIOD = 14
+ATR_MA_PERIOD = 50
+ADX_TREND_THRESHOLD = 25
+ADX_RANGE_THRESHOLD = 20
+ATR_MULT_BREAKOUT = 1.5
+ATR_MULT_FADE = 2.5
+SIGNAL_SIZE = 0.28
 
 def generate_signals(prices):
     n = len(prices)
-    if n < SENB_SPAN_B_PERIOD:
+    if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 12h Ichimoku components
+    # Calculate 12h ATR for regime filter
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
     close_12h = df_12h['close'].values
     
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan_sen = (pd.Series(high_12h).rolling(window=TK_PERIOD, min_periods=TK_PERIOD).max() + 
-                  pd.Series(low_12h).rolling(window=TK_PERIOD, min_periods=TK_PERIOD).min()) / 2
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun_sen = (pd.Series(high_12h).rolling(window=KJ_PERIOD, min_periods=KJ_PERIOD).max() + 
-                 pd.Series(low_12h).rolling(window=KJ_PERIOD, min_periods=KJ_PERIOD).min()) / 2
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_span_a = ((tenkan_sen + kijun_sen) / 2).shift(KJ_PERIOD)
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    senkou_span_b = ((pd.Series(high_12h).rolling(window=SENB_SPAN_B_PERIOD, min_periods=SENB_SPAN_B_PERIOD).max() + 
-                      pd.Series(low_12h).rolling(window=SENB_SPAN_B_PERIOD, min_periods=SENB_SPAN_B_PERIOD).min()) / 2).shift(KJ_PERIOD)
-    
-    # Align HTF Ichimoku to LTF
-    tenkan_sen_aligned = align_htf_to_ltf(prices, df_12h, tenkan_sen.values)
-    kijun_sen_aligned = align_htf_to_ltf(prices, df_12h, kijun_sen.values)
-    senkou_span_a_aligned = align_htf_to_ltf(prices, df_12h, senkou_span_a.values)
-    senkou_span_b_aligned = align_htf_to_ltf(prices, df_12h, senkou_span_b.values)
+    tr1_12h = pd.Series(high_12h - low_12h)
+    tr2_12h = pd.Series(np.abs(high_12h - np.roll(close_12h, 1)))
+    tr3_12h = pd.Series(np.abs(low_12h - np.roll(close_12h, 1)))
+    tr_12h = pd.concat([tr1_12h, tr2_12h, tr3_12h], axis=1).max(axis=1)
+    atr_12h = tr_12h.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    atr_ma_12h = pd.Series(atr_12h).ewm(span=ATR_MA_PERIOD, adjust=False, min_periods=ATR_MA_PERIOD).mean().values
+    atr_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_ma_12h)
     
     # Calculate LTF indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # LTF Tenkan-sen and Kijun-sen for TK cross
-    tenkan_sen_ltf = (pd.Series(high).rolling(window=TK_PERIOD, min_periods=TK_PERIOD).max() + 
-                      pd.Series(low).rolling(window=TK_PERIOD, min_periods=TK_PERIOD).min()) / 2
-    kijun_sen_ltf = (pd.Series(high).rolling(window=KJ_PERIOD, min_periods=KJ_PERIOD).max() + 
-                     pd.Series(low).rolling(window=KJ_PERIOD, min_periods=KJ_PERIOD).min()) / 2
+    # True Range and ATR
+    tr1 = pd.Series(high - low)
+    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
+    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # TK cross signals (current vs previous)
-    tk_cross_up = (tenkan_sen_ltf > kijun_sen_ltf) & (tenkan_sen_ltf.shift(1) <= kijun_sen_ltf.shift(1))
-    tk_cross_down = (tenkan_sen_ltf < kijun_sen_ltf) & (tenkan_sen_ltf.shift(1) >= kijun_sen_ltf.shift(1))
+    # ADX calculation
+    plus_dm = pd.Series(np.where((high - high.shift(1)) > (low.shift(1) - low), 
+                                 np.maximum(high - high.shift(1), 0), 0))
+    minus_dm = pd.Series(np.where((low.shift(1) - low) > (high - high.shift(1)), 
+                                  np.maximum(low.shift(1) - low, 0), 0))
     
-    # Volume confirmation
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    tr_for_adx = tr.copy()
+    atr_for_adx = tr_for_adx.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values
+    
+    plus_di = 100 * (plus_dm.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values / atr_for_adx)
+    minus_di = 100 * (minus_dm.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values / atr_for_adx)
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
     
     # Start from warmup period
-    start = max(TK_PERIOD, KJ_PERIOD, SENB_SPAN_B_PERIOD, VOLUME_MA_PERIOD) + KJ_PERIOD + 1
+    start = max(ATR_PERIOD * 2, ADX_PERIOD * 2, ATR_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or \
-           np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]):
+        if np.isnan(atr_ma_12h_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
+            
+        # Volatility regime filter: avoid extreme ATR expansion
+        vol_regime_ok = atr[i] < (atr_ma_12h_aligned[i] * 2.0)
+        
+        # Skip if ATR data not ready
+        if np.isnan(atr[i]) or np.isnan(adx[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
         
-        # Determine market regime using 12h Ichimoku
-        bull_regime = (tenkan_sen_aligned[i] > kijun_sen_aligned[i]) and \
-                      (close[i] > max(senkou_span_a_aligned[i], senkou_span_b_aligned[i]))
-        bear_regime = (tenkan_sen_aligned[i] < kijun_sen_aligned[i]) and \
-                      (close[i] < min(senkou_span_a_aligned[i], senkou_span_b_aligned[i]))
+        # Check stoploss (2x ATR)
+        if position == 1:  # long position
+            if close[i] <= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Determine market regime
+        trending = adx[i] > ADX_TREND_THRESHOLD
+        ranging = adx[i] < ADX_RANGE_THRESHOLD
+        
+        # Calculate ATR-based bands
+        atr_mult = ATR_MULT_BREAKOUT if trending else ATR_MULT_FADE
+        upper_band = close[i-1] + (atr[i] * atr_mult) if i > 0 else close[i]
+        lower_band = close[i-1] - (atr[i] * atr_mult) if i > 0 else close[i]
         
         # Entry conditions
-        long_entry = bull_regime and tk_cross_up.iloc[i] if hasattr(tk_cross_up, 'iloc') else bool(tk_cross_up[i]) and volume_confirmed
-        short_entry = bear_regime and tk_cross_down.iloc[i] if hasattr(tk_cross_down, 'iloc') else bool(tk_cross_down[i]) and volume_confirmed
+        long_entry = False
+        short_entry = False
+        
+        if trending:
+            # In trending markets: breakout in direction of DI crossover
+            if plus_di[i] > minus_di[i] and high[i] > upper_band:
+                long_entry = True
+            elif minus_di[i] > plus_di[i] and low[i] < lower_band:
+                short_entry = True
+        elif ranging:
+            # In ranging markets: fade at extreme deviations
+            if high[i] > upper_band:
+                short_entry = True  # fade the breakout
+            elif low[i] < lower_band:
+                long_entry = True   # fade the breakdown
         
         # Generate signals
         if position == 0:
-            if long_entry:
+            if long_entry and vol_regime_ok:
                 signals[i] = SIGNAL_SIZE
                 position = 1
-            elif short_entry:
+                entry_price = close[i]
+                stop_price = entry_price - (2.0 * atr[i])
+            elif short_entry and vol_regime_ok:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (2.0 * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
