@@ -2,10 +2,10 @@
 """
 Experiment #8243: 4-hour Donchian breakout with 12-hour trend filter and volume confirmation.
 Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.5x 20-period MA 
-and aligned 12h trend (price above/below 12h EMA50) captures sustained moves while avoiding 
-whipsaw in both bull and bear markets. The 12h trend filter provides balanced trend context 
-for 4h trading, reducing false breakouts during consolidation periods. Targeting 75-200 
-total trades over 4 years for optimal balance of signal quality and cost.
+and aligned 12h trend (price above/below 12h EMA20) captures sustained moves while avoiding 
+whipsaw in both bull and bear markets. The 12h trend filter provides intermediate-term trend 
+context, reducing false breakouts during consolidation periods. Targeting 75-200 total trades 
+over 4 years for optimal balance of signal quality and cost.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -21,7 +21,7 @@ DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-EMA_PERIOD = 50
+EMA_PERIOD = 20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
@@ -90,8 +90,8 @@ def generate_signals(prices):
                 continue
         
         # Determine market bias from 12h EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 12h close above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 12h close below EMA50
+        bull_bias = price_vs_ema_aligned[i] == 1   # 12h close above EMA20
+        bear_bias = price_vs_ema_aligned[i] == -1  # 12h close below EMA20
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
