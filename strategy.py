@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #10688: 12h Donchian Breakout + Weekly Trend + Volume Spike
-Hypothesis: 12-hour Donchian(20) breakouts in the direction of weekly EMA trend with volume confirmation
-provide high-probability trend continuation trades with lower frequency than daily.
-Weekly EMA filter ensures alignment with long-term trend, reducing counter-trend trades.
-Volume spike filters false breakouts. Works in both bull and bear markets by following the weekly trend.
+Hypothesis: 12-hour Donchian(20) breakouts in the direction of weekly EMA50 trend with volume confirmation
+provide high-probability trend continuation trades. Works in bull markets (breakouts above weekly EMA)
+and bear markets (breakdowns below weekly EMA). Volume filters reduce false breakouts.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
