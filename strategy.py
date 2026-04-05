@@ -1,80 +1,68 @@
 #!/usr/bin/env python3
 """
-exp_7514_1h_4h_1d_rsi_trend_v2
-Hypothesis: Tightened 1h RSI mean reversion with 4h trend filter and 1d regime filter.
-Increases profit targets and tightens stops to reduce trade frequency while maintaining edge.
-Target: 100-200 total trades over 4 years (25-50/year) for 1h timeframe.
-Uses Bollinger Bands for dynamic exits and volume confirmation to filter false signals.
+exp_7515_6h_1w_1d_donchian_vol_v1
+Hypothesis: 6s Donchian(20) breakout with weekly pivot direction filter and volume confirmation.
+Weekly pivot defines long-term trend: price above weekly pivot = bullish bias (long breakouts),
+price below weekly pivot = bearish bias (short breakdowns). Volume > 1.5x 20-period average
+confirms breakout strength. Targets 50-150 trades over 4 years (12-37/year) with strict
+breakout conditions + trend alignment. Works in bull/bear by following weekly trend.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7514_1h_4h_1d_rsi_trend_v2"
-timeframe = "1h"
+name = "exp_7515_6h_1w_1d_donchian_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 75
-RSI_OVERSOLD = 25
-BB_PERIOD = 20
-BB_STD = 2.0
-EMA_TREND = 200
-SIGNAL_SIZE = 0.20
+DONCHIAN_PERIOD = 20
+VOLUME_AVG_PERIOD = 20
+VOLUME_THRESHOLD = 1.5  # 1.5x average volume
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 3.0
-VOLUME_MA = 20
+ATR_STOP_MULTIPLIER = 2.5
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    df_1w = get_htf_data(prices, '1w')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h RSI for trend filter
-    close_4h = df_4h['close'].values
-    delta_4h = np.diff(close_4h, prepend=close_4h[0])
-    gain_4h = np.where(delta_4h > 0, delta_4h, 0)
-    loss_4h = np.where(delta_4h < 0, -delta_4h, 0)
-    avg_gain_4h = pd.Series(gain_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    avg_loss_4h = pd.Series(loss_4h).ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
-    rs_4h = avg_gain_4h / (avg_loss_4h + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs_4h))
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    # Calculate weekly pivot points (using prior week's OHLC)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 1d EMA200 for regime filter
-    close_1d = df_1d['close'].values
-    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
+    # Weekly pivot: P = (H + L + C) / 3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Support/resistance levels
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
+    
+    # Align weekly pivot to 6s timeframe (use pivot for trend bias)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    
+    # Calculate 1d average volume for confirmation
+    volume_1d = df_1d['volume'].values
+    avg_volume_1d = pd.Series(volume_1d).rolling(window=VOLUME_AVG_PERIOD, min_periods=VOLUME_AVG_PERIOD).mean().values
+    avg_volume_1d_aligned = align_htf_to_ltf(prices, df_1d, avg_volume_1d)
     
     # Calculate LTF indicators
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1h RSI for entry
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Bollinger Bands for dynamic exits
-    sma_bb = pd.Series(close).rolling(window=BB_PERIOD, min_periods=BB_PERIOD).mean().values
-    std_bb = pd.Series(close).rolling(window=BB_PERIOD, min_periods=BB_PERIOD).std().values
-    bb_upper = sma_bb + BB_STD * std_bb
-    bb_lower = sma_bb - BB_STD * std_bb
-    
-    # Volume filter
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA, min_periods=VOLUME_MA).mean().values
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # ATR for stoploss
     tr1 = pd.Series(high - low)
@@ -88,11 +76,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, BB_PERIOD, EMA_TREND, VOLUME_MA, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_AVG_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_1d_200_aligned[i]):
+        if np.isnan(pivot_1w_aligned[i]) or np.isnan(avg_volume_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -108,40 +96,24 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market regime
-        above_ema200 = close[i] > ema_1d_200_aligned[i]  # bull regime
-        below_ema200 = close[i] < ema_1d_200_aligned[i]  # bear regime
-        strong_uptrend_4h = rsi_4h_aligned[i] > 55       # 4h bullish threshold
-        strong_downtrend_4h = rsi_4h_aligned[i] < 45     # 4h bearish threshold
+        # Determine weekly trend bias
+        bullish_bias = close[i] > pivot_1w_aligned[i]   # price above weekly pivot
+        bearish_bias = close[i] < pivot_1w_aligned[i]   # price below weekly pivot
         
         # Volume confirmation
-        volume_ok = volume[i] > volume_ma[i] if not np.isnan(volume_ma[i]) else True
+        volume_confirmed = volume[i] > (VOLUME_THRESHOLD * avg_volume_1d_aligned[i])
         
-        # Entry conditions with tighter thresholds
-        long_entry = (
-            above_ema200 and           # bull regime
-            strong_uptrend_4h and      # 4h bullish
-            rsi[i] < RSI_OVERSOLD and  # oversold
-            volume_ok                  # volume confirmation
-        )
+        # Breakout conditions
+        bullish_breakout = (high[i] > highest_high[i]) and volume_confirmed
+        bearish_breakout = (low[i] < lowest_low[i]) and volume_confirmed
         
-        short_entry = (
-            below_ema200 and           # bear regime
-            strong_downtrend_4h and    # 4h bearish
-            rsi[i] > RSI_OVERBOUGHT and # overbought
-            volume_ok                  # volume confirmation
-        )
+        # Entry conditions: follow weekly trend bias
+        long_entry = bullish_bias and bullish_breakout
+        short_entry = bearish_bias and bearish_breakout
         
-        # Exit conditions using Bollinger Bands for profit targets
-        long_exit = (
-            close[i] >= bb_upper[i] or      # hit upper BB
-            rsi[i] > 60                     # RSI overbought
-        )
-        
-        short_exit = (
-            close[i] <= bb_lower[i] or     # hit lower BB
-            rsi[i] < 40                    # RSI oversold
-        )
+        # Exit conditions: opposite breakout or reversal
+        long_exit = bearish_breakout  # exit long on bearish breakout
+        short_exit = bullish_breakout  # exit short on bullish breakout
         
         # Generate signals
         if position == 0:
