@@ -1,57 +1,48 @@
 #!/usr/bin/env python3
 """
-exp_7113_4h_donchian20_12h_hma_v1
-Hypothesis: 4h Donchian(20) breakout with 12h HMA(21) trend filter and volume confirmation.
-Long when price breaks above Donchian upper band with 12h HMA rising and volume > 1.5x MA.
-Short when price breaks below Donchian lower band with 12h HMA falling and volume > 1.5x MA.
-ATR(14) stoploss at 2.5x. Designed for 4h timeframe to capture swings with ~19-50 trades/year.
-Works in both bull and bear markets by using HMA trend filter to avoid counter-trend breakouts.
+exp_7114_1h_donchian20_4h_ema_v1
+Hypothesis: 1h Donchian(20) breakout with 4h EMA(50) trend filter and volume confirmation.
+Only trade in direction of 4h EMA trend to avoid counter-trend whipsaws.
+Uses 1h for precise entry timing, 4h for trend direction (proven to reduce false breakouts).
+Session filter (08-20 UTC) to avoid low-liquidity hours.
+Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+Discrete position sizing (0.20) to minimize fee churn.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7113_4h_donchian20_12h_hma_v1"
-timeframe = "4h"
+name = "exp_7114_1h_donchian20_4h_ema_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-HMA_PERIOD = 21
+ATR_STOP_MULTIPLIER = 2.0
+MAX_HOLD_BARS = 48  # ~48 * 1h = 2 days
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 12h for HMA trend
-    df_12h = get_htf_data(prices, '12h')
+    # Pre-compute session hours (08-20 UTC) - open_time is already datetime64[ms]
+    hours = prices.index.hour  # prices.index is DatetimeIndex
+    in_session = (hours >= 8) & (hours <= 20)
     
-    # Calculate 12h HMA
-    close_12h = df_12h['close'].values
-    half_period = HMA_PERIOD // 2
-    sqrt_period = int(np.sqrt(HMA_PERIOD))
+    # Load HTF data ONCE before loop - using 4h for EMA trend
+    df_4h = get_htf_data(prices, '4h')
     
-    # WMA function
-    def wma(values, period):
-        if period <= 0:
-            return np.full_like(values, np.nan)
-        weights = np.arange(1, period + 1)
-        return np.convolve(values, weights, mode='full')[-len(values):] / weights.sum()
-    
-    wma_half = wma(close_12h, half_period)
-    wma_full = wma(close_12h, HMA_PERIOD)
-    hma_12h = 2 * wma_half - wma_full
-    hma_12h = wma(hma_12h, sqrt_period)
-    
-    # Align to LTF (4h)
-    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
+    # Calculate 4h EMA for trend filter
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)  # auto shift(1)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -59,14 +50,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels
+    # Donchian channels (breakout structure)
     highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
     lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
-    # ATR for stoploss
+    # ATR for dynamic stoploss
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
@@ -79,13 +70,24 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, HMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
+        # Skip if outside trading session
+        if not in_session[i]:
+            # Force flat outside session
+            if position != 0:
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
+            else:
+                signals[i] = 0.0
+            continue
+            
         # Skip if HTF data not available
-        if np.isnan(hma_12h_aligned[i]):
+        if np.isnan(ema_4h_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -103,25 +105,34 @@ def generate_signals(prices):
                 bars_since_entry = 0
                 continue
                 
+        # Time-based exit
+        if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
+            signals[i] = 0.0
+            position = 0
+            bars_since_entry = 0
+            continue
+            
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # HMA trend direction (rising/falling)
-        hma_rising = hma_12h_aligned[i] > hma_12h_aligned[i-1] if i > 0 else False
-        hma_falling = hma_12h_aligned[i] < hma_12h_aligned[i-1] if i > 0 else False
+        # Breakout conditions
+        bull_breakout = close[i] > highest_high[i]
+        bear_breakout = close[i] < lowest_low[i]
         
-        # Donchian breakouts
-        breakout_up = close[i] > highest_high[i-1] if i > 0 else False
-        breakout_down = close[i] < lowest_low[i-1] if i > 0 else False
+        # Trend filter: only trade in direction of 4h EMA
+        # For long: price above EMA (uptrend)
+        # For short: price below EMA (downtrend)
+        uptrend = close[i] > ema_4h_aligned[i]
+        downtrend = close[i] < ema_4h_aligned[i]
         
-        # Enter new positions only if flat
-        if position == 0:
-            if breakout_up and hma_rising and vol_confirmed:
+        # Entry logic
+        if position == 0:  # flat - look for new entries
+            if bull_breakout and vol_confirmed and uptrend:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif breakout_down and hma_falling and vol_confirmed:
+            elif bear_breakout and vol_confirmed and downtrend:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
