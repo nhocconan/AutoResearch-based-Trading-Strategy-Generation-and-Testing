@@ -25,7 +25,7 @@ VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # 10 days
+MAX_HOLD_BARS = 30  # ~30 days
 
 def generate_signals(prices):
     n = len(prices)
@@ -102,7 +102,7 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on 1w EMA
+        # Determine market regime based on EMA
         above_ema = close[i] > ema_1w_aligned[i]
         below_ema = close[i] < ema_1w_aligned[i]
         near_ema = np.abs(close[i] - ema_1w_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of EMA
