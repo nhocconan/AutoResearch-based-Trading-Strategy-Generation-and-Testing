@@ -1,49 +1,29 @@
 #!/usr/bin/env python3
 """
-Experiment #8051: 6-hour Camarilla Pivot with 1-day Direction and Volume Confirmation.
-Hypothesis: At 6h, price rejecting Camarilla R3/S3 levels with volume confirmation 
-and aligned with 1d trend (price above/below 1d VWAP) captures mean-reversion bounces 
-in ranging markets and breakout continuations in trending markets. Uses fade at R3/S3 
-and continuation at R4/S4. Target: 75-150 total trades over 4 years.
+Experiment #8052: 12-hour Donchian breakout with 1-day trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA 
+and aligned 1d trend (price above/below 1d EMA50) captures sustained moves with appropriate frequency.
+The 1d timeframe provides higher trend context to reduce whipsaw while maintaining 
+appropriate trade frequency for 12h timeframe. Target: 50-150 total trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8051_6h_camarilla1d_vwap_vol_v1"
-timeframe = "6h"
+name = "exp_8052_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_MULTIPLIER = 1.1 / 4  # Standard Camarilla multiplier
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-VWAP_PERIOD = 14
+EMA_PERIOD = 50
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_camarilla_levels(high, low, close):
-    """Calculate Camarilla pivot levels for given HLC"""
-    range_val = high - low
-    if range_val <= 0:
-        return close, close, close, close  # fallback
-    
-    pivot = (high + low + close) / 3
-    r4 = close + CAMARILLA_MULTIPLIER * range_val * 1.1 / 2  # R4
-    r3 = close + CAMARILLA_MULTIPLIER * range_val * 1.1 / 4  # R3
-    s3 = close - CAMARILLA_MULTIPLIER * range_val * 1.1 / 4  # S3
-    s4 = close - CAMARILLA_MULTIPLIER * range_val * 1.1 / 2  # S4
-    return r3, r4, s3, s4
-
-def calculate_vwap(high, low, close, volume, period):
-    """Calculate VWAP using typical price * volume"""
-    typical_price = (high + low + close) / 3
-    vwap_num = pd.Series(typical_price * volume).rolling(window=period, min_periods=1).sum()
-    vwap_den = pd.Series(volume).rolling(window=period, min_periods=1).sum()
-    vwap = vwap_num / vwap_den
-    return vwap.replace(0, np.nan).fillna(method='ffill').values
+ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -53,23 +33,26 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d VWAP for trend bias
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA
     close_1d = df_1d['close'].values
-    volume_1d = df_1d['volume'].values
-    vwap_1d = calculate_vwap(high_1d, low_1d, close_1d, volume_1d, VWAP_PERIOD)
-    price_vs_vwap = np.where(close_1d > vwap_1d, 1, -1)  # 1=bullish bias, -1=bearish bias
-    price_vs_vwap_aligned = align_htf_to_ltf(prices, df_1d, price_vs_vwap)
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    
+    # Price relative to EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
     
     # Calculate LTF indicators
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # VWAP for entry timing
-    vwap = calculate_vwap(high, low, close, volume, VWAP_PERIOD)
+    # Price channel (Donchian)
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR for risk management
     tr1 = pd.Series(high - low)
@@ -78,62 +61,47 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Volume moving average
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
+    target_price = 0.0
     
     # Start from warmup period
-    start = max(VWAP_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(price_vs_vwap_aligned[i]):
+        if np.isnan(price_vs_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
-        # Check stoploss
+        # Check stoploss or target
         if position == 1:  # long position
-            if close[i] <= stop_price:
+            if close[i] <= stop_price or close[i] >= target_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            if close[i] >= stop_price:
+            if close[i] >= stop_price or close[i] <= target_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Determine market bias from 1d VWAP
-        bull_bias = price_vs_vwap_aligned[i] == 1   # 1d close above VWAP
-        bear_bias = price_vs_vwap_aligned[i] == -1  # 1d close below VWAP
+        # Determine market bias from 1d EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d close below EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Calculate Camarilla levels for current 6h bar
-        r3, r4, s3, s4 = calculate_camarilla_levels(high[i], low[i], close[i])
+        # Breakout conditions - require close beyond channel bands to avoid wicks
+        upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
+        lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
         # Entry conditions
-        long_entry = False
-        short_entry = False
-        
-        if bull_bias and volume_confirmed:
-            # In bullish 1d context: look for bounces at S3/S4 or breakouts above R4
-            if close[i] <= s3 and low[i] <= s3:  # touched or went below S3
-                long_entry = True  # fade at S3
-            elif close[i] >= r4 and high[i] >= r4:  # broke above R4
-                long_entry = True  # continuation breakout
-                
-        if bear_bias and volume_confirmed:
-            # In bearish 1d context: look for bounces at R3/R4 or breakouts below S4
-            if close[i] >= r3 and high[i] >= r3:  # touched or went above R3
-                short_entry = True  # fade at R3
-            elif close[i] <= s4 and low[i] <= s4:  # broke below S4
-                short_entry = True  # continuation breakdown
+        long_entry = bull_bias and upper_breakout and volume_confirmed
+        short_entry = bear_bias and lower_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
@@ -142,11 +110,13 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
