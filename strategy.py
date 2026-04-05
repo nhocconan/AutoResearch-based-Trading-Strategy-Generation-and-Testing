@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
 Experiment #8806: 4h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Combining 4h Donchian breakouts with daily trend filter captures strong momentum moves while avoiding counter-trend trades.
-Volume confirmation ensures institutional participation. Designed for 75-200 trades over 4 years to balance edge and fee drag.
+Hypothesis: 4h timeframe provides optimal balance between signal frequency and noise reduction.
+Trend filter from 1d EMA ensures alignment with daily momentum to avoid counter-trend trades.
+Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk.
+Targets 75-200 trades over 4 years (19-50/year) to minimize fee impact while maintaining statistical validity.
+Works in bull markets via breakouts and in bear markets via short breakdowns with trend filter.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
