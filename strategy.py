@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #11679: 6h Donchian Breakout with 12h Trend and Volume Confirmation
-Hypothesis: 6h Donchian(20) breakouts capture medium-term trends. 12h EMA provides trend bias,
+Experiment #11683: 4h Donchian Breakout with 12h Trend and Volume Confirmation
+Hypothesis: 4h Donchian(20) breakouts capture medium-term trends. 12h EMA provides trend bias,
 and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 12h trend filter. Target: 100-200 trades over 4 years.
+bear (breakouts reverse quickly) by using 12h trend filter. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11679_6h_donchian20_12h_ema_vol_v3"
-timeframe = "6h"
+name = "exp_11683_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
-# Parameters - optimized for more trades while maintaining quality
-DONCHIAN_PERIOD = 15
+# Parameters - optimized for trade frequency
+DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.2  # Lowered threshold for more signals
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
@@ -54,7 +54,7 @@ def generate_signals(prices):
     ema_12h = calculate_ema(df_12h['close'].values, TREND_EMA_PERIOD)
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -104,7 +104,7 @@ def generate_signals(prices):
         uptrend_12h = close[i] > ema_12h_aligned[i]
         downtrend_12h = close[i] < ema_12h_aligned[i]
         
-        # Entry conditions - simplified for more trades
+        # Entry conditions
         long_entry = breakout_up and volume_ok and uptrend_12h
         short_entry = breakout_down and volume_ok and downtrend_12h
         
@@ -128,3 +128,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</lymph>
