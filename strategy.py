@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-Experiment #8038: Daily Donchian breakout with weekly trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period daily high/low with volume >1.5x 20-day MA
-and aligned weekly trend (price above/below weekly EMA50) captures sustained moves.
-Weekly timeframe provides strong trend context to reduce whipsaw while maintaining
-appropriate trade frequency for daily timeframe. Target: 30-100 total trades over 4 years.
+Experiment #8039: 6-hour Candlestick Body Range Breakout with 12-hour Trend Filter and Volume Confirmation.
+Hypothesis: Price breaking beyond the 20-period range of candle body midpoints (not wicks) on 6h with volume >1.5x 20-period MA 
+and aligned 12h trend (price above/below 12h EMA50) captures sustained moves with appropriate frequency. 
+Focus on body range reduces noise from long wicks in volatile markets. Target: 75-200 total trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8038_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_8039_6h_body_range_breakout_12h_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+BODY_RANGE_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -31,15 +30,15 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1w EMA
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate 12h EMA
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
     # Price relative to EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_1w > ema_1w, 1, -1)  # 1=bullish, -1=bearish
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
+    price_vs_ema = np.where(close_12h > ema_12h, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_12h, price_vs_ema)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -47,9 +46,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Price channel (Donchian)
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Calculate candle body (midpoint of open and close)
+    open_price = prices['open'].values
+    body = (open_price + close) / 2
+    
+    # Body range (highest/lowest body over period) - less noise than wicks
+    highest_body = pd.Series(body).rolling(window=BODY_RANGE_PERIOD, min_periods=BODY_RANGE_PERIOD).max().values
+    lowest_body = pd.Series(body).rolling(window=BODY_RANGE_PERIOD, min_periods=BODY_RANGE_PERIOD).min().values
     
     # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -68,7 +71,7 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(BODY_RANGE_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
@@ -88,16 +91,16 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1w EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1w close above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1w close below EMA50
+        # Determine market bias from 12h EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 12h close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 12h close below EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions - require close beyond channel bands to avoid wicks
-        upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
-        lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
+        # Breakout conditions - require close beyond body range bands
+        upper_breakout = (close[i] > highest_body[i-1]) and (i-1 >= 0) and not np.isnan(highest_body[i-1])
+        lower_breakout = (close[i] < lowest_body[i-1]) and (i-1 >= 0) and not np.isnan(lowest_body[i-1])
         
         # Entry conditions
         long_entry = bull_bias and upper_breakout and volume_confirmed
@@ -125,3 +128,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</p>
