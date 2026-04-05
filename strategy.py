@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #7697: 4-hour Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 4h with volume confirmation and aligned daily trend
+Hypothesis: Price breaking beyond 20-period high/low on 4h with volume confirmation and aligned 1d trend
 captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above EMA) and bear
 markets (short breakdowns below EMA). Targets 75-200 trades over 4 years.
 """
