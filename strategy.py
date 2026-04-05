@@ -21,13 +21,11 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 HMA_PERIOD = 21
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0  # Increased from 1.5 to reduce trades
+VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 10  # ~10 days
-CHOPPINESS_PERIOD = 14
-CHOPPINESS_THRESHOLD = 61.8  # Above this = ranging market
+MAX_HOLD_BARS = 15  # ~15 days
 
 def generate_signals(prices):
     n = len(prices)
@@ -86,25 +84,19 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Choppiness Index for regime detection
-    chop_sum = pd.Series(atr).rolling(window=CHOPPINESS_PERIOD, min_periods=CHOPPINESS_PERIOD).sum().values
-    highest_high_chop = pd.Series(high).rolling(window=CHOPPINESS_PERIOD, min_periods=CHOPPINESS_PERIOD).max().values
-    lowest_low_chop = pd.Series(low).rolling(window=CHOPPINESS_PERIOD, min_periods=CHOPPINESS_PERIOD).min().values
-    chop = 100 * np.log10(chop_sum / (highest_high_chop - lowest_low_chop)) / np.log10(CHOPPINESS_PERIOD)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, HMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, CHOPPINESS_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, HMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(hma_1w_aligned[i]) or np.isnan(chop[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -129,23 +121,21 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Volume confirmation
+        # Volume confirmation - increased threshold
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on HMA and Choppiness
+        # Determine market regime based on HMA
         above_hma = close[i] > hma_1w_aligned[i]
         below_hma = close[i] < hma_1w_aligned[i]
-        near_hma = np.abs(close[i] - hma_1w_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of HMA
-        ranging_market = chop[i] > CHOPPINESS_THRESHOLD  # Chop > 61.8 = ranging
-        trending_market = chop[i] <= CHOPPINESS_THRESHOLD  # Chop <= 61.8 = trending
+        near_hma = np.abs(close[i] - hma_1w_aligned[i]) < (0.3 * atr[i])  # Tighter HMA band
         
         # Fade at extremes in ranging market (near HMA)
-        fade_long = ranging_market and near_hma and (close[i] <= lowest_low[i]) and vol_confirmed
-        fade_short = ranging_market and near_hma and (close[i] >= highest_high[i]) and vol_confirmed
+        fade_long = near_hma and (close[i] <= lowest_low[i]) and vol_confirmed
+        fade_short = near_hma and (close[i] >= highest_high[i]) and vol_confirmed
         
         # Continuation breakouts in trending market
-        continuation_long = trending_market and above_hma and (close[i] > highest_high[i]) and vol_confirmed
-        continuation_short = trending_market and below_hma and (close[i] < lowest_low[i]) and vol_confirmed
+        continuation_long = above_hma and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_hma and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
@@ -166,3 +156,5 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
+
+</think>
