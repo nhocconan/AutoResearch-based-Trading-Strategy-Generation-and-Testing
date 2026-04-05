@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #8421: 4h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Price breaking out of Donchian channels (20-period) with 1-day trend alignment and volume spikes
-captures strong directional moves while avoiding false breakouts in chop. 1d EMA provides trend bias,
-Donchian breakouts provide entry signals, volume confirms institutional participation. 
-Targets 100-180 trades over 4 years (25-45/year) to balance opportunity with fee minimization.
+Experiment #8422: 12h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
+Hypothesis: Price breaking out of Donchian channels (20-period) on 12h timeframe with 1-day trend alignment and volume spikes captures strong directional moves while avoiding false breakouts in chop. 1d EMA provides trend bias, Donchian breakouts provide entry signals, volume confirms institutional participation. Targets 50-150 trades over 4 years (12-37/year) to balance opportunity with fee minimization. Works in both bull and bear markets due to symmetric long/short logic and trend filter.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8421_4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "exp_8422_12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
