@@ -1,43 +1,48 @@
 #!/usr/bin/env python3
 """
-Experiment #7629: 4h Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
-Hypothesis: In bull markets (price > 1d EMA200), go long on breakout above 4h Donchian upper.
-In bear markets (price < 1d EMA200), go short on breakdown below 4h Donchian lower.
-Volume must be above 1.5x average to confirm breakout strength.
-ATR-based stoploss (2x) and target (3x) for risk management.
-Targets 75-200 trades over 4 years (19-50/year) with strict breakout conditions.
+Experiment #7631: 6h Donchian(20) breakout with 1-day pivot filter and volume confirmation.
+Hypothesis: Use daily pivot levels to determine market bias - long when price above daily pivot, short when below.
+Enter on 6h Donchian breakout in direction of daily pivot bias with volume confirmation (>1.5x avg volume).
+Targets 80-160 trades over 4 years (20-40/year) with pivot + breakout + volume confluence.
+Works in both bull/bear as pivot adapts to recent price action.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_alt_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7629_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7631_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_TREND = 200
+PIVOT_LOOKBACK = 1
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5  # volume must be 1.5x average
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
 
+def calculate_pivot(high, low, close):
+    """Calculate classic pivot point: (H + L + C) / 3"""
+    return (high + low + close) / 3.0
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA200 for trend filter
+    # Calculate 1d pivot points
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
+    pivot_1d = calculate_pivot(high_1d, low_1d, close_1d)
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -66,11 +71,11 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1d_200_aligned[i]):
+        if np.isnan(pivot_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -86,9 +91,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market regime
-        bull_regime = close[i] > ema_1d_200_aligned[i]   # price above 1d EMA200
-        bear_regime = close[i] < ema_1d_200_aligned[i]   # price below 1d EMA200
+        # Determine market bias from daily pivot
+        bull_bias = close[i] > pivot_1d_aligned[i]   # price above daily pivot
+        bear_bias = close[i] < pivot_1d_aligned[i]   # price below daily pivot
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -98,8 +103,8 @@ def generate_signals(prices):
         lower_breakout = (low[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
         # Entry conditions
-        long_entry = bull_regime and upper_breakout and volume_confirmed
-        short_entry = bear_regime and lower_breakout and volume_confirmed
+        long_entry = bull_bias and upper_breakout and volume_confirmed
+        short_entry = bear_bias and lower_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
