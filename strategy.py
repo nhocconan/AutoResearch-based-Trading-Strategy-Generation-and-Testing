@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """
-exp_7267_6h_donchian20_1d_pivot_v2
-Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot direction filter.
-In trending markets (price above/below daily pivot): continuation breakouts in breakout direction.
-In ranging markets (price near daily pivot): mean reversion at Donchian extremes.
-Uses 1d Camarilla pivots for trend regime and 6h volume for confirmation.
+exp_7267_6h_donchian20_1d_pivot_vol_v1
+Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot regime filter for BTC/ETH/SOL.
+In trending markets (price between R3/S3): breakout continuation in breakout direction.
+In ranging markets (price outside R3/S3): mean reversion at Donchian extremes with volume confirmation.
+Uses 1d Camarilla pivots for regime classification and 6h volume for confirmation.
 Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by adapting to pivot-defined trend regime.
+Works in both bull and bear markets by adapting to pivot-defined structure: 
+- Trending regime (R3-S3): trade breakouts with trend
+- Ranging regime (outside R3-S3): fade extremes
+Avoids whipsaw in sideways markets and captures momentum in trending periods.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7267_6h_donchian20_1d_pivot_v2"
+name = "exp_7267_6h_donchian20_1d_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -34,26 +37,28 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop - using 1d for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Camarilla pivots
+    # Calculate 1d Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3
+    # Typical price for pivot calculation
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
     
     # Camarilla levels
-    r3 = pivot + (range_1d * 1.1 / 4)
-    s3 = pivot - (range_1d * 1.1 / 4)
-    r4 = pivot + (range_1d * 1.1 / 2)
-    s4 = pivot - (range_1d * 1.1 / 2)
+    camarilla_h5 = typical_price + 1.1 * range_1d / 2  # R4
+    camarilla_h4 = typical_price + 1.1 * range_1d / 4  # R3
+    camarilla_h3 = typical_price + 1.1 * range_1d / 6  # R2
+    camarilla_l3 = typical_price - 1.1 * range_1d / 6  # S2
+    camarilla_l4 = typical_price - 1.1 * range_1d / 4  # S3
+    camarilla_l5 = typical_price - 1.1 * range_1d / 2  # S4
     
     # Align to LTF (6h)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)  # R3
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)  # S3
+    camarilla_h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)  # R4
+    camarilla_l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)  # S4
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -87,7 +92,7 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(pivot_aligned[i]):
+        if np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -115,18 +120,19 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on pivot
-        above_pivot = close[i] > pivot_aligned[i]
-        below_pivot = close[i] < pivot_aligned[i]
-        near_pivot = np.abs(close[i] - pivot_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of pivot
+        # Determine market regime based on Camarilla levels
+        # Trending regime: price between R3 and S3
+        in_trending_regime = (close[i] > camarilla_l4_aligned[i]) and (close[i] < camarilla_h4_aligned[i])
+        # Ranging regime: price outside R3/S3 (beyond R3 or below S3)
+        in_ranging_regime = (close[i] <= camarilla_l4_aligned[i]) or (close[i] >= camarilla_h4_aligned[i])
         
-        # Fade at extremes in ranging market (near pivot)
-        fade_long = near_pivot and (close[i] <= lowest_low[i]) and vol_confirmed
-        fade_short = near_pivot and (close[i] >= highest_high[i]) and vol_confirmed
+        # Fade at Donchian extremes in ranging market
+        fade_long = in_ranging_regime and (close[i] <= lowest_low[i]) and vol_confirmed
+        fade_short = in_ranging_regime and (close[i] >= highest_high[i]) and vol_confirmed
         
-        # Continuation breakouts in trending market
-        continuation_long = above_pivot and (close[i] > highest_high[i]) and vol_confirmed
-        continuation_short = below_pivot and (close[i] < lowest_low[i]) and vol_confirmed
+        # Continuation breakouts in trending market (trade with structure)
+        continuation_long = in_trending_regime and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = in_trending_regime and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
@@ -151,20 +157,23 @@ def generate_signals(prices):
 </think>
 #!/usr/bin/env python3
 """
-exp_7267_6h_donchian20_1d_pivot_v2
-Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot direction filter.
-In trending markets (price above/below daily pivot): continuation breakouts in breakout direction.
-In ranging markets (price near daily pivot): mean reversion at Donchian extremes.
-Uses 1d Camarilla pivots for trend regime and 6h volume for confirmation.
+exp_7267_6h_donchian20_1d_pivot_vol_v1
+Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot regime filter for BTC/ETH/SOL.
+In trending markets (price between R3/S3): breakout continuation in breakout direction.
+In ranging markets (price outside R3/S3): mean reversion at Donchian extremes with volume confirmation.
+Uses 1d Camarilla pivots for regime classification and 6h volume for confirmation.
 Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by adapting to pivot-defined trend regime.
+Works in both bull and bear markets by adapting to pivot-defined structure: 
+- Trending regime (R3-S3): trade breakouts with trend
+- Ranging regime (outside R3-S3): fade extremes
+Avoids whipsaw in sideways markets and captures momentum in trending periods.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7267_6h_donchian20_1d_pivot_v2"
+name = "exp_7267_6h_donchian20_1d_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -185,26 +194,28 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop - using 1d for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Camarilla pivots
+    # Calculate 1d Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    pivot = (high_1d + low_1d + close_1d) / 3
+    # Typical price for pivot calculation
+    typical_price = (high_1d + low_1d + close_1d) / 3.0
     range_1d = high_1d - low_1d
     
     # Camarilla levels
-    r3 = pivot + (range_1d * 1.1 / 4)
-    s3 = pivot - (range_1d * 1.1 / 4)
-    r4 = pivot + (range_1d * 1.1 / 2)
-    s4 = pivot - (range_1d * 1.1 / 2)
+    camarilla_h5 = typical_price + 1.1 * range_1d / 2  # R4
+    camarilla_h4 = typical_price + 1.1 * range_1d / 4  # R3
+    camarilla_h3 = typical_price + 1.1 * range_1d / 6  # R2
+    camarilla_l3 = typical_price - 1.1 * range_1d / 6  # S2
+    camarilla_l4 = typical_price - 1.1 * range_1d / 4  # S3
+    camarilla_l5 = typical_price - 1.1 * range_1d / 2  # S4
     
     # Align to LTF (6h)
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)  # R3
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)  # S3
+    camarilla_h5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h5)  # R4
+    camarilla_l5_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l5)  # S4
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -238,7 +249,7 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(pivot_aligned[i]):
+        if np.isnan(camarilla_h4_aligned[i]) or np.isnan(camarilla_l4_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -266,18 +277,19 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on pivot
-        above_pivot = close[i] > pivot_aligned[i]
-        below_pivot = close[i] < pivot_aligned[i]
-        near_pivot = np.abs(close[i] - pivot_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of pivot
+        # Determine market regime based on Camarilla levels
+        # Trending regime: price between R3 and S3
+        in_trending_regime = (close[i] > camarilla_l4_aligned[i]) and (close[i] < camarilla_h4_aligned[i])
+        # Ranging regime: price outside R3/S3 (beyond R3 or below S3)
+        in_ranging_regime = (close[i] <= camarilla_l4_aligned[i]) or (close[i] >= camarilla_h4_aligned[i])
         
-        # Fade at extremes in ranging market (near pivot)
-        fade_long = near_pivot and (close[i] <= lowest_low[i]) and vol_confirmed
-        fade_short = near_pivot and (close[i] >= highest_high[i]) and vol_confirmed
+        # Fade at Donchian extremes in ranging market
+        fade_long = in_ranging_regime and (close[i] <= lowest_low[i]) and vol_confirmed
+        fade_short = in_ranging_regime and (close[i] >= highest_high[i]) and vol_confirmed
         
-        # Continuation breakouts in trending market
-        continuation_long = above_pivot and (close[i] > highest_high[i]) and vol_confirmed
-        continuation_short = below_pivot and (close[i] < lowest_low[i]) and vol_confirmed
+        # Continuation breakouts in trending market (trade with structure)
+        continuation_long = in_trending_regime and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = in_trending_regime and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
@@ -298,5 +310,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
