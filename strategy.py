@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #8358: 1-day Donchian breakout with 1-week trend filter, volume confirmation, and ATR risk management.
-Hypothesis: Price breaking above/below the 20-day Donchian channel on 1d with volume >1.5x 20-period MA 
-and aligned 1-week trend (price above/below weekly SMA50) captures sustained moves while avoiding whipsaw.
-The weekly trend filter provides long-term context, reducing false breakouts during consolidation.
-Targeting 75-200 total trades over 4 years for optimal balance.
+Experiment #8359: 6-hour Bollinger Band squeeze breakout with 12-hour trend filter and volume confirmation.
+Hypothesis: Bollinger Band width contraction indicates low volatility and impending breakout. 
+Breakouts in the direction of the 12-hour trend (price above/below 50-period EMA) with volume 
+>1.5x 20-period MA capture high-probability moves while avoiding whipsaw in ranging markets.
+Targeting 50-150 total trades over 4 years (12-37/year) for optimal balance.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8358_1d_donchian20_1w_trend_vol_v1"
-timeframe = "1d"
+name = "exp_8359_6b_bollinger_squeeze_12h_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+BB_PERIOD = 20
+BB_STD_DEV = 2.0
+BBW_PERCENTILE_LOOKBACK = 50  # for squeeze detection
+EMA_TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-SMA_TREND_PERIOD = 50
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
@@ -31,14 +33,14 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1w SMA trend filter
-    close_1w = df_1w['close'].values
-    sma_1w = pd.Series(close_1w).rolling(window=SMA_TREND_PERIOD, min_periods=SMA_TREND_PERIOD).mean().values
-    # Price above SMA = bullish trend, below = bearish trend
-    price_above_sma = np.where(close_1w > sma_1w, 1, -1)
-    price_above_sma_aligned = align_htf_to_ltf(prices, df_1w, price_above_sma)
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=EMA_TREND_PERIOD, adjust=False, min_periods=EMA_TREND_PERIOD).mean().values
+    # Trend: 1 = bullish (price above EMA), -1 = bearish (price below EMA)
+    trend_12h = np.where(close_12h > ema_12h, 1, -1)
+    trend_12h_aligned = align_htf_to_ltf(prices, df_12h, trend_12h)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -46,9 +48,20 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period high/low)
-    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Bollinger Bands on 6h
+    sma = pd.Series(close).rolling(window=BB_PERIOD, min_periods=BB_PERIOD).mean().values
+    std = pd.Series(close).rolling(window=BB_PERIOD, min_periods=BB_PERIOD).std().values
+    upper_band = sma + (BB_STD_DEV * std)
+    lower_band = sma - (BB_STD_DEV * std)
+    bb_width = upper_band - lower_band
+    
+    # Bollinger Band Width percentile for squeeze detection
+    # Using pandas rolling percentile rank
+    bbw_series = pd.Series(bb_width)
+    bbw_percentile = bbw_series.rolling(window=BBW_PERCENTILE_LOOKBACK, min_periods=BBW_PERCENTILE_LOOKBACK).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
+    ).values
+    squeeze = bbw_percentile <= 0.2  # Bottom 20% indicates squeeze
     
     # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -67,11 +80,12 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, SMA_TREND_PERIOD, ATR_PERIOD) + 1
+    start = max(BB_PERIOD, EMA_TREND_PERIOD, BBW_PERCENTILE_LOOKBACK, 
+                VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(price_above_sma_aligned[i]):
+        if np.isnan(trend_12h_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -87,21 +101,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1w SMA trend
-        bull_bias = price_above_sma_aligned[i] == 1   # 1w price above SMA50
-        bear_bias = price_above_sma_aligned[i] == -1  # 1w price below SMA50
+        # Determine trend bias from 12h EMA
+        bull_bias = trend_12h_aligned[i] == 1   # 12h price above EMA
+        bear_bias = trend_12h_aligned[i] == -1  # 12h price below EMA
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions - require close beyond Donchian bands
-        # Use previous bar's bands to avoid look-ahead
-        breakout_up = (close[i] > donchian_high[i-1]) and (i-1 >= 0) and not np.isnan(donchian_high[i-1])
-        breakout_down = (close[i] < donchian_low[i-1]) and (i-1 >= 0) and not np.isnan(donchian_low[i-1])
+        # Breakout conditions - price closes beyond Bollinger Bands
+        breakout_up = close[i] > upper_band[i-1] if i-1 >= 0 else False
+        breakout_down = close[i] < lower_band[i-1] if i-1 >= 0 else False
         
-        # Entry conditions
-        long_entry = bull_bias and breakout_up and volume_confirmed
-        short_entry = bear_bias and breakout_down and volume_confirmed
+        # Entry conditions: require squeeze + breakout in trend direction + volume
+        long_entry = squeeze[i-1] and bull_bias and breakout_up and volume_confirmed if i-1 >= 0 else False
+        short_entry = squeeze[i-1] and bear_bias and breakout_down and volume_confirmed if i-1 >= 0 else False
         
         # Generate signals
         if position == 0:
