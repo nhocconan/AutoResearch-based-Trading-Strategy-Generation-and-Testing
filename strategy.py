@@ -1,16 +1,17 @@
+# 11100
 #!/usr/bin/env python3
 """
-Experiment #11097: 4h Donchian Breakout with 1d Trend and Volume Confirmation
+Experiment #11100: 4h Donchian Breakout with 1d Trend and Volume Confirmation
 Hypothesis: Donchian(20) breakouts capture strong directional moves. Daily EMA provides trend bias,
 and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 trades over 4 years.
+bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11097_4h_donchian20_1d_ema_vol_v1"
+name = "exp_11100_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
