@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #7923: 4-hour Donchian breakout with 12h trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.5x 20-period MA 
-and aligned 12h trend (price above/below 12h EMA50) captures sustained moves. 
-The 12h timeframe provides stronger trend context than 1d to improve performance in 
-both bull and bear markets while maintaining reasonable trade frequency. 
-Target: 75-200 total trades over 4 years.
+Experiment #7924: Daily Donchian breakout with weekly trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 1d with volume >1.5x 20-period MA 
+and aligned 1w trend (price above/below 1w EMA50) captures sustained moves while minimizing 
+trade frequency. Weekly trend filter reduces whipsaws in both bull and bear markets.
+Target: 30-100 total trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7923_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7924_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
@@ -24,7 +23,6 @@ SIGNAL_SIZE = 0.25
 EMA_PERIOD = 50
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
     n = len(prices)
@@ -32,15 +30,15 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 12h EMA
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate 1w EMA
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
     # Price relative to EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_12h > ema_12h, 1, -1)  # 1=bullish, -1=bearish
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_12h, price_vs_ema)
+    price_vs_ema = np.where(close_1w > ema_1w, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -66,7 +64,6 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
-    target_price = 0.0
     
     # Start from warmup period
     start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
@@ -77,21 +74,21 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
-        # Check stoploss or target
+        # Check stoploss
         if position == 1:  # long position
-            if close[i] <= stop_price or close[i] >= target_price:
+            if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            if close[i] >= stop_price or close[i] <= target_price:
+            if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Determine market bias from 12h EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 12h close above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 12h close below EMA50
+        # Determine market bias from 1w EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1w close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1w close below EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -111,13 +108,11 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
