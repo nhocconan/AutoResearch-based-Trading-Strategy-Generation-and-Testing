@@ -1,31 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #8174: 1-hour strategy with 4h/1d trend filter and volume confirmation.
-Hypothesis: Using 4h for trend direction and 1d for higher-timeframe confirmation, 
-combined with volume spikes on 1h for entry timing, reduces whipsaw and captures 
-sustained moves in both bull and bear markets. The 1d trend filter adds robustness 
-against false breakouts during consolidation, while 4h provides timely trend signals.
-Target trade count: 60-150 total over 4 years (15-37/year) to avoid fee drag.
+Experiment #8174: 1-hour timeframe with 4h/1d trend filter and volume confirmation.
+Hypothesis: 1h breakouts aligned with 4h trend (price above/below EMA) and 1d regime (price above/below EMA) with volume confirmation capture sustained moves while reducing whipsaw. 1h provides timely entries, 4h/1d filters reduce false signals. Target 15-37 trades/year via tight entry conditions.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8174_1h_4h_1d_trend_vol_v1"
+name = "exp_8174_1h_4h_1d_ema_vol_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-TREND_PERIOD_4H = 20          # 4h EMA for trend direction
-TREND_PERIOD_1D = 50          # 1d EMA for higher-timeframe filter
-VOLUME_MA_PERIOD = 20         # Volume moving average
-VOLUME_THRESHOLD = 1.5        # Volume spike threshold
-SIGNAL_SIZE = 0.20            # Position size (20% of capital)
-ATR_PERIOD = 14               # ATR for volatility
-ATR_STOP_MULTIPLIER = 2.0     # Stop loss multiplier
-SESSION_START_HOUR = 8        # Active session start (UTC)
-SESSION_END_HOUR = 20         # Active session end (UTC)
+EMA_PERIOD_4H = 34
+EMA_PERIOD_1D = 50
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.20
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
+ATR_TARGET_MULTIPLIER = 3.0
+SESSION_START_HOUR = 8   # UTC
+SESSION_END_HOUR = 20    # UTC
 
 def generate_signals(prices):
     n = len(prices)
@@ -36,26 +33,26 @@ def generate_signals(prices):
     df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA for trend direction
+    # Calculate 4h EMA for trend
     close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=TREND_PERIOD_4H, adjust=False, min_periods=TREND_PERIOD_4H).mean().values
-    trend_4h = np.where(close_4h > ema_4h, 1, -1)  # 1=uptrend, -1=downtrend
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
+    ema_4h = pd.Series(close_4h).ewm(span=EMA_PERIOD_4H, adjust=False, min_periods=EMA_PERIOD_4H).mean().values
+    price_vs_ema_4h = np.where(close_4h > ema_4h, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_4h_aligned = align_htf_to_ltf(prices, df_4h, price_vs_ema_4h)
     
-    # Calculate 1d EMA for higher-timeframe filter
+    # Calculate 1d EMA for regime filter
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=TREND_PERIOD_1D, adjust=False, min_periods=TREND_PERIOD_1D).mean().values
-    trend_1d = np.where(close_1d > ema_1d, 1, -1)  # 1=uptrend, -1=downtrend
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD_1D, adjust=False, min_periods=EMA_PERIOD_1D).mean().values
+    price_vs_ema_1d = np.where(close_1d > ema_1d, 1, -1)  # 1=bullish, -1=bearish
+    price_vs_ema_1d_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema_1d)
+    
+    # Precompute session hours
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # Volume moving average
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR for risk management
     tr1 = pd.Series(high - low)
@@ -64,55 +61,62 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Session filter: active hours 8-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= SESSION_START_HOUR) & (hours <= SESSION_END_HOUR)
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
+    target_price = 0.0
     
     # Start from warmup period
-    start = max(TREND_PERIOD_4H, TREND_PERIOD_1D, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_PERIOD_4H, EMA_PERIOD_1D, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if outside active session
-        if not in_session[i]:
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < SESSION_START_HOUR or hour > SESSION_END_HOUR:
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
             
         # Skip if HTF data not available
-        if np.isnan(trend_4h_aligned[i]) or np.isnan(trend_1d_aligned[i]):
+        if np.isnan(price_vs_ema_4h_aligned[i]) or np.isnan(price_vs_ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = 0.0
                 position = 0
             continue
-        
-        # Check stoploss
+            
+        # Check stoploss or target
         if position == 1:  # long position
-            if close[i] <= stop_price:
+            if close[i] <= stop_price or close[i] >= target_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            if close[i] >= stop_price:
+            if close[i] >= stop_price or close[i] <= target_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Determine market bias: require alignment between 4h and 1d trends
-        bull_bias = (trend_4h_aligned[i] == 1) and (trend_1d_aligned[i] == 1)
-        bear_bias = (trend_4h_aligned[i] == -1) and (trend_1d_aligned[i] == -1)
+        # Determine market bias from 4h EMA and 1d regime
+        bull_bias_4h = price_vs_ema_4h_aligned[i] == 1   # 4h close above EMA34
+        bear_bias_4h = price_vs_ema_4h_aligned[i] == -1  # 4h close below EMA34
+        bull_bias_1d = price_vs_ema_1d_aligned[i] == 1   # 1d close above EMA50
+        bear_bias_1d = price_vs_ema_1d_aligned[i] == -1  # 1d close below EMA50
+        
+        # Require alignment: both 4h and 1d agree on direction
+        bull_aligned = bull_bias_4h and bull_bias_1d
+        bear_aligned = bear_bias_4h and bear_bias_1d
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry conditions
-        long_entry = bull_bias and volume_confirmed
-        short_entry = bear_bias and volume_confirmed
+        # Entry conditions: aligned trend + volume
+        long_entry = bull_aligned and volume_confirmed
+        short_entry = bear_aligned and volume_confirmed
         
         # Generate signals
         if position == 0:
@@ -121,11 +125,13 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
