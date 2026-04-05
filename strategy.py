@@ -2,9 +2,9 @@
 """
 Experiment #8077: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
 Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.5x 20-period MA 
-and aligned 1d trend (price above/below 1d EMA50) captures sustained moves with 
-appropriate frequency for 4h timeframe. The 1d timeframe provides higher trend context 
-to reduce whipsaw while maintaining trade frequency of ~20-50 trades/year.
+and aligned daily trend (price above/below daily EMA50) captures sustained moves with 
+appropriate frequency for 4h timeframe. Uses daily timeframe for stronger trend context 
+than 12h, reducing whipsaw while targeting 75-200 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
