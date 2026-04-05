@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #8827: 6h Donchian breakout + weekly pivot direction + volume confirmation.
-Hypothesis: Weekly pivots provide strong support/resistance levels that align with weekly trend.
-Breakouts in direction of weekly pivot bias (above/below weekly pivot) capture institutional flow.
-Volume confirmation ensures genuine breakouts. Targets 50-150 total trades over 4 years (12-37/year).
-Uses 6h timeframe to balance trade frequency and signal quality, avoiding excessive churn.
+Experiment #8828: 12h Donchian breakout + 1w trend filter + volume confirmation + ATR stoploss.
+Hypothesis: 12h timeframe captures significant price moves while reducing trade frequency to combat fee drag.
+Using 1-week trend filter (EMA50) ensures alignment with multi-week momentum, avoiding counter-trend trades.
+Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk.
+Targets 50-150 trades over 4 years (12-37/year) to minimize fee impact while maintaining statistical validity.
+Works in both bull and bear markets by following the weekly trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8827_6h_donchian20_1w_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_8828_12h_donchian20_1w_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -37,22 +39,19 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (weekly data for pivot calculation)
+    # Load HTF data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot points (standard formula)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Calculate 1w EMA for trend filter
     close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
     
-    # Weekly pivot: P = (H + L + C) / 3
-    weekly_pivot = (high_1w + low_1w + close_1w) / 3.0
-    # Weekly bias: above pivot = bullish, below = bearish
-    weekly_bias = np.where(close_1w > weekly_pivot, 1, 
-                   np.where(close_1w < weekly_pivot, -1, 0))  # 1=bullish, -1=bearish, 0=at pivot
-    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias)
+    # Price relative to 1w EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_1w > ema_1w, 1, 
+                     np.where(close_1w < ema_1w, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
     
-    # Calculate LTF indicators (6h)
+    # Calculate LTF indicators (12h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -74,11 +73,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(weekly_bias_aligned[i]):
+        if np.isnan(price_vs_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -94,9 +93,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from weekly pivot
-        bull_bias = weekly_bias_aligned[i] == 1   # weekly close above pivot
-        bear_bias = weekly_bias_aligned[i] == -1  # weekly close below pivot
+        # Determine market bias from 1w EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1w price above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1w price below EMA50
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
