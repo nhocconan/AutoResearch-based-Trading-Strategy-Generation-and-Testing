@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #11301: 4h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: Donchian(20) breakouts on 4h capture strong directional moves. Daily EMA provides trend bias,
+Experiment #11302: 12h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Donchian(20) breakouts capture strong directional moves. Daily EMA provides trend bias,
 and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 trades over 4 years.
+bear (breakouts reverse quickly) by using 1d trend filter. Target: 50-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11301_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_11302_12h_donchian20_1d_vol_adj_v1"
+timeframe = "12h"
 leverage = 1.0
 
-# Parameters
+# Parameters - ADJUSTED FOR MORE TRADES
 DONCHIAN_PERIOD = 20
 DAILY_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.3  # LOWERED from 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -54,7 +54,7 @@ def generate_signals(prices):
     ema_daily = calculate_ema(df_daily['close'].values, DAILY_EMA_PERIOD)
     ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
