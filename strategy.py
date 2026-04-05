@@ -1,26 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #8531: 6h Camarilla Pivot + 1d Trend Filter + Volume Confirmation
-Hypothesis: Camarilla levels from daily timeframe provide institutional-grade support/resistance.
-Fade at R3/S3 (mean reversion) and breakout at R4/S4 (momentum) with 1d trend filter (EMA50) ensures
-alignment with higher timeframe momentum. Volume confirmation filters false signals.
-Targets 50-150 trades over 4 years (12-37/year) to balance opportunity with fee minimization.
+Experiment #8534: 1h strategy with 4h/1d trend filter + volume confirmation + mean reversion entry.
+Hypothesis: In ranging markets (2025 test period), price reverts to 20-period mean with volume confirmation.
+Uses 4h for trend direction (avoid counter-trend) and 1d for volatility filter (avoid chop).
+Targets 100-200 total trades over 4 years (25-50/year) to balance frequency and edge.
 """
 
-from mtf_data import get_ath_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8531_6h_camarilla1d_trend_vol_v1"
-timeframe = "6h"
+name = "exp_8534_1h_meanrev_4h_trend_1d_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_PERIOD = 1
-TREND_PERIOD = 50
+MEAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+TREND_PERIOD = 50
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
@@ -33,73 +32,50 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given period"""
-    # Typical price
-    pivot = (high + low + close) / 3.0
-    range_val = high - low
-    
-    # Camarilla levels
-    r4 = close + range_val * 1.1 / 2
-    r3 = close + range_val * 1.1 / 4
-    r2 = close + range_val * 1.1 / 6
-    r1 = close + range_val * 1.1 / 12
-    
-    s1 = close - range_val * 1.1 / 12
-    s2 = close - range_val * 1.1 / 6
-    s3 = close - range_val * 1.1 / 4
-    s4 = close - range_val * 1.1 / 2
-    
-    return {
-        'r4': r4, 'r3': r3, 'r2': r2, 'r1': r1,
-        's1': s1, 's2': s2, 's3': s3, 's4': s4,
-        'pivot': pivot
-    }
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
+    # Calculate 4h EMA for trend filter
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
+    # Price relative to 4h EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_4h > ema_4h, 1, 
+                     np.where(close_4h < ema_4h, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
+    trend_4h = align_htf_to_ltf(prices, df_4h, price_vs_ema)
     
-    # Price relative to 1d EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_1d > ema_1d, 1, 
-                     np.where(close_1d < ema_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
-    
-    # Calculate 1d Camarilla levels
+    # Calculate 1d ATR for volatility filter (avoid high volatility periods)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, ATR_PERIOD)
+    # Use 20-period SMA of ATR as volatility baseline
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=20, min_periods=20).mean().values
+    vol_filter_1d = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
     
-    camarilla = calculate_camarilla(high_1d, low_1d, close_1d)
-    
-    # Extract levels
-    r4 = camarilla['r4']
-    r3 = camarilla['r3']
-    s3 = camarilla['s3']
-    s4 = camarilla['s4']
-    
-    # Align Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Calculate LTF indicators (6h)
+    # Calculate LTF indicators (1h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # Price relative to 20-period mean (mean reversion target)
+    price_ma = pd.Series(close).rolling(window=MEAN_PERIOD, min_periods=MEAN_PERIOD).mean().values
+    price_dev = (close - price_ma) / price_ma  # Deviation from mean
+    
+    # Volume confirmation
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Session filter: 08-20 UTC (reduce noise outside active hours)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -107,12 +83,21 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(MEAN_PERIOD, VOLUME_MA_PERIOD, TREND_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(price_vs_ema_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        if np.isnan(trend_4h[i]) or np.isnan(vol_filter_1d[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
+            
+        # Check session: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE  # hold position
+            else:
+                signals[i] = 0.0
             continue
             
         # Check stoploss
@@ -127,26 +112,18 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1d EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1d price above EMA50
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1d price below EMA50
+        # Volatility filter: avoid trading when volatility is too high (>1.5x average)
+        vol_condition = vol_filter_1d[i] > 0 and atr[i] < (1.5 * vol_filter_1d[i])
         
-        # Volume confirmation
-        volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Mean reversion conditions
+        # Long when price is significantly below mean AND volume confirms
+        long_entry = (price_dev[i] < -0.015) and volume_confirmed and vol_condition and (trend_4h[i] != -1)
+        # Short when price is significantly above mean AND volume confirms
+        short_entry = (price_dev[i] > 0.015) and volume_confirmed and vol_condition and (trend_4h[i] != 1)
         
-        # Camarilla-based conditions
-        # Fade at R3/S3 (mean reversion)
-        fade_long = close[i] <= s3_aligned[i] and bull_bias
-        fade_short = close[i] >= r3_aligned[i] and bear_bias
-        
-        # Breakout at R4/S4 (momentum)
-        breakout_long = close[i] > r4_aligned[i-1] and bull_bias
-        breakout_short = close[i] < s4_aligned[i-1] and bear_bias
-        
-        # Entry conditions (require volume confirmation)
-        long_entry = (fade_long or breakout_long) and volume_confirmed
-        short_entry = (fade_short or breakout_short) and volume_confirmed
+        # Volume confirmation (using previous bar to avoid look-ahead)
+        volume_confirmed = (i > 0 and not np.isnan(volume_ma[i-1]) and 
+                          volume[i-1] > (volume_ma[i-1] * VOLUME_THRESHOLD))
         
         # Generate signals
         if position == 0:
