@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #8852: 12h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
-Hypothesis: 12h timeframe balances trend capture with reduced trade frequency vs lower timeframes.
-Using 1-day trend filter (EMA50) ensures alignment with daily momentum while avoiding counter-trend trades.
-Volume confirmation filters breakouts requiring participation. ATR-based stops manage risk.
+Hypothesis: 12h timeframe balances trade frequency (target 50-150 total trades over 4 years) with trend capture.
+1d trend filter (EMA50) ensures alignment with daily momentum, avoiding counter-trend trades in both bull and bear markets.
+Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk.
 Targets 50-150 trades over 4 years (12-37/year) to minimize fee impact while maintaining statistical validity.
-Works in both bull (breakouts with trend) and bear (avoids counter-trend, waits for alignment).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
