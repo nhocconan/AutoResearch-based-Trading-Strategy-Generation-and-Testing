@@ -1,67 +1,74 @@
 #!/usr/bin/env python3
 """
-Experiment #8154: 1-hour RSI mean reversion with 4h trend filter and volume confirmation.
-Hypothesis: In ranging markets (both bull and bear), price tends to revert from RSI extremes.
-We use 4h trend to filter direction (long in uptrend, short in downtrend) and enter on 1h RSI reversals
-with volume confirmation. This reduces whipsaw by trading with the higher timeframe trend while
-capitalizing on short-term mean reversion. Session filter (08-20 UTC) avoids low-liquidity hours.
-Target: 60-150 trades over 4 years (15-37/year) with controlled frequency.
+Experiment #8155: 6-hour 1-week pivot-based reversal with 1-day volume confirmation.
+Hypothesis: Price rejection at weekly resistance (R3/R4) or support (S3/S4) with 
+volume exhaustion (volume < 0.5x 1d MA) on 6h timeframe captures reversals in both 
+bull and bear markets. Uses 1d volume to filter for low-volume exhaustion moves 
+that often precede reversals, working across market regimes.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_ath_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8154_1h_rsi_meanrev_4h_trend_vol"
-timeframe = "1h"
+name = "exp_8155_6h_1w_pivot_1d_vol_reversal_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-RSI_EXIT = 50
-TREND_EMA_PERIOD = 50
+PIVOT_LOOKBACK = 5  # days for weekly pivot calculation
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+VOLUME_THRESHOLD = 0.5  # volume < 50% of MA indicates exhaustion
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_pivot_points(high, low, close):
+    """Calculate classic pivot points: P = (H+L+C)/3, then support/resistance levels"""
+    P = (high + low + close) / 3.0
+    R1 = 2*P - low
+    S1 = 2*P - high
+    R2 = P + (high - low)
+    S2 = P - (high - low)
+    R3 = high + 2*(P - low)
+    S3 = low - 2*(high - P)
+    R4 = R3 + (high - low)
+    S4 = S3 - (high - low)
+    return P, R1, R2, R3, R4, S1, S2, S3, S4
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load HTF data ONCE before loop: 1w for pivots, 1d for volume
+    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA for trend
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=TREND_EMA_PERIOD, adjust=False, min_periods=TREND_EMA_PERIOD).mean().values
+    # Calculate weekly pivot points using prior week's OHLC
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Price relative to EMA: above = bullish bias, below = bearish bias
-    trend_bias = np.where(close_4h > ema_4h, 1, -1)  # 1=bullish, -1=bearish
-    trend_bias_aligned = align_htf_to_ltf(prices, df_4h, trend_bias)
+    P, R1, R2, R3, R4, S1, S2, S3, S4 = calculate_pivot_points(high_1w, low_1w, close_1w)
+    
+    # Align pivot levels to 6t timeframe (shifted by 1 week for no look-ahead)
+    P_aligned = align_htf_to_ltf(prices, df_1w, P)
+    R3_aligned = align_htf_to_ltf(prices, df_1w, R3)
+    R4_aligned = align_htf_to_ltf(prices, df_1w, R4)
+    S3_aligned = align_htf_to_ltf(prices, df_1w, S3)
+    S4_aligned = align_htf_to_ltf(prices, df_1w, S4)
+    
+    # Calculate 1d volume moving average for exhaustion filter
+    volume_1d = df_1d['volume'].values
+    volume_ma_1d = pd.Series(volume_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # RSI calculation
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean()
-    avg_loss = loss.ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # Volume moving average
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR for risk management
     tr1 = pd.Series(high - low)
@@ -70,32 +77,20 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, TREND_EMA_PERIOD) + 1
+    start = max(len(df_1w), len(df_1d), ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if trend data not available
-        if np.isnan(trend_bias_aligned[i]):
+        # Skip if HTF data not available
+        if np.isnan(P_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
-        
-        # Check session
-        if not (8 <= hours[i] <= 20):
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
+            
         # Check stoploss
         if position == 1:  # long position
             if close[i] <= stop_price:
@@ -108,48 +103,49 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Volume exhaustion: volume < 50% of 1d MA indicates selling/buying climax
+        volume_exhausted = volume[i] < (volume_ma_1d_aligned[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma_1d_aligned[i]) else False
         
-        # RSI conditions
-        rsi_overbought = rsi[i] >= RSI_OVERBOUGHT
-        rsi_oversold = rsi[i] <= RSI_OVERSOLD
-        rsi_exit_long = rsi[i] >= RSI_EXIT
-        rsi_exit_short = rsi[i] <= RSI_EXIT
+        # Reversal signals at weekly pivot extremes
+        # Short rejection at resistance (R3/R4) with volume exhaustion
+        resistance_rejection = (
+            (close[i] < R3_aligned[i]) and 
+            (high[i] >= R3_aligned[i]) and 
+            volume_exhausted
+        ) or (
+            (close[i] < R4_aligned[i]) and 
+            (high[i] >= R4_aligned[i]) and 
+            volume_exhausted
+        )
         
-        # Entry conditions
-        long_entry = trend_bias_aligned[i] == 1 and rsi_oversold and volume_confirmed
-        short_entry = trend_bias_aligned[i] == -1 and rsi_overbought and volume_confirmed
-        
-        # Exit conditions
-        exit_long = position == 1 and rsi_exit_long
-        exit_short = position == -1 and rsi_exit_short
+        # Long rejection at support (S3/S4) with volume exhaustion
+        support_rejection = (
+            (close[i] > S3_aligned[i]) and 
+            (low[i] <= S3_aligned[i]) and 
+            volume_exhausted
+        ) or (
+            (close[i] > S4_aligned[i]) and 
+            (low[i] <= S4_aligned[i]) and 
+            volume_exhausted
+        )
         
         # Generate signals
         if position == 0:
-            if long_entry:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
+            if resistance_rejection:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            elif support_rejection:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            if exit_long:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = SIGNAL_SIZE
+            signals[i] = SIGNAL_SIZE
         elif position == -1:
-            if exit_short:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -SIGNAL_SIZE
+            signals[i] = -SIGNAL_SIZE
     
     return signals
