@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #9691: 6h Donchian(20) Breakout + Daily ATR Regime + Volume Confirmation.
-Hypothesis: Donchian breakouts with volume confirmation filtered by ATR-based regime 
-(ATR ratio > 1.5 for breakouts, ATR ratio < 0.8 for mean reversion) provide robust 
-performance across bull/bear markets. Targets 80-180 total trades over 4 years 
-(20-45/year) to balance opportunity and cost. Uses 1d ATR for regime classification.
+Experiment #9692: 12h Donchian Breakout + Volume Spike + ATR Stop.
+Hypothesis: Donchian channel breakouts on 12h timeframe capture strong trends in both bull and bear markets.
+Volume confirmation filters false breakouts, ATR stop manages risk. Targets 50-150 trades over 4 years.
+Works in bull markets (upward breakouts) and bear markets (downward breakdowns).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9691_6h_donchian20_atr_regime_volume_v1"
-timeframe = "6h"
+name = "exp_9692_12h_donchian_breakout_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-ATR_PERIOD = 14
-ATR_RATIO_PERIOD = 30  # For ATR ratio calculation
-VOLUME_SPIKE_MULTIPLIER = 1.5
+VOLUME_SPIKE_MULTIPLIER = 2.0
 SIGNAL_SIZE = 0.25
-ATR_STOP_MULTIPLIER = 2.0
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.5
+VOLUME_MA_PERIOD = 20
+
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channel upper and lower bands"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -32,47 +37,33 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for ATR regime)
+    # Load HTF data ONCE before loop (1d for trend filter)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d ATR for regime classification
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 1d EMA for trend filter
     close_1d = df_1d['close'].values
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, ATR_PERIOD)
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate ATR ratio (current ATR / 30-period average ATR) for regime
-    atr_ma_1d = pd.Series(atr_1d).rolling(window=ATR_RATIO_PERIOD, min_periods=ATR_RATIO_PERIOD).mean().values
-    atr_ratio_1d = atr_1d / atr_ma_1d
-    
-    # Align 1d ATR ratio to 6h timeframe
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
-    
-    # Calculate LTF indicators (6h)
+    # Calculate LTF indicators (12h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    upper, lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    # Donchian channel
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # Volume moving average for spike detection
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # ATR for risk management (6h)
-    atr_6h = calculate_atr(high, low, close, ATR_PERIOD)
+    # ATR for risk management
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -80,11 +71,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, ATR_RATIO_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
     
     for i in range(start, n):
-        # Skip if HTF data not available
-        if np.isnan(atr_ratio_1d_aligned[i]):
+        # Skip if EMA data not available
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -103,34 +94,26 @@ def generate_signals(prices):
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # ATR-based regime: high volatility (breakout) vs low volatility (mean reversion)
-        high_volatility = atr_ratio_1d_aligned[i] > 1.5   # ATR > 1.5x average = breakout regime
-        low_volatility = atr_ratio_1d_aligned[i] < 0.8    # ATR < 0.8x average = mean reversion regime
+        # Trend filter: price above/below 1d EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # Breakout signals (high volatility): break above/below Donchian channels
-        breakout_long = high_volatility and volume_spike and close[i] >= upper[i]
-        breakout_short = high_volatility and volume_spike and close[i] <= lower[i]
-        
-        # Mean reversion signals (low volatility): fade at Donchian channels
-        mean_rev_long = low_volatility and volume_spike and close[i] <= lower[i]
-        mean_rev_short = low_volatility and volume_spike and close[i] >= upper[i]
+        # Breakout conditions
+        long_breakout = (high[i] >= donchian_upper[i]) and volume_spike and uptrend
+        short_breakout = (low[i] <= donchian_lower[i]) and volume_spike and downtrend
         
         # Entry conditions
-        long_entry = breakout_long or mean_rev_long
-        short_entry = breakout_short or mean_rev_short
-        
-        # Generate signals
         if position == 0:
-            if long_entry:
+            if long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr_6h[i])
-            elif short_entry:
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr_6h[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
@@ -139,8 +122,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
-# Note: align_htf_to_ltf is imported from mtf_data as align_htf_to_ltf
-# Fixing the import/usage mismatch
-from mtf_data import align_htf_to_ltf
-# Replace align_htf_to_ltf calls (already correct in code above)
