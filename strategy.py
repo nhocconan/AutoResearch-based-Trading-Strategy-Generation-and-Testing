@@ -1,27 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #8794: 1h Donchian breakout + 4h/1d trend filter + volume confirmation + session filter.
-Hypothesis: 1h timeframe with tight entry conditions and multi-timeframe trend alignment will capture
-trends in both bull and bear markets while minimizing false signals. Using 4h/1d trend filters ensures
-alignment with higher timeframe momentum. Volume confirmation and session filter (08-20 UTC) reduce noise.
-Target: 60-150 total trades over 4 years = 15-37/year to balance opportunity with fee costs.
+Experiment #8795: 6h Donchian breakout + weekly pivot direction + volume confirmation
+Hypothesis: 6h timeframe reduces trade frequency to combat fee drag while weekly pivot provides directional bias
+from higher timeframe structure. Donchian breakouts capture momentum, volume confirms institutional participation.
+Targets 50-150 total trades over 4 years (12-37/year) to balance statistical validity with fee minimization.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8794_1h_donchian20_4h1d_trend_vol_sess_v1"
-timeframe = "1h"
+name = "exp_8795_6h_donchian20_weekly_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_4H_PERIOD = 50
-TREND_1D_PERIOD = 50
+PIVOT_LOOKBACK = 5  # days for weekly pivot calculation
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
@@ -34,33 +32,44 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_weekly_pivot(high, low, close):
+    """Calculate weekly pivot points from daily OHLC"""
+    # Using daily data to calculate weekly pivot (simplified)
+    # Pivot = (H + L + C) / 3
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - weekly data for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=TREND_4H_PERIOD, adjust=False, min_periods=TREND_4H_PERIOD).mean().values
-    price_vs_ema_4h = np.where(close_4h > ema_4h, 1, 
-                       np.where(close_4h < ema_4h, -1, 0))
-    price_vs_ema_4h_aligned = align_htf_to_ltf(prices, df_4h, price_vs_ema_4h)
+    # Calculate weekly pivot levels from weekly OHLC
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=TREND_1D_PERIOD, adjust=False, min_periods=TREND_1D_PERIOD).mean().values
-    price_vs_ema_1d = np.where(close_1d > ema_1d, 1, 
-                       np.where(close_1d < ema_1d, -1, 0))
-    price_vs_ema_1d_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema_1d)
+    pivot, r1, r2, r3, s1, s2, s3 = calculate_weekly_pivot(weekly_high, weekly_low, weekly_close)
     
-    # Precompute session hours (08-20 UTC)
-    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    # Determine bias based on price relative to weekly pivot
+    # Above pivot = bullish bias, below pivot = bearish bias
+    weekly_bias = np.where(weekly_close > pivot, 1, 
+                   np.where(weekly_close < pivot, -1, 0))
+    weekly_bias_aligned = align_htf_to_ltf(prices, df_1w, weekly_bias)
     
-    # Calculate LTF indicators (1h)
+    # Calculate LTF indicators (6h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -82,18 +91,14 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_4H_PERIOD, TREND_1D_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, PIVOT_LOOKBACK, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(price_vs_ema_4h_aligned[i]) or np.isnan(price_vs_ema_1d_aligned[i]):
+        if np.isnan(weekly_bias_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        in_session = 8 <= hour <= 20
-        
         # Check stoploss
         if position == 1:  # long position
             if close[i] <= stop_price:
@@ -106,9 +111,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 4h and 1d EMA (both must agree)
-        bull_bias = (price_vs_ema_4h_aligned[i] == 1) and (price_vs_ema_1d_aligned[i] == 1)
-        bear_bias = (price_vs_ema_4h_aligned[i] == -1) and (price_vs_ema_1d_aligned[i] == -1)
+        # Determine market bias from weekly pivot
+        bull_bias = weekly_bias_aligned[i] == 1   # weekly close above pivot
+        bear_bias = weekly_bias_aligned[i] == -1  # weekly close below pivot
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
@@ -117,9 +122,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry conditions (require session, trend alignment, breakout, and volume)
-        long_entry = in_session and bull_bias and long_breakout and volume_confirmed
-        short_entry = in_session and bear_bias and short_breakout and volume_confirmed
+        # Entry conditions
+        long_entry = bull_bias and long_breakout and volume_confirmed
+        short_entry = bear_bias and short_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
