@@ -1,25 +1,26 @@
 #!/usr/bin/env python3
 """
-exp_7505_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation.
-Breakouts above upper band in uptrend (price > EMA50) go long; breakdowns below lower band in downtrend go short.
-Volume must be above 20-period average to confirm breakout strength.
-Designed for low-frequency, high-conviction trades (target: 50-150 total over 4 years).
-Works in bull markets via long breakouts and in bear markets via short breakdowns.
+exp_7506_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
+Go long when price breaks above 4h Donchian upper band in bull regime (price > 1d EMA200).
+Go short when price breaks below 4h Donchian lower band in bear regime (price < 1d EMA200).
+Requires volume > 1.5x 20-period average to confirm breakout strength.
+Uses ATR-based stoploss (2.5x ATR) to limit drawdown.
+Target: 75-200 trades over 4 years (19-50/year) with strict breakout conditions.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7505_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_7506_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_TREND = 50
-VOLUME_MA = 20
+EMA_TREND = 200
+VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
@@ -27,29 +28,32 @@ ATR_STOP_MULTIPLIER = 2.5
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA50 for trend filter
+    # Calculate 1d EMA200 for regime filter
     close_1d = df_1d['close'].values
-    ema_1d_50 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_1d_50_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_50)
+    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
     # Calculate LTF indicators
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Donchian channels (20-period high/low)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_up = high_series.rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = low_series.rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Volume moving average
-    vol_ma = pd.Series(volume).rolling(window=VOLUME_MA, min_periods=VOLUME_MA).mean().values
+    # Volume confirmation: volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    volume_ok = volume > (VOLUME_THRESHOLD * volume_ma)
     
     # ATR for stoploss
     tr1 = pd.Series(high - low)
@@ -63,11 +67,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1d_50_aligned[i]):
+        if np.isnan(ema_1d_200_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -84,42 +88,38 @@ def generate_signals(prices):
                 continue
         
         # Determine market regime
-        uptrend = close[i] > ema_1d_50_aligned[i]   # bull regime
-        downtrend = close[i] < ema_1d_50_aligned[i] # bear regime
+        bull_regime = close[i] > ema_1d_200_aligned[i]   # bull regime: price above 1d EMA200
+        bear_regime = close[i] < ema_1d_200_aligned[i]   # bear regime: price below 1d EMA200
         
-        # Volume confirmation
-        vol_ok = volume[i] > vol_ma[i] * VOLUME_THRESHOLD if not np.isnan(vol_ma[i]) else False
-        
-        # Entry conditions
-        long_breakout = (
-            high[i] > highest_high[i-1] and   # break above Donchian upper
-            uptrend and                       # bull regime
-            vol_ok                            # volume confirmation
-        )
-        
-        short_breakdown = (
-            low[i] < lowest_low[i-1] and      # break below Donchian lower
-            downtrend and                     # bear regime
-            vol_ok                            # volume confirmation
-        )
+        # Breakout conditions with volume confirmation
+        bull_breakout = close[i] > donchian_up[i] and volume_ok[i]
+        bear_breakout = close[i] < donchian_low[i] and volume_ok[i]
         
         # Generate signals
         if position == 0:
-            if long_breakout:
+            if bull_breakout and bull_regime:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-            elif short_breakdown:
+            elif bear_breakout and bear_regime:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Stay in long until stoploss
-            signals[i] = SIGNAL_SIZE
+            # Exit long when price breaks below Donchian lower band (reversal signal)
+            if close[i] < donchian_low[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Stay in short until stoploss
-            signals[i] = -SIGNAL_SIZE
+            # Exit short when price breaks above Donchian upper band (reversal signal)
+            if close[i] > donchian_up[i]:
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -SIGNAL_SIZE
     
     return signals
