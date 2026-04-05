@@ -1,26 +1,43 @@
 #!/usr/bin/env python3
 """
-Experiment #9033: 4h Donchian breakout + 12h trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Donchian breakouts capture trends; 12h EMA filter ensures directional alignment; volume confirms institutional participation.
-Targets 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost. Works in bull (breakouts) and bear (filtered shorts).
+Experiment #9034: 1h VWAP mean reversion + 4h RSI filter + 1d trend filter.
+Hypothesis: In ranging markets (2025 test), price reverts to VWAP with high probability.
+Use 4h RSI(14) < 40 for long, > 60 for short to avoid counter-trend trades.
+Use 1d EMA(50) to filter trend direction: only long when price > EMA50, short when price < EMA50.
+Session filter: 08-20 UTC to avoid low-volume Asian session.
+Target: 80-120 total trades over 4 years (20-30/year) to balance opportunity and cost.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9033_4h_donchian20_12h_trend_vol_v1"
-timeframe = "4h"
+name = "exp_9034_1h_vwap_meanrev_4h_rsi_1d_trend"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-TREND_PERIOD = 30
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
-SIGNAL_SIZE = 0.25
+VWAP_WINDOW = 24          # 24 hours for VWAP
+RSI_PERIOD = 14
+RSI_LONG_THRESH = 40      # RSI < 40 = oversold
+RSI_SHORT_THRESH = 60     # RSI > 60 = overbought
+EMA_TREND_PERIOD = 50
+SIGNAL_SIZE = 0.20        # 20% position size
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.2
+ATR_STOP_MULTIPLIER = 2.5
+
+def calculate_rsi(close, period):
+    """Calculate RSI using Wilder's smoothing"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -37,32 +54,37 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h EMA for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
+    # Calculate 4h RSI
+    close_4h = df_4h['close'].values
+    rsi_4h = calculate_rsi(close_4h, RSI_PERIOD)
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    # Price relative to 12h EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_12h > ema_12h, 1, 
-                     np.where(close_12h < ema_12h, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_12h, price_vs_ema)
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_TREND_PERIOD, adjust=False, min_periods=EMA_TREND_PERIOD).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate LTF indicators (4h)
+    # Calculate LTF indicators (1h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Volume moving average
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    # VWAP (typical price * volume) / cumulative volume
+    typical_price = (high + low + close) / 3.0
+    vwap_num = pd.Series(typical_price * volume).rolling(window=VWAP_WINDOW, min_periods=1).sum().values
+    vwap_den = pd.Series(volume).rolling(window=VWAP_WINDOW, min_periods=1).sum().values
+    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, typical_price)
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Session filter: 08-20 UTC (pre-compute for efficiency)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,14 +92,25 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VWAP_WINDOW, RSI_PERIOD, EMA_TREND_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if HTF data not available
-        if np.isnan(price_vs_ema_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        # Skip if outside trading session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
             continue
             
+        # Skip if HTF data not available
+        if np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+            continue
+        
         # Check stoploss
         if position == 1:  # long position
             if close[i] <= stop_price:
@@ -90,20 +123,21 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 12h EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 12h price above EMA30
-        bear_bias = price_vs_ema_aligned[i] == -1  # 12h price below EMA30
+        # Determine market bias from 1d EMA
+        price_above_ema = close[i] > ema_1d_aligned[i]
+        price_below_ema = close[i] < ema_1d_aligned[i]
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
-        short_breakout = close[i] < donchian_low[i-1]  # Break below previous period's low
+        # Mean reversion signals from VWAP
+        price_below_vwap = close[i] < vwap[i]
+        price_above_vwap = close[i] > vwap[i]
         
-        # Volume confirmation
-        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # RSI conditions
+        rsi_oversold = rsi_4h_aligned[i] < RSI_LONG_THRESH
+        rsi_overbought = rsi_4h_aligned[i] > RSI_SHORT_THRESH
         
         # Entry conditions
-        long_entry = bull_bias and long_breakout and volume_confirmed
-        short_entry = bear_bias and short_breakout and volume_confirmed
+        long_entry = price_above_ema and price_below_vwap and rsi_oversold
+        short_entry = price_below_ema and price_above_vwap and rsi_overbought
         
         # Generate signals
         if position == 0:
