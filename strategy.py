@@ -7,7 +7,7 @@ Volume confirmation filters breakouts requiring institutional participation. ATR
 Targets 30-100 trades over 4 years (7-25/year) to minimize fee impact while maintaining statistical validity.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_ftf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
