@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 exp_6870_1d_donchian20_1w_ema_vol_v1
-Hypothesis: 1d Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
+Hypothesis: 1d Donchian(20) breakout with weekly EMA50 trend filter and volume confirmation.
 In bull markets (price > weekly EMA50): long breakouts only. In bear markets (price < weekly EMA50): short breakouts only.
 Weekly EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
 Designed for 1d timeframe to capture major swings with ~7-25 trades/year (30-100 total over 4 years).
