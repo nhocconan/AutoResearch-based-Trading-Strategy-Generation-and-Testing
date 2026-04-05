@@ -1,33 +1,39 @@
 #!/usr/bin/env python3
 """
-Experiment #11694: 1h Donchian Breakout with 4h Trend and Daily Volume Confirmation
-Hypothesis: 1h Donchian(20) breakouts capture short-term momentum. 4h EMA provides trend bias,
-and daily volume filter ensures institutional participation. Works in bull (breakouts continue) 
-and bear (breakouts reverse quickly) by using 4h trend filter. Target: 60-150 trades over 4 years.
+Experiment #11695: 6h Donchian Breakout with Weekly Pivot Direction and Volume Confirmation
+Hypothesis: Weekly pivots (from 1w data) provide strong directional bias. 6h Donchian breakouts
+in the direction of weekly pivot bias capture trend continuation, while counter-trend breakouts
+fade quickly. Volume confirmation filters false breakouts. Works in bull (continuation) and
+bear (fade) markets. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11694_1h_donchian20_4h_trend_1d_vol"
-timeframe = "1h"
+name = "exp_11695_6h_donchian20_wpivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
-# Parameters - tuned for appropriate trade frequency
+# Parameters
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 21
+WPIVOT_LOOKBACK = 5  # weeks to calculate pivot
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_pivot_points(high, low, close):
+    """Calculate weekly pivot points"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -47,21 +53,22 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA for trend
-    ema_4h = calculate_ema(df_4h['close'].values, TREND_EMA_PERIOD)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate weekly pivot points from prior week
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
     
-    # Calculate daily volume MA
-    volume_1d = pd.Series(df_1d['volume'].values).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    volume_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_1d)
+    # Align weekly pivot levels to 6h (using prior week's values)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -77,11 +84,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 4h EMA or daily volume not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(volume_1d_aligned[i]):
+        # Skip if weekly pivot not available
+        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -104,18 +111,17 @@ def generate_signals(prices):
         breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
         breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # Volume confirmation (both 1h and daily)
-        volume_1h_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
-        volume_1d_ok = volume[i] > (volume_1d_aligned[i] * VOLUME_THRESHOLD) if not np.isnan(volume_1d_aligned[i]) else False
-        volume_ok = volume_1h_ok and volume_1d_ok
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (4h)
-        uptrend_4h = close[i] > ema_4h_aligned[i]
-        downtrend_4h = close[i] < ema_4h_aligned[i]
+        # Weekly pivot bias
+        # Above R3 = bullish bias, Below S3 = bearish bias, Between = neutral
+        bullish_bias = close[i] > r3_aligned[i]
+        bearish_bias = close[i] < s3_aligned[i]
         
-        # Entry conditions
-        long_entry = breakout_up and volume_ok and uptrend_4h
-        short_entry = breakout_down and volume_ok and downtrend_4h
+        # Entry conditions: only trade breakouts in direction of weekly bias
+        long_entry = breakout_up and volume_ok and bullish_bias
+        short_entry = breakout_down and volume_ok and bearish_bias
         
         # Generate signals
         if position == 0:
@@ -137,3 +143,9 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
