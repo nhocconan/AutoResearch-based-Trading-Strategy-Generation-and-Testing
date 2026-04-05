@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #10401: 4h Donchian Breakout + Daily Trend + Volume Spike (Optimized)
-Hypothesis: Donchian(20) breakouts in the direction of daily EMA50 with volume confirmation provide
-high-probability trend continuation. Reduced trade frequency via stricter volume filter and 
-minimum hold period to achieve 75-200 trades over 4 years. Works in bull/bear via trend filter.
+Experiment #10401: 4h Donchian Breakout + Daily Trend + Volume Spike (Revised)
+Hypothesis: Donchian(20) breakouts in the direction of daily trend (EMA50) with volume confirmation
+provide high-probability trend continuation trades. Revised to reduce trade frequency by tightening
+volume spike multiplier and adding minimum hold time to avoid overtrading. Target: 75-200 total trades.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10401_4h_donchian_breakout_daily_trend_volume_v1"
+name = "exp_10401_4h_donchian_breakout_daily_trend_volume_v2"
 timeframe = "4h"
 leverage = 1.0
 
-# Parameters
+# Parameters - tightened to reduce trade frequency
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 2.0  # Increased to reduce trades
+VOLUME_SPIKE_MULTIPLIER = 2.0  # Increased from 1.5 to reduce false signals
 DAILY_EMA_PERIOD = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MIN_HOLD_BARS = 8  # Minimum 2 days (8*4h) to reduce churn
+MIN_HOLD_BARS = 4  # Minimum 16 hours (4 bars) hold to reduce churn
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
@@ -85,7 +85,6 @@ def generate_signals(prices):
         # Skip if daily EMA not available
         if np.isnan(daily_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-            bars_since_entry += 1 if position != 0 else 0
             continue
             
         # Check stoploss
@@ -134,11 +133,26 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Only exit via stoploss (min hold period handled by not allowing early exit)
-            signals[i] = SIGNAL_SIZE
-            bars_since_entry += 1
+            # Only exit if minimum hold time passed and reverse signal
+            if bars_since_entry >= MIN_HOLD_BARS and short_entry:
+                signals[i] = -SIGNAL_SIZE  # Reverse to short
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                bars_since_entry = 0
+            else:
+                signals[i] = SIGNAL_SIZE
+                bars_since_entry += 1
         elif position == -1:
-            signals[i] = -SIGNAL_SIZE
-            bars_since_entry += 1
+            # Only exit if minimum hold time passed and reverse signal
+            if bars_since_entry >= MIN_HOLD_BARS and long_entry:
+                signals[i] = SIGNAL_SIZE  # Reverse to long
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                bars_since_entry = 0
+            else:
+                signals[i] = -SIGNAL_SIZE
+                bars_since_entry += 1
     
     return signals
