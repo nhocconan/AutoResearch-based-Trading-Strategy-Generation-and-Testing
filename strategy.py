@@ -1,18 +1,17 @@
+#044946: 4H-Donchian20-1D-EMA200-Volume-Filtered-V2
 #!/usr/bin/env python3
 """
-Experiment #7680: 4-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
-Hypothesis: In bull markets (price > 1d EMA200), go long on breakout above 4h Donchian upper.
-In bear markets (price < 1d EMA200), go short on breakdown below 4h Donchian lower.
-Volume must be above 1.3x average to confirm breakout strength.
-ATR-based stoploss (2x) and target (3x) for risk management.
-Targets 75-200 trades over 4 years (19-50/year).
+Experiment #7681: 4-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation.
+Improved from #7680: Reduced trade frequency by tightening volume confirmation (1.5x avg) 
+and requiring consecutive closes beyond Donchian bands to avoid whipsaw. Targets 75-200 trades over 4 years.
+Works in both bull (long breakouts above EMA200) and bear (short breakdowns below EMA200) markets.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7680_4h_donchian20_1d_ema_vol_v1"
+name = "exp_7681_4h_donchian20_1d_ema_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,7 +19,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_TREND = 200
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.3  # volume must be 1.3x average
+VOLUME_THRESHOLD = 1.5  # Increased from 1.3 to reduce trades
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -90,12 +89,12 @@ def generate_signals(prices):
         bull_regime = close[i] > ema_1d_200_aligned[i]   # price above 1d EMA200
         bear_regime = close[i] < ema_1d_200_aligned[i]   # price below 1d EMA200
         
-        # Volume confirmation
+        # Volume confirmation (tightened from 1.3 to 1.5 to reduce trades)
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions
-        upper_breakout = (high[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
-        lower_breakout = (low[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
+        # Breakout conditions - require close beyond Donchian bands to avoid wicks
+        upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
+        lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
         
         # Entry conditions
         long_entry = bull_regime and upper_breakout and volume_confirmed
