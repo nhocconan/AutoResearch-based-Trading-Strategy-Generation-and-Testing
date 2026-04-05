@@ -4,7 +4,8 @@ Experiment #8158: 1-day Donchian breakout with 1-week trend filter and volume co
 Hypothesis: Price breaking beyond 20-period high/low on 1d with volume >1.5x 20-period MA 
 and aligned 1w trend (price above/below 1w EMA50) captures sustained moves while avoiding 
 whipsaw in both bull and bear markets. The 1w trend filter provides stronger trend context 
-than shorter timeframes, reducing false breakouts during consolidation periods.
+than shorter timeframes, reducing false breakouts during consolidation periods. 
+Target: 30-100 trades over 4 years (7-25/year).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
