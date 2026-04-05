@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Experiment #7776: 12-hour Camarilla pivot reversal with 1-day trend filter, volume confirmation, and ATR-based risk management.
-Hypothesis: Price reversing from Camarilla pivot levels (S3/S4 for long, R3/R4 for short) on 12h with volume >1.5x 20-period MA and aligned 1d trend (EMA50) captures mean reversion in ranging markets while avoiding false breakouts. Works in bull markets (long reversals above EMA) and bear markets (short reversals below EMA). Targets 50-150 trades over 4 years.
+Experiment #7776: 12-hour price channel breakout with 1-day trend filter, volume confirmation, and ATR-based risk management.
+Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >2.0x 20-period MA and aligned 1d trend (EMA50) captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above EMA) and bear markets (short breakdowns below EMA). Targets 50-150 trades over 4 years.
 """
 
-from mtf_data import get_athf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7776_12h_camarilla_pivot_1d_ema_vol_v1"
+name = "exp_7776_12h_price_channel_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-PIVOT_LOOKBACK = 1  # Use previous day for pivot calculation
+CHANNEL_PERIOD = 20
 EMA_TREND = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -34,33 +34,15 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate daily high, low, close for pivot points
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels for each day
-    # R4 = close + ((high - low) * 1.1/2)
-    # R3 = close + ((high - low) * 1.1/4)
-    # S3 = close - ((high - low) * 1.1/4)
-    # S4 = close - ((high - low) * 1.1/2)
-    pivot_range = high_1d - low_1d
-    r4 = close_1d + (pivot_range * 1.1 / 2)
-    r3 = close_1d + (pivot_range * 1.1 / 4)
-    s3 = close_1d - (pivot_range * 1.1 / 4)
-    s4 = close_1d - (pivot_range * 1.1 / 2)
-    
-    # Align pivot levels to 12h timeframe (use previous day's levels)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
     # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
+    
+    # Price channel (Donchian)
+    highest_high = pd.Series(high).rolling(window=CHANNEL_PERIOD, min_periods=CHANNEL_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=CHANNEL_PERIOD, min_periods=CHANNEL_PERIOD).min().values
     
     # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -78,11 +60,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(CHANNEL_PERIOD, EMA_TREND, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -105,26 +87,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Reversal conditions at Camarilla levels
-        # Long: price touches or goes below S3/S4 and reverses up in bull regime
-        long_reversal = bull_regime and volume_confirmed and (
-            (low[i] <= s3_aligned[i] and close[i] > s3_aligned[i]) or 
-            (low[i] <= s4_aligned[i] and close[i] > s4_aligned[i])
-        )
-        # Short: price touches or goes above R3/R4 and reverses down in bear regime
-        short_reversal = bear_regime and volume_confirmed and (
-            (high[i] >= r3_aligned[i] and close[i] < r3_aligned[i]) or 
-            (high[i] >= r4_aligned[i] and close[i] < r4_aligned[i])
-        )
+        # Breakout conditions - require close beyond channel bands to avoid wicks
+        upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
+        lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
+        
+        # Entry conditions
+        long_entry = bull_regime and upper_breakout and volume_confirmed
+        short_entry = bear_regime and lower_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
-            if long_reversal:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_reversal:
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
