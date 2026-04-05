@@ -1,37 +1,26 @@
 #!/usr/bin/env python3
 """
-Experiment #10288: 12h Donchian Breakout + Weekly Trend + Volume Spike
-Hypothesis: Donchian(20) breakouts in the direction of weekly trend (EMA40) with volume confirmation
-provide high-probability trend continuation trades. Works in bull markets (breakouts above weekly EMA)
-and bear markets (breakdowns below weekly EMA). Volume filters reduce false breakouts.
-Target: 75-150 total trades over 4 years (19-38/year).
+Experiment #10291: 6h 123 Reversal + Volume Spike + Daily Trend
+Hypothesis: The 123 reversal pattern (higher low in downtrend, lower high in uptrend) 
+combined with volume spikes and daily trend filter provides high-probability reversal 
+entries. Works in both bull and bear markets by capturing exhaustion moves. 
+Volume confirms institutional participation. Target: 100-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10288_12h_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "12h"
+name = "exp_10291_6h_123_reversal_volume_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 1.5
-WEEKLY_EMA_PERIOD = 40
-SIGNAL_SIZE = 0.25
+LOOKBACK_PERIOD = 10
+VOLUME_SPIKE_MULTIPLIER = 1.8
+SIGNAL_SIZE = 0.28
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(high).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -44,27 +33,24 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for trend filter
-    df_weekly = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop for trend filter
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend direction
-    weekly_close = df_weekly['close'].values
-    weekly_ema = calculate_ema(weekly_close, WEEKLY_EMA_PERIOD)
+    # Calculate daily EMA for trend direction
+    daily_close = df_daily['close'].values
+    daily_ema = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
     
-    # Align weekly EMA to 12h timeframe
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
+    # Align daily EMA to 6h timeframe
+    daily_ema_aligned = align_htf_to_ltf(prices, df_daily, daily_ema)
     
-    # Calculate 12h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channels
-    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -78,11 +64,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, 20) + 1
+    start = max(LOOKBACK_PERIOD + 2, 20) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(weekly_ema_aligned[i]):
+        # Skip if daily EMA not available
+        if np.isnan(daily_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -101,35 +87,61 @@ def generate_signals(prices):
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        above_weekly_ema = close[i] > weekly_ema_aligned[i]
-        below_weekly_ema = close[i] < weekly_ema_aligned[i]
+        # Trend filter: price above/below daily EMA
+        above_daily_ema = close[i] > daily_ema_aligned[i]
+        below_daily_ema = close[i] < daily_ema_aligned[i]
         
-        # Breakout conditions
-        bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
-        bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
-        
-        # Entry conditions: breakout in direction of weekly trend with volume
-        long_entry = bullish_breakout and above_weekly_ema and volume_spike
-        short_entry = bearish_breakout and below_weekly_ema and volume_spike
-        
-        # Generate signals
-        if position == 0:
-            if long_entry:
+        # 123 Reversal pattern detection
+        # Need at least 3 bars of lookback
+        if i >= LOOKBACK_PERIOD + 2:
+            # Get recent lows and highs
+            recent_lows = low[i-LOOKBACK_PERIOD:i+1]
+            recent_highs = high[i-LOOKBACK_PERIOD:i+1]
+            
+            # Find lowest low and highest high in lookback period
+            lowest_low = np.min(recent_lows)
+            highest_high = np.max(recent_highs)
+            
+            # Current bar indices relative to lookback start
+            current_low = low[i]
+            current_high = high[i]
+            
+            # Higher Low pattern (for long): 
+            # 1. Price made a higher low than the lowest low in lookback
+            # 2. Current close is above the prior bar's close (showing strength)
+            # 3. Volume spike confirms
+            higher_low = (current_low > lowest_low) and (close[i] > close[i-1])
+            
+            # Lower High pattern (for short):
+            # 1. Price made a lower high than the highest high in lookback
+            # 2. Current close is below the prior bar's close (showing weakness)
+            # 3. Volume spike confirms
+            lower_high = (current_high < highest_high) and (close[i] < close[i-1])
+            
+            # Entry conditions
+            long_entry = higher_low and above_daily_ema and volume_spike
+            short_entry = lower_high and below_daily_ema and volume_spike
+            
+            # Generate signals
+            if position == 0:
+                if long_entry:
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                elif short_entry:
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                else:
+                    signals[i] = 0.0
+            elif position == 1:
                 signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
+            elif position == -1:
                 signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            signals[i] = SIGNAL_SIZE
-        elif position == -1:
-            signals[i] = -SIGNAL_SIZE
+        else:
+            # Not enough data for pattern detection
+            signals[i] = 0.0
     
     return signals
