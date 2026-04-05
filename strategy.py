@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #11134: 1h Donchian Breakout with 4h Trend and Volume Confirmation
-Hypothesis: 1h Donchian(20) breakouts with 4h EMA(50) trend filter and volume confirmation capture directional moves. 
-4h trend provides directional bias to avoid counter-trend trades. Volume ensures institutional participation. 
-Session filter (08-20 UTC) reduces noise. Target: 60-150 trades over 4 years.
+Experiment #11134: 1h Donchian Breakout with 4h/1d Trend and Volume Confirmation
+Hypothesis: 1h Donchian(20) breakouts capture momentum with 4h/1d trend alignment and volume confirmation.
+Uses 4h/1d for signal direction, 1h for entry timing. Session filter (08-20 UTC) reduces noise.
+Target: 60-150 total trades over 4 years (15-37/year). Uses discrete position size 0.20 to minimize churn.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11134_1h_donchian20_4h_ema_vol_v1"
+name = "exp_11134_1h_donchian20_4h_1d_vol_sess_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-FOURH_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -47,12 +46,21 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
+    # Pre-calculate session hours (08-20 UTC)
+    hours = pd.DatetimeIndex(prices["open_time"]).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
+    # Load 4h and 1d data ONCE before loop
     df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate 4h EMA for trend
-    ema_4h = calculate_ema(df_4h['close'].values, FOURH_EMA_PERIOD)
+    ema_4h = calculate_ema(df_4h['close'].values, 21)
     ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Calculate 1d EMA for trend
+    ema_1d = calculate_ema(df_1d['close'].values, 21)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate 1h indicators
     high = prices['high'].values
@@ -70,11 +78,19 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, FOURH_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 4h EMA not available
-        if np.isnan(ema_4h_aligned[i]):
+        # Skip if outside session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Skip if 4h or 1d EMA not available
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -97,16 +113,18 @@ def generate_signals(prices):
         breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
         breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # Volume confirmation
+        # Volume confirmation (higher threshold for fewer trades)
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (4h)
+        # Trend filters (both 4h and 1d must agree)
         uptrend_4h = close[i] > ema_4h_aligned[i]
         downtrend_4h = close[i] < ema_4h_aligned[i]
+        uptrend_1d = close[i] > ema_1d_aligned[i]
+        downtrend_1d = close[i] < ema_1d_aligned[i]
         
-        # Entry conditions
-        long_entry = breakout_up and volume_ok and uptrend_4h
-        short_entry = breakout_down and volume_ok and downtrend_4h
+        # Entry conditions require both timeframes to agree
+        long_entry = breakout_up and volume_ok and uptrend_4h and uptrend_1d
+        short_entry = breakout_down and volume_ok and downtrend_4h and downtrend_1d
         
         # Generate signals
         if position == 0:
