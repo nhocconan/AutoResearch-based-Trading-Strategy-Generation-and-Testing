@@ -1,64 +1,46 @@
 #!/usr/bin/env python3
 """
-Experiment #10155: 6h Mean Reversion at Weekly Pivots with Volume Exhaustion
-Hypothesis: Price reversals at weekly Camarilla pivot levels (R3/S3) with volume exhaustion
-provide high-probability mean reversion trades. Works in ranging markets and during
-pullbacks in trending markets. Volume exhaustion (volume < 50% of average) confirms
-lack of follow-through, increasing reversal probability. Target: 100-200 total trades
-over 4 years (25-50/year).
+Experiment #10159: 6h Donchian Breakout + 12h Pivot + Volume Spike
+Hypothesis: Donchian(20) breakouts confirmed by 12h pivot levels (R4/S4 for continuation, R3/S3 for reversal) 
+with volume spike provide high-probability trades. Works in bull/bear by using pivot structure as dynamic 
+support/resistance. Targets 75-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
-name = "exp_10155_6h_meanrev_weekly_pivots_volume_exhaustion_v1"
+name = "exp_10159_6h_donchian_12h_pivot_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-PIVOT_LOOKBACK = 5  # days for pivot calculation (use prior week)
-VOLUME_EXHAUSTION_THRESHOLD = 0.5  # volume < 50% of average
+DONCHIAN_PERIOD = 20
+VOLUME_SPIKE_MULTIPLIER = 1.5
+PIVOT_LOOKBACK = 10
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-MIN_HOLD_BARS = 4  # minimum 4 bars (~1 day) before reversal allowed
+ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_camarilla_pivots(high, low, close):
-    """
-    Calculate Camarilla pivot levels for the period
-    Based on previous period's high, low, close
-    R4 = close + ((high - low) * 1.500)
-    R3 = close + ((high - low) * 1.250)
-    R2 = close + ((high - low) * 1.166)
-    R1 = close + ((high - low) * 1.083)
-    PP = (high + low + close) / 3
-    S1 = close - ((high - low) * 1.083)
-    S2 = close - ((high - low) * 1.166)
-    S3 = close - ((high - low) * 1.250)
-    S4 = close - ((high - low) * 1.500)
-    """
-    pivot = (high + low + close) / 3.0
-    range_val = high - low
-    
-    r4 = close + (range_val * 1.500)
-    r3 = close + (range_val * 1.250)
-    r2 = close + (range_val * 1.166)
-    r1 = close + (range_val * 1.083)
-    
-    s1 = close - (range_val * 1.083)
-    s2 = close - (range_val * 1.166)
-    s3 = close - (range_val * 1.250)
-    s4 = close - (range_val * 1.500)
-    
-    return r4, r3, r2, r1, pivot, s1, s2, s3, s4
+def calculate_donchian_channels(high, low, period):
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_pivot_points(high, low, close):
+    """Calculate classic pivot points: P = (H+L+C)/3, R1=2P-L, S1=2P-H, R2=P+(H-L), S2=P-(H-L), etc."""
+    pp = (high + low + close) / 3.0
+    r1 = 2 * pp - low
+    s1 = 2 * pp - high
+    r2 = pp + (high - low)
+    s2 = pp - (high - low)
+    r3 = high + 2 * (pp - low)
+    s3 = low - 2 * (high - pp)
+    r4 = r3 + (high - low)
+    s4 = s3 - (high - low)
+    return pp, r1, s1, r2, s2, r3, s3, r4, s4
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -71,32 +53,23 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for pivot calculation
-    df_daily = get_htf_data(prices, '1d')
+    # Load 12h data ONCE for pivot points
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate Camarilla pivots from previous day's HLC
-    daily_high = df_daily['high'].values
-    daily_low = df_daily['low'].values
-    daily_close = df_daily['close'].values
+    # Calculate 12h pivot points
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Shift by 1 to use previous day's data (lookback)
-    daily_high_shift = np.roll(daily_high, 1)
-    daily_low_shift = np.roll(daily_low, 1)
-    daily_close_shift = np.roll(daily_close, 1)
-    # Set first value to NaN since we don't have previous day
-    daily_high_shift[0] = np.nan
-    daily_low_shift[0] = np.nan
-    daily_close_shift[0] = np.nan
-    
-    r4, r3, r2, r1, pp, s1, s2, s3, s4 = calculate_camarilla_pivots(
-        daily_high_shift, daily_low_shift, daily_close_shift
+    pp_12h, r1_12h, s1_12h, r2_12h, s2_12h, r3_12h, s3_12h, r4_12h, s4_12h = calculate_pivot_points(
+        high_12h, low_12h, close_12h
     )
     
     # Align pivot levels to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_daily, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_daily, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_daily, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_daily, s4)
+    r3_12h_aligned = align_htf_to_ltf(prices, df_12h, r3_12h)
+    s3_12h_aligned = align_htf_to_ltf(prices, df_12h, s3_12h)
+    r4_12h_aligned = align_htf_to_ltf(prices, df_12h, r4_12h)
+    s4_12h_aligned = align_htf_to_ltf(prices, df_12h, s4_12h)
     
     # Calculate 6h indicators
     high = prices['high'].values
@@ -104,73 +77,59 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume moving average for exhaustion detection
-    volume_ma = pd.Series(volume).rolling(window=24, min_periods=24).mean().values  # 4 days
+    # Donchian channels
+    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
+    position = 0
     entry_price = 0.0
     stop_price = 0.0
-    bars_since_entry = 0
     
-    # Start from warmup period
-    start = 25  # need volume MA and pivots
+    start = max(DONCHIAN_PERIOD, 20) + 1
     
     for i in range(start, n):
-        bars_since_entry += 1
-        
-        # Skip if pivots not available
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
+        # Skip if pivot levels not available
+        if np.isnan(r4_12h_aligned[i]) or np.isnan(s4_12h_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
-        
+            
         # Check stoploss
-        if position == 1:  # long position
+        if position == 1:
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
                 continue
-        elif position == -1:  # short position
+        elif position == -1:
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
                 continue
         
-        # Volume exhaustion: volume < 50% of average
-        volume_exhausted = volume[i] < (volume_ma[i] * VOLUME_EXHAUSTION_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Volume spike confirmation
+        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Proximity to pivot levels (within 0.5% ATR)
-        proximity_threshold = atr[i] * 0.5
-        near_r3 = abs(close[i] - r3_aligned[i]) <= proximity_threshold
-        near_s3 = abs(close[i] - s3_aligned[i]) <= proximity_threshold
+        # Breakout conditions
+        bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
+        bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
         
-        # Rejection signals: price tests level but fails to break through
-        # Long: price near S3 and closing above it (bounce)
-        long_setup = near_s3 and close[i] > s3_aligned[i] and volume_exhausted
-        # Short: price near R3 and closing below it (rejection)
-        short_setup = near_r3 and close[i] < r3_aligned[i] and volume_exhausted
+        # Pivot-based conditions
+        # Strong breakout: price breaks beyond R4/S4 (continuation)
+        strong_breakout_long = bullish_breakout and close[i] > r4_12h_aligned[i]
+        strong_breakout_short = bearish_breakout and close[i] < s4_12h_aligned[i]
         
-        # Additional filter: avoid trading against strong momentum
-        # Use price change over last 2 bars to detect momentum
-        if i >= 2:
-            price_change_2bars = (close[i] - close[i-2]) / close[i-2]
-            strong_up = price_change_2bars > 0.02  # >2% up
-            strong_down = price_change_2bars < -0.02  # >2% down
-        else:
-            strong_up = False
-            strong_down = False
+        # Fade at R3/S3: price rejects at R3/S3 (mean reversion)
+        fade_long = close[i] < r3_12h_aligned[i] and close[i] > s3_12h_aligned[i] and bearish_breakout
+        fade_short = close[i] > s3_12h_aligned[i] and close[i] < r3_12h_aligned[i] and bullish_breakout
         
-        # Final entry conditions
-        long_entry = long_setup and not strong_down and bars_since_entry >= MIN_HOLD_BARS
-        short_entry = short_setup and not strong_up and bars_since_entry >= MIN_HOLD_BARS
+        # Entry logic: strong breakouts with volume, or fades at R3/S3 with volume
+        long_entry = (strong_breakout_long or fade_long) and volume_spike
+        short_entry = (strong_breakout_short or fade_short) and volume_spike
         
         # Generate signals
         if position == 0:
@@ -179,13 +138,11 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
