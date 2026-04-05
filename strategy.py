@@ -5,7 +5,7 @@ Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume con
 In trending markets (price > 1w EMA): continuation breakouts in breakout direction.
 In ranging markets (price near 1w EMA): mean reversion at Donchian extremes with volume confirmation.
 Uses 1w EMA for trend regime and 1d volume for confirmation.
-Designed for 1d timeframe to capture major swings with ~7-25 trades/year (30-100 total over 4 years).
+Designed for 1d timeframe to capture swings with ~7-25 trades/year (30-100 total over 4 years).
 Works in both bull and bear markets by adapting to 1w EMA-defined trend regime.
 """
 
