@@ -1,44 +1,43 @@
 #!/usr/bin/env python3
 """
-exp_7114_1h_donchian20_4h_ema_v1
-Hypothesis: 1h Donchian(20) breakout with 4h EMA(50) trend filter and volume confirmation.
-In bull markets (price > 4h EMA50): take long breakouts above Donchian(20) high.
-In bear markets (price < 4h EMA50): take short breakouts below Donchian(20) low.
-Uses 4h EMA for regime filter to avoid counter-trend trades, 1h for precise entry timing.
-Session filter (08-20 UTC) reduces noise. Target: 60-150 total trades over 4 years.
+exp_7116_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
+In trending markets (price > 1d EMA50): take Donchian breakouts in trend direction.
+In ranging markets: avoid false breakouts by requiring volume spike.
+Uses 12h timeframe to capture multi-day swings with ~12-37 trades/year (50-150 total over 4 years).
+Designed to work in both bull and bear markets by aligning with 1d trend.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7114_1h_donchian20_4h_ema_v1"
-timeframe = "1h"
+name = "exp_7116_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+VOL_BASE_THRESHOLD = 2.0
+EMA_PERIOD_HTF = 50
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 12  # ~12 * 12h = 6 days
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 4h for EMA trend filter
-    df_4h = get_htf_data(prices, '4h')
+    # Load HTF data ONCE before loop - using 1d for EMA trend
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
-    
-    # Align to LTF (1h)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD_HTF, adjust=False, min_periods=EMA_PERIOD_HTF).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -60,28 +59,20 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD_HTF) + 1
     
     for i in range(start, n):
-        # Skip if outside trading session
-        if not in_session[i]:
-            signals[i] = 0.0
-            position = 0
-            continue
-            
+        bars_since_entry += 1
+        
         # Skip if HTF data not available
-        if np.isnan(ema_4h_aligned[i]):
-            signals[i] = 0.0
-            position = 0
+        if np.isnan(ema_1d_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
         # Check stoploss
@@ -89,34 +80,45 @@ def generate_signals(prices):
             if close[i] <= entry_price - ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= entry_price + ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
                 
+        # Time-based exit
+        if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
+            signals[i] = 0.0
+            position = 0
+            bars_since_entry = 0
+            continue
+            
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend regime from 4h EMA
-        bull_regime = close[i] > ema_4h_aligned[i]
-        bear_regime = close[i] < ema_4h_aligned[i]
+        # Determine trend from 1d EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # Breakout conditions
-        breakout_long = (close[i] > highest_high[i]) and vol_confirmed
-        breakout_short = (close[i] < lowest_low[i]) and vol_confirmed
+        # Donchian breakouts
+        breakout_long = (i > 0 and close[i] > highest_high[i-1]) and vol_confirmed
+        breakout_short = (i > 0 and close[i] < lowest_low[i-1]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if bull_regime and breakout_long:
+            if uptrend and breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-            elif bear_regime and breakout_short:
+                bars_since_entry = 0
+            elif downtrend and breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         else:
