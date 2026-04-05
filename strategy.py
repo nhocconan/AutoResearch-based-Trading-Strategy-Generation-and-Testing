@@ -1,63 +1,97 @@
 #!/usr/bin/env python3
 """
-exp_7386_4h_donchian20_1d_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Uses 1d HTF for robust trend to reduce noise vs 12h, targeting 75-200 trades over 4 years.
-Discrete position sizing (0.0, ±0.25) minimizes fee churn. Works in bull/bear via EMA regime filter.
+exp_7387_6d_pivot3levels_volatility_breakout_v1
+Hypothesis: 6h strategy using daily pivot points (R3/S3 fade, R4/S4 breakout) with volatility filter.
+Works in bull/bear via mean reversion at extremes and breakout continuation.
+Target: 50-150 trades over 4 years. Uses discrete sizing (0.25) to minimize fee churn.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7386_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7387_6d_pivot3levels_volatility_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
-VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0
+PIVOT_LOOKBACK = 1  # Use previous day's OHLC for pivot
+VOLATILITY_LOOKBACK = 24  # 24 * 6h = 6 days of volatility
+VOLATILITY_THRESHOLD = 1.5  # Breakout when volatility > 1.5x average
+PIVOT_BUFFER = 0.001  # 0.1% buffer around pivot levels
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 8
+MAX_HOLD_BARS = 12  # Max 3 days
+
+def calculate_pivot_levels(high, low, close):
+    """Calculate classic pivot points: P, R1/S1, R2/S2, R3/S3, R4/S4"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    r4 = r3 + (high - low)
+    s4 = s3 - (high - low)
+    return pivot, r1, r2, r3, r4, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA trend
+    # Load HTF data ONCE before loop - using 1d for pivot levels
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA
+    # Calculate daily pivot levels from previous day's OHLC
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align to LTF (4h)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Arrays to store pivot levels
+    pivot_vals = np.full_like(close_1d, np.nan)
+    r3_vals = np.full_like(close_1d, np.nan)
+    s3_vals = np.full_like(close_1d, np.nan)
+    r4_vals = np.full_like(close_1d, np.nan)
+    s4_vals = np.full_like(close_1d, np.nan)
     
-    # Calculate LTF indicators
+    # Calculate pivots for each day (using previous day's data)
+    for i in range(1, len(close_1d)):
+        pivot, r1, r2, r3, r4, s1, s2, s3, s4 = calculate_pivot_levels(
+            high_1d[i-1], low_1d[i-1], close_1d[i-1]
+        )
+        pivot_vals[i] = pivot
+        r3_vals[i] = r3
+        s3_vals[i] = s3
+        r4_vals[i] = r4
+        s4_vals[i] = s4
+    
+    # Align pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot_vals)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_vals)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_vals)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_vals)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_vals)
+    
+    # Calculate 6h indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Volatility measure: ATR-based
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First period
+    atr = pd.Series(tr).ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
-    # Volume MA for confirmation
-    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
-    
-    # ATR for stoploss
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    # Average true range over longer period for volatility filter
+    atr_ma = pd.Series(atr).rolling(window=VOLATILITY_LOOKBACK, min_periods=VOLATILITY_LOOKBACK).mean().values
+    volatility_expanded = atr > (atr_ma * VOLATILITY_THRESHOLD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -65,13 +99,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLATILITY_LOOKBACK, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(pivot_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -96,37 +130,49 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        # Volatility filter - only trade when volatility is elevated
+        vol_filter = volatility_expanded[i] if not np.isnan(atr_ma[i]) else False
         
-        # Determine market regime based on EMA
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
-        
-        # Continuation breakouts in trending market
-        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
-        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
-        
-        # Breakout retest entries (pullback to breakout level with volume)
-        retest_long = above_ema and (close[i] <= highest_high[i-1] * 1.005) and (close[i] >= lowest_low[i-1]) and vol_confirmed
-        retest_short = below_ema and (close[i] >= lowest_low[i-1] * 0.995) and (close[i] <= highest_high[i-1]) and vol_confirmed
-        
-        # Enter new positions only if flat
-        if position == 0:
-            if continuation_long or retest_long:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                bars_since_entry = 0
-            elif continuation_short or retest_short:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                bars_since_entry = 0
+        if vol_filter:
+            # Fade at R3/S3 levels (mean reversion)
+            fade_long = (close[i] <= s3_aligned[i] * (1 + PIVOT_BUFFER)) and (close[i] >= s3_aligned[i] * (1 - PIVOT_BUFFER))
+            fade_short = (close[i] >= r3_aligned[i] * (1 - PIVOT_BUFFER)) and (close[i] <= r3_aligned[i] * (1 + PIVOT_BUFFER))
+            
+            # Breakout continuation at R4/S4 levels
+            breakout_long = close[i] > r4_aligned[i]
+            breakout_short = close[i] < s4_aligned[i]
+            
+            # Enter new positions only if flat
+            if position == 0:
+                if fade_long:
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                elif fade_short:
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                elif breakout_long:
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                elif breakout_short:
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.0
             else:
-                signals[i] = 0.0
+                # Hold current position
+                signals[i] = position * SIGNAL_SIZE
         else:
-            # Hold current position
-            signals[i] = position * SIGNAL_SIZE
+            # Low volatility - no trading
+            signals[i] = 0.0
+            position = 0
+            bars_since_entry = 0
     
     return signals
