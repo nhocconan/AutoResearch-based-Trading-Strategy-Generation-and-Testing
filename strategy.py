@@ -5,6 +5,7 @@ Hypothesis: Daily timeframe reduces trade frequency to combat fee drag while cap
 Using 1-week trend filter (EMA50) ensures alignment with multi-week momentum, avoiding counter-trend trades.
 Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk.
 Targets 30-100 trades over 4 years (7-25/year) to minimize fee impact while maintaining statistical validity.
+Works in both bull and bear markets by following the weekly trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
