@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
 """
-exp_7528_12h_donchian20_1w_ema_vol_v1
-Hypothesis: 12-hour Donchian(20) breakout with 1-week EMA50 trend filter and volume confirmation.
-In bull markets (price > 1w EMA50): long breakout above 12h Donchian upper.
-In bear markets (price < 1w EMA50): short breakdown below 12h Donchian lower.
-Volume must be above 20-period average to confirm breakout strength.
+exp_7529_4h_donchian20_1d_ema_vol_v2
+Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA200 trend filter and volume confirmation, optimized for fewer trades.
+In bull markets (price > 1d EMA200): long breakout above 4h Donchian upper.
+In bear markets (price < 1d EMA200): short breakdown below 4h Donchian lower.
+Volume must be above 25-period average and 2.0x average to confirm breakout strength.
 Uses ATR-based stoploss and target-based exits.
-Targets 100-200 trades over 4 years (25-50/year) with strict breakout conditions.
+Target: 50-150 trades over 4 years (12.5-37.5/year) to avoid overtrading.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7528_12h_donchian20_1w_ema_vol_v1"
-timeframe = "12h"
+name = "exp_7529_4h_donchian20_1d_ema_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_TREND = 50
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5  # volume must be 1.5x average
+EMA_TREND = 200
+VOLUME_MA_PERIOD = 25
+VOLUME_THRESHOLD = 2.0  # Increased for stricter confirmation
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-ATR_TARGET_MULTIPLIER = 3.0
+ATR_STOP_MULTIPLIER = 2.5  # Wider stop to reduce premature exits
+ATR_TARGET_MULTIPLIER = 4.0  # Wider target for better risk-reward
 
 def generate_signals(prices):
     n = len(prices)
@@ -33,12 +33,12 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA50 for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w_50 = pd.Series(close_1w).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_1w_50_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_50)
+    # Calculate 1d EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d_200 = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_1d_200_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_200)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -71,7 +71,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1w_50_aligned[i]):
+        if np.isnan(ema_1d_200_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -88,15 +88,15 @@ def generate_signals(prices):
                 continue
         
         # Determine market regime
-        bull_regime = close[i] > ema_1w_50_aligned[i]   # price above 1w EMA50
-        bear_regime = close[i] < ema_1w_50_aligned[i]   # price below 1w EMA50
+        bull_regime = close[i] > ema_1d_200_aligned[i]   # price above 1d EMA200
+        bear_regime = close[i] < ema_1d_200_aligned[i]   # price below 1d EMA200
         
         # Volume confirmation
-        volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_confirmed = (not np.isnan(volume_ma[i])) and (volume[i] > (volume_ma[i] * VOLUME_THRESHOLD))
         
         # Breakout conditions
-        upper_breakout = (high[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
-        lower_breakout = (low[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
+        upper_breakout = (i-1 >= 0) and (not np.isnan(highest_high[i-1])) and (high[i] > highest_high[i-1])
+        lower_breakout = (i-1 >= 0) and (not np.isnan(lowest_low[i-1])) and (low[i] < lowest_low[i-1])
         
         # Entry conditions
         long_entry = bull_regime and upper_breakout and volume_confirmed
@@ -124,5 +124,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
-</think>
