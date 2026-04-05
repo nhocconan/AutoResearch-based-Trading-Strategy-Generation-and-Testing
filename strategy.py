@@ -1,38 +1,37 @@
 #!/usr/bin/env python3
 """
-Experiment #10211: 6h 123 Reversal Pattern with Volume Confirmation
-Hypothesis: The 123 reversal pattern (test of prior swing high/low) combined with volume confirmation
-provides high-probability reversal entries at key swing levels. Works in both bull and bear markets
-by capturing mean reversion at swing extremes. Target: 80-180 total trades over 4 years (20-45/year).
+Experiment #10214: 1h Donchian Breakout + 4h Trend + Volume Spike
+Hypothesis: Donchian(20) breakouts in the direction of 4h trend (EMA40) with volume confirmation
+provide high-probability trend continuation trades. Uses 4h for signal direction and 1h for entry timing.
+Session filter (08-20 UTC) reduces noise trades. Target: 60-150 total trades over 4 years (15-38/year).
+Works in bull markets (breakouts above 4h EMA) and bear markets (breakdowns below 4h EMA).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10211_6h_123_reversal_volume_v1"
-timeframe = "6h"
+name = "exp_10214_1h_donchian_breakout_4h_trend_volume_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-LOOKBACK_PERIOD = 10
-VOLUME_SPIKE_MULTIPLIER = 1.8
-SIGNAL_SIZE = 0.28
+DONCHIAN_PERIOD = 20
+VOLUME_SPIKE_MULTIPLIER = 1.5
+TREND_EMA_PERIOD = 40
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_swing_points(high, low, lookback):
-    """Calculate swing high and low points"""
-    swing_high = np.full_like(high, np.nan)
-    swing_low = np.full_like(low, np.nan)
-    
-    for i in range(lookback, len(high)):
-        # Swing high: highest high in lookback period
-        swing_high[i] = np.max(high[i-lookback:i+1])
-        # Swing low: lowest low in lookback period
-        swing_low[i] = np.min(low[i-lookback:i+1])
-    
-    return swing_high, swing_low
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -45,17 +44,27 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Calculate 6h indicators
+    # Load 4h data ONCE before loop for trend filter
+    df_4h = get_htf_data(prices, '4h')
+    
+    # Calculate 4h EMA for trend direction
+    close_4h = df_4h['close'].values
+    ema_4h = calculate_ema(close_4h, TREND_EMA_PERIOD)
+    
+    # Align 4h EMA to 1h timeframe
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # Calculate 1h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Swing points for 123 pattern
-    swing_high, swing_low = calculate_swing_points(high, low, LOOKBACK_PERIOD)
+    # Donchian channels
+    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -63,18 +72,29 @@ def generate_signals(prices):
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
+    # Session filter: 08-20 UTC
+    session_mask = (prices.index.hour >= 8) & (prices.index.hour < 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
     # Start from warmup period
-    start = LOOKBACK_PERIOD + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, 20) + 1
     
     for i in range(start, n):
-        # Skip if swing points not available
-        if np.isnan(swing_high[i]) or np.isnan(swing_low[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        # Skip if outside trading session
+        if not session_mask[i]:
+            signals[i] = 0.0
+            position = 0
+            entry_price = 0.0
+            stop_price = 0.0
+            continue
+            
+        # Skip if 4h EMA not available
+        if np.isnan(ema_4h_aligned[i]):
+            signals[i] = 0.0
             continue
             
         # Check stoploss
@@ -82,35 +102,40 @@ def generate_signals(prices):
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                stop_price = 0.0
                 continue
         elif position == -1:  # short position
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
+                entry_price = 0.0
+                stop_price = 0.0
                 continue
         
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # 123 Reversal pattern:
-        # For bullish reversal: price tests swing low (point 2) and bounces with volume
-        # For bearish reversal: price tests swing high (point 2) and rejects with volume
-        near_swing_low = abs(close[i] - swing_low[i]) <= (0.5 * atr[i])  # Within 0.5 ATR of swing low
-        near_swing_high = abs(close[i] - swing_high[i]) <= (0.5 * atr[i])  # Within 0.5 ATR of swing high
+        # Trend filter: price above/below 4h EMA
+        above_4h_ema = close[i] > ema_4h_aligned[i]
+        below_4h_ema = close[i] < ema_4h_aligned[i]
         
-        # Bullish reversal: test of swing low with bounce
-        bullish_reversal = near_swing_low and (close[i] > low[i]) and volume_spike
-        # Bearish reversal: test of swing high with rejection
-        bearish_reversal = near_swing_high and (close[i] < high[i]) and volume_spike
+        # Breakout conditions
+        bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
+        bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
+        
+        # Entry conditions: breakout in direction of 4h trend with volume
+        long_entry = bullish_breakout and above_4h_ema and volume_spike
+        short_entry = bearish_breakout and below_4h_ema and volume_spike
         
         # Generate signals
         if position == 0:
-            if bullish_reversal:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif bearish_reversal:
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
