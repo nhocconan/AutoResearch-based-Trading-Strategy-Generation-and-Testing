@@ -1,43 +1,46 @@
 #!/usr/bin/env python3
 """
-exp_7433_4h_donchian20_12h_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 12h EMA(50) trend filter and volume confirmation.
-Designed for 4h timeframe to target 75-200 trades over 4 years (19-50/year).
-Uses 12h EMA for trend filter to reduce whipsaws and work in both bull and bear markets.
-Volume confirmation ensures breakouts have institutional backing.
+exp_7434_1h_volatility_squeeze_rsi_v1
+Hypothesis: 1h Bollinger Band squeeze + RSI mean reversion with 4h trend filter.
+In low volatility (squeeze), price tends to mean revert. Uses 4h EMA for trend direction to avoid counter-trend trades.
+Targets 80-120 trades over 4 years (20-30/year) with 0.20 position size.
+Works in bull/bear by following 4h trend: long only when price > 4h EMA, short only when price < 4h EMA.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7433_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_7434_1h_volatility_squeeze_rsi_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
-VOL_MA_PERIOD = 20
-VOL_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.25
+BB_PERIOD = 20
+BB_STD = 2.0
+SQUEEZE_THRESHOLD = 0.03  # Bandwidth threshold for squeeze
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
+EMA_TREND_PERIOD = 50
+VOLUME_SPIKE_MULT = 2.0
+VOLUME_MA_PERIOD = 20
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 12h for EMA trend
-    df_12h = get_htf_data(prices, '12h')
+    # Load HTF data ONCE before loop - using 4h for trend filter
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 12h EMA
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
-    
-    # Align to LTF (4h)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 4h EMA for trend
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=EMA_TREND_PERIOD, adjust=False, min_periods=EMA_TREND_PERIOD).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -45,30 +48,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Bollinger Bands
+    sma = pd.Series(close).rolling(window=BB_PERIOD, min_periods=BB_PERIOD).mean().values
+    std = pd.Series(close).rolling(window=BB_PERIOD, min_periods=BB_PERIOD).std().values
+    upper_band = sma + (BB_STD * std)
+    lower_band = sma - (BB_STD * std)
+    bandwidth = (upper_band - lower_band) / sma
     
-    # Volume MA for confirmation
-    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
+    # RSI
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation
+    vol_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    volume_spike = volume > (vol_ma * VOLUME_SPIKE_MULT)
     
     # ATR for stoploss
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
+    tr1 = high - low
+    tr2 = np.abs(np.roll(close, 1) - high)
+    tr3 = np.abs(np.roll(close, 1) - low)
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(BB_PERIOD, RSI_PERIOD, EMA_TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_12h_aligned[i]):
+        if np.isnan(ema_4h_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -83,32 +99,36 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 continue
-            
-        # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on 12h EMA
-        above_ema = close[i] > ema_12h_aligned[i]
-        below_ema = close[i] < ema_12h_aligned[i]
+        # Squeeze condition: low volatility
+        is_squeeze = bandwidth[i] < SQUEEZE_THRESHOLD
         
-        # Breakout conditions
-        breakout_long = close[i] > highest_high[i]
-        breakout_short = close[i] < lowest_low[i]
+        # Mean reversion signals within squeeze
+        rsi_oversold = rsi[i] < RSI_OVERSOLD
+        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        price_at_lower = close[i] <= lower_band[i] * 1.001  # Near lower band
+        price_at_upper = close[i] >= upper_band[i] * 0.999  # Near upper band
         
-        # Enter new positions only if flat
+        # Trend alignment from 4h EMA
+        uptrend = close[i] > ema_4h_aligned[i]
+        downtrend = close[i] < ema_4h_aligned[i]
+        
+        # Entry logic: mean reversion in squeeze with trend filter
         if position == 0:
-            if above_ema and breakout_long and vol_confirmed:
+            # Long: oversold + near lower band + uptrend on 4h
+            if rsi_oversold and price_at_lower and uptrend and volume_spike[i] and is_squeeze:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-            elif below_ema and breakout_short and vol_confirmed:
+            # Short: overbought + near upper band + downtrend on 4h
+            elif rsi_overbought and price_at_upper and downtrend and volume_spike[i] and is_squeeze:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
             else:
                 signals[i] = 0.0
         else:
-            # Hold current position
+            # Hold position
             signals[i] = position * SIGNAL_SIZE
     
     return signals
