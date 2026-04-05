@@ -1,39 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #11695: 6h Donchian Breakout with Weekly Pivot Direction and Volume Confirmation
-Hypothesis: Weekly pivots (from 1w data) provide strong directional bias. 6h Donchian breakouts
-in the direction of weekly pivot bias capture trend continuation, while counter-trend breakouts
-fade quickly. Volume confirmation filters false breakouts. Works in bull (continuation) and
-bear (fade) markets. Target: 75-150 total trades over 4 years.
+Experiment #11694: 1h Donchian Breakout with 4h/1d Trend and Volume Confirmation
+Hypothesis: 1h Donchian(20) breakouts capture short-term trends. 4h and 1d EMA provide trend bias,
+and volume filter ensures institutional participation. Uses 4h/1d for signal direction, 1h only for entry timing.
+Session filter (08-20 UTC) reduces noise trades. Target: 60-150 total trades over 4 years = 15-37/year.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11695_6h_donchian20_wpivot_vol_v1"
-timeframe = "6h"
+name = "exp_11694_1h_donchian20_4h_1d_vol_sess_v1"
+timeframe = "1h"
 leverage = 1.0
 
-# Parameters
+# Parameters - tuned for appropriate trade frequency
 DONCHIAN_PERIOD = 20
-WPIVOT_LOOKBACK = 5  # weeks to calculate pivot
+TREND_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_pivot_points(high, low, close):
-    """Calculate weekly pivot points"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, r2, r3, s1, s2, s3
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -53,22 +47,17 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 4h and 1d data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points from prior week
-    weekly_high = df_1w['high'].values
-    weekly_low = df_1w['low'].values
-    weekly_close = df_1w['close'].values
+    # Calculate 4h and 1d EMA for trend
+    ema_4h = calculate_ema(df_4h['close'].values, TREND_EMA_PERIOD)
+    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
-    
-    # Align weekly pivot levels to 6h (using prior week's values)
-    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
-    
-    # Calculate 6h indicators
+    # Calculate 1h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -78,17 +67,29 @@ def generate_signals(prices):
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
+    # Pre-compute session filter (08-20 UTC)
+    hours = prices.index.hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly pivot not available
-        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        # Skip if outside trading session
+        if not in_session[i]:
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Skip if 4h or 1d EMA not available
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -114,14 +115,15 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Weekly pivot bias
-        # Above R3 = bullish bias, Below S3 = bearish bias, Between = neutral
-        bullish_bias = close[i] > r3_aligned[i]
-        bearish_bias = close[i] < s3_aligned[i]
+        # Trend filter (4h AND 1d must agree)
+        uptrend_4h = close[i] > ema_4h_aligned[i]
+        uptrend_1d = close[i] > ema_1d_aligned[i]
+        downtrend_4h = close[i] < ema_4h_aligned[i]
+        downtrend_1d = close[i] < ema_1d_aligned[i]
         
-        # Entry conditions: only trade breakouts in direction of weekly bias
-        long_entry = breakout_up and volume_ok and bullish_bias
-        short_entry = breakout_down and volume_ok and bearish_bias
+        # Entry conditions - require both timeframes to agree
+        long_entry = breakout_up and volume_ok and uptrend_4h and uptrend_1d
+        short_entry = breakout_down and volume_ok and downtrend_4h and downtrend_1d
         
         # Generate signals
         if position == 0:
@@ -143,9 +145,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
