@@ -1,58 +1,70 @@
 #!/usr/bin/env python3
 """
-exp_7090_1d_donchian20_1w_ema_vol_v1
-Hypothesis: 1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
-In bull markets (price > 1w EMA50): long breakouts only. In bear markets (price < 1w EMA50): short breakouts only.
-1w EMA50 provides long-term trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
-Designed for 1d timeframe to capture major swings with ~7-25 trades/year (30-100 total over 4 years).
-Works in both bull and bear markets by aligning with 1w trend direction.
+exp_7091_6h_camarilla1d_pivot_breakout_v1
+Hypothesis: 6h Camarilla pivot breakout with 1d pivot direction filter.
+- Uses daily Camarilla levels (R3/S3, R4/S4) from previous day.
+- In uptrend (price > daily pivot): long breakouts above R4, short reversals at R3.
+- In downtrend (price < daily pivot): short breakdowns below S4, long reversals at S3.
+- Volume confirmation on breakouts/breakdowns.
+- Designed for 6h timeframe to capture intraday swings with ~12-37 trades/year.
+Works in both bull and bear markets by aligning with daily pivot direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7090_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_7091_6h_camarilla1d_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+PIVOT_LOOKBACK = 1  # use previous day's levels
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0
+VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 15  # ~15 days max hold
-EMA_PERIOD = 50
+MAX_HOLD_BARS = 20  # ~20 * 6h = 5 days
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1w for EMA
-    df_1w = get_htf_data(prices, '1w')
+    # Load HTF data ONCE before loop - using 1d for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA50
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate daily Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Align to LTF (1d)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Camarilla levels: based on previous day's range
+    # R4 = close + 1.5 * (high - low)
+    # R3 = close + 1.0 * (high - low)
+    # S3 = close - 1.0 * (high - low)
+    # S4 = close - 1.5 * (high - low)
+    # Pivot = (high + low + close) / 3
+    rng = high_1d - low_1d
+    camarilla_r4 = close_1d + 1.5 * rng
+    camarilla_r3 = close_1d + 1.0 * rng
+    camarilla_s3 = close_1d - 1.0 * rng
+    camarilla_s4 = close_1d - 1.5 * rng
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    
+    # Align to LTF (6h)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     
     # Calculate LTF indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
-    
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Volume MA for confirmation
-    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
     # ATR for stoploss
     tr1 = pd.Series(high - low)
@@ -61,19 +73,22 @@ def generate_signals(prices):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
+    # Volume MA for confirmation
+    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(PIVOT_LOOKBACK, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1w_aligned[i]):
+        if np.isnan(pivot_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -101,13 +116,17 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend direction from 1w EMA50
-        weekly_uptrend = close[i] > ema_1w_aligned[i]
-        weekly_downtrend = close[i] < ema_1w_aligned[i]
+        # Determine trend direction from daily pivot
+        daily_uptrend = close[i] > pivot_aligned[i]
+        daily_downtrend = close[i] < pivot_aligned[i]
         
-        # Breakout signals aligned with 1w trend
-        long_breakout = weekly_uptrend and (close[i] > highest_high[i]) and vol_confirmed
-        short_breakout = weekly_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
+        # Breakout/breakdown signals with volume confirmation
+        long_breakout = daily_uptrend and (close[i] > r4_aligned[i]) and vol_confirmed
+        short_breakout = daily_downtrend and (close[i] < s4_aligned[i]) and vol_confirmed
+        
+        # Reversal signals at R3/S3 (fade extreme levels)
+        long_reversal = daily_downtrend and (close[i] <= s3_aligned[i]) and vol_confirmed
+        short_reversal = daily_uptrend and (close[i] >= r3_aligned[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
@@ -121,6 +140,16 @@ def generate_signals(prices):
                 position = -1
                 entry_price = close[i]
                 bars_since_entry = 0
+            elif long_reversal:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                bars_since_entry = 0
+            elif short_reversal:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         else:
@@ -128,5 +157,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
