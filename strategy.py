@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-exp_7385_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Designed for 12h timeframe targeting 50-150 trades over 4 years (12-37/year).
-Uses 1d HTF EMA for robust trend filter to reduce noise and improve performance in both bull and bear markets.
-Discrete position sizing (0.0, ±0.25) minimizes fee churn. Includes ATR-based stoploss and time-based exit.
+exp_7386_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+Uses 1d HTF for robust trend to reduce noise vs 12h, targeting 75-200 trades over 4 years.
+Discrete position sizing (0.0, ±0.25) minimizes fee churn. Works in bull/bear via EMA regime filter.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7385_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_7386_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -23,7 +22,7 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 4  # ~2 days for 12h timeframe
+MAX_HOLD_BARS = 8
 
 def generate_signals(prices):
     n = len(prices)
@@ -37,7 +36,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align to LTF (12h)
+    # Align to LTF (4h)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -94,8 +93,8 @@ def generate_signals(prices):
         if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
             signals[i] = 0.0
             position = 0
-                bars_since_entry = 0
-                continue
+            bars_since_entry = 0
+            continue
             
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
