@@ -2,7 +2,7 @@
 """
 exp_7369_4h_donchian20_1d_ema_vol_v1
 Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Uses 1d HTF for trend to reduce noise, targeting 75-200 trades over 4 years.
+Uses 1d HTF for trend to reduce noise vs 12h, targeting 75-200 trades over 4 years.
 Discrete position sizing (0.0, ±0.25) minimizes fee churn. Works in bull/bear via EMA regime filter.
 """
 
@@ -18,11 +18,11 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0  # Volume confirmation threshold
+VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 8  # Max hold ~32 hours
+MAX_HOLD_BARS = 8
 
 def generate_signals(prices):
     n = len(prices)
@@ -130,5 +130,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
