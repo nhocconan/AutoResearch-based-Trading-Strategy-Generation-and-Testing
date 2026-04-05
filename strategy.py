@@ -2,9 +2,9 @@
 """
 Experiment #8048: 12-hour Donchian breakout with 1-week trend filter and volume confirmation.
 Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20-period MA 
-and aligned 1w trend (price above/below 1w EMA20) captures sustained moves with appropriate 
-frequency. The 1w timeframe provides higher trend context to reduce whipsaw while maintaining 
-appropriate trade frequency for 12h timeframe. Target: 50-150 total trades over 4 years.
+and aligned 1w trend (price above/below 1w EMA50) captures sustained moves with low frequency.
+The 1w timeframe provides strong trend context to reduce whipsaw and maintain 
+appropriate trade frequency for 12h timeframe (target: 50-150 total trades over 4 years).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -20,7 +20,7 @@ DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-EMA_PERIOD = 20
+EMA_PERIOD = 50
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
@@ -89,8 +89,8 @@ def generate_signals(prices):
                 continue
         
         # Determine market bias from 1w EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1w close above EMA20
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1w close below EMA20
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1w close above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1w close below EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
