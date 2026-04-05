@@ -8,7 +8,7 @@ context, reducing false breakouts during consolidation periods. Targeting 75-200
 over 4 years for optimal balance of signal quality and cost.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_ftf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
