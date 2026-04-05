@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 """
-Experiment #11747: 6h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: 6h Donchian(20) breakouts capture medium-term trends. 1d EMA provides trend bias,
-and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1d trend filter. Target: 50-150 trades over 4 years.
+Experiment #11751: 6h Donchian Breakout with 1d Trend and Volume Filter
+Hypothesis: 6h Donchian breakouts capture medium-term momentum. 1d EMA provides trend bias to avoid counter-trend trades, and volume surge confirms institutional participation. Works in bull markets (continuation) and bear markets (quick reversals filtered by trend). Target: 50-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11747_6h_donchian20_1d_ema_vol_v1"
+name = "exp_11751_6h_donchian20_1d_ema_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
