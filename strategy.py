@@ -18,11 +18,11 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 2.0  # Volume must be 2x MA to confirm breakout
+VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 30  # Reduced to avoid holding losers (~30 days)
+MAX_HOLD_BARS = 10
 
 def generate_signals(prices):
     n = len(prices)
@@ -130,5 +130,4 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
+</ly>
