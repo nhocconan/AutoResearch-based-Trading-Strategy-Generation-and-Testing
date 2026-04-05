@@ -1,42 +1,46 @@
 #!/usr/bin/env python3
 """
-exp_7240_4h_donchian20_1d_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and ATR stoploss.
-Breakouts above/below 20-period 4h Donchian channels with volume > 1.5x 20-period 4h volume MA.
-Uses 1d HTF only for alignment reference (no HTF indicators needed). Designed for 4h timeframe
-to capture medium-term swings with ~19-50 trades/year (75-200 total over 4 years).
-Volume confirmation reduces false breakouts. ATR stoploss manages risk.
-Works in both bull and bear markets by following breakout direction with strict entry criteria.
+exp_7241_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+In trending markets (price > EMA50): trade breakouts in breakout direction.
+In ranging markets (price near EMA50): fade Donchian extremes with volume confirmation.
+Uses 1d EMA for trend regime and 4h volume for confirmation.
+Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
+Works in both bull and bear markets by adapting to EMA-defined trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7240_4h_donchian20_1d_vol_v1"
+name = "exp_7241_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 20  # ~20*4h = 80h ≈ 3.3 days
+MAX_HOLD_BARS = 20  # ~20 * 4h = ~3.3 days
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for alignment reference only)
+    # Load HTF data ONCE before loop - using 1d for EMA trend
     df_1d = get_htf_data(prices, '1d')
-    # We don't actually use HTF indicators, but we load it once as required
-    # Align a dummy array to get the proper shifted array (not used but required by pattern)
-    dummy_1d = np.full(len(df_1d), np.nan)
-    _ = align_htf_to_ltf(prices, df_1d, dummy_1d)  # call once to follow pattern
+    
+    # Calculate 1d EMA
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    
+    # Align to LTF (4h)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -64,11 +68,16 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
+        # Skip if HTF data not available
+        if np.isnan(ema_1d_aligned[i]):
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
+            
         # Check stoploss
         if position == 1:  # long position
             if close[i] <= entry_price - ATR_STOP_MULTIPLIER * atr[i]:
@@ -93,18 +102,27 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Donchian breakout conditions
-        breakout_long = close[i] > highest_high[i] and vol_confirmed
-        breakout_short = close[i] < lowest_low[i] and vol_confirmed
+        # Determine market regime based on EMA
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
+        near_ema = np.abs(close[i] - ema_1d_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of EMA
+        
+        # Fade at extremes in ranging market (near EMA)
+        fade_long = near_ema and (close[i] <= lowest_low[i]) and vol_confirmed
+        fade_short = near_ema and (close[i] >= highest_high[i]) and vol_confirmed
+        
+        # Continuation breakouts in trending market
+        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if breakout_long:
+            if fade_long or continuation_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif breakout_short:
+            elif fade_short or continuation_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
