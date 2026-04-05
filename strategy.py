@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-exp_7087_6h_donchian20_1d_pivot_vol_v1
-Hypothesis: 6h Donchian(20) breakout with 1d pivot direction and volume confirmation.
-Uses 1d Camarilla pivot levels: long when price breaks above R4 in uptrend (price > 1d EMA50),
-short when price breaks below S4 in downtrend (price < 1d EMA50). Volume confirms breakout.
-Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by aligning with 1d EMA50 trend direction.
+exp_7088_12h_donchian20_1w_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation.
+In bull markets (price > 1w EMA50): long breakouts only. In bear markets (price < 1w EMA50): short breakouts only.
+1w EMA50 provides long-term trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
+Designed for 12h timeframe to capture major swings with ~12-37 trades/year (50-150 total over 4 years).
+Works in both bull and bear markets by aligning with 1w trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7087_6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_7088_12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -23,7 +23,7 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 30  # ~7.5 months (6h bars)
+MAX_HOLD_BARS = 30  # ~30 * 12h = 15 days
 EMA_PERIOD = 50
 
 def generate_signals(prices):
@@ -31,26 +31,15 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA and pivot
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - using 1w for EMA
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA50 for trend
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate 1w EMA50
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Calculate 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    r4 = pivot + (range_1d * 1.5)
-    s4 = pivot - (range_1d * 1.5)
-    
-    # Align to LTF (6h)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Align to LTF (12h)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -84,7 +73,7 @@ def generate_signals(prices):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -112,13 +101,13 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend direction from 1d EMA50
-        daily_uptrend = close[i] > ema_1d_aligned[i]
-        daily_downtrend = close[i] < ema_1d_aligned[i]
+        # Determine trend direction from 1w EMA50
+        weekly_uptrend = close[i] > ema_1w_aligned[i]
+        weekly_downtrend = close[i] < ema_1w_aligned[i]
         
-        # Breakout signals aligned with 1d trend
-        long_breakout = daily_uptrend and (close[i] > highest_high[i]) and vol_confirmed
-        short_breakout = daily_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
+        # Breakout signals aligned with 1w trend
+        long_breakout = weekly_uptrend and (close[i] > highest_high[i]) and vol_confirmed
+        short_breakout = weekly_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
