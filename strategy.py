@@ -1,33 +1,44 @@
 #!/usr/bin/env python3
 """
-exp_7434_1h_volatility_squeeze_rsi_v1
-Hypothesis: 1h Bollinger Band squeeze + RSI mean reversion with 4h trend filter.
-In low volatility (squeeze), price tends to mean revert. Uses 4h EMA for trend direction to avoid counter-trend trades.
-Targets 80-120 trades over 4 years (20-30/year) with 0.20 position size.
-Works in bull/bear by following 4h trend: long only when price > 4h EMA, short only when price < 4h EMA.
+exp_7434_1h_rsi_divergence_volatility_filter_v1
+Hypothesis: 1h RSI divergence (bullish/bearish) with volatility filter and volume confirmation.
+Uses 4h EMA(50) for trend direction to avoid counter-trend trades, targeting 80-150 trades over 4 years.
+Designed to work in both bull and bear markets by combining mean reversion (RSI) with trend filter.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7434_1h_volatility_squeeze_rsi_v1"
+name = "exp_7434_1h_rsi_divergence_volatility_filter_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-BB_PERIOD = 20
-BB_STD = 2.0
-SQUEEZE_THRESHOLD = 0.03  # Bandwidth threshold for squeeze
 RSI_PERIOD = 14
 RSI_OVERBOUGHT = 70
 RSI_OVERSOLD = 30
+VOLATILITY_LOOKBACK = 20
+VOLATILITY_THRESHOLD = 1.5
+VOLUME_CONFIRM = 1.5
 EMA_TREND_PERIOD = 50
-VOLUME_SPIKE_MULT = 2.0
-VOLUME_MA_PERIOD = 20
-SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+SIGNAL_SIZE = 0.25
+MAX_HOLD_BARS = 24  # 24 hours max hold
+
+def calculate_rsi(prices, period=14):
+    """Calculate RSI with proper handling"""
+    delta = np.diff(prices, prepend=prices[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 def generate_signals(prices):
     n = len(prices)
@@ -37,52 +48,48 @@ def generate_signals(prices):
     # Load HTF data ONCE before loop - using 4h for trend filter
     df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 4h EMA for trend
+    # Calculate 4h EMA for trend direction
     close_4h = df_4h['close'].values
     ema_4h = pd.Series(close_4h).ewm(span=EMA_TREND_PERIOD, adjust=False, min_periods=EMA_TREND_PERIOD).mean().values
+    
+    # Align 4h EMA to 1h timeframe
     ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate LTF indicators
+    # Calculate 1h indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands
-    sma = pd.Series(close).rolling(window=BB_PERIOD, min_periods=BB_PERIOD).mean().values
-    std = pd.Series(close).rolling(window=BB_PERIOD, min_periods=BB_PERIOD).std().values
-    upper_band = sma + (BB_STD * std)
-    lower_band = sma - (BB_STD * std)
-    bandwidth = (upper_band - lower_band) / sma
-    
     # RSI
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/RSI_PERIOD, adjust=False, min_periods=RSI_PERIOD).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    rsi = calculate_rsi(close, RSI_PERIOD)
     
-    # Volume confirmation
-    vol_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    volume_spike = volume > (vol_ma * VOLUME_SPIKE_MULT)
-    
-    # ATR for stoploss
+    # Volatility (ATR-based)
     tr1 = high - low
     tr2 = np.abs(np.roll(close, 1) - high)
     tr3 = np.abs(np.roll(close, 1) - low)
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
     
+    # Volatility filter: current ATR vs average ATR
+    atr_ma = pd.Series(atr).rolling(window=VOLATILITY_LOOKBACK, min_periods=VOLATILITY_LOOKBACK).mean().values
+    volatility_filter = atr > (atr_ma * VOLATILITY_THRESHOLD) if not np.isnan(atr_ma[-1]) else False
+    
+    # Volume confirmation
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_confirmed = volume > (volume_ma * VOLUME_CONFIRM) if not np.isnan(volume_ma[-1]) else False
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
+    bars_since_entry = 0
     
     # Start from warmup period
-    start = max(BB_PERIOD, RSI_PERIOD, EMA_TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(RSI_PERIOD, ATR_PERIOD, VOLATILITY_LOOKBACK, 20) + 1
     
     for i in range(start, n):
+        bars_since_entry += 1
+        
         # Skip if HTF data not available
         if np.isnan(ema_4h_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
@@ -93,42 +100,78 @@ def generate_signals(prices):
             if close[i] <= entry_price - ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= entry_price + ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
+                
+        # Time-based exit
+        if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
+            signals[i] = 0.0
+            position = 0
+            bars_since_entry = 0
+            continue
+            
+        # Check volatility and volume filters
+        vol_filter = volatility_filter[i] if hasattr(volatility_filter, '__len__') else volatility_filter
+        vol_conf = volume_confirmed[i] if hasattr(volume_confirmed, '__len__') else volume_confirmed
         
-        # Squeeze condition: low volatility
-        is_squeeze = bandwidth[i] < SQUEEZE_THRESHOLD
+        # RSI divergence detection (simplified: look for RSI extremes with price action)
+        # Bullish divergence: price makes lower low, RSI makes higher low
+        # Bearish divergence: price makes higher high, RSI makes lower high
+        # Using 3-bar lookback for divergence
         
-        # Mean reversion signals within squeeze
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
-        price_at_lower = close[i] <= lower_band[i] * 1.001  # Near lower band
-        price_at_upper = close[i] >= upper_band[i] * 0.999  # Near upper band
-        
-        # Trend alignment from 4h EMA
-        uptrend = close[i] > ema_4h_aligned[i]
-        downtrend = close[i] < ema_4h_aligned[i]
-        
-        # Entry logic: mean reversion in squeeze with trend filter
-        if position == 0:
-            # Long: oversold + near lower band + uptrend on 4h
-            if rsi_oversold and price_at_lower and uptrend and volume_spike[i] and is_squeeze:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-            # Short: overbought + near upper band + downtrend on 4h
-            elif rsi_overbought and price_at_upper and downtrend and volume_spike[i] and is_squeeze:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
+        if i >= 3:
+            # Price action
+            price_lower_low = low[i] < low[i-1] and low[i-1] < low[i-2]
+            price_higher_high = high[i] > high[i-1] and high[i-1] > high[i-2]
+            
+            # RSI action
+            rsi_higher_low = rsi[i] > rsi[i-1] and rsi[i-1] < rsi[i-2]
+            rsi_lower_high = rsi[i] < rsi[i-1] and rsi[i-1] > rsi[i-2]
+            
+            # Bullish divergence: price down, RSI up
+            bullish_div = price_lower_low and rsi_higher_low
+            
+            # Bearish divergence: price up, RSI down
+            bearish_div = price_higher_high and rsi_lower_high
+            
+            # Additional filters
+            oversold = rsi[i] < RSI_OVERSOLD
+            overbought = rsi[i] > RSI_OVERBOUGHT
+            
+            # Trend filter from 4h EMA
+            uptrend = close[i] > ema_4h_aligned[i]
+            downtrend = close[i] < ema_4h_aligned[i]
+            
+            # Entry conditions
+            if position == 0:
+                # Long: bullish divergence in oversold area OR oversold bounce in uptrend
+                long_signal = (bullish_div and oversold) or (oversold and uptrend and vol_filter and vol_conf)
+                
+                # Short: bearish divergence in overbought area OR overbought rejection in downtrend
+                short_signal = (bearish_div and overbought) or (overbought and downtrend and vol_filter and vol_conf)
+                
+                if long_signal:
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                elif short_signal:
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.0
             else:
-                signals[i] = 0.0
+                # Hold current position
+                signals[i] = position * SIGNAL_SIZE
         else:
-            # Hold position
-            signals[i] = position * SIGNAL_SIZE
+            signals[i] = 0.0
     
     return signals
