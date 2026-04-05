@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 exp_7430_1d_donchian20_1w_ema_vol_v1
-Hypothesis: 1d Donchian(20) breakout with 1w EMA trend filter and volume confirmation.
-Uses 1w EMA for trend to capture major trends while reducing whipsaws.
-Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
+Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
+Uses weekly EMA for primary trend to reduce whipsaws, targeting 50-150 trades over 4 years.
+Designed to work in both bull and bear markets by following the weekly trend direction.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -22,10 +22,10 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 30  # ~1.5 months max hold
+MAX_HOLD_BARS = 30  # Reduced for 1d timeframe
 
 def generate_signals(prices):
-    n = len(prrices)
+    n = len(prices)
     if n < 60:
         return np.zeros(n)
     
@@ -130,5 +130,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-</p>
-</p>
