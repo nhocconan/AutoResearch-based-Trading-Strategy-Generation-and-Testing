@@ -2,9 +2,8 @@
 """
 exp_7345_12h_donchian20_1d_ema_vol_v1
 Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Uses 1d HTF for trend to reduce noise vs 12h, targeting 50-150 trades over 4 years.
-Discrete position sizing (0.0, ±0.25) minimizes fee churn. Works in bull/bear via EMA regime filter.
-Timeframe: 12h, HTF: 1d.
+Uses daily HTF for trend to capture major moves while reducing noise. Discrete sizing (0.0, ±0.25) minimizes fee churn.
+Designed for 12h timeframe targeting 50-150 total trades over 4 years. Works in bull/bear via EMA regime filter.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -19,7 +18,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.8  # Increased to reduce overtrading
+VOL_BASE_THRESHOLD = 2.0  # Increased to reduce overtrading
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -104,22 +103,18 @@ def generate_signals(prices):
         above_ema = close[i] > ema_1d_aligned[i]
         below_ema = close[i] < ema_1d_aligned[i]
         
-        # Continuation breakouts in trending market
-        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
-        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
-        
-        # Breakout retest entries (pullback to breakout level with volume)
-        retest_long = above_ema and (close[i] <= highest_high[i-1] * 1.005) and (close[i] >= lowest_low[i-1]) and vol_confirmed
-        retest_short = below_ema and (close[i] >= lowest_low[i-1] * 0.995) and (close[i] <= highest_high[i-1]) and vol_confirmed
+        # Only trade breakouts in direction of EMA trend
+        breakout_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
+        breakout_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if continuation_long or retest_long:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif continuation_short or retest_short:
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -137,9 +132,8 @@ def generate_signals(prices):
 """
 exp_7345_12h_donchian20_1d_ema_vol_v1
 Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-Uses 1d HTF for trend to reduce noise vs 12h, targeting 50-150 trades over 4 years.
-Discrete position sizing (0.0, ±0.25) minimizes fee churn. Works in bull/bear via EMA regime filter.
-Timeframe: 12h, HTF: 1d.
+Uses daily HTF for trend to capture major moves while reducing noise. Discrete sizing (0.0, ±0.25) minimizes fee churn.
+Designed for 12h timeframe targeting 50-150 total trades over 4 years. Works in bull/bear via EMA regime filter.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -154,7 +148,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_BASE_THRESHOLD = 1.8  # Increased to reduce overtrading
+VOL_BASE_THRESHOLD = 2.0  # Increased to reduce overtrading
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -239,22 +233,18 @@ def generate_signals(prices):
         above_ema = close[i] > ema_1d_aligned[i]
         below_ema = close[i] < ema_1d_aligned[i]
         
-        # Continuation breakouts in trending market
-        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
-        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
-        
-        # Breakout retest entries (pullback to breakout level with volume)
-        retest_long = above_ema and (close[i] <= highest_high[i-1] * 1.005) and (close[i] >= lowest_low[i-1]) and vol_confirmed
-        retest_short = below_ema and (close[i] >= lowest_low[i-1] * 0.995) and (close[i] <= highest_high[i-1]) and vol_confirmed
+        # Only trade breakouts in direction of EMA trend
+        breakout_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
+        breakout_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
-            if continuation_long or retest_long:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif continuation_short or retest_short:
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
