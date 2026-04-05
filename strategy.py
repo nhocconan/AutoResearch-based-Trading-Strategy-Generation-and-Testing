@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Experiment #8360: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
+Experiment #8363: 4-hour Donchian breakout with 12-hour trend filter and volume confirmation.
 Hypothesis: Price breaking above/below the 20-period Donchian channel on 4h with volume >1.5x 20-period MA 
-and aligned 1-day trend (price above/below daily EMA50) captures sustained moves while avoiding whipsaw. 
-The daily trend filter provides intermediate-term context, reducing false breakouts during consolidation. 
+and aligned 12-hour trend (price above/below 12h EMA50) captures sustained moves while avoiding whipsaw. 
+The 12h trend filter provides medium-term context, reducing false breakouts during consolidation. 
 Targeting 75-200 total trades over 4 years for optimal balance.
 """
 
@@ -11,19 +11,19 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8360_4h_donchian20_1d_ema_vol_v1"
+name = "exp_8363_4h_donchian20_12h_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+EMA_TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
-EMA_PERIOD = 50
 
 def generate_signals(prices):
     n = len(prices)
@@ -31,12 +31,16 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = pd.Series(close_12h).ewm(span=EMA_TREND_PERIOD, adjust=False, min_periods=EMA_TREND_PERIOD).mean().values
+    
+    # Price relative to 12h EMA: above = bullish bias, below = bearish bias
+    price_vs_ema = np.where(close_12h > ema_12h, 1, 
+                     np.where(close_12h < ema_12h, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
+    price_vs_ema_aligned = align_htf_to_ltf(prices, df_12h, price_vs_ema)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -44,7 +48,7 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels on 4h
+    # Donchian channel on 4h
     donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
     donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
@@ -65,11 +69,11 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(price_vs_ema_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -85,9 +89,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 1d EMA50
-        bull_bias = close[i] > ema_1d_aligned[i]   # Price above daily EMA50
-        bear_bias = close[i] < ema_1d_aligned[i]   # Price below daily EMA50
+        # Determine market bias from 12h EMA
+        bull_bias = price_vs_ema_aligned[i] == 1   # 12h price above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 12h price below EMA50
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -122,4 +126,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</|end_of_text|>
