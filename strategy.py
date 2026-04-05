@@ -1,37 +1,41 @@
 #!/usr/bin/env python3
 """
-Experiment #9990: 1d Donchian Breakout + Weekly Trend + Volume Spike
-Hypothesis: Donchian(20) breakouts on daily timeframe in the direction of weekly trend (EMA40) with volume confirmation
-provide high-probability trend continuation trades. Works in bull markets (breakouts above weekly EMA)
-and bear markets (breakdowns below weekly EMA). Volume filters reduce false breakouts.
-Target: 30-100 total trades over 4 years (7-25/year).
+Experiment #9991: 6h Camarilla Pivot Reversal + Volume Spike
+Hypothesis: In ranging markets, price often reverses at Camarilla pivot levels (R3/S3, R4/S4).
+In trending markets, breakouts beyond R4/S4 with volume continuation provide trend-following entries.
+Works in both bull and bear markets by adapting to regime via price position relative to daily pivot.
+Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9990_1d_donchian_breakout_weekly_trend_volume_v1"
-timeframe = "1d"
+name = "exp_9991_6h_camarilla_pivot_reversal_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+CAMARILLA_MULT = 1.1  # Standard Camarilla uses 1.1
 VOLUME_SPIKE_MULTIPLIER = 1.5
-WEEKLY_EMA_PERIOD = 40
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
+PIVOT_LOOKBACK = 5  # Require pivot to be at least this old
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_camarilla_pivots(high, low, close):
+    """Calculate Camarilla pivot levels for the day"""
+    # Typical price
+    pp = (high + low + close) / 3.0
+    range_ = high - low
+    
+    # Camarilla levels
+    r4 = pp + (range_ * 1.1 * 2)
+    r3 = pp + (range_ * 1.1)
+    s3 = pp - (range_ * 1.1)
+    s4 = pp - (range_ * 1.1 * 2)
+    
+    return pp, r3, r4, s3, s4
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -47,24 +51,28 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for trend filter
-    df_weekly = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop for pivot levels
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend direction
-    weekly_close = df_weekly['close'].values
-    weekly_ema = calculate_ema(weekly_close, WEEKLY_EMA_PERIOD)
+    # Calculate Camarilla pivots from daily data
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
+    daily_close = df_daily['close'].values
     
-    # Align weekly EMA to daily timeframe
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
+    pp, r3, r4, s3, s4 = calculate_camarilla_pivots(daily_high, daily_low, daily_close)
     
-    # Calculate daily indicators
+    # Align daily pivot levels to 6h timeframe (shifted by 1 day for no look-ahead)
+    pp_aligned = align_htf_to_ltf(prices, df_daily, pp)
+    r3_aligned = align_htf_to_ltf(prices, df_daily, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_daily, r4)
+    s3_aligned = align_htf_to_ltf(prices, df_daily, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_daily, s4)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channels
-    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -78,11 +86,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, WEEKLY_EMA_PERIOD, 20) + 1
+    start = max(20, PIVOT_LOOKBACK) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(weekly_ema_aligned[i]):
+        # Skip if daily pivots not available
+        if np.isnan(pp_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -101,17 +109,29 @@ def generate_signals(prices):
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        above_weekly_ema = close[i] > weekly_ema_aligned[i]
-        below_weekly_ema = close[i] < weekly_ema_aligned[i]
+        # Price position relative to pivots
+        at_r3 = abs(close[i] - r3_aligned[i]) < (r4_aligned[i] - r3_aligned[i]) * 0.1  # Within 10% of R3
+        at_s3 = abs(close[i] - s3_aligned[i]) < (s3_aligned[i] - s4_aligned[i]) * 0.1  # Within 10% of S3
+        above_r4 = close[i] > r4_aligned[i]
+        below_s4 = close[i] < s4_aligned[i]
         
-        # Breakout conditions
-        bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
-        bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
+        # Entry conditions
+        long_entry = False
+        short_entry = False
         
-        # Entry conditions: breakout in direction of weekly trend with volume
-        long_entry = bullish_breakout and above_weekly_ema and volume_spike
-        short_entry = bearish_breakout and below_weekly_ema and volume_spike
+        # Reversal at R3/S3 with volume spike (mean reversion in range)
+        if volume_spike:
+            if at_r3 and close[i] < r3_aligned[i]:  # Rejection at R3
+                short_entry = True
+            if at_s3 and close[i] > s3_aligned[i]:  # Bounce at S3
+                long_entry = True
+        
+        # Breakout beyond R4/S4 with volume (trend continuation)
+        if volume_spike:
+            if above_r4:
+                long_entry = True  # Break above R4
+            if below_s4:
+                short_entry = True  # Break below S4
         
         # Generate signals
         if position == 0:
