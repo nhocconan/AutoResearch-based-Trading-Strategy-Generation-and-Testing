@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #7807: 6-hour Donchian breakout with daily pivot direction and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 6h with volume >1.8x 20-period MA and aligned daily pivot trend captures sustained moves while avoiding whipsaw. Daily pivot provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 50-150 trades over 4 years.
+Experiment #7808: 12-hour Donchian breakout with weekly EMA trend and volume confirmation.
+Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.8x 20-period MA and aligned weekly EMA trend captures sustained moves while avoiding whipsaw. Weekly EMA provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 50-150 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7807_6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_7808_12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -17,16 +17,14 @@ DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
+EMA_PERIOD = 50
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
 
-def calculate_pivot_points(high, low, close):
-    """Calculate standard pivot points: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    return pivot, r1, s1
+def calculate_ema(values, period):
+    """Calculate Exponential Moving Average"""
+    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -34,18 +32,13 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily pivot points for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    pivot_1d, r1_1d, s1_1d = calculate_pivot_points(high_1d, low_1d, close_1d)
-    
-    # Trend bias: above pivot = bullish, below pivot = bearish
-    pivot_bias_1d = np.where(close_1d > pivot_1d, 1, -1)  # 1=bullish, -1=bearish
-    pivot_bias_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_bias_1d)
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
+    ema_1w_above_price = ema_1w_above_price = np.where(close_1w > ema_1w, 1, -1)  # 1=bullish (price above EMA), -1=bearish
+    ema_1w_above_price_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_above_price)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -74,11 +67,11 @@ def generate_signals(prices):
     target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(pivot_bias_1d_aligned[i]):
+        if np.isnan(ema_1w_above_price_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -94,9 +87,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from daily pivot
-        bull_bias = pivot_bias_1d_aligned[i] == 1   # daily close above pivot
-        bear_bias = pivot_bias_1d_aligned[i] == -1  # daily close below pivot
+        # Determine market bias from weekly EMA
+        bull_bias = ema_1w_above_price_aligned[i] == 1   # weekly price above EMA
+        bear_bias = ema_1w_above_price_aligned[i] == -1  # weekly price below EMA
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
