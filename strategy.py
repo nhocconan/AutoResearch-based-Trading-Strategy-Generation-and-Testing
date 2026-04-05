@@ -1,53 +1,68 @@
 #!/usr/bin/env python3
 """
-exp_7187_6h_donchian20_1d_pivot_v1
-Hypothesis: 6h Donchian(20) breakout with 1d pivot direction filter for regime.
-In trending markets (price above/below 1d pivot): continuation breakouts in breakout direction.
-In ranging markets (price near 1d pivot): mean reversion at Donchian extremes with volume confirmation.
-Uses 1d pivot points for trend regime and 6h volume for confirmation.
-Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by adapting to pivot-defined trend regime.
+exp_7188_12h_donchian20_1w_hma_v1
+Hypothesis: 12h Donchian(20) breakout with 1w HMA(21) trend filter for regime.
+In trending markets (price > HMA): continuation breakouts in breakout direction.
+In ranging markets (price near HMA): mean reversion at Donchian extremes with volume confirmation.
+Uses 1w HMA for trend regime and 12h volume for confirmation.
+Designed for 12h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
+Works in both bull and bear markets by adapting to HMA-defined trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7187_6h_donchian20_1d_pivot_v1"
-timeframe = "6h"
+name = "exp_7188_12h_donchian20_1w_hma_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+HMA_PERIOD = 21
 VOL_MA_PERIOD = 20
 VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 8  # ~8*6h = 32h (~1.3 days)
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 10  # ~10 * 12h = 5 days
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for pivot points
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop - using 1w for HMA trend
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d pivot points (standard: P = (H+L+C)/3, R1 = 2*P - L, S1 = 2*P - H)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 1w HMA (Hull Moving Average)
+    close_1w = df_1w['close'].values
+    half_period = HMA_PERIOD // 2
+    sqrt_period = int(np.sqrt(HMA_PERIOD))
     
-    # Pivot point calculation
-    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
-    r1_1d = 2 * pivot_1d - low_1d  # First resistance
-    s1_1d = 2 * pivot_1d - high_1d  # First support
+    # WMA function
+    def wma(values, period):
+        if len(values) < period:
+            return np.full_like(values, np.nan)
+        weights = np.arange(1, period + 1)
+        return np.convolve(values, weights / weights.sum(), mode='valid')
     
-    # Align to LTF (6h)
-    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
-    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
-    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    # HMA calculation
+    wma_half = wma(close_1w, half_period)
+    wma_full = wma(close_1w, HMA_PERIOD)
+    
+    # Handle array lengths
+    if len(wma_half) > 0 and len(wma_full) > 0:
+        raw_hma = 2 * wma_half - wma_full
+        hma_values = wma(raw_hma, sqrt_period)
+        # Pad to original length
+        hma_1w = np.full_like(close_1w, np.nan)
+        hma_1w[half_period - 1:half_period - 1 + len(hma_values)] = hma_values
+    else:
+        hma_1w = np.full_like(close_1w, np.nan)
+    
+    # Align to LTF (12h)
+    hma_1w_aligned = align_htf_to_ltf(prices, df_1w, hma_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -75,13 +90,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, HMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(pivot_1d_aligned[i]):
+        if np.isnan(hma_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -109,18 +124,18 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on pivot
-        above_pivot = close[i] > pivot_1d_aligned[i]
-        below_pivot = close[i] < pivot_1d_aligned[i]
-        near_pivot = np.abs(close[i] - pivot_1d_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of pivot
+        # Determine market regime based on HMA
+        above_hma = close[i] > hma_1w_aligned[i]
+        below_hma = close[i] < hma_1w_aligned[i]
+        near_hma = np.abs(close[i] - hma_1w_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of HMA
         
-        # Fade at extremes in ranging market (near pivot)
-        fade_long = near_pivot and (close[i] <= lowest_low[i]) and vol_confirmed
-        fade_short = near_pivot and (close[i] >= highest_high[i]) and vol_confirmed
+        # Fade at extremes in ranging market (near HMA)
+        fade_long = near_hma and (close[i] <= lowest_low[i]) and vol_confirmed
+        fade_short = near_hma and (close[i] >= highest_high[i]) and vol_confirmed
         
         # Continuation breakouts in trending market
-        continuation_long = above_pivot and (close[i] > highest_high[i]) and vol_confirmed
-        continuation_short = below_pivot and (close[i] < lowest_low[i]) and vol_confirmed
+        continuation_long = above_hma and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_hma and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
@@ -141,5 +156,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
