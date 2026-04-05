@@ -1,26 +1,43 @@
 #!/usr/bin/env python3
 """
-Experiment #8879: 6h Donchian breakout + 12h trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Donchian breakouts capture trends; 12h EMA filter ensures directional alignment; volume confirms institutional participation.
-Targets 100-200 total trades over 4 years (25-50/year) to balance opportunity and cost. Works in bull (breakouts) and bear (filtered shorts).
+Experiment #8879: 6h RSI(14) mean reversion with 12h trend filter + Bollinger Band squeeze filter.
+Hypothesis: Mean reversion works in both bull and bear markets when filtered by trend (12h EMA) and volatility contraction (BB squeeze). 
+Targets 80-150 total trades over 4 years (20-38/year) by combining RSI extremes with low volatility breakouts.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8879_6h_donchian20_12h_trend_vol_v1"
+name = "exp_8879_6h_rsi14_12h_trend_bb_squeeze_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
 TREND_PERIOD = 50
+BB_PERIOD = 20
+BB_STD_DEV = 2.0
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.3
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_rsi(close, period):
+    """Calculate RSI using Wilder's smoothing"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -54,9 +71,19 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # RSI
+    rsi = calculate_rsi(close, RSI_PERIOD)
+    
+    # Bollinger Bands for volatility squeeze detection
+    bb_middle = pd.Series(close).rolling(window=BB_PERIOD, min_periods=BB_PERIOD).mean().values
+    bb_std = pd.Series(close).rolling(window=BB_PERIOD, min_periods=BB_PERIOD).std().values
+    bb_upper = bb_middle + (BB_STD_DEV * bb_std)
+    bb_lower = bb_middle - (BB_STD_DEV * bb_std)
+    bb_width = bb_upper - bb_lower
+    
+    # Bollinger Band squeeze: low volatility when width is below its 20-period mean
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=1).mean().values
+    bb_squeeze = bb_width < bb_width_ma  # True when volatility is contracted
     
     # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -70,7 +97,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(RSI_PERIOD, TREND_PERIOD, BB_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
@@ -94,16 +121,19 @@ def generate_signals(prices):
         bull_bias = price_vs_ema_aligned[i] == 1   # 12h price above EMA50
         bear_bias = price_vs_ema_aligned[i] == -1  # 12h price below EMA50
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
-        short_breakout = close[i] < donchian_low[i-1]  # Break below previous period's low
+        # Mean reversion conditions: RSI extremes
+        rsi_overbought = rsi[i] >= RSI_OVERBOUGHT
+        rsi_oversold = rsi[i] <= RSI_OVERSOLD
+        
+        # Volatility contraction filter: only trade when Bollinger Bands are squeezed
+        volatility_filter = bb_squeeze[i] if not np.isnan(bb_squeeze[i]) else False
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry conditions
-        long_entry = bull_bias and long_breakout and volume_confirmed
-        short_entry = bear_bias and short_breakout and volume_confirmed
+        # Entry conditions: mean reversion during low volatility + volume
+        long_entry = bull_bias and rsi_oversold and volatility_filter and volume_confirmed
+        short_entry = bear_bias and rsi_overbought and volatility_filter and volume_confirmed
         
         # Generate signals
         if position == 0:
