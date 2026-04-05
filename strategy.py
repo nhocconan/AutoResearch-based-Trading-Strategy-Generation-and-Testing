@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #11043: 4h Donchian Breakout with 12h Trend and Volume Confirmation
-Hypothesis: 4h Donchian(20) breakouts capture medium-term trends. 12h EMA provides trend bias,
-and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 12h trend filter. Target: 75-200 trades over 4 years.
+Hypothesis: 4h Donchian(20) breakouts with 12h EMA trend filter and volume confirmation
+captures strong directional moves while avoiding false breakouts. 12h trend provides
+smoother bias than 1d, reducing whipsaw in sideways markets. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
@@ -16,7 +16,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_PERIOD = 21  # 12h EMA
+TREND_PERIOD = 20  # 12h EMA period
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -128,3 +128,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</lymph>
