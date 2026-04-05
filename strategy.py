@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Experiment #7825: 12-hour Donchian breakout with 1-day trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >2.0x 20-period MA and aligned 1d trend captures sustained moves while avoiding whipsaw. The 1d trend filter (using EMA) provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 50-150 trades over 4 years with controlled risk via ATR-based stops.
+Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.8x 20-period MA and aligned 1d trend captures sustained moves while avoiding whipsaw. The 1d trend filter (using EMA) provides directional bias from higher timeframe to reduce false breakouts in both bull and bear markets. Targets 50-150 trades over 4 years with controlled risk via ATR-based stops.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -15,7 +15,7 @@ leverage = 1.0
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 EMA_PERIOD = 50
 ATR_PERIOD = 14
