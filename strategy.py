@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-exp_6953_4h_donchian20_12h_ema_vol_v1
-Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation.
-In bull markets (price > 12h EMA50): long breakouts only. In bear markets (price < 12h EMA50): short breakouts only.
-12h EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
-Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
-Works in both bull and bear markets by aligning with 12h trend direction.
+exp_6955_6h_donchian20_1w_pivot_vol_v1
+Hypothesis: 6h Donchian(20) breakout with weekly Camarilla pivot continuation (R4/S4) and volume confirmation.
+In bull markets (price > weekly R4): long breakouts only. In bear markets (price < weekly S4): short breakouts only.
+Weekly Camarilla pivots provide structural levels to avoid fakeouts. Volume confirms breakout legitimacy.
+Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
+Uses 1w HTF for pivot calculation to reduce noise and increase reliability.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6953_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_6955_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
@@ -23,23 +23,44 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 30  # ~5 months (4h bars)
-EMA_PERIOD = 50
+MAX_HOLD_BARS = 20  # ~5 days (6h bars)
+PIVOT_LOOKBACK = 5  # bars to confirm pivot level respect
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 12h for EMA
-    df_12h = get_htf_data(prices, '12h')
+    # Load HTF data ONCE before loop - using 1w for weekly Camarilla pivots
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 12h EMA50
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate weekly Camarilla pivots (based on prior week's OHLC)
+    # Need to shift by 1 to avoid look-ahead (use completed week only)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align to LTF (4h)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate pivots from PREVIOUS week (shifted by 1)
+    # We'll calculate for each bar using the most recent completed weekly bar
+    pivots_high = np.full_like(close_1w, np.nan)
+    pivots_low = np.full_like(close_1w, np.nan)
+    
+    for i in range(1, len(close_1w)):
+        # Use previous week's OHLC to calculate current week's pivots
+        phigh = high_1w[i-1]
+        plow = low_1w[i-1]
+        pclose = close_1w[i-1]
+        pivot = (phigh + plow + pclose) / 3
+        range_ = phigh - plow
+        # Camarilla levels
+        r4 = pclose + range_ * 1.1 / 2
+        s4 = pclose - range_ * 1.1 / 2
+        pivots_high[i] = r4
+        pivots_low[i] = s4
+    
+    # Align to LTF (6h)
+    pivots_high_aligned = align_htf_to_ltf(prices, df_1w, pivots_high)
+    pivots_low_aligned = align_htf_to_ltf(prices, df_1w, pivots_low)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -67,13 +88,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 5  # extra for pivot calc
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_12h_aligned[i]):
+        if np.isnan(pivots_high_aligned[i]) or np.isnan(pivots_low_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -101,13 +122,14 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend direction from 12h EMA50
-        weekly_uptrend = close[i] > ema_12h_aligned[i]
-        weekly_downtrend = close[i] < ema_12h_aligned[i]
+        # Determine market regime from weekly Camarilla
+        # Bull: price above weekly R4, Bear: price below weekly S4
+        weekly_bull = close[i] > pivots_high_aligned[i]
+        weekly_bear = close[i] < pivots_low_aligned[i]
         
-        # Breakout signals aligned with 12h trend
-        long_breakout = weekly_uptrend and (close[i] > highest_high[i]) and vol_confirmed
-        short_breakout = weekly_downtrend and (close[i] < lowest_low[i]) and vol_confirmed
+        # Breakout signals aligned with weekly regime
+        long_breakout = weekly_bull and (close[i] > highest_high[i]) and vol_confirmed
+        short_breakout = weekly_bear and (close[i] < lowest_low[i]) and vol_confirmed
         
         # Enter new positions only if flat
         if position == 0:
