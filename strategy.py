@@ -2,8 +2,8 @@
 """
 exp_7149_4h_donchian20_1d_ema_vol_v1
 Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-In trending markets (price > EMA): take breakout trades in breakout direction.
-In ranging markets (price near EMA): fade extremes at Donchian bands with volume confirmation.
+In trending markets (price > EMA): take breakouts in breakout direction.
+In ranging markets (price near EMA): fade extremes with volume confirmation.
 Uses 1d EMA for trend regime and 4h volume for confirmation.
 Designed for 4h timeframe to capture swings with ~19-50 trades/year (75-200 total over 4 years).
 Works in both bull and bear markets by adapting to EMA-defined trend regime.
@@ -25,7 +25,7 @@ VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 20  # ~20 * 4h = 10 days
+MAX_HOLD_BARS = 10  # ~40 hours
 
 def generate_signals(prices):
     n = len(prices)
@@ -134,5 +134,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-
-</think>
