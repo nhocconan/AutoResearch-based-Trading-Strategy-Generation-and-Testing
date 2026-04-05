@@ -5,7 +5,7 @@ Hypothesis: Price breaking beyond 20-period high/low on 12h with volume >1.5x 20
 and aligned 1d trend (price above/below 1d EMA50) captures sustained moves while avoiding 
 whipsaw in both bull and bear markets. The 1d trend filter provides longer-term trend 
 context, reducing false breakouts during consolidation periods. Targeting 50-150 total trades 
-over 4 years for optimal balance of signal quality and cost.
+over 4 years for optimal balance of signal quality and cost, suitable for 12h timeframe.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
