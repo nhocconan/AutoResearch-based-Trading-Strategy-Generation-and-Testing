@@ -1,26 +1,57 @@
 #!/usr/bin/env python3
 """
-Experiment #9592: 12h Donchian Breakout + Volume Spike + ATR Stop.
-Hypothesis: Donchian(20) breakouts on 12h timeframe capture medium-term trends 
-in BTC/ETH/SOL. Volume confirmation filters false breakouts, ATR stop manages risk.
-Targets 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-Works in bull (breakouts up) and bear (breakouts down) with symmetry.
+Experiment #9593: 4h Donchian(20) breakout + HMA trend + volume confirmation + ATR stoploss.
+Hypothesis: Donchian breakouts capture strong trends while HMA(21) filters counter-trend moves. 
+Volume confirmation ensures breakout validity. Works in bull (breakouts up) and bear (breakouts down). 
+Targets 100-200 total trades over 4 years (25-50/year) to balance opportunity and cost.
+Uses 12h HMA for trend filter to avoid overtrading.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9592_12h_donchian_breakout_volume_atr_v1"
-timeframe = "12h"
+name = "exp_9593_4h_donchian20_hma12h_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_SPIKE_MULTIPLIER = 2.0
+HMA_PERIOD = 21
+VOLUME_SPIKE_MULTIPLIER = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
+
+def calculate_hma(arr, period):
+    """Calculate Hull Moving Average"""
+    n = int(period)
+    if n < 1:
+        return arr
+    half_n = n // 2
+    sqrt_n = int(np.sqrt(n))
+    
+    # WMA of half period
+    arr_pd = pd.Series(arr)
+    wma_half = arr_pd.rolling(window=half_n, min_periods=half_n).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
+    
+    # WMA of full period
+    wma_full = arr_pd.rolling(window=n, min_periods=n).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
+    
+    # Raw HMA: 2*WMA(half) - WMA(full)
+    raw_hma = 2 * wma_half - wma_full
+    
+    # Final WMA of sqrt(n)
+    raw_series = pd.Series(raw_hma)
+    hma = raw_series.rolling(window=sqrt_n, min_periods=sqrt_n).apply(
+        lambda x: np.average(x, weights=np.arange(1, len(x) + 1)), raw=True
+    ).values
+    
+    return hma
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -33,29 +64,26 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (1d for Donchian calculation)
-    df_1d = get_htf_data(prices, '1d')
+    # Load HTF data ONCE before loop (12h for HMA trend filter)
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d Donchian channels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate 12h HMA for trend filter
+    close_12h = df_12h['close'].values
+    hma_12h = calculate_hma(close_12h, HMA_PERIOD)
+    hma_12h_aligned = align_htf_to_ltf(prices, df_12h, hma_12h)
     
-    # Donchian high and low (20-period)
-    donchian_high = pd.Series(high_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Align 1d Donchian levels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    
-    # Calculate LTF indicators (12h)
+    # Calculate 4h Donchian channels
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Donchian channels
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -69,11 +97,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, HMA_PERIOD, 20) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]):
+        if np.isnan(hma_12h_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -89,25 +117,23 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume spike confirmation
+        # Volume confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions
-        breakout_long = volume_spike and close[i] >= donchian_high_aligned[i]
-        breakout_short = volume_spike and close[i] <= donchian_low_aligned[i]
-        
-        # Entry conditions
-        long_entry = breakout_long
-        short_entry = breakout_short
+        # Breakout conditions with trend filter
+        # Long: price breaks above Donchian high AND above 12h HMA (uptrend)
+        long_breakout = (close[i] > donchian_high[i]) and (close[i] > hma_12h_aligned[i]) and volume_spike
+        # Short: price breaks below Donchian low AND below 12h HMA (downtrend)
+        short_breakout = (close[i] < donchian_low[i]) and (close[i] < hma_12h_aligned[i]) and volume_spike
         
         # Generate signals
         if position == 0:
-            if long_entry:
+            if long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
+            elif short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
