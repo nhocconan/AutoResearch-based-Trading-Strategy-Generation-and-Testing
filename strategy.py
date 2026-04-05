@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #8711: 6h Donchian(20) breakout + 1d trend filter + volume confirmation + ATR stoploss.
-Hypothesis: Daily trend filter aligns with multi-day momentum while 6b captures intermediate trends.
-Volume confirmation ensures institutional participation. Targets 50-150 trades over 4 years (12-37/year).
-Designed to work in both bull (trend following) and bear (filtered shorts) via daily trend alignment.
+Experiment #8712: 12h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
+Hypothesis: 12h timeframe balances trend capture with reduced trade frequency.
+Using 1-day trend filter (EMA50) ensures alignment with daily momentum.
+Volume confirmation filters breakouts requiring institutional participation.
+ATR-based stops manage risk. Targets 50-150 trades over 4 years (12-37/year).
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8711_6h_donchian20_1d_trend_vol_v1"
-timeframe = "6h"
+name = "exp_8712_12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -49,7 +50,7 @@ def generate_signals(prices):
                      np.where(close_1d < ema_1d, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
     price_vs_ema_aligned = align_htf_to_ltf(prices, df_1d, price_vs_ema)
     
-    # Calculate LTF indicators (6h)
+    # Calculate LTF indicators (12h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
