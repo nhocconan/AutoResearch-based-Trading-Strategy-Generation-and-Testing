@@ -1,19 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #10888: 12h Donchian Breakout with Weekly Trend Filter and Volume Confirmation
-Hypothesis: Donchian channel breakouts capture strong momentum moves. Weekly trend filter ensures
-we trade in the direction of the higher timeframe trend, reducing false signals. Volume confirmation
-ensures institutional participation. This combination should work in both bull and bear markets by
-filtering for high-probability breakouts with strong momentum.
-Target: 50-150 total trades over 4 years (12-37/year) on 12h timeframe.
+Experiment #10890: 1d Donchian(20) breakout with Weekly EMA trend and Volume confirmation
+Hypothesis: Donchian breakouts capture breakout momentum, weekly EMA provides trend bias,
+and volume confirms institutional participation. Works in both bull (breakouts) and bear (breakdowns).
+Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10888_12h_donchian20_weekly_trend_volume_v1"
-timeframe = "12h"
+name = "exp_10890_1d_donchian20_weekly_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
@@ -25,8 +23,8 @@ SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels: upper and lower bands"""
+def calculate_donchian(high, low, period):
+    """Calculate Donchian upper and lower bands"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -56,13 +54,13 @@ def generate_signals(prices):
     ema_weekly = calculate_ema(df_weekly['close'].values, WEEKLY_EMA_PERIOD)
     ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -130,4 +128,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</|endoftext|>
