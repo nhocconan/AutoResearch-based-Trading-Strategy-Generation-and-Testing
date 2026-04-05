@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #9755: 6h Donchian Breakout + Weekly Pivot Direction + Volume Confirmation.
-Hypothesis: 6h Donchian(20) breakouts aligned with weekly pivot direction (price above/below weekly pivot) 
-provide high-probability trend continuation signals. Volume confirmation filters false breakouts.
-Works in bull (breakouts above weekly pivot) and bear (breakdowns below weekly pivot).
-Targets 75-150 total trades over 4 years (19-38/year) to balance opportunity and cost.
+Experiment #9757: 4h Donchian Breakout + Volume Spike + ATR Stop
+Hypothesis: 4h Donchian(20) breakouts with volume confirmation provide
+directional edge in both bull and bear markets. Volume filters false breakouts.
+ATR-based stop manages risk. Targets 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_9755_6h_donchian_breakout_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "exp_9757_4h_donchian_vol_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-WEEKLY_PIVOT_PERIOD = 1  # Use previous week's OHLC
-VOLUME_SPIKE_MULTIPLIER = 2.0
-SIGNAL_SIZE = 0.25
+VOLUME_MA_PERIOD = 20
+VOLUME_SPIKE_MULTIPLIER = 1.5
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+SIGNAL_SIZE = 0.25
 
-def calculate_donchian_channels(high, low, period):
+def calculate_donchian(high, low, period):
     """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
@@ -35,64 +34,42 @@ def calculate_atr(high, low, close, period):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = tr1[0]  # first TR is just high-low
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_weekly_pivot(high, low, close):
-    """
-    Calculate weekly pivot point (standard)
-    P = (high + low + close) / 3
-    """
-    return (high + low + close) / 3
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop (weekly for pivot calculation)
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for context (not used in signals but available if needed)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot levels (using previous week's OHLC)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Calculate weekly pivot
-    weekly_pivot = calculate_weekly_pivot(high_1w, low_1w, close_1w)
-    
-    # Align weekly pivot to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
-    
-    # Calculate LTF indicators (6h)
+    # Calculate indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     # Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    dc_upper, dc_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    
+    # Volume MA for spike detection
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Volume moving average for spike detection
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period
-    start = max(DONCHIAN_PERIOD, ATR_PERIOD) + 1
+    # Start from warmup
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD)
     
     for i in range(start, n):
-        # Skip if weekly pivot data not available
-        if np.isnan(weekly_pivot_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-            continue
-            
         # Check stoploss
         if position == 1:  # long position
             if close[i] <= stop_price:
@@ -106,28 +83,21 @@ def generate_signals(prices):
                 continue
         
         # Volume spike confirmation
-        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
+        vol_ma = volume_ma[i]
+        vol_spike = volume[i] > (vol_ma * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(vol_ma) else False
         
         # Breakout conditions
-        bullish_breakout = close[i] >= donchian_upper[i]
-        bearish_breakout = close[i] <= donchian_lower[i]
+        breakout_up = high[i] >= dc_upper[i]  # Using high to catch breakout
+        breakout_down = low[i] <= dc_lower[i]  # Using low to catch breakdown
         
-        # Weekly pivot direction filter
-        above_weekly_pivot = close[i] > weekly_pivot_aligned[i]
-        below_weekly_pivot = close[i] < weekly_pivot_aligned[i]
-        
-        # Entry conditions: breakout in direction of weekly pivot bias
-        long_entry = bullish_breakout and above_weekly_pivot and volume_spike
-        short_entry = bearish_breakout and below_weekly_pivot and volume_spike
-        
-        # Generate signals
+        # Entry logic
         if position == 0:
-            if long_entry:
+            if breakout_up and vol_spike:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
+            elif breakout_down and vol_spike:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -140,4 +110,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</p>
