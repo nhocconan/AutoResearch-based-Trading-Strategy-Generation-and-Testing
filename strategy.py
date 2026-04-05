@@ -1,26 +1,46 @@
 #!/usr/bin/env python3
 """
-Experiment #10291: 6h 123 Reversal + Volume Spike + Daily Trend
-Hypothesis: The 123 reversal pattern (higher low in downtrend, lower high in uptrend) 
-combined with volume spikes and daily trend filter provides high-probability reversal 
-entries. Works in both bull and bear markets by capturing exhaustion moves. 
-Volume confirms institutional participation. Target: 100-200 total trades over 4 years.
+Experiment #10291: 6h Donchian Breakout + Daily Pivot Direction + Volume Spike
+Hypothesis: Donchian(20) breakouts in the direction of daily pivot trend (S5/S4 for downtrend, S3/S2 for uptrend)
+with volume confirmation provide high-probability trend continuation. Works in bull/bear via pivot-based trend filter.
+Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10291_6h_123_reversal_volume_trend_v1"
+name = "exp_10291_6h_donchian_breakout_daily_pivot_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-LOOKBACK_PERIOD = 10
-VOLUME_SPIKE_MULTIPLIER = 1.8
-SIGNAL_SIZE = 0.28
+DONCHIAN_PERIOD = 20
+VOLUME_SPIKE_MULTIPLIER = 1.5
+PIVOT_PERIOD = 1  # daily pivot
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
+def calculate_pivot_points(high, low, close):
+    """Calculate standard pivot points: P=(H+L+C)/3, S1=2P-H, S2=P-(H-L), S3=L-2(H-P), S4=S3-(H-L), S5=S4-(H-L)"""
+    pivot = (high + low + close) / 3.0
+    s1 = 2 * pivot - high
+    s2 = pivot - (high - low)
+    s3 = low - 2 * (high - pivot)
+    s4 = s3 - (high - low)
+    s5 = s4 - (high - low)
+    return pivot, s1, s2, s3, s4, s5
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -33,24 +53,35 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for trend filter
+    # Load daily data ONCE before loop for pivot trend filter
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend direction
+    # Calculate daily pivot points
+    daily_high = df_daily['high'].values
+    daily_low = df_daily['low'].values
     daily_close = df_daily['close'].values
-    daily_ema = pd.Series(daily_close).ewm(span=50, adjust=False, min_periods=50).mean().values
+    _, _, s2, s3, s4, s5 = calculate_pivot_points(daily_high, daily_low, daily_close)
     
-    # Align daily EMA to 6h timeframe
-    daily_ema_aligned = align_htf_to_ltf(prices, df_daily, daily_ema)
+    # Determine trend based on S4/S5 (downtrend) vs S2/S3 (uptrend)
+    # Uptrend: close > S3, Downtrend: close < S4
+    daily_uptrend = daily_close > s3
+    daily_downtrend = daily_close < s4
+    
+    # Align trend indicators to 6h timeframe
+    daily_uptrend_aligned = align_htf_to_ltf(prices, df_daily, daily_uptrend.astype(float))
+    daily_downtrend_aligned = align_htf_to_ltf(prices, df_daily, daily_downtrend.astype(float))
     
     # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Donchian channels
+    donch_upper, donch_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     
     # Volume moving average for spike detection
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -64,11 +95,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(LOOKBACK_PERIOD + 2, 20) + 1
+    start = max(DONCHIAN_PERIOD, 20) + 1
     
     for i in range(start, n):
-        # Skip if daily EMA not available
-        if np.isnan(daily_ema_aligned[i]):
+        # Skip if daily trend not available
+        if np.isnan(daily_uptrend_aligned[i]) or np.isnan(daily_downtrend_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -87,61 +118,36 @@ def generate_signals(prices):
         # Volume spike confirmation
         volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below daily EMA
-        above_daily_ema = close[i] > daily_ema_aligned[i]
-        below_daily_ema = close[i] < daily_ema_aligned[i]
+        # Trend filter: daily uptrend/downtrend
+        is_uptrend = daily_uptrend_aligned[i] > 0.5
+        is_downtrend = daily_downtrend_aligned[i] > 0.5
         
-        # 123 Reversal pattern detection
-        # Need at least 3 bars of lookback
-        if i >= LOOKBACK_PERIOD + 2:
-            # Get recent lows and highs
-            recent_lows = low[i-LOOKBACK_PERIOD:i+1]
-            recent_highs = high[i-LOOKBACK_PERIOD:i+1]
-            
-            # Find lowest low and highest high in lookback period
-            lowest_low = np.min(recent_lows)
-            highest_high = np.max(recent_highs)
-            
-            # Current bar indices relative to lookback start
-            current_low = low[i]
-            current_high = high[i]
-            
-            # Higher Low pattern (for long): 
-            # 1. Price made a higher low than the lowest low in lookback
-            # 2. Current close is above the prior bar's close (showing strength)
-            # 3. Volume spike confirms
-            higher_low = (current_low > lowest_low) and (close[i] > close[i-1])
-            
-            # Lower High pattern (for short):
-            # 1. Price made a lower high than the highest high in lookback
-            # 2. Current close is below the prior bar's close (showing weakness)
-            # 3. Volume spike confirms
-            lower_high = (current_high < highest_high) and (close[i] < close[i-1])
-            
-            # Entry conditions
-            long_entry = higher_low and above_daily_ema and volume_spike
-            short_entry = lower_high and below_daily_ema and volume_spike
-            
-            # Generate signals
-            if position == 0:
-                if long_entry:
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                elif short_entry:
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                else:
-                    signals[i] = 0.0
-            elif position == 1:
+        # Breakout conditions
+        bullish_breakout = close[i] > donch_upper[i] if not np.isnan(donch_upper[i]) else False
+        bearish_breakout = close[i] < donch_lower[i] if not np.isnan(donch_lower[i]) else False
+        
+        # Entry conditions: breakout in direction of daily trend with volume
+        long_entry = bullish_breakout and is_uptrend and volume_spike
+        short_entry = bearish_breakout and is_downtrend and volume_spike
+        
+        # Generate signals
+        if position == 0:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
-            elif position == -1:
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
-        else:
-            # Not enough data for pattern detection
-            signals[i] = 0.0
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            signals[i] = -SIGNAL_SIZE
     
     return signals
+</x>
