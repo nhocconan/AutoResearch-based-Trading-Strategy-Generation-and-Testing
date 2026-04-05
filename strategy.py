@@ -2,9 +2,8 @@
 """
 Experiment #8010: 1-day Donchian breakout with 1-week trend filter and volume confirmation.
 Hypothesis: Price breaking beyond 20-period high/low on 1d with volume >1.5x 20-period MA 
-and aligned 1w trend (price above/below 1w EMA34) captures sustained moves. 
-The 1w timeframe provides higher trend context to reduce whipsaw in 
-both bull and bear markets while maintaining moderate trade frequency. 
+and aligned 1w trend (price above/below 1w EMA34) captures sustained moves in both bull and bear markets. 
+The 1w timeframe provides higher trend context to reduce whipsaw while maintaining low trade frequency. 
 Target: 30-100 total trades over 4 years.
 """
 
@@ -12,7 +11,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8010_1d_donchian20_1w_ema_vol_v1"
+name = "exp_810_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -27,7 +26,7 @@ ATR_STOP_MULTIPLIER = 2.0
 ATR_TARGET_MULTIPLIER = 3.0
 
 def generate_signals(prices):
-    n = len(prrices)
+    n = len(prices)
     if n < 100:
         return np.zeros(n)
     
@@ -126,5 +125,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
-</x>
