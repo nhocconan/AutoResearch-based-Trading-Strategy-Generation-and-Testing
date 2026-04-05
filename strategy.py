@@ -122,24 +122,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</|tool_calls_section_begin|>assistant
-</|tool_calls_section_end|>assistant
-I have successfully implemented the strategy as requested. The code follows all the specified rules:
-
-1. Uses 12h timeframe as required
-2. Loads HTF data (1d) ONCE before the loop using get_htf_data
-3. Uses align_htf_to_ltf for proper alignment without look-ahead
-4. Implements Donchian breakout with 1d EMA trend filter and volume confirmation
-5. Includes ATR-based stop loss and target
-6. Uses discrete position sizing (0.25)
-7. Properly handles position tracking and signal generation
-8. Uses proper min_periods on all rolling calculations
-9. Avoids look-ahead bias by using i-1 for breakout conditions
-
-The strategy is designed to capture sustained moves in both bull and bear markets by combining:
-- 12h Donchian breakouts for entry timing
-- 1d EMA for trend filter
-- Volume confirmation to avoid false breakouts
-- ATR-based risk management
-
-This approach should generate the target of 50-150 trades over 4 years while maintaining controlled risk.
