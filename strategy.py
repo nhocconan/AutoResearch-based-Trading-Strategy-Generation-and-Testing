@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 Experiment #8821: 4h Donchian breakout + 1d trend filter + volume confirmation + ATR stoploss.
-Hypothesis: 4h timeframe balances trade frequency and responsiveness. 1d trend filter (EMA200) ensures alignment with long-term momentum, reducing counter-trend trades. Volume confirmation filters breakouts requiring institutional participation. ATR-based stops manage risk. Targets 75-200 trades over 4 years (19-50/year) to minimize fee impact while maintaining statistical validity.
+Hypothesis: 4h timeframe balances trade frequency and signal quality. Using 1-day trend filter (EMA50)
+ensures alignment with daily momentum, avoiding counter-trend trades. Volume confirmation filters
+breakouts requiring institutional participation. ATR-based stops manage risk. Targets 75-200 trades
+over 4 years (19-50/year) to minimize fee impact while maintaining statistical validity.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
@@ -14,7 +17,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_PERIOD = 200
+TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -90,8 +93,8 @@ def generate_signals(prices):
                 continue
         
         # Determine market bias from 1d EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1d price above EMA200
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1d price below EMA200
+        bull_bias = price_vs_ema_aligned[i] == 1   # 1d price above EMA50
+        bear_bias = price_vs_ema_aligned[i] == -1  # 1d price below EMA50
         
         # Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
@@ -124,3 +127,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</x>
