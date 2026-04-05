@@ -1,28 +1,47 @@
 #!/usr/bin/env python3
 """
-Experiment #8250: 1-day Donchian breakout with 1-week trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 1-day with volume >1.5x 20-period volume MA
-and aligned 1-week trend (price above/below 1-week EMA21) captures sustained moves in both bull and bear markets.
-The weekly trend filter reduces false breakouts during consolidation, targeting 30-100 total trades over 4 years.
+Experiment #8251: 6-hour Camarilla pivot + 1-day regime filter.
+Hypothesis: Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout) on 6h 
+combined with 1-day trend regime (price above/below 1-day EMA50) provides high-probability 
+entries. In bull regime (price > EMA50): fade at S3/R3 with stop at S4/R4. In bear regime 
+(price < EMA50): fade at R3/S3 with stop at R4/S4. Uses volume confirmation to filter 
+low-probability setups. Targets 50-150 trades over 4 years for optimal balance.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8250_1d_donchian20_1w_vol_v1"
-timeframe = "1d"
+name = "exp_8251_6h_camarilla1d_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+CAMARILLA_LOOKBACK = 10
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-EMA_PERIOD = 21
+EMA_PERIOD = 50
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-ATR_TARGET_MULTIPLIER = 3.0
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given high, low, close"""
+    range_val = high - low
+    if range_val <= 0:
+        return close, close, close, close  # fallback
+    
+    c = close
+    h = high
+    l = low
+    
+    # Camarilla levels
+    r4 = c + (range_val * 1.1 / 2)
+    r3 = c + (range_val * 1.1 / 4)
+    s3 = c - (range_val * 1.1 / 4)
+    s4 = c - (range_val * 1.1 / 2)
+    
+    return r4, r3, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -30,25 +49,32 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1-week EMA
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    # Calculate 1-day EMA for regime filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    bull_regime = close_1d > ema_1d  # True = bull regime, False = bear regime
+    bull_regime_aligned = align_htf_to_ltf(prices, df_1d, bull_regime)
     
-    # Price relative to EMA: above = bullish bias, below = bearish bias
-    price_vs_ema = np.where(close_1w > ema_1w, 1, -1)  # 1=bullish, -1=bearish
-    price_vs_ema_aligned = align_htf_to_ltf(prices, df_1w, price_vs_ema)
-    
-    # Calculate LTF indicators (1-day)
-    close = prices['close'].values
+    # Calculate LTF indicators
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Price channel (Donchian)
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Camarilla levels (based on previous bar)
+    r4_vals = np.full(n, np.nan)
+    r3_vals = np.full(n, np.nan)
+    s3_vals = np.full(n, np.nan)
+    s4_vals = np.full(n, np.nan)
+    
+    for i in range(1, n):
+        r4, r3, s3, s4 = calculate_camarilla(high[i-1], low[i-1], close[i-1])
+        r4_vals[i] = r4
+        r3_vals[i] = r3
+        s3_vals[i] = s3
+        s4_vals[i] = s4
     
     # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -64,63 +90,75 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
-    target_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
+    start = max(CAMARILLA_LOOKBACK + 1, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(price_vs_ema_aligned[i]):
+        if np.isnan(bull_regime_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
-        # Check stoploss or target
+        # Check stoploss
         if position == 1:  # long position
-            if close[i] <= stop_price or close[i] >= target_price:
+            if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            if close[i] >= stop_price or close[i] <= target_price:
+            if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Determine market bias from 1-week EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 1w close above EMA21
-        bear_bias = price_vs_ema_aligned[i] == -1  # 1w close below EMA21
+        # Determine regime
+        is_bull_regime = bull_regime_aligned[i]
+        is_bear_regime = not bull_regime_aligned[i]
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions - require close beyond channel bands to avoid wicks
-        upper_breakout = (close[i] > highest_high[i-1]) and (i-1 >= 0) and not np.isnan(highest_high[i-1])
-        lower_breakout = (close[i] < lowest_low[i-1]) and (i-1 >= 0) and not np.isnan(lowest_low[i-1])
+        # Skip if not volume confirmed
+        if not volume_confirmed:
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            continue
         
-        # Entry conditions
-        long_entry = bull_bias and upper_breakout and volume_confirmed
-        short_entry = bear_bias and lower_breakout and volume_confirmed
-        
-        # Generate signals
-        if position == 0:
-            if long_entry:
+        # Fade at S3/R3 with stop at S4/R4 based on regime
+        if is_bull_regime:
+            # In bull regime: fade at S3 (mean reversion up), stop at S4
+            long_entry = (close[i] <= s3_vals[i]) and (i-1 >= 0) and (close[i-1] > s3_vals[i-1])
+            long_exit = close[i] >= s4_vals[i]
+            
+            if position == 0 and long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                target_price = entry_price + (ATR_TARGET_MULTIPLIER * atr[i])
-            elif short_entry:
+                stop_price = s4_vals[i]
+            elif position == 1 and long_exit:
+                signals[i] = 0.0
+                position = 0
+            elif position == 1:
+                signals[i] = SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+                
+        else:  # bear regime
+            # In bear regime: fade at R3 (mean reversion down), stop at R4
+            short_entry = (close[i] >= r3_vals[i]) and (i-1 >= 0) and (close[i-1] < r3_vals[i-1])
+            short_exit = close[i] <= r4_vals[i]
+            
+            if position == 0 and short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                target_price = entry_price - (ATR_TARGET_MULTIPLIER * atr[i])
+                stop_price = r4_vals[i]
+            elif position == -1 and short_exit:
+                signals[i] = 0.0
+                position = 0
+            elif position == -1:
+                signals[i] = -SIGNAL_SIZE
             else:
                 signals[i] = 0.0
-        elif position == 1:
-            signals[i] = SIGNAL_SIZE
-        elif position == -1:
-            signals[i] = -SIGNAL_SIZE
     
     return signals
