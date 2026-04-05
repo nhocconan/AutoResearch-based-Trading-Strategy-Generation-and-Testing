@@ -1,27 +1,50 @@
 #!/usr/bin/env python3
 """
-Experiment #10399: 6h Chandelier Exit Reversal with 12h Trend Filter
-Hypothesis: Chandelier Exit (trailing stop based on ATR) provides dynamic support/resistance.
-In ranging markets, price reverses at these levels; in trending markets, trailing stop follows.
-Combined with 12h EMA trend filter to only take reversals in direction of higher timeframe trend.
-Works in both bull/bear: reversals catch pullbacks in uptrend and bounces in downtrend.
-Target: 75-200 total trades over 4 years (19-50/year).
+Experiment #10399: 6h Williams Alligator + Elder Ray + Volume Confirmation
+Hypothesis: Williams Alligator identifies trend direction and alignment, Elder Ray confirms momentum strength,
+and volume filter ensures institutional participation. Works in trending markets (both bull/bear) by
+filtering for strong directional moves with volume confirmation. Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_10399_6h_chandelier_exit_reversal_12h_trend_v1"
+name = "exp_10399_6h_williams_alligator_elder_ray_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-CHANDELIER_PERIOD = 22
-ATR_PERIOD = 22
-CHANDELIER_MULTIPLIER = 3.0
-TREND_EMA_PERIOD = 50
+ALLIGATOR_PERIOD = 13
+ELDER_RAY_PERIOD = 13
+VOLUME_SPIKE_MULTIPLIER = 1.5
 SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_smma(values, period):
+    """Calculate Smoothed Moving Average (SMMA)"""
+    sma = np.full_like(values, np.nan, dtype=float)
+    if len(values) >= period:
+        sma[period-1] = np.mean(values[:period])
+        for i in range(period, len(values)):
+            sma[i] = (sma[i-1] * (period-1) + values[i]) / period
+    return sma
+
+def calculate_williams_alligator(high, low, close, period):
+    """Calculate Williams Alligator (Jaw, Teeth, Lips)"""
+    median_price = (high + low) / 2
+    jaw = calculate_smma(median_price, period * 3)  # Slowest
+    teeth = calculate_smma(median_price, period * 2)  # Medium
+    lips = calculate_smma(median_price, period)     # Fastest
+    return jaw, teeth, lips
+
+def calculate_elder_ray(high, low, close, period):
+    """Calculate Elder Ray (Bull Power, Bear Power)"""
+    ema = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+    bull_power = high - ema
+    bear_power = low - ema
+    return bull_power, bear_power
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -32,22 +55,6 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
-def calculate_chandelier_exit(high, low, close, atr, period, multiplier):
-    """Calculate Chandelier Exit (long and short)"""
-    # For long positions: highest high - ATR * multiplier
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    chandelier_long = highest_high - (atr * multiplier)
-    
-    # For short positions: lowest low + ATR * multiplier
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    chandelier_short = lowest_low + (atr * multiplier)
-    
-    return chandelier_long, chandelier_short
-
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
@@ -56,72 +63,91 @@ def generate_signals(prices):
     # Load 12h data ONCE before loop for trend filter
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 12h EMA for trend direction
+    # Calculate 12h EMA for higher timeframe trend
     close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
-    
-    # Align 12h EMA to 6h timeframe
+    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # ATR for Chandelier Exit
+    # Williams Alligator
+    jaw, teeth, lips = calculate_williams_alligator(high, low, close, ALLIGATOR_PERIOD)
+    
+    # Elder Ray
+    bull_power, bear_power = calculate_elder_ray(high, low, close, ELDER_RAY_PERIOD)
+    
+    # Volume moving average for spike detection
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Chandelier Exit levels
-    chandelier_long, chandelier_short = calculate_chandelier_exit(
-        high, low, close, atr, CHANDELIER_PERIOD, CHANDELIER_MULTIPLIER
-    )
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
     
     # Start from warmup period
-    start = max(CHANDELIER_PERIOD, ATR_PERIOD, TREND_EMA_PERIOD) + 1
+    start = max(ALLIGATOR_PERIOD * 3, ELDER_RAY_PERIOD, 20, 50) + 1
     
     for i in range(start, n):
         # Skip if 12h EMA not available
         if np.isnan(ema_12h_aligned[i]):
-            signals[i] = 0.0
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
+            
+        # Check stoploss
+        if position == 1:  # long position
+            if close[i] <= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
         
-        # Determine trend direction from 12h EMA
-        uptrend = close[i] > ema_12h_aligned[i]
-        downtrend = close[i] < ema_12h_aligned[i]
+        # Volume spike confirmation
+        volume_spike = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
         
-        # Chandelier Exit reversal signals
-        # Long: price crosses above Chandelier long (short covering)
-        long_signal = (close[i] > chandelier_long[i]) and (close[i-1] <= chandelier_long[i-1]) if not np.isnan(chandelier_long[i]) else False
-        # Short: price crosses below Chandelier short (long liquidation)
-        short_signal = (close[i] < chandelier_short[i]) and (close[i-1] >= chandelier_short[i-1]) if not np.isnan(chandelier_short[i]) else False
+        # Alligator alignment: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
+        bullish_alignment = (lips[i] > teeth[i] > jaw[i]) if not (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i])) else False
+        bearish_alignment = (lips[i] < teeth[i] < jaw[i]) if not (np.isnan(lips[i]) or np.isnan(teeth[i]) or np.isnan(jaw[i])) else False
+        
+        # Elder Ray confirmation: strong bull/bear power
+        strong_bull_power = bull_power[i] > 0 and bull_power[i] > np.nanpercentile(bull_power[max(0, i-50):i+1], 60) if i >= 50 else bull_power[i] > 0
+        strong_bear_power = bear_power[i] < 0 and abs(bear_power[i]) > np.nanpercentile(abs(bear_power[max(0, i-50):i+1]), 60) if i >= 50 else bear_power[i] < 0
+        
+        # Higher timeframe trend filter
+        above_12h_ema = close[i] > ema_12h_aligned[i]
+        below_12h_ema = close[i] < ema_12h_aligned[i]
+        
+        # Entry conditions
+        long_entry = bullish_alignment and strong_bull_power and volume_spike and above_12h_ema
+        short_entry = bearish_alignment and strong_bear_power and volume_spike and below_12h_ema
         
         # Generate signals
         if position == 0:
-            # Only take longs in uptrend, shorts in downtrend
-            if long_signal and uptrend:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
-            elif short_signal and downtrend:
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long: exit when price crosses below Chandelier long
-            if close[i] < chandelier_long[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = SIGNAL_SIZE
+            signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Short: exit when price crosses above Chandelier short
-            if close[i] > chandelier_short[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -SIGNAL_SIZE
+            signals[i] = -SIGNAL_SIZE
     
     return signals
