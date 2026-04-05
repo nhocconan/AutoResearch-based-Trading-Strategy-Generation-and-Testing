@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-exp_6865_12h_donchian20_1d_ema_vol_v1
-Hypothesis: 12h Donchian(20) breakout with daily EMA trend filter and volume confirmation.
+exp_6866_4h_donchian20_1d_ema_vol_v1
+Hypothesis: 4h Donchian(20) breakout with daily EMA trend filter and volume confirmation.
 In bull markets (price > daily EMA50): long breakouts only. In bear markets (price < daily EMA50): short breakouts only.
 Daily EMA50 provides structural trend filter to avoid counter-trend trades. Volume confirms breakout legitimacy.
-Designed for 12h timeframe to capture major swings with ~12-37 trades/year (50-150 total over 4 years).
+Designed for 4h timeframe targeting 75-200 total trades over 4 years (19-50/year).
 Works in both bull and bear markets by aligning with daily trend direction.
 """
 
@@ -12,8 +12,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6865_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_6866_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -23,7 +23,7 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 20  # ~10 days (12h bars)
+MAX_HOLD_BARS = 30  # ~5 months (4h bars)
 EMA_PERIOD = 50
 
 def generate_signals(prices):
@@ -38,7 +38,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
     
-    # Align to LTF (12h)
+    # Align to LTF (4h)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
