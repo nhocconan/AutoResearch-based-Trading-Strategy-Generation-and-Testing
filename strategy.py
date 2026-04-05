@@ -1,45 +1,45 @@
 #!/usr/bin/env python3
 """
-exp_7251_6h_adx_elder_ray_v1
-Hypothesis: 6h Elder Ray (Bull/Bear Power) with ADX regime filter and volume confirmation.
-In strong trends (ADX>25): trade in direction of Elder Ray (Bull/Bear Power).
-In weak trends (ADX<=25): fade extreme Elder Ray readings with volume confirmation.
-Uses 1d EMA200 as additional trend filter to avoid counter-trend trades in strong regimes.
-Designed for 6h timeframe to capture multi-day swings with ~12-37 trades/year (50-150 total over 4 years).
-Works in bull markets via trend continuation and bear markets via mean reversion in ranges.
+exp_7252_12h_donchian20_1d_ema_vol_v1
+Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+In trending markets (price > EMA): trade breakouts in breakout direction.
+In ranging markets (price near EMA): mean reversion at Donchian extremes.
+Uses 1d EMA for trend regime and 12h volume for confirmation.
+Designed for 12h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
+Works in both bull and bear markets by adapting to EMA-defined trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7251_6h_adx_elder_ray_v1"
-timeframe = "6h"
+name = "exp_7252_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-ELDER_RAY_PERIOD = 13
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
-EMA_FILTER_PERIOD = 200
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOL_MA_PERIOD = 20
-VOL_CONFIRM_THRESHOLD = 1.5
+VOL_BASE_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 12  # ~3 days
+MAX_HOLD_BARS = 10  # ~10 * 12h = 5 days
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 250:
+    if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 1d for EMA filter
+    # Load HTF data ONCE before loop - using 1d for EMA trend
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA200 for trend filter
+    # Calculate 1d EMA
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_FILTER_PERIOD, adjust=False, min_periods=EMA_FILTER_PERIOD).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    
+    # Align to LTF (12h)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate LTF indicators
@@ -48,35 +48,19 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=ELDER_RAY_PERIOD, adjust=False, min_periods=ELDER_RAY_PERIOD).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # ADX calculation
-    plus_dm = pd.Series(np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                                 np.maximum(high - np.roll(high, 1), 0), 0))
-    minus_dm = pd.Series(np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                                  np.maximum(np.roll(low, 1) - low, 0), 0))
+    # Volume MA for confirmation
+    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
+    # ATR for stoploss
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_tr = tr.ewm(span=1, adjust=False).mean()  # True Range
-    
-    plus_di = 100 * (plus_dm.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean() / 
-                     atr_tr.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean())
-    minus_di = 100 * (minus_dm.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean() / 
-                      atr_tr.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean())
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values
-    
-    # ATR for stoploss
     atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
-    
-    # Volume MA for confirmation
-    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -84,7 +68,7 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(ELDER_RAY_PERIOD, ADX_PERIOD, EMA_FILTER_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
@@ -116,211 +100,35 @@ def generate_signals(prices):
             continue
             
         # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_CONFIRM_THRESHOLD if not np.isnan(vol_ma[i]) else False
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine trend regime
-        strong_trend = adx[i] > ADX_THRESHOLD
-        weak_trend = adx[i] <= ADX_THRESHOLD
+        # Determine market regime based on EMA
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
+        near_ema = np.abs(close[i] - ema_1d_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of EMA
         
-        # Price relative to 1d EMA200 filter
-        price_above_ema = close[i] > ema_1d_aligned[i]
-        price_below_ema = close[i] < ema_1d_aligned[i]
+        # Fade at extremes in ranging market (near EMA)
+        fade_long = near_ema and (close[i] <= lowest_low[i]) and vol_confirmed
+        fade_short = near_ema and (close[i] >= highest_high[i]) and vol_confirmed
         
-        # Entry logic
+        # Continuation breakouts in trending market
+        continuation_long = above_ema and (close[i] > highest_high[i]) and vol_confirmed
+        continuation_short = below_ema and (close[i] < lowest_low[i]) and vol_confirmed
+        
+        # Enter new positions only if flat
         if position == 0:
-            # Strong trend: trade with Elder Ray direction
-            if strong_trend:
-                if bull_power[i] > 0 and price_above_ema and vol_confirmed:
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                elif bear_power[i] < 0 and price_below_ema and vol_confirmed:
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                else:
-                    signals[i] = 0.0
-            # Weak trend: fade extreme Elder Ray readings
-            else:
-                if bull_power[i] < 0 and price_below_ema and vol_confirmed:
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                elif bear_power[i] > 0 and price_above_ema and vol_confirmed:
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                else:
-                    signals[i] = 0.0
-        else:
-            # Hold current position
-            signals[i] = position * SIGNAL_SIZE
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-"""
-exp_7251_6h_adx_elder_ray_v1
-Hypothesis: 6h Elder Ray (Bull/Bear Power) with ADX regime filter and volume confirmation.
-In strong trends (ADX>25): trade in direction of Elder Ray (Bull/Bear Power).
-In weak trends (ADX<=25): fade extreme Elder Ray readings with volume confirmation.
-Uses 1d EMA200 as additional trend filter to avoid counter-trend trades in strong regimes.
-Designed for 6h timeframe to capture multi-day swings with ~12-37 trades/year (50-150 total over 4 years).
-Works in bull markets via trend continuation and bear markets via mean reversion in ranges.
-"""
-
-from mtf_data import get_htf_data, align_htf_to_ltf
-import numpy as np
-import pandas as pd
-
-name = "exp_7251_6h_adx_elder_ray_v1"
-timeframe = "6h"
-leverage = 1.0
-
-# Parameters
-ELDER_RAY_PERIOD = 13
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
-EMA_FILTER_PERIOD = 200
-VOL_MA_PERIOD = 20
-VOL_CONFIRM_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 12  # ~3 days
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 250:
-        return np.zeros(n)
-    
-    # Load HTF data ONCE before loop - using 1d for EMA filter
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d EMA200 for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_FILTER_PERIOD, adjust=False, min_periods=EMA_FILTER_PERIOD).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Calculate LTF indicators
-    close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
-    
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=ELDER_RAY_PERIOD, adjust=False, min_periods=ELDER_RAY_PERIOD).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
-    
-    # ADX calculation
-    plus_dm = pd.Series(np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                                 np.maximum(high - np.roll(high, 1), 0), 0))
-    minus_dm = pd.Series(np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                                  np.maximum(np.roll(low, 1) - low, 0), 0))
-    
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr_tr = tr.ewm(span=1, adjust=False).mean()  # True Range
-    
-    plus_di = 100 * (plus_dm.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean() / 
-                     atr_tr.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean())
-    minus_di = 100 * (minus_dm.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean() / 
-                      atr_tr.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean())
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.ewm(span=ADX_PERIOD, adjust=False, min_periods=ADX_PERIOD).mean().values
-    
-    # ATR for stoploss
-    atr = tr.ewm(span=ATR_PERIOD, adjust=False, min_periods=ATR_PERIOD).mean().values
-    
-    # Volume MA for confirmation
-    vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    bars_since_entry = 0
-    
-    # Start from warmup period
-    start = max(ELDER_RAY_PERIOD, ADX_PERIOD, EMA_FILTER_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
-    
-    for i in range(start, n):
-        bars_since_entry += 1
-        
-        # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-            continue
-            
-        # Check stoploss
-        if position == 1:  # long position
-            if close[i] <= entry_price - ATR_STOP_MULTIPLIER * atr[i]:
-                signals[i] = 0.0
-                position = 0
+            if fade_long or continuation_long:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
                 bars_since_entry = 0
-                continue
-        elif position == -1:  # short position
-            if close[i] >= entry_price + ATR_STOP_MULTIPLIER * atr[i]:
-                signals[i] = 0.0
-                position = 0
+            elif fade_short or continuation_short:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
                 bars_since_entry = 0
-                continue
-                
-        # Time-based exit
-        if position != 0 and bars_since_entry >= MAX_HOLD_BARS:
-            signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
-            continue
-            
-        # Volume confirmation
-        vol_confirmed = volume[i] > vol_ma[i] * VOL_CONFIRM_THRESHOLD if not np.isnan(vol_ma[i]) else False
-        
-        # Determine trend regime
-        strong_trend = adx[i] > ADX_THRESHOLD
-        weak_trend = adx[i] <= ADX_THRESHOLD
-        
-        # Price relative to 1d EMA200 filter
-        price_above_ema = close[i] > ema_1d_aligned[i]
-        price_below_ema = close[i] < ema_1d_aligned[i]
-        
-        # Entry logic
-        if position == 0:
-            # Strong trend: trade with Elder Ray direction
-            if strong_trend:
-                if bull_power[i] > 0 and price_above_ema and vol_confirmed:
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                elif bear_power[i] < 0 and price_below_ema and vol_confirmed:
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                else:
-                    signals[i] = 0.0
-            # Weak trend: fade extreme Elder Ray readings
             else:
-                if bull_power[i] < 0 and price_below_ema and vol_confirmed:
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                elif bear_power[i] > 0 and price_above_ema and vol_confirmed:
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                else:
-                    signals[i] = 0.0
+                signals[i] = 0.0
         else:
             # Hold current position
             signals[i] = position * SIGNAL_SIZE
