@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
 """
-Experiment #11431: 6h Elder Ray with 1d Trend and Volume Confirmation
-Hypothesis: Elder Ray (Bull Power/Bear Power) identifies momentum exhaustion and trend strength.
-Combined with 1d trend filter and volume confirmation, this should capture sustained moves
-while avoiding whipsaws in both bull and bear markets. Target: 75-250 total trades over 4 years.
+Experiment #11432: 12h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Donchian(20) breakouts capture strong directional moves. Daily EMA provides trend bias,
+and volume filter ensures institutional participation. Works in bull (breakouts continue) and
+bear (breakouts reverse quickly) by using 1d trend filter. Target: 50-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11431_6h_elder_ray_1d_trend_vol_v1"
-timeframe = "6h"
+name = "exp_11432_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-ELDER_RAY_PERIOD = 13
-EMA_PERIOD = 13
+DONCHIAN_PERIOD = 20
+DAILY_EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -45,20 +51,16 @@ def generate_signals(prices):
     df_daily = get_htf_data(prices, '1d')
     
     # Calculate daily EMA for trend
-    ema_daily = calculate_ema(df_daily['close'].values, EMA_PERIOD)
+    ema_daily = calculate_ema(df_daily['close'].values, DAILY_EMA_PERIOD)
     ema_daily_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Elder Ray components
-    ema_close = calculate_ema(close, ELDER_RAY_PERIOD)
-    bull_power = high - ema_close
-    bear_power = low - ema_close
-    
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -68,7 +70,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ELDER_RAY_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, DAILY_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if daily EMA not available
@@ -91,9 +93,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Elder Ray conditions
-        bullish_momentum = bull_power[i] > 0
-        bearish_momentum = bear_power[i] < 0
+        # Donchian breakout conditions
+        breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
+        breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
@@ -103,12 +105,8 @@ def generate_signals(prices):
         downtrend_daily = close[i] < ema_daily_aligned[i]
         
         # Entry conditions
-        long_entry = bullish_momentum and volume_ok and uptrend_daily
-        short_entry = bearish_momentum and volume_ok and downtrend_daily
-        
-        # Exit conditions (momentum reversal)
-        long_exit = not bullish_momentum
-        short_exit = not bearish_momentum
+        long_entry = breakout_up and volume_ok and uptrend_daily
+        short_entry = breakout_down and volume_ok and downtrend_daily
         
         # Generate signals
         if position == 0:
@@ -125,17 +123,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            if long_exit:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = SIGNAL_SIZE
+            signals[i] = SIGNAL_SIZE
         elif position == -1:
-            if short_exit:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -SIGNAL_SIZE
+            signals[i] = -SIGNAL_SIZE
     
     return signals
-</p>
