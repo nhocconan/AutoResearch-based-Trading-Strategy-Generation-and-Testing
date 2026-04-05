@@ -5,7 +5,7 @@ Hypothesis: Donchian breakouts capture trends; 1d EMA filter ensures directional
 Targets 150-300 total trades over 4 years (38-75/year) to balance opportunity and cost. Works in bull (breakouts) and bear (filtered shorts).
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_ft_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
