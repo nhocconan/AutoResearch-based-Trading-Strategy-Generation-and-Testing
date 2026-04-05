@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
 """
-exp_7158_1d_donchian20_1w_hma_v2
-Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter and volume confirmation.
-- In trending markets (price > 1w HMA): trade continuation breakouts in breakout direction
-- In ranging markets (price near 1w HMA): mean reversion at Donchian extremes with volume spike
-- Uses discrete position sizing (0.25) to minimize fee churn
-- Includes ATR-based stoploss and time-based exit to limit drawdown
-- Designed for 1d timeframe targeting ~15-25 trades/year (60-100 total over 4 years)
-- Works in both bull and bear markets by adapting to HMA-defined trend regime
+exp_7158_1d_donchian20_1w_hma_v1
+Hypothesis: 1d Donchian(20) breakout with 1w HMA(21) trend filter for regime.
+In trending markets (price > HMA): continuation breakouts in breakout direction.
+In ranging markets (price near HMA): mean reversion at Donchian extremes with volume confirmation.
+Uses 1w HMA for trend regime and 1d volume for confirmation.
+Designed for 1d timeframe to capture swings with ~7-25 trades/year (30-100 total over 4 years).
+Works in both bull and bear markets by adapting to HMA-defined trend regime.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7158_1d_donchian20_1w_hma_v2"
+name = "exp_7158_1d_donchian20_1w_hma_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -22,12 +21,11 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 HMA_PERIOD = 21
 VOL_MA_PERIOD = 20
-VOL_SPIKE_THRESHOLD = 2.0  # Increased to reduce trades
+VOL_BASE_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 15  # Increased to reduce trade frequency
-NEAR_HMA_THRESHOLD = 0.3  # Reduced to tighten ranging condition
+MAX_HOLD_BARS = 15  # ~15 days
 
 def generate_signals(prices):
     n = len(prices)
@@ -42,7 +40,7 @@ def generate_signals(prices):
     half_period = HMA_PERIOD // 2
     sqrt_period = int(np.sqrt(HMA_PERIOD))
     
-    # WMA function with proper min_periods handling
+    # WMA function
     def wma(values, period):
         if len(values) < period:
             return np.full_like(values, np.nan)
@@ -59,10 +57,7 @@ def generate_signals(prices):
         hma_values = wma(raw_hma, sqrt_period)
         # Pad to original length
         hma_1w = np.full_like(close_1w, np.nan)
-        start_idx = half_period - 1
-        end_idx = start_idx + len(hma_values)
-        if end_idx <= len(close_1w):
-            hma_1w[start_idx:end_idx] = hma_values
+        hma_1w[half_period - 1:half_period - 1 + len(hma_values)] = hma_values
     else:
         hma_1w = np.full_like(close_1w, np.nan)
     
@@ -75,14 +70,14 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels with min_periods
+    # Donchian channels
     highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
     lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Volume MA for confirmation with min_periods
+    # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
-    # ATR for stoploss with min_periods
+    # ATR for stoploss
     tr1 = pd.Series(high - low)
     tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
     tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
@@ -126,19 +121,19 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Volume confirmation - require significant spike
-        vol_confirmed = not np.isnan(vol_ma[i]) and volume[i] > vol_ma[i] * VOL_SPIKE_THRESHOLD
+        # Volume confirmation
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
         # Determine market regime based on HMA
         above_hma = close[i] > hma_1w_aligned[i]
         below_hma = close[i] < hma_1w_aligned[i]
-        near_hma = np.abs(close[i] - hma_1w_aligned[i]) < (NEAR_HMA_THRESHOLD * atr[i])  # Tightened
+        near_hma = np.abs(close[i] - hma_1w_aligned[i]) < (0.5 * atr[i])  # Within 0.5 ATR of HMA
         
-        # Fade at extremes in ranging market (near HMA) - requires volume spike
+        # Fade at extremes in ranging market (near HMA)
         fade_long = near_hma and (close[i] <= lowest_low[i]) and vol_confirmed
         fade_short = near_hma and (close[i] >= highest_high[i]) and vol_confirmed
         
-        # Continuation breakouts in trending market - requires volume spike
+        # Continuation breakouts in trending market
         continuation_long = above_hma and (close[i] > highest_high[i]) and vol_confirmed
         continuation_short = below_hma and (close[i] < lowest_low[i]) and vol_confirmed
         
@@ -161,4 +156,3 @@ def generate_signals(prices):
             signals[i] = position * SIGNAL_SIZE
     
     return signals
-</file>
