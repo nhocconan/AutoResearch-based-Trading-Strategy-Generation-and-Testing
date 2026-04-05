@@ -1,45 +1,55 @@
 #!/usr/bin/env python3
 """
-exp_7414_1h_volume_breakout_4h_trend_v1
-Hypothesis: 1h volume breakout with 4h trend filter (EMA) to capture momentum in both bull and bear markets.
-Uses 4h EMA for direction, 1h volume breakout for entry timing to limit trades (target: 60-150/4 years).
-Volume filter ensures only strong moves trigger entries. Works in bull (breakouts up) and bear (breakdowns down).
+exp_7415_6d_donchian20_1w_pivot_v1
+Hypothesis: 6h Donchian(20) breakout with 1-week pivot direction and volume confirmation.
+In bull markets, price tends to stay above weekly pivot; in bear markets, below.
+Only take breakouts aligned with weekly pivot direction to avoid counter-trend whipsaws.
+Uses volume confirmation to ensure institutional participation.
+Designed for low trade frequency (target: 50-150 total over 4 years) to minimize fee drag.
 """
 
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_athf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7414_1h_volume_breakout_4h_trend_v1"
-timeframe = "1h"
+name = "exp_7415_6d_donchian20_1w_pivot_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-EMA_FAST = 20
-EMA_SLOW = 50
+DONCHIAN_PERIOD = 20
+PIVOT_LOOKBACK = 5  # days for weekly pivot calculation
 VOL_MA_PERIOD = 20
-VOL_BREAKOUT_MULT = 2.0
-SIGNAL_SIZE = 0.20
+VOL_BASE_THRESHOLD = 2.0
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULT = 2.5
-MAX_HOLD_BARS = 24  # 24 hours max hold
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 12  # ~3 days for 6h timeframe
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - 4h EMA for trend
-    df_4h = get_htf_data(prices, '4h')
+    # Load HTF data ONCE before loop - using 1w for pivot calculation
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMAs
-    close_4h = df_4h['close'].values
-    ema_fast_4h = pd.Series(close_4h).ewm(span=EMA_FAST, adjust=False, min_periods=EMA_FAST).mean().values
-    ema_slow_4h = pd.Series(close_4h).ewm(span=EMA_SLOW, adjust=False, min_periods=EMA_SLOW).mean().values
+    # Calculate weekly pivot points (using prior week's OHLC)
+    # Pivot = (H + L + C) / 3
+    # Support 1 = (2 * Pivot) - High
+    # Resistance 1 = (2 * Pivot) - Low
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Align to LTF (1h)
-    ema_fast_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_fast_4h)
-    ema_slow_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_slow_4h)
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    r1_1w = (2 * pivot_1w) - low_1w
+    s1_1w = (2 * pivot_1w) - high_1w
+    
+    # Align to LTF (6h)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -47,7 +57,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Volume MA for breakout detection
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Volume MA for confirmation
     vol_ma = pd.Series(volume).rolling(window=VOL_MA_PERIOD, min_periods=VOL_MA_PERIOD).mean().values
     
     # ATR for stoploss
@@ -63,25 +77,25 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(EMA_SLOW, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, PIVOT_LOOKBACK, VOL_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(ema_fast_4h_aligned[i]) or np.isnan(ema_slow_4h_aligned[i]):
+        if np.isnan(pivot_1w_aligned[i]) or np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
         # Check stoploss
         if position == 1:  # long position
-            if close[i] <= entry_price - ATR_STOP_MULT * atr[i]:
+            if close[i] <= entry_price - ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
                 continue
         elif position == -1:  # short position
-            if close[i] >= entry_price + ATR_STOP_MULT * atr[i]:
+            if close[i] >= entry_price + ATR_STOP_MULTIPLIER * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
@@ -94,22 +108,27 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
             
-        # Volume breakout condition
-        vol_breakout = volume[i] > vol_ma[i] * VOL_BREAKOUT_MULT if not np.isnan(vol_ma[i]) else False
+        # Volume confirmation
+        vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine 4h trend
-        uptrend = ema_fast_4h_aligned[i] > ema_slow_4h_aligned[i]
-        downtrend = ema_fast_4h_aligned[i] < ema_slow_4h_aligned[i]
+        # Determine market regime based on weekly pivot
+        above_pivot = close[i] > pivot_1w_aligned[i]
+        below_pivot = close[i] < pivot_1w_aligned[i]
         
-        # Enter long on uptrend + volume breakout up
-        # Enter short on downtrend + volume breakout down
+        # Only take breakouts in direction of weekly pivot bias
+        # In bull bias (above pivot): look for longs on breakouts above R1
+        # In bear bias (below pivot): look for shorts on breakdowns below S1
+        bull_breakout = above_pivot and (close[i] > r1_1w_aligned[i]) and (close[i] > highest_high[i]) and vol_confirmed
+        bear_breakout = below_pivot and (close[i] < s1_1w_aligned[i]) and (close[i] < lowest_low[i]) and vol_confirmed
+        
+        # Enter new positions only if flat
         if position == 0:
-            if uptrend and vol_breakout and close[i] > open[i]:
+            if bull_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif downtrend and vol_breakout and close[i] < open[i]:
+            elif bear_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
