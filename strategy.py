@@ -1,29 +1,27 @@
 #!/usr/bin/env python3
 """
-Experiment #9074: 1h Donchian breakout + 4h trend filter + volume confirmation + 1d volatility filter.
-Hypothesis: 1h timeframe with 4h trend direction and 1d volatility filter reduces noise. 
-Uses 4h for signal direction, 1d for volatility regime, and 1h for precise entry timing.
-Targets 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
-Works in bull (breakouts with trend) and bear (filtered shorts with volatility filter).
+Experiment #9074: 1h Donchian breakout with 4h/1d trend filter and volume confirmation.
+Hypothesis: On 1h timeframe, use 4h EMA and 1d Donchian for directional bias, 1h Donchian breakout with volume confirmation for entry timing. 
+Session filter (08-20 UTC) reduces noise. Target 60-150 trades over 4 years (15-37/year) to avoid fee drag. Works in bull/bear via trend filter.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_9074_1h_donchian20_4h_trend_1d_vol_filt_v1"
+name = "exp_9074_1h_donchian20_4h1d_trend_vol_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_PERIOD = 30
+EMA_FAST = 20
+EMA_SLOW = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.2
-VOL_LOOKBACK = 50  # For 1d volatility percentile
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -45,33 +43,32 @@ def generate_signals(prices):
     
     # Calculate 4h EMA for trend filter
     close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=TREND_PERIOD, adjust=False, min_periods=TREND_PERIOD).mean().values
+    ema_4h = pd.Series(close_4h).ewm(span=EMA_FAST, adjust=False, min_periods=EMA_FAST).mean().values
+    
+    # Calculate 1d Donchian for directional bias
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high_1d = pd.Series(high_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low_1d = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Price relative to 4h EMA: above = bullish bias, below = bearish bias
     price_vs_ema = np.where(close_4h > ema_4h, 1, 
                      np.where(close_4h < ema_4h, -1, 0))  # 1=bullish, -1=bearish, 0=at EMA
     price_vs_ema_aligned = align_htf_to_ltf(prices, df_4h, price_vs_ema)
     
-    # Calculate 1d ATR for volatility regime filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, ATR_PERIOD)
-    
-    # Calculate 1d ATR percentile (50-period lookback) for volatility regime
-    atr_1d_series = pd.Series(atr_1d)
-    atr_percentile = atr_1d_series.rolling(window=VOL_LOOKBACK, min_periods=VOL_LOOKBACK).quantile(0.5).values
-    # High volatility regime: current ATR > median ATR (more trending)
-    high_vol_regime = atr_1d > atr_percentile
-    high_vol_regime_aligned = align_htf_to_ltf(prices, df_1d, high_vol_regime)
+    # 1d Donchian breakout signals
+    donchian_signal_1d = np.where(close_4h > donchian_high_1d, 1, 
+                       np.where(close_4h < donchian_low_1d, -1, 0))
+    donchian_signal_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_signal_1d)
     
     # Calculate LTF indicators (1h)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time'].values
     
-    # Donchian channels
+    # 1h Donchian channels
     donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
     donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
@@ -81,18 +78,29 @@ def generate_signals(prices):
     # ATR for risk management
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(open_time).hour
+    in_session = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, VOL_LOOKBACK) + 1
+    start = max(DONCHIAN_PERIOD, EMA_FAST, EMA_SLOW, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
+        # Skip if outside session
+        if not in_session[i]:
+            signals[i] = 0.0
+            position = 0
+            continue
+            
         # Skip if HTF data not available
-        if np.isnan(price_vs_ema_aligned[i]) or np.isnan(high_vol_regime_aligned[i]):
-            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        if np.isnan(price_vs_ema_aligned[i]) or np.isnan(donchian_signal_1d_aligned[i]):
+            signals[i] = 0.0
+            position = 0
             continue
             
         # Check stoploss
@@ -107,23 +115,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine market bias from 4h EMA
-        bull_bias = price_vs_ema_aligned[i] == 1   # 4h price above EMA30
-        bear_bias = price_vs_ema_aligned[i] == -1  # 4h price below EMA30
+        # Determine market bias from 4h EMA and 1d Donchian
+        bull_bias = (price_vs_ema_aligned[i] == 1) and (donchian_signal_1d_aligned[i] == 1)
+        bear_bias = (price_vs_ema_aligned[i] == -1) and (donchian_signal_1d_aligned[i] == -1)
         
-        # Donchian breakout conditions
+        # 1h Donchian breakout conditions
         long_breakout = close[i] > donchian_high[i-1]  # Break above previous period's high
         short_breakout = close[i] < donchian_low[i-1]  # Break below previous period's low
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # High volatility regime filter (from 1d)
-        vol_filter = high_vol_regime_aligned[i]
-        
         # Entry conditions
-        long_entry = bull_bias and long_breakout and volume_confirmed and vol_filter
-        short_entry = bear_bias and short_breakout and volume_confirmed and vol_filter
+        long_entry = bull_bias and long_breakout and volume_confirmed
+        short_entry = bear_bias and short_breakout and volume_confirmed
         
         # Generate signals
         if position == 0:
@@ -145,3 +150,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</response>
