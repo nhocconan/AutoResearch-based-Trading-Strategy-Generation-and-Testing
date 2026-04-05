@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #7702: 12-hour Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 12h with volume confirmation and aligned 1d trend
+Experiment #7704: 1-day Donchian(20) breakout with 1-week EMA trend filter and volume confirmation.
+Hypothesis: Price breaking beyond 20-day high/low with volume confirmation and aligned 1-week trend
 captures sustained moves while avoiding whipsaw. Works in bull markets (long breakouts above EMA) and bear
-markets (short breakdowns below EMA). Targets 50-150 trades over 4 years.
+markets (short breakdowns below EMA). Targets 30-100 trades over 4 years.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7702_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_7704_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
@@ -30,12 +30,12 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Load HTF data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 1w EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=EMA_TREND, adjust=False, min_periods=EMA_TREND).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -68,7 +68,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if HTF data not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(ema_1w_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -85,8 +85,8 @@ def generate_signals(prices):
                 continue
         
         # Determine market regime
-        bull_regime = close[i] > ema_1d_aligned[i]   # price above 1d EMA
-        bear_regime = close[i] < ema_1d_aligned[i]   # price below 1d EMA
+        bull_regime = close[i] > ema_1w_aligned[i]   # price above 1w EMA
+        bear_regime = close[i] < ema_1w_aligned[i]   # price below 1w EMA
         
         # Volume confirmation
         volume_confirmed = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
