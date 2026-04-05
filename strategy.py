@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-exp_6931_6h_donchian20_1d_pivot_vol_v1
-Hypothesis: 6h Donchian(20) breakout with 1d Camarilla pivot confirmation. 
+exp_6932_12h_donchian20_1d_pivot_vol_v2
+Hypothesis: 12h Donchian(20) breakout with 1d Camarilla pivot confirmation. 
 Breakouts above R4 or below S4 are continuation trades. Breakouts between R3-S3 are faded.
 Volume confirms legitimacy. Works in bull/bear by using pivot levels as dynamic support/resistance.
 Target: 50-150 trades over 4 years (12-37/year).
@@ -11,8 +11,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_6931_6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_6932_12h_donchian20_1d_pivot_vol_v2"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -22,7 +22,7 @@ VOL_BASE_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 50  # ~12.5 days (6h bars)
+MAX_HOLD_BARS = 25  # ~12.5 days (12h bars)
 
 def generate_signals(prices):
     n = len(prices)
@@ -48,7 +48,7 @@ def generate_signals(prices):
     s3 = pivot - range_1d * 1.1 / 2.0
     s4 = pivot - range_1d * 1.1
     
-    # Align to LTF (6h)
+    # Align to LTF (12h)
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
