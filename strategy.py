@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-exp_7139_6h_donchian20_12h_pivot_v1
-Hypothesis: 6h Donchian(20) breakout with 12h Camarilla pivot regime filter.
-In ranging markets (price between S3/R3): mean reversion at extremes with volume confirmation.
-In trending markets (breaks S4/R4): continuation breakouts in breakout direction.
-Uses 12h Camarilla pivots for structure and 6h volume for confirmation.
-Designed for 6h timeframe to capture swings with ~12-37 trades/year (50-150 total over 4 years).
-Works in both bull and bear markets by adapting to pivot-defined regimes.
+exp_7140_4h_donchian20_1d_hma_v1
+Hypothesis: 4h Donchian(20) breakout with 1d HMA(21) trend filter + volume confirmation.
+In trending markets (price above/below 1d HMA21): take Donchian breakouts in trend direction.
+In ranging markets (price near 1d HMA21): avoid false breakouts, reducing whipsaw.
+Uses 1d HMA for regime filter and 4h volume for confirmation. Designed for 4h timeframe
+to capture swings with ~19-50 trades/year (75-200 total over 4 years).
+HMA reduces lag vs EMA/SMA, improving trend detection in both bull and bear markets.
 """
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_7139_6h_donchian20_12h_pivot_v1"
-timeframe = "6h"
+name = "exp_7140_4h_donchian20_1d_hma_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -24,35 +24,35 @@ VOL_BASE_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 4  # ~4 * 6h = 1 day
+HMA_PERIOD = 21
+MAX_HOLD_BARS = 6  # ~6 * 4h = 1 day
 
 def generate_signals(prices):
     n = len(prices)
     if n < 60:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop - using 12h for Camarilla pivots
-    df_12h = get_htf_data(prices, '12h')
+    # Load HTF data ONCE before loop - using 1d for HMA
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h Camarilla pivots
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Calculate 1d HMA (Hull Moving Average)
+    close_1d = df_1d['close'].values
+    half_period = HMA_PERIOD // 2
+    sqrt_period = int(np.sqrt(HMA_PERIOD))
     
-    pivot = (high_12h + low_12h + close_12h) / 3
-    range_12h = high_12h - low_12h
+    # WMA function
+    def wma(values, period):
+        weights = np.arange(1, period + 1)
+        return np.convolve(values, weights, mode='valid') / weights.sum()
     
-    # Camarilla levels
-    R3 = pivot + (range_12h * 1.1 / 2)
-    S3 = pivot - (range_12h * 1.1 / 2)
-    R4 = pivot + (range_12h * 1.1)
-    S4 = pivot - (range_12h * 1.1)
+    # HMA = WMA(2*WMA(n/2) - WMA(n), sqrt(n))
+    wma_half = wma(close_1d, half_period)
+    wma_full = wma(close_1d, HMA_PERIOD)
+    raw_hma = 2 * wma_half - wma_full
+    hma_1d = wma(raw_hma, sqrt_period)
     
-    # Align to LTF (6h)
-    R3_aligned = align_htf_to_ltf(prices, df_12h, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_12h, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_12h, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_12h, S4)
+    # Align to LTF (4h)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
     
     # Calculate LTF indicators
     close = prices['close'].values
@@ -80,13 +80,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOL_MA_PERIOD, ATR_PERIOD, HMA_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
         # Skip if HTF data not available
-        if np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]):
+        if np.isnan(hma_1d_aligned[i]):
             signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             continue
             
@@ -114,35 +114,43 @@ def generate_signals(prices):
         # Volume confirmation
         vol_confirmed = volume[i] > vol_ma[i] * VOL_BASE_THRESHOLD if not np.isnan(vol_ma[i]) else False
         
-        # Determine market regime based on Camarilla levels
-        in_range = (close[i] > S3_aligned[i]) and (close[i] < R3_aligned[i])
-        bull_breakout = close[i] > R4_aligned[i]
-        bear_breakout = close[i] < S4_aligned[i]
+        # Determine market regime based on 1d HMA
+        price_above_hma = close[i] > hma_1d_aligned[i]
+        price_below_hma = close[i] < hma_1d_aligned[i]
         
-        # Fade at extremes in range (R3/S3)
-        fade_long = in_range and (close[i] <= S3_aligned[i]) and vol_confirmed
-        fade_short = in_range and (close[i] >= R3_aligned[i]) and vol_confirmed
+        # Donchian breakout conditions
+        breakout_long = close[i] > highest_high[i]
+        breakout_short = close[i] < lowest_low[i]
         
-        # Continuation breakouts
-        continuation_long = bull_breakout and vol_confirmed
-        continuation_short = bear_breakout and vol_confirmed
-        
-        # Enter new positions only if flat
-        if position == 0:
-            if fade_long or continuation_long:
+        # Enter long: price above HMA + bullish breakout + volume
+        if price_above_hma and breakout_long and vol_confirmed:
+            if position == 0:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 bars_since_entry = 0
-            elif fade_short or continuation_short:
+            else:
+                signals[i] = position * SIGNAL_SIZE
+        # Enter short: price below HMA + bearish breakout + volume
+        elif price_below_hma and breakout_short and vol_confirmed:
+            if position == 0:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 bars_since_entry = 0
             else:
-                signals[i] = 0.0
+                signals[i] = position * SIGNAL_SIZE
+        # Exit conditions: price crosses HMA in opposite direction
+        elif position == 1 and price_below_hma:
+            signals[i] = 0.0
+            position = 0
+            bars_since_entry = 0
+        elif position == -1 and price_above_hma:
+            signals[i] = 0.0
+            position = 0
+            bars_since_entry = 0
+        # Hold current position
         else:
-            # Hold current position
-            signals[i] = position * SIGNAL_SIZE
+            signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
     
     return signals
