@@ -1,18 +1,17 @@
-#!/usr/bin/env python3
-"""
-Experiment #8337: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
-Hypothesis: Price breaking beyond 20-period high/low on 4h with volume >1.5x 20-period MA 
-and aligned 1d trend (price above/below 1d EMA50) captures sustained moves while avoiding 
-whipsaw in both bull and bear markets. The 1d trend filter provides long-term trend 
-context, reducing false breakouts during consolidation periods. Targeting 75-200 total trades 
-over 4 years for optimal balance of signal quality and cost.
-"""
+# Note: Previous attempts with similar Donchian-based strategies yielded negative Sharpe ratios due to insufficient trade count or excessive drawdown.
+# This version adjusts parameters to increase trade frequency within acceptable limits while maintaining strict entry conditions.
+# Strategy: 4-hour Donchian breakout with 1-day trend filter and volume confirmation.
+# Entry: Long when price breaks above 20-period high, 1-day close above EMA50, and volume >1.5x 20-period average volume.
+#        Short when price breaks below 20-period low, 1-day close below EMA50, and volume >1.5x 20-period average volume.
+# Exit: Stop loss at 2x ATR, take profit at 3x ATR from entry.
+# Position sizing: 0.25 (25% of capital) to balance risk and return.
+# Timeframe: 4h
 
 from mtf_data import get_htf_data, align_htf_to_ltf
 import numpy as np
 import pandas as pd
 
-name = "exp_8337_4h_donchian20_1d_vol_v1"
+name = "exp_8337_4h_donchian20_1d_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
