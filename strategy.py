@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout with Daily Trend Filter and Volume Confirmation
-Hypothesis: Breakouts from Donchian channels on 12h, filtered by daily trend direction (EMA crossover),
-and confirmed by volume spikes, capture momentum across market regimes. Daily trend filter avoids
-whipsaws in sideways markets while capturing trends in both bull and bear phases. Volume ensures
-breakout legitimacy. Target: 50-150 total trades over 4 years.
+12h Donchian(20) Breakout with 1d Trend Filter and Volume Confirmation
+Hypothesis: Breakouts from Donchian channels on 12h, filtered by daily trend direction (HMA crossover),
+and confirmed by volume spikes, capture momentum across market regimes. Using daily trend
+avoids whipsaws in sideways markets while capturing trends in both bull and bear phases.
+Volume ensures breakout legitimacy. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_daily_trend_vol_v1"
+name = "12h_donchian20_1d_trend_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -47,22 +47,33 @@ def generate_signals(prices):
         donch_high[i] = np.max(high[i-20:i])
         donch_low[i] = np.min(low[i-20:i])
     
-    # Get daily data for trend filter
+    # Get 1d data for trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA for trend on daily (21-period)
-    if len(close_1d) >= 21:
-        ema_1d = np.full_like(close_1d, np.nan)
-        alpha = 2 / (21 + 1)
-        ema_1d[20] = np.mean(close_1d[:21])
-        for i in range(21, len(close_1d)):
-            ema_1d[i] = alpha * close_1d[i] + (1 - alpha) * ema_1d[i-1]
-    else:
-        ema_1d = np.full_like(close_1d, np.nan)
+    # Calculate Hull Moving Average (HMA) for trend on 1d
+    def hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma2 = np.full_like(arr, np.nan)
+        wma1 = np.full_like(arr, np.nan)
+        for i in range(half, len(arr)):
+            wma2[i] = np.nansum(arr[i-half+1:i+1] * np.arange(1, half+1)) / (half * (half + 1) / 2)
+        for i in range(period, len(arr)):
+            wma1[i] = np.nansum(arr[i-period+1:i+1] * np.arange(1, period+1)) / (period * (period + 1) / 2)
+        hma_raw = 2 * wma2 - wma1
+        hma_result = np.full_like(arr, np.nan)
+        for i in range(sqrt, len(arr)):
+            hma_result[i] = np.nansum(hma_raw[i-sqrt+1:i+1] * np.arange(1, sqrt+1)) / (sqrt * (sqrt + 1) / 2)
+        return hma_result
     
-    # Determine trend: 1 if close > EMA (bullish), -1 if close < EMA (bearish)
-    trend_1d = np.where(close_1d > ema_1d, 1, -1)
+    hma_1d = hma(close_1d, 21)
+    hma_1d_aligned = align_htf_to_ltf(prices, df_1d, hma_1d)
+    
+    # Determine trend: 1 if close > HMA (bullish), -1 if close < HMA (bearish)
+    trend_1d = np.where(close_1d > hma_1d, 1, -1)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     # Volume filter: current volume > 2.0x average over last 20 periods
@@ -113,14 +124,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for breakout entries
-            # Long: price breaks above Donchian high in bullish daily trend with volume
+            # Long: price breaks above Donchian high in bullish 1d trend with volume
             if (close[i] > donch_high[i] and
                 trend_1d_aligned[i] == 1 and
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low in bearish daily trend with volume
+            # Short: price breaks below Donchian low in bearish 1d trend with volume
             elif (close[i] < donch_low[i] and
                   trend_1d_aligned[i] == -1 and
                   volume_filter):
