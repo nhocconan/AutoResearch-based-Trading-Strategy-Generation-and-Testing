@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + Volume Filter + ATR Stoploss with 1d Trend Filter
-Hypothesis: Donchian breakouts capture momentum, volume confirms breakout strength, 
-1d EMA filters trend direction to avoid counter-trend trades, ATR stoploss limits drawdown.
-Designed for low trade frequency (target 75-200 total over 4 years) to minimize fee decay.
+4h Donchian(20) Breakout + Volume Filter + 1d EMA Trend + ATR Stoploss
+Hypothesis: Donchian breakouts capture momentum, volume confirms breakout strength,
+1d EMA provides higher timeframe trend filter to avoid counter-trend whipsaw,
+ATR stoploss limits drawdown. Designed for low trade frequency (target 75-200 total
+over 4 years) to minimize fee decay.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_vol_atr_v3"
+name = "4h_donchian20_1dema_vol_atr_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price and volume data
@@ -24,6 +25,18 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Get 1d EMA trend (higher timeframe filter)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    # Calculate EMA(50) on daily
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 49) / 51
+    # Align to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # 14-period ATR
     atr = np.full(n, np.nan)
@@ -39,17 +52,12 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1d EMA for trend filter (calculated once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = 50  # For EMA and sufficient data
+    start = max(20, 50)  # For Donchian and EMA
     
     for i in range(start, n):
         # Skip if required data not available
@@ -88,19 +96,20 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + 1d trend filter
+            # Look for entries: Donchian breakout + volume + 1d EMA trend filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # 1d trend filter: only long in uptrend, short in downtrend
-            trend_up = close[i] > ema_1d_aligned[i]
-            trend_down = close[i] < ema_1d_aligned[i]
+            # 1d EMA trend filter: only long when price above daily EMA,
+            # only short when price below daily EMA
+            price_above_ema = close[i] > ema_1d_aligned[i]
+            price_below_ema = close[i] < ema_1d_aligned[i]
             
-            if bull_breakout and volume_filter and trend_up:
+            if bull_breakout and volume_filter and price_above_ema:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_breakout and volume_filter and trend_down:
+            elif bear_breakout and volume_filter and price_below_ema:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
@@ -110,25 +119,27 @@ def generate_signals(prices):
     return signals
 
 </think>
+
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + Volume Filter + ATR Stoploss with 1d Trend Filter
-Hypothesis: Donchian breakouts capture momentum, volume confirms breakout strength, 
-1d EMA filters trend direction to avoid counter-trend trades, ATR stoploss limits drawdown.
-Designed for low trade frequency (target 75-200 total over 4 years) to minimize fee decay.
+4h Donchian(20) Breakout + Volume Filter + 1d EMA Trend + ATR Stoploss
+Hypothesis: Donchian breakouts capture momentum, volume confirms breakout strength,
+1d EMA provides higher timeframe trend filter to avoid counter-trend whipsaw,
+ATR stoploss limits drawdown. Designed for low trade frequency (target 75-200 total
+over 4 years) to minimize fee decay.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_vol_atr_v3"
+name = "4h_donchian20_1dema_vol_atr_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price and volume data
@@ -136,6 +147,18 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Get 1d EMA trend (higher timeframe filter)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    # Calculate EMA(50) on daily
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 49) / 51
+    # Align to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # 14-period ATR
     atr = np.full(n, np.nan)
@@ -151,17 +174,12 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1d EMA for trend filter (calculated once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = 50  # For EMA and sufficient data
+    start = max(20, 50)  # For Donchian and EMA
     
     for i in range(start, n):
         # Skip if required data not available
@@ -200,19 +218,20 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + 1d trend filter
+            # Look for entries: Donchian breakout + volume + 1d EMA trend filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # 1d trend filter: only long in uptrend, short in downtrend
-            trend_up = close[i] > ema_1d_aligned[i]
-            trend_down = close[i] < ema_1d_aligned[i]
+            # 1d EMA trend filter: only long when price above daily EMA,
+            # only short when price below daily EMA
+            price_above_ema = close[i] > ema_1d_aligned[i]
+            price_below_ema = close[i] < ema_1d_aligned[i]
             
-            if bull_breakout and volume_filter and trend_up:
+            if bull_breakout and volume_filter and price_above_ema:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_breakout and volume_filter and trend_down:
+            elif bear_breakout and volume_filter and price_below_ema:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
@@ -220,5 +239,3 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
-
-</think>
