@@ -1,103 +1,100 @@
 #!/usr/bin/env python3
 """
-6h Volume Spike + Keltner Channel Breakout
-Hypothesis: Volume spikes indicate institutional interest. Keltner Channel (ATR-based) provides
-dynamic support/resistance. Long when price breaks above upper band with volume spike;
-short when breaks below lower band with volume spike. Works in both bull (breakouts)
-and bear (breakdowns). Uses 1d ATR for channel calculation to reduce noise.
-Target: 80-160 total trades over 4 years (20-40/year).
+4h Donchian Channel Breakout with 1d EMA Filter and Volume Confirmation
+Hypothesis: Donchian breakouts capture trend continuation, while 1d EMA provides higher timeframe trend filter.
+Volume confirmation ensures breakouts have conviction. Works in both bull and bear markets by
+trading breakouts in the direction of the higher timeframe trend. Target: 100-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "14419_6h_volume_spike_keltner_v1"
-timeframe = "6h"
+name = "14420_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for ATR (once before loop)
+    # Load 1d data for EMA filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # 1d ATR for Keltner Channel (20-period)
-    atr_period = 20
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
-    tr_1d = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr_1d[0] = tr1[0]
-    atr_1d = pd.Series(tr_1d).rolling(window=atr_period, min_periods=atr_period).mean().values
+    # 1d EMA50 filter
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 6h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume spike detector (20-period average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_std = pd.Series(volume).rolling(window=20, min_periods=20).std().values
-    vol_threshold = vol_ma + (2.0 * vol_std)  # 2 sigma above mean
+    # Donchian Channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Keltner Channel on 6h using 1d ATR
-    ma_period = 20
-    ma = pd.Series(close).rolling(window=ma_period, min_periods=ma_period).mean().values
-    atr_6h = pd.Series(atr_1d).rolling(window=6, min_periods=1).mean().values  # Approximate 6h ATR from 1d
-    keltner_upper = ma + (2.0 * atr_6h)
-    keltner_lower = ma - (2.0 * atr_6h)
+    # Volume filter: avoid low volume periods
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (0.7 * vol_ma)  # Require at least 70% of average volume
+    
+    # ATR for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    start = max(atr_period, ma_period) + 1
+    # Start from warmup period
+    start = max(20, 50) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(ma[i]) or np.isnan(keltner_upper[i]) or np.isnan(keltner_lower[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(vol_std[i]) or np.isnan(atr_6h[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume spike condition
-        vol_spike = volume[i] > vol_threshold[i]
-        
         # Check exits
         if position == 1:  # long position
-            # Exit: price below middle line OR stoploss
-            if (close[i] <= ma[i] or close[i] <= entry_price - 2.5 * atr_6h[i]):
+            # Exit: price breaks below Donchian low OR stoploss
+            if close[i] <= donchian_low[i] or close[i] <= entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price above middle line OR stoploss
-            if (close[i] >= ma[i] or close[i] >= entry_price + 2.5 * atr_6h[i]):
+            # Exit: price breaks above Donchian high OR stoploss
+            if close[i] >= donchian_high[i] or close[i] >= entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: price outside channel + volume spike
-            long_setup = (close[i] > keltner_upper[i]) and vol_spike
-            short_setup = (close[i] < keltner_lower[i]) and vol_spike
+            # Look for entries: Donchian breakout + 1d EMA filter + volume
+            long_breakout = close[i] > donchian_high[i]
+            short_breakout = close[i] < donchian_low[i]
             
-            if long_setup:
+            # 1d EMA filter: only trade in direction of higher timeframe trend
+            ema_filter_long = close[i] > ema_1d_aligned[i]
+            ema_filter_short = close[i] < ema_1d_aligned[i]
+            
+            if long_breakout and ema_filter_long and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_setup:
+            elif short_breakout and ema_filter_short and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
