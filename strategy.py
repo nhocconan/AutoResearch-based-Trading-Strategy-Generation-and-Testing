@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
 # Enter long when price breaks above Donchian upper with 1d EMA(50) rising and volume > 1.5x avg.
 # Enter short when price breaks below Donchian lower with 1d EMA(50) falling and volume > 1.5x avg.
 # Exit on opposite Donchian breakout or when price crosses 1d EMA(50).
