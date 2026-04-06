@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with 1d VWAP trend filter and volume confirmation
-Hypothesis: 4h Donchian breakouts capture momentum. Filter by 1d VWAP for trend bias and volume confirmation for conviction.
-Works in bull (buy breakouts above 1d VWAP) and bear (sell breakdowns below 1d VWAP). Target: 75-200 total trades over 4 years.
+4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation
+Hypothesis: 4h Donchian breakouts capture medium-term momentum. Filter by 1d EMA200 for primary trend bias and volume confirmation for conviction. Works in bull (buy breakouts above 1d EMA200) and bear (sell breakdowns below 1d EMA200). Target: 100-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_vwap_vol_v2"
+name = "4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -37,31 +36,26 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 1d data for trend filter (VWAP)
+    # Get 1d data for trend filter (EMA200)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    volume_1d = df_1d['volume'].values
     
-    # VWAP on 1d: cumulative (typical price * volume) / cumulative volume
-    typical_price_1d = (high_1d + low_1d + close_1d) / 3.0
-    vwap_1d = np.full(len(close_1d), np.nan)
-    cum_vol = 0.0
-    cum_pv = 0.0
-    for i in range(len(volume_1d)):
-        cum_vol += volume_1d[i]
-        cum_pv += typical_price_1d[i] * volume_1d[i]
-        if cum_vol > 0:
-            vwap_1d[i] = cum_pv / cum_vol
+    # EMA200 on 1d close
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 200:
+        ema_1d[199] = np.mean(close_1d[:200])
+        for i in range(200, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 198) / 200
     
-    # 1d trend: above VWAP = bullish, below = bearish
-    trend_1d = np.where(close_1d > vwap_1d, 1, -1)
+    # 1d trend: above EMA200 = bullish, below = bearish
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
     
     # Align 1d trend to 4h timeframe
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     # Get 1d data for volume confirmation
+    volume_1d = df_1d['volume'].values
+    
     # 20-period average volume on 1d
     vol_ma_1d = np.full(len(volume_1d), np.nan)
     for i in range(20, len(volume_1d)):
@@ -130,8 +124,8 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 8 bars flat
-            if bars_since_entry >= 8:
+            # Minimum holding period: only allow new entry after 6 bars flat
+            if bars_since_entry >= 6:
                 # Breakout entries: upper/lower with 1d trend
                 bull_breakout = close[i] > upper[i]
                 bear_breakout = close[i] < lower[i]
