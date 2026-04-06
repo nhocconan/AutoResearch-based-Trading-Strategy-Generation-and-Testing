@@ -4,9 +4,8 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 12-hour Donchian breakout with 1-day EMA trend filter and volume confirmation.
-# Donchian(20) breakout captures momentum in trending markets.
-# EMA50 on 1-day provides trend bias: only long when price > EMA50, short when price < EMA50.
-# Volume confirmation (current volume > 1.5x 20-period average) ensures institutional participation.
+# Donchian(20) breakout captures momentum, EMA50 on daily ensures trend alignment,
+# volume > 1.5x 20-period average confirms institutional participation.
 # Designed for 12h timeframe to target 50-150 trades over 4 years.
 # Works in bull/bear markets via EMA-based directional bias and breakout entries.
 
@@ -39,7 +38,7 @@ def generate_signals(prices):
     # Align EMA50 to 12h timeframe (shifted by 1 1d bar for no look-ahead)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian Channel (20-period) on 12h data
+    # Donchian channel (20-period) on 12h data
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -47,7 +46,7 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-19:i+1])
         donchian_low[i] = np.min(low[i-19:i+1])
     
-    # Volume confirmation: current volume > 1.5x 20-period average
+    # Volume confirmation: 12h volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volume[i-19:i+1])
@@ -73,34 +72,30 @@ def generate_signals(prices):
         bullish_bias = close[i] > ema_50_aligned[i]
         bearish_bias = close[i] < ema_50_aligned[i]
         
-        # Donchian breakout conditions
-        breakout_high = close[i] > donchian_high[i-1]  # break above previous high
-        breakout_low = close[i] < donchian_low[i-1]    # break below previous low
-        
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: Donchian break below or stoploss (2x ATR approximation)
+            # Exit: price breaks below Donchian low or stoploss (2x ATR approximation)
             atr_approx = (high[i] - low[i])  # simple range approximation
             if atr_approx > 0:
                 stop_loss_level = entry_price - 2.0 * atr_approx
             else:
                 stop_loss_level = entry_price - 2.0 * 0.001
             
-            if (breakout_low or 
+            if (close[i] < donchian_low[i] or 
                 close[i] < stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Donchian break above or stoploss
+            # Exit: price breaks above Donchian high or stoploss
             atr_approx = (high[i] - low[i])
             if atr_approx > 0:
                 stop_loss_level = entry_price + 2.0 * atr_approx
             else:
                 stop_loss_level = entry_price + 2.0 * 0.001
             
-            if (breakout_high or 
+            if (close[i] > donchian_high[i] or 
                 close[i] > stop_loss_level):
                 signals[i] = 0.0
                 position = 0
@@ -110,12 +105,12 @@ def generate_signals(prices):
             # Look for entries in direction of EMA trend with volume confirmation
             if volume_filter:
                 # Long: breakout above Donchian high in uptrend
-                if breakout_high and bullish_bias:
+                if close[i] > donchian_high[i] and bullish_bias:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: breakout below Donchian low in downtrend
-                elif breakout_low and bearish_bias:
+                # Short: breakdown below Donchian low in downtrend
+                elif close[i] < donchian_low[i] and bearish_bias:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
