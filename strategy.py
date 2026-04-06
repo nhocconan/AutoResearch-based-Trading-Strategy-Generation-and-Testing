@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-Hypothesis: Use 1d EMA trend filter on 4h candles with Donchian breakouts and volume confirmation to capture strong momentum while filtering counter-trend moves. Target: 100-200 total trades over 4 years.
+1d Donchian(20) breakout + 1w EMA(34) trend + volume confirmation
+Hypothesis: Use weekly EMA trend filter on daily candles with Donchian breakouts and volume confirmation to capture strong momentum while filtering counter-trend moves. Designed for low trade frequency (target: 30-100 total trades over 4 years) to minimize fee drag and work in both bull and bear markets via trend alignment.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_ema50_vol_v3"
-timeframe = "4h"
+name = "1d_donchian20_1w_ema34_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,24 +23,24 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR for stops
+    # 20-period ATR for stops
     atr = np.full(n, np.nan)
-    if n >= 14:
+    if n >= 20:
         tr = np.maximum(
             high[1:] - low[1:],
             np.abs(high[1:] - close[:-1]),
             np.abs(low[1:] - close[:-1])
         )
         if len(tr) > 0:
-            atr[14] = np.mean(tr[:14])
-            for i in range(15, n):
-                atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
+            atr[20] = np.mean(tr[:20])
+            for i in range(21, n):
+                atr[i] = (atr[i-1] * 19 + tr[i-1]) / 20
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get 1w data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA(50) on 1d
+    # Calculate EMA(34) on 1w
     def ema(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -51,10 +51,10 @@ def generate_signals(prices):
             ema_val[i] = alpha * arr[i] + (1 - alpha) * ema_val[i-1]
         return ema_val
     
-    ema_50 = ema(close_1d, 50)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_34 = ema(close_1w, 34)
+    ema_34_aligned = align_htf_to_ltf(prices, df_1w, ema_34)
     
-    # Donchian channels (20-period) on 4h
+    # Donchian channels (20-period) on 1d
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(20, n):
@@ -71,11 +71,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20)
+    start = max(34, 20)
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(atr[i]) or np.isnan(ema_34_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -104,16 +104,16 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries
-            # Long: price breaks above Donchian high, above 1d EMA50, with volume
+            # Long: price breaks above Donchian high, above 1w EMA34, with volume
             if (close[i] > donchian_high[i] and 
-                close[i] > ema_50_aligned[i] and 
+                close[i] > ema_34_aligned[i] and 
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low, below 1d EMA50, with volume
+            # Short: price breaks below Donchian low, below 1w EMA34, with volume
             elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_50_aligned[i] and 
+                  close[i] < ema_34_aligned[i] and 
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
