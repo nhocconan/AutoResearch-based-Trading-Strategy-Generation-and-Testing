@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h KAMA trend + RSI mean-reversion with chop filter
-# Uses Kaufman Adaptive Moving Average (KAMA) to identify trend direction
-# RSI(14) for mean-reversion entries when overextended against trend
-# Choppiness Index filter to avoid ranging markets
-# Targets 50-150 total trades over 4 years by combining trend-following with mean-reversion
-# Works in bull (trend follow) and bear (mean revert in range) markets
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
+# Long when price breaks above Donchian upper (20-period) AND price > 1d EMA(20) AND volume > 1.5x 20-period average
+# Short when price breaks below Donchian lower (20-period) AND price < 1d EMA(20) AND volume > 1.5x 20-period average
+# Exit when price crosses Donchian midline (10-period average of upper/lower)
+# Uses 12h timeframe to reduce trade frequency, 1d EMA for trend filter, Donchian for breakout signals
+# Target: 50-150 total trades over 4 years (12-37/year) for optimal 12h performance
 
-name = "12h_kama_rsi_chop_v2"
+name = "12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,82 +25,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA trend indicator (ER=10, Fast=2, Slow=30)
-    close_series = pd.Series(close)
-    change = abs(close_series - close_series.shift(10))
-    volatility = abs(close_series - close_series.shift(1)).rolling(window=10).sum()
-    er = change / volatility.replace(0, np.nan)
-    sc = (er * (2/2 - 2/30) + 2/30) ** 2
-    kama = np.zeros(n)
-    kama[0] = close[0]
-    for i in range(1, n):
-        if not np.isnan(sc.iloc[i]):
-            kama[i] = kama[i-1] + sc.iloc[i] * (close[i] - kama[i-1])
-        else:
-            kama[i] = kama[i-1]
+    # Donchian Channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_upper = highest_high.values
+    donchian_lower = lowest_low.values
+    donchian_mid = (donchian_upper + donchian_lower) / 2
     
-    # RSI(14) for mean-reversion
-    delta = pd.Series(close).diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=14, min_periods=14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=14, min_periods=14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.fillna(50).values
+    # 1-day EMA(20) trend filter
+    df_1d = get_htf_data(prices, '1d')
+    daily_close = df_1d['close'].values
     
-    # Choppiness Index (14-period) - regime filter
-    atr1 = np.maximum(high - low, 
-                      np.maximum(abs(high - np.roll(close, 1)), 
-                                 abs(low - np.roll(close, 1))))
-    atr1[0] = high[0] - low[0]
-    atr_sum = pd.Series(atr1).rolling(window=14, min_periods=14).sum()
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(14)
-    chop = chop.fillna(50).values
+    # Calculate 20-period EMA on daily close
+    daily_close_series = pd.Series(daily_close)
+    daily_ema = daily_close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
+    
+    # Align daily EMA to 12h timeframe
+    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_threshold = 1.5 * volume_ma.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(30, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(daily_ema_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Exit conditions
+        # Check exits: price crosses Donchian midline
         if position == 1:  # long position
-            if close[i] < kama[i] or rsi[i] > 70:
+            if close[i] < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] > kama[i] or rsi[i] < 30:
+            if close[i] > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Chop filter: only trade when market is trending (CHOP < 50)
-            if chop[i] < 50:
-                # Long when price above KAMA and RSI oversold
-                if close[i] > kama[i] and rsi[i] < 30:
-                    signals[i] = 0.25
-                    position = 1
-                # Short when price below KAMA and RSI overbought
-                elif close[i] < kama[i] and rsi[i] > 70:
-                    signals[i] = -0.25
-                    position = -1
-            # In choppy markets, mean revert at extremes
-            else:
-                if rsi[i] < 20:  # deeply oversold
-                    signals[i] = 0.25
-                    position = 1
-                elif rsi[i] > 80:  # deeply overbought
-                    signals[i] = -0.25
-                    position = -1
+            # Look for entries with trend filter and volume confirmation
+            # Long: price breaks above Donchian upper AND price > daily EMA AND volume confirmation
+            if (close[i] > donchian_upper[i] and close[i-1] <= donchian_upper[i-1] and 
+                close[i] > daily_ema_aligned[i] and volume[i] > volume_threshold[i]):
+                signals[i] = 0.25
+                position = 1
+            # Short: price breaks below Donchian lower AND price < daily EMA AND volume confirmation
+            elif (close[i] < donchian_lower[i] and close[i-1] >= donchian_lower[i-1] and 
+                  close[i] < daily_ema_aligned[i] and volume[i] > volume_threshold[i]):
+                signals[i] = -0.25
+                position = -1
     
     return signals
