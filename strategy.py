@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using daily Donchian breakout with volume confirmation and ATR stoploss.
-# Goes long when price breaks above daily Donchian upper channel with above-average volume,
+# Hypothesis: 4h strategy using 1d Donchian breakout with volume confirmation and ATR stoploss.
+# Goes long when price breaks above 1d Donchian upper channel with above-average volume,
 # short when breaks below lower channel with volume.
-# Uses 4h EMA20 as trend filter to avoid counter-trend trades.
+# Uses 1d EMA50 as trend filter to avoid counter-trend trades.
 # Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
 # Donchian channels provide clear breakout levels that work across market regimes.
 
-name = "exp_13800_4h_donchian1d_ema_vol_v1"
+name = "exp_13801_4h_donchian1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 20
+TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 10
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
