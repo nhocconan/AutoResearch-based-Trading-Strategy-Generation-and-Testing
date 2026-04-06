@@ -3,13 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_reversion_v1"
-timeframe = "6h"
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA200 trend and volume confirmation.
+# Uses 1-day EMA200 to establish long-term trend bias (long above EMA200, short below EMA200).
+# Breakouts in direction of EMA200 trend with volume capture institutional moves.
+# Designed for 12h timeframe to target 50-150 trades over 4 years with proven structure.
+# Works in bull/bear markets via EMA200-based directional bias and volume confirmation.
+
+name = "12h_donchian20_1d_ema200_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -18,35 +24,32 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily pivot levels from previous day (for 6h timeframe)
+    # 1-day EMA200 for trend bias
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate Camarilla pivot levels for daily timeframe
-    # Camarilla: H = High, L = Low, C = Close of previous day
-    # R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    HLC_diff = (high_1d - low_1d)
-    R4 = close_1d + HLC_diff * 1.1 / 2
-    R3 = close_1d + HLC_diff * 1.1 / 4
-    S3 = close_1d - HLC_diff * 1.1 / 4
-    S4 = close_1d - HLC_diff * 1.1 / 2
+    # Calculate EMA200 on 1d closes
+    ema_200_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 200:
+        ema_200_1d[199] = np.mean(close_1d[:200])
+        for i in range(200, len(close_1d)):
+            ema_200_1d[i] = (close_1d[i] * 2 / 201) + (ema_200_1d[i-1] * 199 / 201)
     
-    # Align pivot levels to 6h timeframe (shifted by 1 day for no look-ahead)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
+    # Align EMA200 to 12h timeframe (shifted by 1 1d bar for no look-ahead)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200_1d)
     
-    # Volume confirmation: 6h volume > 1.3x 20-period average
+    # 12-hour Donchian channel (20-period)
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    
+    for i in range(19, n):
+        highest_high[i] = np.max(high[i-19:i+1])
+        lowest_low[i] = np.min(low[i-19:i+1])
+    
+    # Volume confirmation: 12h volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volume[i-19:i+1])
-    
-    # Range filter: only trade when price is between S3 and R3 (mean reversion zone)
-    in_range = (close > S3_aligned) & (close < R3_aligned)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -54,157 +57,62 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(ema_200_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.3
+        # Volume condition: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
-        # Check exits and stoploss (1.5x daily range)
-        daily_range = (high_1d[i] - low_1d[i]) if not np.isnan(high_1d[i]) and not np.isnan(low_1d[i]) else 0
-        if np.isnan(daily_range) or daily_range == 0:
-            daily_range = high[i] - low[i]  # fallback to 6h range
+        # Trend bias: long above EMA200, short below EMA200
+        bullish_bias = close[i] > ema_200_aligned[i]
+        bearish_bias = close[i] < ema_200_aligned[i]
         
+        # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price reaches S3 (mean reversion target) or stoploss
-            if (close[i] <= S3_aligned[i] or 
-                close[i] < entry_price - 1.5 * daily_range):
+            # Exit: price below EMA200 or stoploss (2x ATR approximation using Donchian width)
+            donch_width = highest_high[i] - lowest_low[i]
+            if donch_width > 0:
+                stop_loss_level = entry_price - 2.0 * donch_width
+            else:
+                stop_loss_level = entry_price - 2.0 * (highest_high[i] - lowest_low[i] + 0.001)
+            
+            if (close[i] < ema_200_aligned[i] or 
+                close[i] < stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price reaches R3 (mean reversion target) or stoploss
-            if (close[i] >= R3_aligned[i] or 
-                close[i] > entry_price + 1.5 * daily_range):
+            # Exit: price above EMA200 or stoploss
+            donch_width = highest_high[i] - lowest_low[i]
+            if donch_width > 0:
+                stop_loss_level = entry_price + 2.0 * donch_width
+            else:
+                stop_loss_level = entry_price + 2.0 * (highest_high[i] - lowest_low[i] + 0.001)
+            
+            if (close[i] > ema_200_aligned[i] or 
+                close[i] > stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for mean reversion entries at extreme levels
-            if volume_filter and in_range[i]:
-                # Long: price touches or goes below S4 with rejection (close > S4)
-                if close[i] <= S4_aligned[i] and close[i] > S4_aligned[i] * 0.999:  # touched S4
+            # Look for entries in direction of EMA trend
+            if volume_filter:
+                # Long: breakout above resistance with bullish bias
+                if (highest_high[i] > highest_high[i-1] and 
+                    close[i] > highest_high[i-1] and bullish_bias):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: price touches or goes above R4 with rejection (close < R4)
-                elif close[i] >= R4_aligned[i] and close[i] < R4_aligned[i] * 1.001:  # touched R4
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
-            else:
-                signals[i] = 0.0
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "6h_camarilla_pivot_reversion_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 100:
-        return np.zeros(n)
-    
-    # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Daily pivot levels from previous day (for 6h timeframe)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate Camarilla pivot levels for daily timeframe
-    # Camarilla: H = High, L = Low, C = Close of previous day
-    # R4 = C + (H-L)*1.1/2, R3 = C + (H-L)*1.1/4, R2 = C + (H-L)*1.1/6, R1 = C + (H-L)*1.1/12
-    # S1 = C - (H-L)*1.1/12, S2 = C - (H-L)*1.1/6, S3 = C - (H-L)*1.1/4, S4 = C - (H-L)*1.1/2
-    HLC_diff = (high_1d - low_1d)
-    R4 = close_1d + HLC_diff * 1.1 / 2
-    R3 = close_1d + HLC_diff * 1.1 / 4
-    S3 = close_1d - HLC_diff * 1.1 / 4
-    S4 = close_1d - HLC_diff * 1.1 / 2
-    
-    # Align pivot levels to 6h timeframe (shifted by 1 day for no look-ahead)
-    R3_aligned = align_htf_to_ltf(prices, df_1d, R3)
-    S3_aligned = align_htf_to_ltf(prices, df_1d, S3)
-    R4_aligned = align_htf_to_ltf(prices, df_1d, R4)
-    S4_aligned = align_htf_to_ltf(prices, df_1d, S4)
-    
-    # Volume confirmation: 6h volume > 1.3x 20-period average
-    vol_ma = np.full(n, np.nan)
-    for i in range(19, n):
-        vol_ma[i] = np.mean(volume[i-19:i+1])
-    
-    # Range filter: only trade when price is between S3 and R3 (mean reversion zone)
-    in_range = (close > S3_aligned) & (close < R3_aligned)
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    for i in range(20, n):
-        # Skip if required data not available
-        if (np.isnan(R3_aligned[i]) or np.isnan(S3_aligned[i]) or 
-            np.isnan(R4_aligned[i]) or np.isnan(S4_aligned[i]) or 
-            np.isnan(vol_ma[i])):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.3
-        
-        # Check exits and stoploss (1.5x daily range)
-        daily_range = (high_1d[i] - low_1d[i]) if not np.isnan(high_1d[i]) and not np.isnan(low_1d[i]) else 0
-        if np.isnan(daily_range) or daily_range == 0:
-            daily_range = high[i] - low[i]  # fallback to 6h range
-        
-        if position == 1:  # long position
-            # Exit: price reaches S3 (mean reversion target) or stoploss
-            if (close[i] <= S3_aligned[i] or 
-                close[i] < entry_price - 1.5 * daily_range):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Exit: price reaches R3 (mean reversion target) or stoploss
-            if (close[i] >= R3_aligned[i] or 
-                close[i] > entry_price + 1.5 * daily_range):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for mean reversion entries at extreme levels
-            if volume_filter and in_range[i]:
-                # Long: price touches or goes below S4 with rejection (close > S4)
-                if close[i] <= S4_aligned[i] and close[i] > S4_aligned[i] * 0.999:  # touched S4
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                # Short: price touches or goes above R4 with rejection (close < R4)
-                elif close[i] >= R4_aligned[i] and close[i] < R4_aligned[i] * 1.001:  # touched R4
+                # Short: breakdown below support with bearish bias
+                elif (lowest_low[i] < lowest_low[i-1] and 
+                      close[i] < lowest_low[i-1] and bearish_bias):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
