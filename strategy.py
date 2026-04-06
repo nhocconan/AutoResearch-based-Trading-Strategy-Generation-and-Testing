@@ -3,10 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with volume confirmation and 1d EMA trend filter.
-# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
-# and EMA trend filter ensures we trade with higher timeframe momentum.
-# Target: 100-200 trades over 4 years (25-50/year) to balance opportunity and cost.
+# Hypothesis: 12h Donchian breakout with 1d EMA trend filter and volume confirmation.
+# Works in bull/bear by capturing strong momentum moves. Volume filters weak breakouts.
+# 1d EMA ensures alignment with higher timeframe trend. Target: 50-150 trades over 4 years.
 
 name = "exp_13142_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
@@ -100,8 +99,8 @@ def generate_signals(prices):
         downtrend = close[i] < ema_1d_aligned[i]
         
         # Breakout signals
-        breakout_up = volume_ok and uptrend and (i == 0 or high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (i == 0 or low[i] < lowest_low[i-1])
+        breakout_up = volume_ok and uptrend and (i > 0 and high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (i > 0 and low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
