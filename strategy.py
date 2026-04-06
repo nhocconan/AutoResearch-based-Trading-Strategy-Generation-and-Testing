@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour timeframe with 4-hour Supertrend for trend direction and 1-hour RSI for entry timing.
-# Uses Supertrend (ATR-based) to identify trend on 4h (bull/bear) and only takes entries in trend direction.
-# RSI(14) on 1h: long when RSI < 30 (oversold) in uptrend, short when RSI > 70 (overbought) in downtrend.
-# Includes session filter (08:00-20:00 UTC) to avoid low-liquidity hours.
-# Fixed position size of 0.20 to control risk and reduce overtrading.
-# Designed for 1h timeframe targeting 60-150 total trades over 4 years.
+# Hypothesis: 6-hour Ichimoku Cloud with daily trend filter and volume confirmation.
+# Uses Ichimoku components (Tenkan-sen, Kijun-sen, Senkou Span A/B) from 6h data.
+# Daily trend filter (price vs EMA50) ensures trades align with higher timeframe bias.
+# Volume confirmation (current volume > 1.5x 20-period average) filters low-quality breakouts.
+# Designed for 6h timeframe to target 50-150 trades over 4 years.
+# Works in bull/bear markets via daily EMA trend bias and cloud breakout logic.
 
-name = "1h_supertrend4h_rsi14_session_v1"
-timeframe = "1h"
+name = "6h_ichimoku_daily_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,133 +19,125 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Price data
+    # Price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 4h Supertrend for trend direction
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Daily EMA50 for trend bias
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate ATR(10) on 4h
-    atr_period = 10
-    tr_4h = np.maximum(
-        high_4h[1:] - low_4h[1:],
-        np.maximum(
-            np.abs(high_4h[1:] - close_4h[:-1]),
-            np.abs(low_4h[1:] - close_4h[:-1])
-        )
-    )
-    tr_4h = np.concatenate([[np.nan], tr_4h])
-    atr_4h = np.full(len(close_4h), np.nan)
-    for i in range(atr_period, len(close_4h)):
-        if i == atr_period:
-            atr_4h[i] = np.nanmean(tr_4h[i-atr_period+1:i+1])
-        else:
-            atr_4h[i] = (atr_4h[i-1] * (atr_period - 1) + tr_4h[i]) / atr_period
+    # Calculate EMA50 on daily closes
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 / 51) + (ema_50_1d[i-1] * 49 / 51)
     
-    # Supertrend calculation
-    factor = 3.0
-    upper_band_4h = (high_4h + low_4h) / 2 + factor * atr_4h
-    lower_band_4h = (high_4h + low_4h) / 2 - factor * atr_4h
+    # Align EMA50 to 6h timeframe (shifted by 1 daily bar for no look-ahead)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    supertrend_4h = np.full(len(close_4h), np.nan)
-    uptrend_4h = np.full(len(close_4h), True)
+    # Ichimoku Cloud components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
+    tenkan_sen = np.full(n, np.nan)
+    for i in range(8, n):
+        tenkan_sen[i] = (np.max(high[i-8:i+1]) + np.min(low[i-8:i+1])) / 2
     
-    for i in range(1, len(close_4h)):
-        if np.isnan(upper_band_4h[i-1]) or np.isnan(lower_band_4h[i-1]):
-            continue
-            
-        if close_4h[i] > upper_band_4h[i-1]:
-            uptrend_4h[i] = True
-        elif close_4h[i] < lower_band_4h[i-1]:
-            uptrend_4h[i] = False
-        else:
-            uptrend_4h[i] = uptrend_4h[i-1]
-            if uptrend_4h[i] and lower_band_4h[i] < lower_band_4h[i-1]:
-                lower_band_4h[i] = lower_band_4h[i-1]
-            if not uptrend_4h[i] and upper_band_4h[i] > upper_band_4h[i-1]:
-                upper_band_4h[i] = upper_band_4h[i-1]
-        
-        if uptrend_4h[i]:
-            supertrend_4h[i] = lower_band_4h[i]
-        else:
-            supertrend_4h[i] = upper_band_4h[i]
+    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
+    kijun_sen = np.full(n, np.nan)
+    for i in range(25, n):
+        kijun_sen[i] = (np.max(high[i-25:i+1]) + np.min(low[i-25:i+1])) / 2
     
-    # Align Supertrend to 1h
-    supertrend_4h_aligned = align_htf_to_ltf(prices, df_4h, supertrend_4h)
-    uptrend_4h_aligned = align_htf_to_ltf(prices, df_4h, uptrend_4h.astype(float)) > 0.5
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = np.full(n, np.nan)
+    for i in range(25, n):
+        if not np.isnan(tenkan_sen[i]) and not np.isnan(kijun_sen[i]):
+            senkou_span_a[i] = (tenkan_sen[i] + kijun_sen[i]) / 2
     
-    # 1h RSI(14)
-    rsi_period = 14
-    delta = np.diff(close)
-    delta = np.concatenate([[np.nan], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
+    senkou_span_b = np.full(n, np.nan)
+    for i in range(51, n):
+        senkou_span_b[i] = (np.max(high[i-51:i+1]) + np.min(low[i-51:i+1])) / 2
     
-    avg_gain = np.full(len(close), np.nan)
-    avg_loss = np.full(len(close), np.nan)
-    
-    for i in range(rsi_period, len(close)):
-        if i == rsi_period:
-            avg_gain[i] = np.mean(gain[i-rsi_period+1:i+1])
-            avg_loss[i] = np.mean(loss[i-rsi_period+1:i+1])
-        else:
-            avg_gain[i] = (avg_gain[i-1] * (rsi_period - 1) + gain[i]) / rsi_period
-            avg_loss[i] = (avg_loss[i-1] * (rsi_period - 1) + loss[i]) / rsi_period
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Session filter: 08:00-20:00 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
+    # Chikou Span (Lagging Span): close plotted 26 periods behind
+    # Not used for signals to avoid look-ahead
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
-        # Skip if required data not available or outside session
-        if (np.isnan(supertrend_4h_aligned[i]) or np.isnan(rsi[i]) or 
-            not in_session[i]):
+    for i in range(52, n):  # Start after Senkou Span B is available
+        # Skip if required data not available
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(tenkan_sen[i]) or 
+            np.isnan(kijun_sen[i]) or np.isnan(senkou_span_a[i]) or 
+            np.isnan(senkou_span_b[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits
-        if position == 1:  # long position
-            # Exit: RSI > 50 (momentum fade) or price below Supertrend
-            if rsi[i] > 50 or close[i] < supertrend_4h_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.20
-        elif position == -1:  # short position
-            # Exit: RSI < 50 (momentum fade) or price above Supertrend
-            if rsi[i] < 50 or close[i] > supertrend_4h_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.20
+        # Volume condition: current volume > 1.5x 20-period average
+        vol_ma = np.mean(volume[max(0, i-19):i+1]) if i >= 19 else np.nan
+        if np.isnan(vol_ma):
+            volume_filter = False
         else:
-            # Look for entries in direction of 4h trend
-            if uptrend_4h_aligned[i]:
-                # Long: RSI < 30 (oversold) in uptrend
-                if rsi[i] < 30:
-                    signals[i] = 0.20
+            volume_filter = volume[i] > vol_ma * 1.5
+        
+        # Trend bias: daily EMA50
+        bullish_bias = close[i] > ema_50_aligned[i]
+        bearish_bias = close[i] < ema_50_aligned[i]
+        
+        # Cloud breakout conditions
+        # Cloud top = max(Senkou Span A, Senkou Span B)
+        # Cloud bottom = min(Senkou Span A, Senkou Span B)
+        cloud_top = max(senkou_span_a[i], senkou_span_b[i])
+        cloud_bottom = min(senkou_span_a[i], senkou_span_b[i])
+        
+        # Breakout above cloud (bullish)
+        breakout_above = close[i] > cloud_top and close[i-1] <= cloud_top
+        # Breakout below cloud (bearish)
+        breakout_below = close[i] < cloud_bottom and close[i-1] >= cloud_bottom
+        
+        # Check exits and stoploss
+        if position == 1:  # long position
+            # Exit: price re-enters cloud or stoploss (2x ATR approximation)
+            atr_approx = max(high[i] - low[i], 0.001)
+            stop_loss_level = entry_price - 2.0 * atr_approx
+            
+            if (close[i] < cloud_top or 
+                close[i] < stop_loss_level):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:  # short position
+            # Exit: price re-enters cloud or stoploss
+            atr_approx = max(high[i] - low[i], 0.001)
+            stop_loss_level = entry_price + 2.0 * atr_approx
+            
+            if (close[i] > cloud_bottom or 
+                close[i] > stop_loss_level):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+        else:
+            # Look for entries in direction of daily trend with volume confirmation
+            if volume_filter:
+                # Long: breakout above cloud in uptrend
+                if breakout_above and bullish_bias:
+                    signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-            else:
-                # Short: RSI > 70 (overbought) in downtrend
-                if rsi[i] > 70:
-                    signals[i] = -0.20
+                # Short: breakout below cloud in downtrend
+                elif breakout_below and bearish_bias:
+                    signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
+            else:
+                signals[i] = 0.0
     
     return signals
