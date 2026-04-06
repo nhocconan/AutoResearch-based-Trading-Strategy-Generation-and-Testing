@@ -3,53 +3,27 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d KAMA trend with weekly RSI filter and volume confirmation.
-# Uses 1d KAMA for trend direction, weekly RSI for overbought/oversold conditions,
-# and volume surge to confirm institutional participation. Designed for low trade frequency
-# (target: 30-100 total trades over 4 years) to minimize fee drift while capturing
-# major trend moves in both bull and bear markets.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
+# Uses 12h price channel breakouts aligned with 1d momentum to capture trending moves.
+# Volume confirmation ensures institutional participation. Works in bull markets (breakouts above upper band)
+# and bear markets (breakdowns below lower band). Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13444_1d_kama_weekly_rsi_vol_v1"
-timeframe = "1d"
+name = "exp_13445_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-KAMA_FAST = 2
-KAMA_SLOW = 30
-RSI_PERIOD = 14
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_kama(close, fast, slow):
-    """Calculate Kaufman Adaptive Moving Average"""
-    close_series = pd.Series(close)
-    diff = np.abs(close_series.diff())
-    signal = np.abs(close_series - close_series.shift(slow))
-    noise = diff.rolling(window=slow, min_periods=1).sum()
-    er = signal / noise.replace(0, np.nan)
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        if np.isnan(sc[i]):
-            kama[i] = kama[i-1]
-        else:
-            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
-
-def calculate_rsi(close, period):
-    """Calculate Relative Strength Index"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / avg_loss.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -65,22 +39,23 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly RSI for trend filter
-    close_weekly = df_weekly['close'].values
-    rsi_weekly = calculate_rsi(close_weekly, RSI_PERIOD)
-    rsi_weekly_aligned = align_htf_to_ltf(prices, df_weekly, rsi_weekly)
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 1d indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA
-    kama = calculate_kama(close, KAMA_FAST, KAMA_SLOW)
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -94,11 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(KAMA_SLOW, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if np.isnan(rsi_weekly_aligned[i]) or np.isnan(kama[i]) or np.isnan(volume_ma[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -120,24 +95,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below KAMA
-        above_kama = close[i] > kama[i]
-        below_kama = close[i] < kama[i]
+        # Trend filter: price above/below 1d EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # Weekly RSI filter: avoid overbought/oversold extremes
-        rsi_not_overbought = rsi_weekly_aligned[i] < 70
-        rsi_not_oversold = rsi_weekly_aligned[i] > 30
+        # Breakout signals using Donchian channels
+        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
-        # Entry signals
+        # Generate signals
         if position == 0:
-            # Long: price above KAMA, not overbought, volume surge
-            if above_kama and rsi_not_overbought and volume_ok:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            # Short: price below KAMA, not oversold, volume surge
-            elif below_kama and rsi_not_oversold and volume_ok:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
