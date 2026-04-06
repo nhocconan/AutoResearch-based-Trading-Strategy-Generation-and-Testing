@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Donchian(20) breakout with 12-hour EMA50 trend and volume confirmation.
-# Uses 12-hour EMA50 to establish trend bias (long above EMA50, short below EMA50).
-# Breakouts in direction of EMA trend with volume capture institutional moves.
-# Designed for 6h timeframe to target 50-150 trades over 4 years with proven structure.
-# Works in bull/bear markets via EMA-based directional bias and volume confirmation.
-# Controls trade frequency with volume filter and strict breakout conditions.
+# Hypothesis: 6-hour Williams %R with 1-day EMA trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions (below -80 = oversold, above -20 = overbought).
+# Trades in direction of 1-day EMA50 trend: only buy oversold in uptrend, sell overbought in downtrend.
+# Volume confirmation ensures institutional participation. Designed for 6h timeframe to target 50-150 trades over 4 years.
+# Works in bull/bear markets via EMA-based directional bias and mean-reversion entries during pullbacks.
 
-name = "6h_donchian20_12h_ema50_vol_v1"
+name = "6h_williamsr_1d_ema50_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -25,29 +24,34 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12-hour EMA50 for trend bias
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # 1-day EMA50 for trend bias
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 12h closes
-    ema_50_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 50:
-        ema_50_12h[49] = np.mean(close_12h[:50])
-        for i in range(50, len(close_12h)):
-            ema_50_12h[i] = (close_12h[i] * 2 / 51) + (ema_50_12h[i-1] * 49 / 51)
+    # Calculate EMA50 on 1d closes
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 / 51) + (ema_50_1d[i-1] * 49 / 51)
     
-    # Align EMA50 to 6h timeframe (shifted by 1 12h bar for no look-ahead)
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align EMA50 to 6h timeframe (shifted by 1 1d bar for no look-ahead)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 6-hour Donchian channel (20-period)
+    # Williams %R (14-period) on 6h data
+    williams_r = np.full(n, np.nan)
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
     
-    for i in range(19, n):
-        highest_high[i] = np.max(high[i-19:i+1])
-        lowest_low[i] = np.min(low[i-19:i+1])
+    for i in range(13, n):
+        highest_high[i] = np.max(high[i-13:i+1])
+        lowest_low[i] = np.min(low[i-13:i+1])
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i]) * -100
+        else:
+            williams_r[i] = -50  # neutral when range is zero
     
-    # Volume confirmation: 6h volume > 1.5x 20-period average
+    # Volume confirmation: 6h volume > 1.3x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volume[i-19:i+1])
@@ -58,62 +62,64 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(williams_r[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        # Volume condition: current volume > 1.3x 20-period average
+        volume_filter = volume[i] > vol_ma[i] * 1.3
         
         # Trend bias: long above EMA50, short below EMA50
         bullish_bias = close[i] > ema_50_aligned[i]
         bearish_bias = close[i] < ema_50_aligned[i]
         
+        # Williams %R conditions: oversold (< -80) or overbought (> -20)
+        oversold = williams_r[i] < -80
+        overbought = williams_r[i] > -20
+        
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price below EMA50 or stoploss (2x ATR approximation using Donchian width)
-            donch_width = highest_high[i] - lowest_low[i]
-            if donch_width > 0:
-                stop_loss_level = entry_price - 2.0 * donch_width
+            # Exit: RSI crosses above -20 (overbought) or stoploss (2x ATR approximation)
+            atr_approx = (high[i] - low[i])  # simple range approximation
+            if atr_approx > 0:
+                stop_loss_level = entry_price - 2.0 * atr_approx
             else:
-                stop_loss_level = entry_price - 2.0 * (highest_high[i] - lowest_low[i] + 0.001)
+                stop_loss_level = entry_price - 2.0 * 0.001
             
-            if (close[i] < ema_50_aligned[i] or 
+            if (williams_r[i] > -20 or 
                 close[i] < stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price above EMA50 or stoploss
-            donch_width = highest_high[i] - lowest_low[i]
-            if donch_width > 0:
-                stop_loss_level = entry_price + 2.0 * donch_width
+            # Exit: RSI crosses below -80 (oversold) or stoploss
+            atr_approx = (high[i] - low[i])
+            if atr_approx > 0:
+                stop_loss_level = entry_price + 2.0 * atr_approx
             else:
-                stop_loss_level = entry_price + 2.0 * (highest_high[i] - lowest_low[i] + 0.001)
+                stop_loss_level = entry_price + 2.0 * 0.001
             
-            if (close[i] > ema_50_aligned[i] or 
+            if (williams_r[i] < -80 or 
                 close[i] > stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries in direction of EMA trend
+            # Look for entries in direction of EMA trend with volume confirmation
             if volume_filter:
-                # Long: breakout above resistance with bullish bias
-                if (highest_high[i] > highest_high[i-1] and 
-                    close[i] > highest_high[i-1] and bullish_bias):
+                # Long: oversold in uptrend
+                if oversold and bullish_bias:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: breakdown below support with bearish bias
-                elif (lowest_low[i] < lowest_low[i-1] and 
-                      close[i] < lowest_low[i-1] and bearish_bias):
+                # Short: overbought in downtrend
+                elif overbought and bearish_bias:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
