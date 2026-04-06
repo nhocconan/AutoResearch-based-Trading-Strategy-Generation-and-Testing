@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with daily trend filter and volume confirmation.
-# Donchian breakouts capture momentum; daily EMA50 ensures alignment with higher timeframe trend.
-# Volume confirmation (>1.5x 20-period average) filters low-quality breakouts.
-# Designed for 4h timeframe to target 75-200 trades over 4 years.
+# Hypothesis: 12-hour Donchian(20) breakout with daily trend filter and volume confirmation.
+# Uses Donchian channel breakouts (20-period high/low) for trend following.
+# Daily trend filter (price vs EMA50) ensures trades align with higher timeframe bias.
+# Volume confirmation (current volume > 1.5x 20-period average) filters low-quality breakouts.
+# Designed for 12h timeframe to target 50-150 trades over 4 years.
 # Works in bull/bear markets via daily EMA trend bias and breakout logic.
 
-name = "4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,12 +36,13 @@ def generate_signals(prices):
         for i in range(50, len(close_1d)):
             ema_50_1d[i] = (close_1d[i] * 2 / 51) + (ema_50_1d[i-1] * 49 / 51)
     
-    # Align EMA50 to 4h timeframe (shifted by 1 daily bar for no look-ahead)
+    # Align EMA50 to 12h timeframe (shifted by 1 daily bar for no look-ahead)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # Donchian Channel (20-period high/low)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
+    
     for i in range(19, n):
         donchian_high[i] = np.max(high[i-19:i+1])
         donchian_low[i] = np.min(low[i-19:i+1])
@@ -49,7 +51,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):  # Start after Donchian Channel is available
+    for i in range(20, n):  # Start after Donchian channel is available
         # Skip if required data not available
         if np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             if position != 0:
@@ -70,8 +72,8 @@ def generate_signals(prices):
         bearish_bias = close[i] < ema_50_aligned[i]
         
         # Donchian breakout conditions
-        breakout_above = close[i] > donchian_high[i] and close[i-1] <= donchian_high[i]
-        breakout_below = close[i] < donchian_low[i] and close[i-1] >= donchian_low[i]
+        breakout_above = close[i] > donchian_high[i] and close[i-1] <= donchian_high[i-1]
+        breakout_below = close[i] < donchian_low[i] and close[i-1] >= donchian_low[i-1]
         
         # Check exits and stoploss
         if position == 1:  # long position
