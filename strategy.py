@@ -8,7 +8,6 @@ timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_PERIOD = 1
 VOLUME_MA = 10
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -22,8 +21,8 @@ def calculate_camarilla_pivot(high, low, close):
     # Range
     r = high - low
     # Camarilla levels
-    r4 = tp + (r * 1.1 / 2)
     r3 = tp + (r * 1.1 / 4)
+    r4 = tp + (r * 1.1 / 2)
     s3 = tp - (r * 1.1 / 4)
     s4 = tp - (r * 1.1 / 2)
     return r3, r4, s3, s4
@@ -109,11 +108,11 @@ def generate_signals(prices):
         s3 = s3_1d_aligned[i]
         s4 = s4_1d_aligned[i]
         
-        # Entry signals: fade at R3/S3, breakout at R4/S4
+        # Entry signals: fade at S3/R3
         long_signal = volume_ok and close[i] <= s3
         short_signal = volume_ok and close[i] >= r3
         
-        # Exit signals: take profit at opposite S3/R3 or stop loss
+        # Exit signals: take profit at opposite R3/S3
         exit_long = volume_ok and close[i] >= r3
         exit_short = volume_ok and close[i] <= s3
         
