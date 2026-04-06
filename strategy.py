@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-Experiment #11961: 4h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: 4h Donchian(20) breakouts capture medium-term trends. 1d EMA provides trend bias,
-and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 trades over 4 years.
+Experiment #11962: 12h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: 12h Donchian(20) breakouts capture long-term trends with low frequency. 
+1d EMA provides trend bias to avoid counter-trend trades, and volume filter ensures 
+institutional participation. Designed for low trade frequency (12-37/year) to minimize 
+fee drag and work in both bull (trend continuation) and bear (trend reversal) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11961_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_11962_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -54,7 +55,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -128,4 +129,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</output>
