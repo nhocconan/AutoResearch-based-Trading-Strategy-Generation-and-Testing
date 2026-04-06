@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian breakout with daily EMA trend filter and volume confirmation
-# Works in bull/bear markets because Donchian captures breakouts, EMA filter ensures trend alignment,
-# and volume confirms institutional participation. Target: 80-180 trades over 4 years (20-45/year).
+# Hypothesis: Daily ATR-based breakout with volume confirmation on 4h timeframe
+# Works in bull/bear because ATR adapts to volatility, breakouts capture strong moves,
+# and volume filters weak signals. Uses 1d ATR for stable volatility measurement.
+# Target: 100-250 trades over 4 years (25-60/year) to balance opportunity and cost.
 
-name = "exp_13020_4h_donchian20_1d_ema_vol_v1"
+name = "exp_13020_4h_atr_breakout_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+ATR_PERIOD = 14
+ATR_MULTIPLIER = 2.5
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -29,28 +28,20 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Load daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA trend
+    # Calculate daily ATR for volatility regime
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
     close_d = df_daily['close'].values
-    ema_d = calculate_ema(close_d, EMA_PERIOD)
-    ema_aligned = align_htf_to_ltf(prices, df_daily, ema_d)
+    atr_daily = calculate_atr(high_d, low_d, close_d, ATR_PERIOD)
+    atr_daily_aligned = align_htf_to_ltf(prices, df_daily, atr_daily)
     
     # Calculate 4h indicators
     high = prices['high'].values
@@ -58,9 +49,11 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    # 4h ATR for stoploss
+    atr_4h = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Volume confirmation
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,11 +61,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily EMA not available
-        if np.isnan(ema_aligned[i]):
+        # Skip if daily ATR not available
+        if np.isnan(atr_daily_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -94,9 +87,14 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Donchian breakout with EMA trend filter
-        breakout_long = volume_ok and (close[i] >= upper[i]) and (close[i] > ema_aligned[i])
-        breakout_short = volume_ok and (close[i] <= lower[i]) and (close[i] < ema_aligned[i])
+        # ATR-based breakout levels
+        atr_val = atr_daily_aligned[i]
+        upper_break = close[i-1] + (ATR_MULTIPLIER * atr_val)
+        lower_break = close[i-1] - (ATR_MULTIPLIER * atr_val)
+        
+        # Breakout conditions
+        breakout_long = volume_ok and close[i] >= upper_break
+        breakout_short = volume_ok and close[i] <= lower_break
         
         # Generate signals
         if position == 0:
@@ -104,12 +102,12 @@ def generate_signals(prices):
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price - (2.0 * atr_4h[i])
             elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price + (2.0 * atr_4h[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
