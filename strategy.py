@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation
-Hypothesis: 4h Donchian breakouts capture medium-term momentum. Filter by 12h EMA50 for trend bias and volume confirmation for conviction. Works in bull (buy breakouts above 12h EMA50) and bear (sell breakdowns below 12h EMA50). Target: 100-200 total trades over 4 years.
+4h Donchian(20) breakout with 12h EMA200 trend filter and volume confirmation
+Hypothesis: 4h Donchian breakouts capture momentum. Filter by 12h EMA200 for trend bias and volume confirmation for conviction. Works in bull (buy breakouts above 12h EMA200) and bear (sell breakdowns below 12h EMA200). Target: 100-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_12h_ema_vol_v1"
+name = "4h_donchian20_12h_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -36,18 +36,18 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 12h data for trend filter (EMA50)
+    # Get 12h data for trend filter (EMA200)
     df_12h = get_htf_data(prices, '12h')
     close_12h = df_12h['close'].values
     
-    # EMA50 on 12h close
+    # EMA200 on 12h close
     ema_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 50:
-        ema_12h[49] = np.mean(close_12h[:50])
-        for i in range(50, len(close_12h)):
-            ema_12h[i] = (close_12h[i] * 2 + ema_12h[i-1] * 48) / 50
+    if len(close_12h) >= 200:
+        ema_12h[199] = np.mean(close_12h[:200])
+        for i in range(200, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * 2 + ema_12h[i-1] * 198) / 200
     
-    # 12h trend: above EMA50 = bullish, below = bearish
+    # 12h trend: above EMA200 = bullish, below = bearish
     trend_12h = np.where(close_12h > ema_12h, 1, -1)
     
     # Align 12h trend to 4h timeframe
