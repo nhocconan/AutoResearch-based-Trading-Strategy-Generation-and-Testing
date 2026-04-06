@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian breakout with weekly SMA trend filter and volume confirmation.
-# Breakouts capture strong trends in both bull and bear markets. Weekly SMA ensures
-# alignment with higher timeframe momentum, while volume filters out false breakouts.
-# Daily timeframe reduces trade frequency to minimize fee drag, targeting 30-100 trades over 4 years.
+# Hypothesis: 1-day Donchian(20) breakout with 1-week EMA trend filter and volume confirmation.
+# In bull markets, breakouts capture strong uptrends; in bear markets, they catch sharp downtrends.
+# The weekly EMA ensures alignment with higher timeframe momentum, while volume filters out false breakouts.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag and improve generalization.
 
-name = "exp_13184_1d_donchian20_1w_sma_vol_v1"
+name = "exp_13184_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-SMA_PERIOD = 50
+EMA_PERIOD = 20  # Weekly EMA for trend filter
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -30,9 +30,9 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_sma(close, period):
-    """Calculate SMA"""
-    return pd.Series(close).rolling(window=period, min_periods=period).mean().values
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -42,12 +42,12 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly SMA for trend filter
+    # Calculate weekly EMA for trend filter
     close_1w = df_1w['close'].values
-    sma_1w = calculate_sma(close_1w, SMA_PERIOD)
-    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
+    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate daily indicators
+    # Calculate 1d indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -69,11 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, SMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if SMA not available
-        if np.isnan(sma_1w_aligned[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -95,9 +95,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly SMA
-        uptrend = close[i] > sma_1w_aligned[i]
-        downtrend = close[i] < sma_1w_aligned[i]
+        # Trend filter: price above/below weekly EMA
+        uptrend = close[i] > ema_1w_aligned[i]
+        downtrend = close[i] < ema_1w_aligned[i]
         
         # Breakout signals
         breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
