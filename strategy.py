@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """
 1d Donchian(20) Breakout + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts capture momentum, volume confirms breakout strength, ATR stoploss limits drawdown.
-Designed for low trade frequency (target 30-100 total over 4 years) to minimize fee decay.
+Hypothesis: Daily timeframe reduces trade frequency to target 30-100 trades over 4 years. Donchian breakouts capture momentum, volume confirms breakout strength, ATR stoploss limits drawdown. Designed for low trade frequency to minimize fee decay in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_vol_atr_v2"
+name = "1d_donchian20_vol_atr_v1"
 timeframe = "1d"
 leverage = 1.0
 
