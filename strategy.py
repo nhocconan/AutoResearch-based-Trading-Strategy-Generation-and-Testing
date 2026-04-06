@@ -1,19 +1,24 @@
-# 1h strategy using 4h Donchian breakouts with 1d EMA trend filter and volume confirmation.
-# Uses 1d trend for direction, 4h Donchian breakouts for entries, volume for confirmation.
-# Designed for ~100-150 total trades over 4 years (25-38/year) to avoid excessive fees.
-# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
-# Target: 100-200 total trades, 0.20 position size, max DD < -50%.
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13734_1h_donchian20_1d_ema_vol_v1"
-timeframe = "1h"
+# Hypothesis: 6h strategy using weekly pivot points with price position relative to pivot levels
+# Long when price > weekly pivot and breaks above weekly R1 with volume confirmation
+# Short when price < weekly pivot and breaks below weekly S1 with volume confirmation
+# Uses weekly pivot for trend bias, price action for entry timing, volume for confirmation
+# Designed for ~100-150 total trades over 4 years (25-38/year) to avoid excessive fees
+# Works in bull (buying strength above pivot) and bear (selling weakness below pivot) markets
+
+name = "exp_13735_6h_weekly_pivot_position_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
-# Parameters - tuned for moderate trade frequency
-DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 50
-VOLUME_MA_PERIOD = 8
+# Parameters
+PIVOT_LOOKBACK = 5  # weeks to calculate pivot
+VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
@@ -27,44 +32,57 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_pivot(high, low, close):
+    """Calculate pivot point and support/resistance levels"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, s1, r2, s2, r3, s3
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 4h and 1d data for filters ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for pivot calculation ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly pivot levels
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # Calculate 4h indicators for entries
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    pivot_vals = np.full_like(close_weekly, np.nan)
+    r1_vals = np.full_like(close_weekly, np.nan)
+    s1_vals = np.full_like(close_weekly, np.nan)
     
-    # ATR for stop loss (using 1h data)
+    # Calculate pivot for each week
+    for i in range(len(close_weekly)):
+        p, r1, s1, _, _, _, _ = calculate_pivot(high_weekly[i], low_weekly[i], close_weekly[i])
+        pivot_vals[i] = p
+        r1_vals[i] = r1
+        s1_vals[i] = s1
+    
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot_vals)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1_vals)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1_vals)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # 4h Donchian channels
-    donchian_high = pd.Series(high_4h).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low_4h).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Volume MA for 4h
-    volume_ma_4h = pd.Series(volume_4h).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    # Volume MA for confirmation
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,11 +90,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(PIVOT_LOOKBACK, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma_4h[i]):
+        if np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -98,23 +116,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation (using 4h volume)
-        volume_ok = volume_4h[i] > (volume_ma_4h[i] * VOLUME_THRESHOLD)
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 1d EMA
-        above_ema = close_4h[i] > ema_1d_aligned[i]
-        below_ema = close_4h[i] < ema_1d_aligned[i]
+        # Price position relative to pivot
+        above_pivot = close[i] > pivot_aligned[i]
+        below_pivot = close[i] < pivot_aligned[i]
         
-        # Donchian breakout signals
-        if i > 0 and not np.isnan(donchian_high[i-1]) and not np.isnan(donchian_low[i-1]):
-            high_prev = donchian_high[i-1]
-            low_prev = donchian_low[i-1]
+        # Breakout signals
+        if i > 0:
+            # Long signal: price above pivot and breaks above R1 with volume
+            long_signal = volume_ok and above_pivot and close[i] > r1_aligned[i] and close[i-1] <= r1_aligned[i]
             
-            # Long signal: price breaks above Donchian high in uptrend
-            long_signal = volume_ok and above_ema and close_4h[i] > high_prev and close_4h[i-1] <= high_prev
-            
-            # Short signal: price breaks below Donchian low in downtrend
-            short_signal = volume_ok and below_ema and close_4h[i] < low_prev and close_4h[i-1] >= low_prev
+            # Short signal: price below pivot and breaks below S1 with volume
+            short_signal = volume_ok and below_pivot and close[i] < s1_aligned[i] and close[i-1] >= s1_aligned[i]
         else:
             long_signal = False
             short_signal = False
@@ -134,25 +149,17 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on opposite Donchian break
-            if i > 0 and not np.isnan(donchian_low[i-1]) and not np.isnan(donchian_low[i]):
-                low_prev = donchian_low[i-1]
-                if close_4h[i] < low_prev and close_4h[i-1] >= low_prev:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = SIGNAL_SIZE
+            # Exit long on break below pivot
+            if close[i] < pivot_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on opposite Donchian break
-            if i > 0 and not np.isnan(donchian_high[i-1]) and not np.isnan(donchian_high[i]):
-                high_prev = donchian_high[i-1]
-                if close_4h[i] > high_prev and close_4h[i-1] <= high_prev:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -SIGNAL_SIZE
+            # Exit short on break above pivot
+            if close[i] > pivot_aligned[i]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -SIGNAL_SIZE
     
