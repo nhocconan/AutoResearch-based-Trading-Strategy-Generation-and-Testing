@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout + 1w trend filter (HMA21) + volume confirmation
-# Long when price breaks above Donchian upper band AND price > HMA(21) on weekly
-# Short when price breaks below Donchian lower band AND price < HMA(21) on weekly
-# Exit when price crosses opposite Donchian band or HMA crosses in opposite direction
-# Target: 75-200 total trades over 4 years (19-50/year) for 1d timeframe
-# Works in bull markets via breakouts, bear markets via short breakdowns
+# Hypothesis: 12h Bollinger Bands + RSI mean reversion with volume confirmation
+# Long when price touches lower BB + RSI < 30 + volume > 1.5x avg
+# Short when price touches upper BB + RSI > 70 + volume > 1.5x avg
+# Exit when price crosses middle BB (SMA20) or volume dries up
+# Works in ranging markets (chop > 61.8) - avoids trending periods
+# Targets 75-150 trades over 4 years with low frequency, high accuracy
 
-name = "1d_donchian20_hma21_vol_v1"
-timeframe = "1d"
+name = "12h_bb_rsi_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,133 +25,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period) - price channel breakout
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_upper = highest_high.values
-    donchian_lower = lowest_low.values
+    # Bollinger Bands (20, 2) on 12h
+    sma20 = pd.Series(close).rolling(window=20, min_periods=20).mean()
+    std20 = pd.Series(close).rolling(window=20, min_periods=20).std()
+    upper_band = sma20 + 2 * std20
+    lower_band = sma20 - 2 * std20
+    middle_band = sma20
     
-    # Weekly HMA (21-period) - trend filter
-    df_1w = get_htf_data(prices, '1w')
-    weekly_close = df_1w['close'].values
+    # RSI (14) from 1d timeframe for mean reversion
+    df_1d = get_htf_data(prices, '1d')
+    daily_close = df_1d['close'].values
     
-    # Calculate HMA: WMA(2*WMA(n/2) - WMA(n))
-    def wma(arr, period):
-        weights = np.arange(1, period + 1)
-        return np.convolve(arr, weights, 'valid') / weights.sum()
+    # Calculate RSI on daily close
+    delta = np.diff(daily_close, prepend=daily_close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    def hma(arr, period):
-        half = period // 2
-        sqrt = int(np.sqrt(period))
-        wma_half = wma(arr, half)
-        wma_full = wma(arr, period)
-        wma_2n_minus_n = 2 * wma_half - wma_full
-        return wma(wma_2n_minus_n, sqrt)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
     
-    # Calculate HMA for weekly data
-    hma_weekly = hma(weekly_close, 21)
-    hma_weekly_aligned = align_htf_to_ltf(prices, df_1w, hma_weekly)
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(20, n):
-        # Skip if required data not available
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
-           np.isnan(hma_weekly_aligned[i]) or np.isnan(volume_threshold[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Exit conditions
-        if position == 1:  # long position
-            if close[i] < donchian_lower[i] or close[i] < hma_weekly_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            if close[i] > donchian_upper[i] or close[i] > hma_weekly_aligned[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with Donchian breakout + HMA trend + volume confirmation
-            # Long: price breaks above Donchian upper AND price > weekly HMA
-            if (close[i] > donchian_upper[i] and close[i] > hma_weekly_aligned[i] and 
-                volume[i] > volume_threshold[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below Donchian lower AND price < weekly HMA
-            elif (close[i] < donchian_lower[i] and close[i] < hma_weekly_aligned[i] and 
-                  volume[i] > volume_threshold[i]):
-                signals[i] = -0.25
-                position = -1
-    
-    return signals
-
-</think>
-
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 1d Donchian(20) breakout + 1w trend filter (HMA21) + volume confirmation
-# Long when price breaks above Donchian upper band AND price > HMA(21) on weekly
-# Short when price breaks below Donchian lower band AND price < HMA(21) on weekly
-# Exit when price crosses opposite Donchian band or HMA crosses in opposite direction
-# Target: 75-200 total trades over 4 years (19-50/year) for 1d timeframe
-# Works in bull markets via breakouts, bear markets via short breakdowns
-
-name = "1d_donchian20_hma21_vol_v1"
-timeframe = "1d"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Donchian Channel (20-period) - price channel breakout
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_upper = highest_high.values
-    donchian_lower = lowest_low.values
-    
-    # Weekly HMA (21-period) - trend filter
-    df_1w = get_htf_data(prices, '1w')
-    weekly_close = df_1w['close'].values
-    
-    # Calculate HMA: WMA(2*WMA(n/2) - WMA(n))
-    def wma(arr, period):
-        weights = np.arange(1, period + 1)
-        return np.convolve(arr, weights, 'valid') / weights.sum()
-    
-    def hma(arr, period):
-        half = period // 2
-        sqrt = int(np.sqrt(period))
-        wma_half = wma(arr, half)
-        wma_full = wma(arr, period)
-        wma_2n_minus_n = 2 * wma_half - wma_full
-        return wma(wma_2n_minus_n, sqrt)
-    
-    # Calculate HMA for weekly data
-    hma_weekly = hma(weekly_close, 21)
-    hma_weekly_aligned = align_htf_to_ltf(prices, df_1w, hma_weekly)
+    # Align daily RSI to 12h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -160,42 +58,37 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
-           np.isnan(hma_weekly_aligned[i]) or np.isnan(volume_threshold[i]):
+        if np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or np.isnan(rsi_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Exit conditions
+        # Exit conditions: price crosses middle BB OR volume drops below threshold
         if position == 1:  # long position
-            if close[i] < donchian_lower[i] or close[i] < hma_weekly_aligned[i]:
+            if close[i] >= middle_band[i] or volume[i] < volume_threshold[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] > donchian_upper[i] or close[i] > hma_weekly_aligned[i]:
+            if close[i] <= middle_band[i] or volume[i] < volume_threshold[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with Donchian breakout + HMA trend + volume confirmation
-            # Long: price breaks above Donchian upper AND price > weekly HMA
-            if (close[i] > donchian_upper[i] and close[i] > hma_weekly_aligned[i] and 
-                volume[i] > volume_threshold[i]):
+            # Look for entries: price at BB extremes + RSI extreme + volume confirmation
+            # Long: price touches lower BB + RSI oversold + volume spike
+            if (close[i] <= lower_band[i] and rsi_aligned[i] < 30 and volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower AND price < weekly HMA
-            elif (close[i] < donchian_lower[i] and close[i] < hma_weekly_aligned[i] and 
-                  volume[i] > volume_threshold[i]):
+            # Short: price touches upper BB + RSI overbought + volume spike
+            elif (close[i] >= upper_band[i] and rsi_aligned[i] > 70 and volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
     
     return signals
-
-</think>
