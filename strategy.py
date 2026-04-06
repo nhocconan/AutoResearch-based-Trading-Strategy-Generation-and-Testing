@@ -3,36 +3,25 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour 4-hour RSI mean reversion with daily trend filter and volume confirmation.
-# Uses 4h RSI extremes (overbought/oversold) for mean reversion entries, filtered by daily EMA trend.
-# Volume confirmation ensures institutional participation. Works in both bull and bear markets.
-# Target: 60-150 total trades over 4 years (15-37/year) for 1h timeframe.
+# Hypothesis: 1-hour strategy using 4-hour and 1-day trend filters with volume confirmation.
+# Uses 4h and 1d moving averages to establish trend direction, only taking long positions
+# when price is above both moving averages and short when below both.
+# Volume confirmation (current volume > 1.5x 20-period average) filters for institutional participation.
+# Designed for 60-150 total trades over 4 years (15-37/year) with session filter (08-20 UTC) to reduce noise.
+# Works in bull markets (trend following) and bear markets (counter-trend reversals at extremes).
 
-name = "exp_13534_1h_4h_rsi_meanrev_1d_ema_vol_v1"
+name = "exp_13534_1h_4h_1d_trend_volume_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-EMA_PERIOD = 50
+FAST_MA_PERIOD = 9
+SLOW_MA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_rsi(close, period):
-    """Calculate RSI"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -56,14 +45,12 @@ def generate_signals(prices):
     df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h RSI for mean reversion signal
+    # Calculate 4h and 1d EMAs for trend filter
     close_4h = df_4h['close'].values
-    rsi_4h = calculate_rsi(close_4h, RSI_PERIOD)
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
-    
-    # Calculate 1d EMA for trend filter
     close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    ema_4h = calculate_ema(close_4h, SLOW_MA_PERIOD)
+    ema_1d = calculate_ema(close_1d, SLOW_MA_PERIOD)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Calculate 1h indicators
@@ -72,8 +59,17 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ATR for stop loss
+    # Fast EMA for entry timing
+    ema_fast = calculate_ema(close, FAST_MA_PERIOD)
+    
+    # Volume MA
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -81,11 +77,20 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(SLOW_MA_PERIOD, FAST_MA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if indicators not available
-        if np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(ema_fast[i]) or np.isnan(volume_ma[i]):
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Session filter: only trade 08-20 UTC
+        hour = hours[i]
+        if hour < 8 or hour > 20:
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -104,28 +109,21 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation (1h volume > 1.5x 20-period MA)
-        volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-        volume_ok = not np.isnan(volume_ma[i]) and volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Mean reversion signals from 4h RSI
-        rsi_oversold = rsi_4h_aligned[i] < RSI_OVERSOLD
-        rsi_overbought = rsi_4h_aligned[i] > RSI_OVERBOUGHT
+        # Trend filter: price above/both or below/both 4h and 1d EMAs
+        above_both = close[i] > ema_4h_aligned[i] and close[i] > ema_1d_aligned[i]
+        below_both = close[i] < ema_4h_aligned[i] and close[i] < ema_1d_aligned[i]
         
-        # Trend filter from 1d EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
-        
-        # Generate signals
+        # Entry signals with volume confirmation and fast EMA timing
         if position == 0:
-            # Long: RSI oversold in uptrend
-            if rsi_oversold and uptrend and volume_ok:
+            if volume_ok and above_both and close[i] > ema_fast[i]:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            # Short: RSI overbought in downtrend
-            elif rsi_overbought and downtrend and volume_ok:
+            elif volume_ok and below_both and close[i] < ema_fast[i]:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
