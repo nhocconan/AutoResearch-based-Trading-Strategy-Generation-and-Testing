@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts capture momentum, weekly pivot direction from 1d timeframe filters for institutional bias, volume confirms breakout strength, ATR stoploss limits drawdown. Designed for low trade frequency (target 50-150 total over 4 years) to minimize fee decay. Works in bull/bear by only trading with higher timeframe pivot bias.
+4h Donchian(20) Breakout + 1d Weekly Pivot Direction + Volume Filter + ATR Stoploss
+Hypothesis: Donchian breakouts capture momentum, weekly pivot direction from 1d timeframe filters for institutional bias, volume confirms breakout strength, ATR stoploss limits drawdown. Designed for low trade frequency (target 75-200 total over 4 years) to minimize fee decay. Works in bull/bear by only trading with higher timeframe pivot bias.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dweeklypivot_volume_atr_v1"
-timeframe = "12h"
+name = "4h_donchian20_1dweeklypivot_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -49,7 +49,11 @@ def generate_signals(prices):
     r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
     s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
     
-    # Align weekly pivot and bias to 12h timeframe
+    # Bias determination: above weekly pivot = bullish bias, below = bearish bias
+    bullish_bias = weekly_pivot > 0  # Will be refined in loop
+    bearish_bias = weekly_pivot > 0  # Will be refined in loop
+    
+    # Align weekly pivot and bias to 4h timeframe
     weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
