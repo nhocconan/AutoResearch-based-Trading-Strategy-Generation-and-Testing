@@ -3,21 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian breakout with 1-day trend filter and volume confirmation
-# Works in bull/bear because breakouts capture strong moves, daily trend filter avoids counter-trend trades,
-# and volume confirmation ensures breakout strength. Target: 80-180 trades over 4 years (20-45/year).
+# Hypothesis: Weekly volatility breakout with volume confirmation and ATR stoploss
+# Works in bull/bear because volatility expansion precedes strong moves in either direction.
+# Volume filters out false breakouts. Weekly timeframe provides structural context.
+# Target: 60-100 trades over 4 years (15-25/year) to balance opportunity and cost.
 
-name = "exp_12977_4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "exp_12978_1d_weekly_volatility_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+VOLATILITY_LOOKBACK = 20
+VOLATILITY_THRESHOLD = 1.5  # ATR ratio threshold for volatility expansion
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -28,34 +30,42 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_volatility_ratio(high, low, close, period):
+    """Calculate current ATR vs long-term ATR ratio"""
+    atr_short = calculate_atr(high, low, close, period)
+    atr_long = pd.Series(atr_short).ewm(span=period*2, adjust=False, min_periods=period*2).mean().values
+    # Avoid division by zero
+    ratio = np.where(atr_long > 0, atr_short / atr_long, 1.0)
+    return ratio
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1-day data ONCE before loop for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 1-day EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly ATR for volatility measurement
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
     
-    # Calculate 4-hour indicators
+    atr_weekly = calculate_atr(high_w, low_w, close_w, ATR_PERIOD)
+    vol_ratio_weekly = calculate_volatility_ratio(high_w, low_w, close_w, ATR_PERIOD)
+    
+    # Align to daily timeframe
+    atr_aligned = align_htf_to_ltf(prices, df_weekly, atr_weekly)
+    vol_ratio_aligned = align_htf_to_ltf(prices, df_weekly, vol_ratio_weekly)
+    
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Volume confirmation
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # ATR for stop loss
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    atr_daily = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -63,11 +73,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, VOLATILITY_LOOKBACK) + 1
     
     for i in range(start, n):
-        # Skip if 1-day trend not available
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if volatility data not available
+        if np.isnan(vol_ratio_aligned[i]) or np.isnan(atr_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -89,26 +99,28 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: only trade in direction of 1-day EMA50
-        trend_up = close[i] > ema_1d_aligned[i]
-        trend_down = close[i] < ema_1d_aligned[i]
+        # Volatility expansion filter
+        vol_expansion = vol_ratio_aligned[i] > VOLATILITY_THRESHOLD
         
-        # Donchian breakout signals
-        breakout_long = volume_ok and trend_up and high[i] >= highest_high[i]
-        breakout_short = volume_ok and trend_down and low[i] <= lowest_low[i]
+        # Breakout signals: price movement beyond weekly ATR
+        price_change = abs(close[i] - close[i-1]) if i > 0 else 0
+        breakout_threshold = atr_aligned[i]
+        
+        breakout_up = volume_ok and vol_expansion and (close[i] > close[i-1]) and (price_change > breakout_threshold)
+        breakout_down = volume_ok and vol_expansion and (close[i] < close[i-1]) and (price_change > breakout_threshold)
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_short:
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr_daily[i])
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr_daily[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
