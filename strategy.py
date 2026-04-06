@@ -9,12 +9,12 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.25
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.30
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-TREND_EMA_PERIOD = 50  # for weekly trend filter
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -40,18 +40,19 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
+    # Load weekly data ONCE before loop for trend filter
     df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly EMA for trend
     ema_1w = calculate_ema(df_1w['close'].values, TREND_EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 1d indicators
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
+    # Load daily data ONCE before loop for entry signals
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate daily indicators
+    high = df_1d['high'].values
+    low = df_1d['low'].values
+    close = df_1d['close'].values
+    volume = df_1d['volume'].values
     
     upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -63,7 +64,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if weekly EMA not available
@@ -93,7 +94,7 @@ def generate_signals(prices):
         uptrend_1w = close[i] > ema_1w_aligned[i]
         downtrend_1w = close[i] < ema_1w_aligned[i]
         
-        # Donchian breakout conditions
+        # Donchian breakout conditions (daily)
         long_breakout = close[i] > upper[i-1]  # break above previous upper band
         short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
