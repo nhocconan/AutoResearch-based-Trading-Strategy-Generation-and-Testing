@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout + Volume Confirmation + ATR Stoploss
-Hypothesis: Donchian channel breakouts capture trend continuations in both bull and bear markets.
-Volume confirmation filters false breakouts. ATR-based stoploss limits drawdown.
-Works in bull (buy strength above upper band) and bear (sell weakness below lower band).
-Target: 100-200 total trades over 4 years (25-50/year).
+6h Donchian Breakout + Weekly Pivot Direction + Volume Confirmation
+Hypothesis: Donchian breakouts capture trend continuation, weekly pivots provide
+institutional support/resistance, and volume filters false breakouts.
+Works in bull markets (breakouts above weekly pivot) and bear markets
+(breakdowns below weekly pivot). Target: 100-180 total trades over 4 years (25-45/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "14446_4h_donchian20_1d_vol_sl_v1"
-timeframe = "4h"
+name = "14447_6h_donchian20_weekly_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,32 +20,42 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Donchian calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load weekly data for pivot points (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
     
-    # Donchian channel (20-period high/low) on daily
-    donchian_period = 20
-    upper = pd.Series(high_1d).rolling(window=donchian_period, min_periods=donchian_period).max()
-    lower = pd.Series(low_1d).rolling(window=donchian_period, min_periods=donchian_period).min()
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    pivot_w = (high_w + low_w + close_w) / 3
+    # Support/resistance levels
+    r1_w = 2 * pivot_w - low_w
+    s1_w = 2 * pivot_w - high_w
+    r2_w = pivot_w + (high_w - low_w)
+    s2_w = pivot_w - (high_w - low_w)
+    r3_w = high_w + 2 * (pivot_w - low_w)
+    s3_w = low_w - 2 * (high_w - pivot_w)
     
-    # Align Donchian levels to 4h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper.values)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower.values)
+    # Align weekly pivot data to 6h timeframe
+    pivot_w_aligned = align_htf_to_ltf(prices, df_weekly, pivot_w)
+    r3_w_aligned = align_htf_to_ltf(prices, df_weekly, r3_w)
+    s3_w_aligned = align_htf_to_ltf(prices, df_weekly, s3_w)
     
-    # 4h data
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # Donchian channel (20-period) on 6h
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
     # Volume filter: avoid low volume periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (0.8 * vol_ma)  # Require at least 80% of average volume
+    vol_filter = volume > (0.8 * vol_ma)
     
-    # ATR for stoploss (14-period)
+    # ATR for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -58,12 +68,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = donchian_period + 1
+    start = max(20, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(pivot_w_aligned[i]) or np.isnan(r3_w_aligned[i]) or
+            np.isnan(s3_w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -72,31 +83,35 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian OR stoploss
-            if (close[i] < lower_aligned[i] or
+            # Exit: price breaks below Donchian low OR stoploss
+            if (close[i] <= donchian_low[i] or
                 close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian OR stoploss
-            if (close[i] > upper_aligned[i] or
+            # Exit: price breaks above Donchian high OR stoploss
+            if (close[i] >= donchian_high[i] or
                 close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume filter
-            long_setup = (close[i] > upper_aligned[i] and vol_filter[i])
-            short_setup = (close[i] < lower_aligned[i] and vol_filter[i])
+            # Look for entries: Donchian breakout + weekly pivot filter + volume
+            long_breakout = close[i] > donchian_high[i]
+            short_breakout = close[i] < donchian_low[i]
             
-            if long_setup:
+            # Weekly pivot filter: only long above R3, short below S3
+            long_filter = close[i] > r3_w_aligned[i]
+            short_filter = close[i] < s3_w_aligned[i]
+            
+            if long_breakout and long_filter and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_setup:
+            elif short_breakout and short_filter and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
@@ -104,3 +119,5 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
+
+</lyzard>
