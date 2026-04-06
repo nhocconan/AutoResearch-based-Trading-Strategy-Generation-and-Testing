@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 12h EMA Trend + Volume Spike
-Hypothesis: 4h timeframe with Donchian breakouts aligned to 12h EMA trend 
-and volume confirmation captures momentum while avoiding chop. 
-12h EMA provides trend bias, volume spike confirms institutional participation.
-Target: 75-200 total trades over 4 years (19-50/year).
+4h Donchian(20) Breakout + 12h EMA Trend + Volume Spike + ATR Stop
+Hypothesis: Combines price channel breakouts with higher timeframe trend bias
+and volume confirmation to capture momentum while avoiding chop.
+Works in bull (breakouts with trend) and bear (short breakdowns with trend).
+Designed for moderate trade frequency (~25-40/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_12htrend_vol_v1"
+name = "4h_donchian20_12htrend_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
