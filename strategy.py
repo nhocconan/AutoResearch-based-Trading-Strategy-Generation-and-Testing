@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14082_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_14083_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_ema(arr, period):
@@ -23,18 +23,18 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load 12h data for EMA filter (once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate 1d EMA (50-period) for trend filter
-    ema_1d = calculate_ema(close_1d, 50)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 12h EMA (50-period) for trend filter
+    ema_12h = calculate_ema(close_12h, 50)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -44,9 +44,9 @@ def generate_signals(prices):
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_filter = volume > (1.8 * vol_ma)
     
     # ATR for stop loss (14-period)
     atr = calculate_atr(high, low, close, 14)
@@ -61,10 +61,10 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_1d_aligned[i]) or \
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_12h_aligned[i]) or \
            np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
-                signals[i] = position * 0.30
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
@@ -90,20 +90,20 @@ def generate_signals(prices):
         breakout_up = close[i] > high_20[i-1] and vol_filter[i]
         breakout_down = close[i] < low_20[i-1] and vol_filter[i]
         
-        # 1d EMA trend filter
-        # Only take longs when price > 1d EMA, shorts when price < 1d EMA
-        trend_filter_long = close[i] > ema_1d_aligned[i]
-        trend_filter_short = close[i] < ema_1d_aligned[i]
+        # 12h EMA trend filter
+        # Only take longs when price > 12h EMA, shorts when price < 12h EMA
+        trend_filter_long = close[i] > ema_12h_aligned[i]
+        trend_filter_short = close[i] < ema_12h_aligned[i]
         
         # Generate signals
         if position == 0:
             if breakout_up and trend_filter_long:
-                signals[i] = 0.30
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (2.0 * atr[i])
             elif breakout_down and trend_filter_short:
-                signals[i] = -0.30
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (2.0 * atr[i])
@@ -115,13 +115,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:
             # Exit short on stop or reversal breakout
             if close[i] >= stop_price or breakout_up:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
     
     return signals
