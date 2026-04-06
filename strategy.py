@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13965_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13966_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(20) trend filter and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(20) trend filter and volume confirmation.
 # Uses 1d EMA(20) for trend direction: price above EMA = bullish bias (long only),
-# price below EMA = bearish bias (short only). Entry on 12h Donchian breakout in
+# price below EMA = bearish bias (short only). Entry on 4h Donchian breakout in
 # direction of 1d trend with volume > 1.5x average. Exit on Donchian reversal or
-# trend change. Designed for 50-150 total trades over 4 years (12-37/year) to
+# trend change. Designed for 75-200 total trades over 4 years (19-50/year) to
 # minimize fee drag. Works in bull (breaks above with trend) and bear (breaks
 # below with trend) with EMA filter.
 
@@ -46,10 +46,10 @@ def generate_signals(prices):
     # Calculate 1d EMA(20) for trend
     ema_1d = calculate_ema(df_1d['close'].values, 20)
     
-    # Align EMA to 12h timeframe
+    # Align EMA to 4h timeframe
     ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h data for Donchian, ATR, and volume
+    # 4h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
