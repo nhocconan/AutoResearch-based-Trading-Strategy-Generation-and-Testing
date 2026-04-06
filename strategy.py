@@ -7,10 +7,10 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Long when price breaks above Donchian high + KAMA up + volume > 1.5x average
 # Short when price breaks below Donchian low + KAMA down + volume > 1.5x average
 # Exit when price crosses KAMA or Donchian midpoint reverses
-# Uses 1d timeframe targeting 30-100 total trades over 4 years (7-25/year)
+# Uses 1d timeframe targeting 75-200 total trades over 4 years (19-50/year)
 # Works in trending markets by following breakouts with trend filter
 
-name = "1d_donchian_kama_vol_v1"
+name = "1d_donchian_1w_kama_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -35,6 +35,7 @@ def generate_signals(prices):
     close_1w = df_1w['close'].values
     
     # Calculate Efficiency Ratio
+    change = np.abs(np.diff(close_1w, prepend=close_1w[0]))
     er = np.zeros_like(close_1w)
     for i in range(1, len(close_1w)):
         if i >= 10:
