@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Donchian breakout with 1d EMA filter and volume confirmation.
-- Long: price breaks above 4h Donchian(20) + price > 1d EMA(50) + volume > 1.5x average
-- Short: price breaks below 4h Donchian(20) + price < 1d EMA(50) + volume > 1.5x average
-- Exit: stop loss (2*ATR) or reversal signal
-- Position size: 0.25 (25%)
-- Target: 75-200 trades over 4 years (19-50/year)
+4h Donchian breakout with 1d EMA filter and volume confirmation - optimized.
+Long: price breaks above 4h Donchian(20) + price > 1d EMA(50) + volume > 1.5x average
+Short: price breaks below 4h Donchian(20) + price < 1d EMA(50) + volume > 1.5x average
+Exit: stop loss (2*ATR) or reversal signal
+Position size: 0.25 (25%)
+Target: 75-200 trades over 4 years (19-50/year)
 """
 
 import numpy as np
