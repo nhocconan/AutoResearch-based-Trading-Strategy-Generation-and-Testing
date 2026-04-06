@@ -3,38 +3,25 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour VWAP mean reversion with weekly trend filter and volume confirmation.
-# Price tends to revert to VWAP in ranging markets (common in 2025-2026), while weekly EMA
-# filters for trend alignment to avoid counter-trend trades. VWAP deviation >1.5σ triggers
-# mean reversion entries. Target: 50-150 total trades over 4 years.
+# Hypothesis: 12-hour Donchian channel breakout with weekly volume confirmation and daily volatility filter.
+# In bull markets: break above upper Donchian band with volume confirms strength.
+# In bear markets: break below lower Donchian band with volume confirms breakdown.
+# Weekly volume filter ensures institutional participation. Daily volatility filter avoids choppy markets.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13348_12h_vwap_meanrev_weekly_trend_vol"
+name = "exp_13348_12h_donchian20_vol_volatility_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-VWAP_DEV_THRESHOLD = 1.5     # Standard deviations for entry
-VWAP_EXIT_THRESHOLD = 0.5    # Standard deviations for exit
-VWAP_LOOKBACK = 20           # Period for VWAP std dev calculation
-WEEKLY_EMA_PERIOD = 20       # Weekly EMA for trend filter
-VOLUME_MA_PERIOD = 20        # Volume moving average
-VOLUME_THRESHOLD = 1.3       # Volume must be above average
-SIGNAL_SIZE = 0.25           # Position size (25%)
-ATR_PERIOD = 14              # ATR for stop loss
-ATR_STOP_MULTIPLIER = 2.0    # ATR multiplier for stop loss
-
-def calculate_vwap(high, low, close, volume):
-    """Calculate VWAP for given period"""
-    typical_price = (high + low + close) / 3.0
-    vwap_numerator = np.cumsum(typical_price * volume)
-    vwap_denominator = np.cumsum(volume)
-    return np.divide(vwap_numerator, vwap_denominator, 
-                     out=np.full_like(vwap_numerator, np.nan), 
-                     where=vwap_denominator!=0)
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+DONCHIAN_PERIOD = 20
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.8
+VOLATILITY_MA_PERIOD = 14
+VOLATILITY_THRESHOLD = 0.02  # 2% daily ATR as percentage of price
+SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -50,13 +37,23 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for trend filter
+    # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly EMA
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, WEEKLY_EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate weekly volume MA
+    volume_1w = df_1w['volume'].values
+    volume_ma_1w = pd.Series(volume_1w).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    volume_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_1w)
+    
+    # Calculate daily volatility (ATR as % of price)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, VOLATILITY_MA_PERIOD)
+    volatility_pct = atr_1d / close_1d
+    volatility_ma = pd.Series(volatility_pct).rolling(window=VOLATILITY_MA_PERIOD, min_periods=VOLATILITY_MA_PERIOD).mean().values
+    volatility_ma_aligned = align_htf_to_ltf(prices, df_1d, volatility_ma)
     
     # Calculate 12h indicators
     high = prices['high'].values
@@ -64,18 +61,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate VWAP and its standard deviation
-    vwap = calculate_vwap(high, low, close, volume)
-    vwap_dev = close - vwap
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Calculate rolling standard deviation of VWAP deviation
-    vwap_dev_series = pd.Series(vwap_dev)
-    vwap_std = vwap_dev_series.rolling(window=VWAP_LOOKBACK, min_periods=VWAP_LOOKBACK).std().values
-    
-    # Volume MA
+    # 12h volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # ATR for stop loss
+    # ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -84,12 +77,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WEEKLY_EMA_PERIOD, VWAP_LOOKBACK, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, VOLATILITY_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not ready
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(vwap_std[i]) or 
-            np.isnan(vwap_dev[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        # Skip if weekly volume or daily volatility not available
+        if np.isnan(volume_ma_1w_aligned[i]) or np.isnan(volatility_ma_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -108,31 +100,24 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        # Volume confirmation: weekly volume above MA
+        volume_ok = volume_ma_1w_aligned[i] > 0 and volume[i] > (volume_ma_1w_aligned[i] * VOLUME_THRESHOLD)
         
-        # Trend filter: price relative to weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Volatility filter: avoid low volatility (choppy) markets
+        vol_ok = volatility_ma_aligned[i] > VOLATILITY_THRESHOLD
         
-        # VWAP mean reversion signals
-        vwap_zscore = vwap_dev[i] / vwap_std[i] if vwap_std[i] > 0 else 0
-        
-        mean_revert_long = volume_ok and uptrend and (vwap_zscore < -VWAP_DEV_THRESHOLD)
-        mean_revert_short = volume_ok and downtrend and (vwap_zscore > VWAP_DEV_THRESHOLD)
-        
-        # Exit when price returns near VWAP
-        exit_long = position == 1 and abs(vwap_zscore) < VWAP_EXIT_THRESHOLD
-        exit_short = position == -1 and abs(vwap_zscore) < VWAP_EXIT_THRESHOLD
+        # Donchian breakout signals
+        breakout_up = volume_ok and vol_ok and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and vol_ok and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
-            if mean_revert_long:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif mean_revert_short:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -140,16 +125,142 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            if exit_long:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = SIGNAL_SIZE
+            signals[i] = SIGNAL_SIZE
         elif position == -1:
-            if exit_short:
+            signals[i] = -SIGNAL_SIZE
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 12-hour Donchian channel breakout with weekly volume confirmation and daily volatility filter.
+# In bull markets: break above upper Donchian band with volume confirms strength.
+# In bear markets: break below lower Donchian band with volume confirms breakdown.
+# Weekly volume filter ensures institutional participation. Daily volatility filter avoids choppy markets.
+# Target: 50-150 total trades over 4 years (12-37/year).
+
+name = "exp_13348_12h_donchian20_vol_volatility_v1"
+timeframe = "12h"
+leverage = 1.0
+
+# Parameters
+DONCHIAN_PERIOD = 20
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.8
+VOLATILITY_MA_PERIOD = 14
+VOLATILITY_THRESHOLD = 0.02  # 2% daily ATR as percentage of price
+SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_atr(high, low, close, period):
+    """Calculate ATR using Wilder's smoothing"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return atr
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate weekly volume MA
+    volume_1w = df_1w['volume'].values
+    volume_ma_1w = pd.Series(volume_1w).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    volume_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, volume_ma_1w)
+    
+    # Calculate daily volatility (ATR as % of price)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, VOLATILITY_MA_PERIOD)
+    volatility_pct = atr_1d / close_1d
+    volatility_ma = pd.Series(volatility_pct).rolling(window=VOLATILITY_MA_PERIOD, min_periods=VOLATILITY_MA_PERIOD).mean().values
+    volatility_ma_aligned = align_htf_to_ltf(prices, df_1d, volatility_ma)
+    
+    # Calculate 12h indicators
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # 12h volume MA
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR for stoploss
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
+    
+    # Start from warmup period
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, VOLATILITY_MA_PERIOD, ATR_PERIOD) + 1
+    
+    for i in range(start, n):
+        # Skip if weekly volume or daily volatility not available
+        if np.isnan(volume_ma_1w_aligned[i]) or np.isnan(volatility_ma_aligned[i]):
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Check stoploss
+        if position == 1:  # long position
+            if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
-            else:
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # Volume confirmation: weekly volume above MA
+        volume_ok = volume_ma_1w_aligned[i] > 0 and volume[i] > (volume_ma_1w_aligned[i] * VOLUME_THRESHOLD)
+        
+        # Volatility filter: avoid low volatility (choppy) markets
+        vol_ok = volatility_ma_aligned[i] > VOLATILITY_THRESHOLD
+        
+        # Donchian breakout signals
+        breakout_up = volume_ok and vol_ok and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and vol_ok and (low[i] < lowest_low[i-1])
+        
+        # Generate signals
+        if position == 0:
+            if breakout_up:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            signals[i] = -SIGNAL_SIZE
     
     return signals
