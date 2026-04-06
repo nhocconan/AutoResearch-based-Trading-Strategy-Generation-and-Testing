@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Camarilla pivot reversal with 1-day trend filter and volume confirmation.
-# Uses 1-day EMA(50) for trend direction, Camarilla levels from 1d for reversal entries,
-# and volume spike for confirmation. Designed for 100-180 total trades over 4 years.
-# Works in bull (fade at S3/S4 in uptrend) and bear (fade at R3/R4 in downtrend) markets.
-# Target: 120 total trades, 0.25 position size, max DD < -50%.
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation (1.5x volume).
+# Uses 1d trend for direction, 12h Donchian breakouts for entries, volume for confirmation.
+# Designed for ~100 total trades over 4 years (25/year) to avoid fee drain.
+# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
+# Target: 50-150 total trades, 0.25 position size, max DD < -50%.
 
-name = "exp_13711_6h_camarilla1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_13712_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
-# Parameters
-CAMARILLA_MULT = 1.1  # Standard Camarilla multiplier
+# Parameters - tuned for moderate trade frequency
+DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
-VOLUME_MA_PERIOD = 10
-VOLUME_THRESHOLD = 1.8
+VOLUME_MA_PERIOD = 8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -41,7 +41,7 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load 1d data for trend filter and Camarilla levels ONCE before loop
+    # Load 1d data for trend filter ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d EMA for trend filter
@@ -49,29 +49,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate Camarilla levels from 1d OHLC
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d_prev = df_1d['close'].shift(1).fillna(method='bfill').values  # Previous day close
-    
-    # Camarilla levels: H4/L4, H3/L3, H2/L2, H1/L1
-    # H4 = Close + 1.1*(High-Low)*1.1/2
-    # L4 = Close - 1.1*(High-Low)*1.1/2
-    # H3 = Close + 1.1*(High-Low)*1.1/4
-    # L3 = Close - 1.1*(High-Low)*1.1/4
-    range_1d = high_1d - low_1d
-    h4 = close_1d_prev + CAMARILLA_MULT * range_1d * 1.1 / 2
-    l4 = close_1d_prev - CAMARILLA_MULT * range_1d * 1.1 / 2
-    h3 = close_1d_prev + CAMARILLA_MULT * range_1d * 1.1 / 4
-    l3 = close_1d_prev - CAMARILLA_MULT * range_1d * 1.1 / 4
-    
-    # Align Camarilla levels to 6h timeframe
-    h4_aligned = align_htf_to_ltf(prices, df_1d, h4)
-    l4_aligned = align_htf_to_ltf(prices, df_1d, l4)
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -79,6 +57,10 @@ def generate_signals(prices):
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Donchian channels
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -89,11 +71,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -122,16 +104,19 @@ def generate_signals(prices):
         above_ema = close[i] > ema_1d_aligned[i]
         below_ema = close[i] < ema_1d_aligned[i]
         
-        # Camarilla reversal signals
-        # Long: price rejects at L3/L4 in uptrend (bounce from support)
-        long_signal = volume_ok and above_ema and \
-                    ((low[i] <= l3_aligned[i] and close[i] > l3_aligned[i]) or \
-                     (low[i] <= l4_aligned[i] and close[i] > l4_aligned[i]))
-        
-        # Short: price rejects at H3/H4 in downtrend (rejection from resistance)
-        short_signal = volume_ok and below_ema and \
-                     ((high[i] >= h3_aligned[i] and close[i] < h3_aligned[i]) or \
-                      (high[i] >= h4_aligned[i] and close[i] < h4_aligned[i]))
+        # Donchian breakout signals
+        if i > 0 and not np.isnan(donchian_high[i-1]) and not np.isnan(donchian_low[i-1]):
+            high_prev = donchian_high[i-1]
+            low_prev = donchian_low[i-1]
+            
+            # Long signal: price breaks above Donchian high in uptrend
+            long_signal = volume_ok and above_ema and close[i] > high_prev and close[i-1] <= high_prev
+            
+            # Short signal: price breaks below Donchian low in downtrend
+            short_signal = volume_ok and below_ema and close[i] < low_prev and close[i-1] >= low_prev
+        else:
+            long_signal = False
+            short_signal = False
         
         # Generate signals
         if position == 0:
@@ -148,17 +133,25 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on stop or when price crosses above H3 (failure of bounce)
-            if close[i] >= h3_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # Exit long on opposite Donchian break
+            if i > 0 and not np.isnan(donchian_low[i-1]) and not np.isnan(donchian_low[i]):
+                low_prev = donchian_low[i-1]
+                if close[i] < low_prev and close[i-1] >= low_prev:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = SIGNAL_SIZE
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on stop or when price crosses below L3 (failure of rejection)
-            if close[i] <= l3_aligned[i]:
-                signals[i] = 0.0
-                position = 0
+            # Exit short on opposite Donchian break
+            if i > 0 and not np.isnan(donchian_high[i-1]) and not np.isnan(donchian_high[i]):
+                high_prev = donchian_high[i-1]
+                if close[i] > high_prev and close[i-1] <= high_prev:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -SIGNAL_SIZE
             else:
                 signals[i] = -SIGNAL_SIZE
     
