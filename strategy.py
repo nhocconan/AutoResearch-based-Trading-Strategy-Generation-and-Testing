@@ -3,24 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Elder Ray with 1-day trend filter and volume confirmation.
-# Elder Ray measures bull/bear power using EMA(13). Bull power = high - EMA, Bear power = low - EMA.
-# In bull markets: buy when bull power turns positive with volume confirmation.
-# In bear markets: sell when bear power turns negative with volume confirmation.
-# Uses 1-day EMA for trend filter to avoid counter-trend trades. Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12-hour Camarilla pivot levels with daily volume spike and weekly trend filter.
+# Uses Camarilla levels (H3/L3 for reversal, H4/L4 for breakout) from daily pivots.
+# In ranging markets: fade touches of H3/L3 with volume confirmation.
+# In trending markets: breakouts of H4/L4 with weekly trend alignment.
+# Volume filter ensures institutional participation. Designed for 12h timeframe to avoid overtrading.
 
-name = "exp_13551_6d_elderray1d_vol_v1"
-timeframe = "6h"
+name = "exp_13552_12h_camarilla1d_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-ELDER_RAY_PERIOD = 13
-TREND_EMA_PERIOD = 50
+CAMARILLA_MULT = 1.1  # Standard Camarilla multiplier
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
+EMA_PERIOD = 21
 
 def calculate_ema(close, period):
     """Calculate EMA with proper min_periods"""
@@ -32,39 +32,64 @@ def calculate_atr(high, low, close, period):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    # First TR is just high-low
-    tr[0] = tr1[0]
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels"""
+    pivot = (high + low + close) / 3.0
+    range_val = high - low
+    h4 = pivot + (range_val * 1.1 / 2)
+    l4 = pivot - (range_val * 1.1 / 2)
+    h3 = pivot + (range_val * 1.1 / 4)
+    l3 = pivot - (range_val * 1.1 / 4)
+    h2 = pivot + (range_val * 1.1 / 6)
+    l2 = pivot - (range_val * 1.1 / 6)
+    h1 = pivot + (range_val * 1.1 / 12)
+    l1 = pivot - (range_val * 1.1 / 12)
+    return h1, h2, h3, h4, l1, l2, l3, l4
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load daily data for Camarilla levels ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend filter
+    # Calculate daily Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 6h indicators
+    h1_1d, h2_1d, h3_1d, h4_1d, l1_1d, l2_1d, l3_1d, l4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    
+    # Align Camarilla levels to 12h timeframe
+    h1_1d_aligned = align_htf_to_ltf(prices, df_1d, h1_1d)
+    h2_1d_aligned = align_htf_to_ltf(prices, df_1d, h2_1d)
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
+    l1_1d_aligned = align_htf_to_ltf(prices, df_1d, l1_1d)
+    l2_1d_aligned = align_htf_to_ltf(prices, df_1d, l2_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
+    
+    # Load weekly EMA for trend filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Elder Ray components
-    ema_13 = calculate_ema(close, ELDER_RAY_PERIOD)
-    bull_power = high - ema_13
-    bear_power = low - ema_13
-    
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # ATR for stop loss
+    # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -73,13 +98,13 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ELDER_RAY_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(ema_13[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        # Skip if any data not available
+        if (np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or 
+            np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]) or
+            np.isnan(ema_1w_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -101,22 +126,37 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter from daily EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Trend filter: price above/below weekly EMA
+        uptrend = close[i] > ema_1w_aligned[i]
+        downtrend = close[i] < ema_1w_aligned[i]
         
-        # Elder Ray signals
-        bull_crossover = bull_power[i] > 0 and bull_power[i-1] <= 0
-        bear_crossover = bear_power[i] < 0 and bear_power[i-1] >= 0
+        # Camarilla-based signals
+        # Fade H3/L3 in ranging markets (price touches and reverses)
+        fade_long = volume_ok and (low[i] <= l3_1d_aligned[i]) and (close[i] > l3_1d_aligned[i])
+        fade_short = volume_ok and (high[i] >= h3_1d_aligned[i]) and (close[i] < h3_1d_aligned[i])
+        
+        # Breakout H4/L4 with trend alignment
+        breakout_long = volume_ok and uptrend and (high[i] > h4_1d_aligned[i])
+        breakout_short = volume_ok and downtrend and (low[i] < l4_1d_aligned[i])
         
         # Generate signals
         if position == 0:
-            if bull_crossover and volume_ok and uptrend:
+            if fade_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif bear_crossover and volume_ok and downtrend:
+            elif fade_short:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            elif breakout_long:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
