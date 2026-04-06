@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + Volume Spike + ADX Trend Filter + ATR Stoploss
-Hypothesis: Donchian breakouts on 12h timeframe with volume spike (>1.5x average) and strong trend (ADX>20) capture high-probability moves. ADX filter prevents whipsaws in ranging markets. Target: 50-150 total trades over 4 years.
+4h Donchian(20) Breakout + Volume Spike + ADX Trend Filter + ATR Stoploss
+Hypothesis: Donchian breakouts with volume spike (>2x average) and strong trend (ADX>25) capture high-probability moves. ADX filter prevents whipsaws in ranging markets. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_vol_adx_v1"
-timeframe = "12h"
+name = "4h_donchian20_vol_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -115,10 +115,10 @@ def generate_signals(prices):
         
         # Volume filter (20-period average)
         vol_ma = np.mean(volume[i-20:i])
-        volume_filter = volume[i] > vol_ma * 1.5  # Reduced threshold for more trades
+        volume_filter = volume[i] > vol_ma * 2.0  # Increased threshold for fewer trades
         
         # ADX trend filter (strong trend)
-        trend_filter = adx[i] > 20  # Lowered threshold for more trades
+        trend_filter = adx[i] > 25
         
         # Check exits and stoploss
         if position == 1:  # long position
