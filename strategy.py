@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-12h Donchian breakout with 1d EMA filter and volume concentration.
-Hypothesis: Breakouts aligned with 1d trend (EMA20) and volume concentration
+4h Donchian breakout with 1d EMA filter and volume concentration.
+Hypothesis: Breakouts aligned with daily trend (EMA50) and volume concentration
 capture medium-term trends while avoiding false breakouts. Works in bull (breakouts)
-and bear (breakdowns) with proper filtering. Target: 50-150 trades over 4 years.
+and bear (breakdowns) with proper filtering. Target: 75-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14276_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_14277_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period):
@@ -37,11 +37,11 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA(20)
-    ema_1d = calculate_ema(close_1d, 20)
+    # Calculate 1d EMA(50)
+    ema_1d = calculate_ema(close_1d, 50)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -63,8 +63,8 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 20 for EMA)
-    start = max(20, 20, 14, 20) + 1
+    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 50 for EMA)
+    start = max(20, 20, 14, 50) + 1
     
     for i in range(start, n):
         # Skip if required data not available
