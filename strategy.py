@@ -3,135 +3,145 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13930_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_13931_6d_1d_parabolic_sar_slope_v1"
+timeframe = "6h"
 leverage = 1.0
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation (2.0x)
-# Target: 30-100 trades over 4 years by using strict volume threshold (2.0x) and
-# requiring alignment with weekly trend to avoid counter-trend whipsaws
-# Works in bull (breaks out to new highs) and bear (breaks down to new lows)
-# Exit on Donchian reversal or trend change with ATR-based stop (2.5x)
+# Hypothesis: Parabolic SAR on 1d (trend direction) + SAR slope acceleration on 6h (entry timing)
+# Works in bull: 1d SAR below price (uptrend) + 6h SAR slope turning up = long
+# Works in bear: 1d SAR above price (downtrend) + 6h SAR slope turning down = short
+# Uses SAR as dynamic stop/reversal - tight entries, low whipsaw
+# Target: 60-120 total trades over 4 years (15-30/year)
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian upper and lower bands"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_parabolic_sar(high, low, af_start=0.02, af_increment=0.02, af_max=0.2):
+    """Calculate Parabolic SAR"""
+    n = len(high)
+    sar = np.zeros(n)
+    trend = np.zeros(n)  # 1 for uptrend, -1 for downtrend
+    af = np.zeros(n)
+    ep = np.zeros(n)  # extreme point
+    
+    # Initialize
+    sar[0] = low[0]
+    trend[0] = 1
+    af[0] = af_start
+    ep[0] = high[0]
+    
+    for i in range(1, n):
+        if trend[i-1] == 1:  # uptrend
+            sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
+            if low[i] <= sar[i]:  # trend reversal
+                trend[i] = -1
+                sar[i] = ep[i-1]
+                af[i] = af_start
+                ep[i] = low[i]
+            else:
+                trend[i] = 1
+                if high[i] > ep[i-1]:
+                    ep[i] = high[i]
+                    af[i] = min(af[i-1] + af_increment, af_max)
+                else:
+                    ep[i] = ep[i-1]
+                    af[i] = af[i-1]
+        else:  # downtrend
+            sar[i] = sar[i-1] + af[i-1] * (ep[i-1] - sar[i-1])
+            if high[i] >= sar[i]:  # trend reversal
+                trend[i] = 1
+                sar[i] = ep[i-1]
+                af[i] = af_start
+                ep[i] = high[i]
+            else:
+                trend[i] = -1
+                if low[i] < ep[i-1]:
+                    ep[i] = low[i]
+                    af[i] = min(af[i-1] + af_increment, af_max)
+                else:
+                    ep[i] = ep[i-1]
+                    af[i] = af[i-1]
+    
+    return sar, trend
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
+def calculate_sar_slope(sar, period=3):
+    """Calculate SAR slope (rate of change)"""
+    sar_series = pd.Series(sar)
+    slope = sar_series.diff(period) / period  # change over period
+    return slope.values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 30:
         return np.zeros(n)
     
-    # Load 1w data for trend filter ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for trend filter ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA for trend direction
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, 50)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 1d Parabolic SAR for trend direction
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    sar_1d, trend_1d = calculate_parabolic_sar(high_1d, low_1d)
+    sar_1d_aligned = align_htf_to_ltf(prices, df_1d, sar_1d)
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # 1d data for Donchian, ATR, and volume
+    # 6h data for SAR slope and price
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
-    
-    # ATR for stop loss
-    atr = calculate_atr(high, low, close, 14)
-    
-    # Volume confirmation
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Calculate 6h Parabolic SAR and its slope
+    sar_6h, trend_6h = calculate_parabolic_sar(high, low)
+    sar_slope = calculate_sar_slope(sar_6h, 3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    stop_price = 0.0
     
     # Start from warmup period
-    start = max(20, 50, 20) + 1
+    start = max(10, 3) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
+        if (np.isnan(sar_1d_aligned[i]) or np.isnan(trend_1d_aligned[i]) or 
+            np.isnan(sar_slope[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check stops
-        if position == 1:  # long position
-            # Check stop loss
-            if close[i] <= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
+        # Trend filter from 1d SAR
+        # In uptrend: SAR below price, in downtrend: SAR above price
+        trend_up = sar_1d_aligned[i] < close[i]
+        trend_down = sar_1d_aligned[i] > close[i]
         
-        elif position == -1:  # short position
-            # Check stop loss
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
+        # SAR slope acceleration on 6h
+        # Positive slope = SAR moving up (accelerating uptrend)
+        # Negative slope = SAR moving down (accelerating downtrend)
+        slope_up = sar_slope[i] > 0
+        slope_down = sar_slope[i] < 0
         
-        # Volume confirmation - higher threshold to reduce trades
-        volume_ok = volume[i] > (volume_ma[i] * 2.0)
-        
-        # Trend filter from 1w EMA
-        trend_up = close[i] > ema_1w_aligned[i]
-        trend_down = close[i] < ema_1w_aligned[i]
-        
-        # Donchian breakout signals
-        breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
-        breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
-        
-        # Entry signals
-        long_signal = volume_ok and trend_up and breakout_up
-        short_signal = volume_ok and trend_down and breakout_down
+        # Entry signals: trend alignment + slope acceleration
+        long_signal = trend_up and slope_up
+        short_signal = trend_down and slope_down
         
         # Generate signals
         if position == 0:
             if long_signal:
                 signals[i] = 0.25
                 position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (2.5 * atr[i])
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (2.5 * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on Donchian breakdown or trend change
-            if close[i] < donchian_lower[i] or not trend_up:
+            # Exit long when trend turns down or slope turns negative
+            if not trend_up or not slope_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short on Donchian breakout or trend change
-            if close[i] > donchian_upper[i] or not trend_down:
+            # Exit short when trend turns up or slope turns positive
+            if not trend_down or not slope_down:
                 signals[i] = 0.0
                 position = 0
             else:
