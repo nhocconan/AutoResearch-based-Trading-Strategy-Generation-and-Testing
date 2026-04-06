@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
-# Enter long when: price breaks above Donchian(20) upper band, price > 1d EMA(50), volume > 1.5x avg
-# Enter short when: price breaks below Donchian(20) lower band, price < 1d EMA(50), volume > 1.5x avg
-# Exit when: price touches opposite Donchian band OR volume drops below average
-# Uses daily trend to avoid counter-trend trades, targeting 100-150 trades over 4 years
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+# Enter long when: price breaks above Donchian upper channel (20-period high), price > 1d EMA(50), volume > 1.5x avg volume
+# Enter short when: price breaks below Donchian lower channel (20-period low), price < 1d EMA(50), volume > 1.5x avg volume
+# Exit when: price crosses Donchian midline (10-period average of high/low) OR opposite breakout occurs
+# Uses daily trend to filter breakouts in alignment with higher timeframe momentum, targeting 100-200 trades over 4 years
 
-name = "12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1dema_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,11 +24,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
-    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    # Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_upper = high_roll.values
+    donchian_lower = low_roll.values
+    donchian_middle = ((donchian_upper + donchian_lower) / 2).astype(float)
     
     # 1d EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -39,14 +40,13 @@ def generate_signals(prices):
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_threshold = 1.5 * volume_ma
-    volume_avg = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -55,27 +55,27 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price touches lower Donchian band OR volume < average
-            if close[i] <= donchian_low[i] or volume[i] < volume_avg[i]:
+            # Exit: price crosses below Donchian middle OR opposite breakout (below lower band)
+            if close[i] < donchian_middle[i] or close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price touches upper Donchian band OR volume < average
-            if close[i] >= donchian_high[i] or volume[i] < volume_avg[i]:
+            # Exit: price crosses above Donchian middle OR opposite breakout (above upper band)
+            if close[i] > donchian_middle[i] or close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + trend filter + volume confirmation
+            # Look for breakouts: price breaks Donchian band + trend filter + volume
             if volume[i] > volume_threshold[i]:
-                if close[i] > donchian_high[i] and close[i] > ema_50_aligned[i]:
+                if close[i] > donchian_upper[i] and close[i] > ema_50_aligned[i]:
                     # Bullish breakout above upper band with daily uptrend
                     signals[i] = 0.25
                     position = 1
-                elif close[i] < donchian_low[i] and close[i] < ema_50_aligned[i]:
+                elif close[i] < donchian_lower[i] and close[i] < ema_50_aligned[i]:
                     # Bearish breakout below lower band with daily downtrend
                     signals[i] = -0.25
                     position = -1
