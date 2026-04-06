@@ -6,7 +6,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
 # Works in bull: breakouts capture momentum. Works in bear: EMA filter avoids false breakdowns in downtrends.
 # Volume filter ensures institutional participation. Target: 75-200 trades over 4 years.
-name = "exp_14120_4h_donchian20_1d_ema_vol_v1"
+name = "exp_14121_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
