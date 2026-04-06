@@ -3,46 +3,43 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot reversal strategy with volume confirmation and volatility filter.
-# Goes long at Camarilla L3 support with volume spike in non-volatile market,
-# short at H3 resistance with volume spike in non-volatile market.
-# Uses 1-day Camarilla levels (calculated from prior day OHLC) as key support/resistance.
-# Works in both bull and bear markets by fading extremes at statistically significant levels.
-# Volume confirmation ensures institutional participation, volatility filter avoids choppy markets.
-# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+# Hypothesis: 6h strategy using 1-day Camarilla pivot levels for breakout and fade signals.
+# Long when price breaks above R4 with volume confirmation and price > 1w EMA200.
+# Short when price breaks below S4 with volume confirmation and price < 1w EMA200.
+# Fade longs at R3 and shorts at S3 with reduced position size.
+# Uses 1-week EMA200 as trend filter to align with higher timeframe trend.
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Works in bull (R4 breakouts) and bear (S4 breakdowns) markets.
+# Camarilla levels provide mathematically derived support/resistance that adapt to volatility.
 
-name = "exp_13786_4h_camarilla_vol_volfilt_v1"
-timeframe = "4h"
+name = "exp_13787_6h_camarilla1d_ema200w_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_LOOKBACK = 1  # Use previous day for pivot calculation
+CAMARILLA_PERIOD = 1  # Use previous day's OHLC
+EMA_TREND_PERIOD = 200
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.8
-VOLATILITY_LOOKBACK = 20
-VOLATILITY_THRESHOLD = 0.02  # 2% daily ATR as percentage of price
 SIGNAL_SIZE = 0.25
+FADE_SIZE = 0.125  # Half position for fade trades
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given OHLC"""
-    # Typical price
-    typical = (high + low + close) / 3
-    # Range
-    range_val = high - low
-    
-    # Camarilla levels
-    H4 = close + range_val * 1.1 / 2
-    H3 = close + range_val * 1.1 / 4
-    H2 = close + range_val * 1.1 / 6
-    H1 = close + range_val * 1.1 / 12
-    L1 = close - range_val * 1.1 / 12
-    L2 = close - range_val * 1.1 / 6
-    L3 = close - range_val * 1.1 / 4
-    L4 = close - range_val * 1.1 / 2
-    
-    return H3, L3, H4, L4  # Return key levels for trading
+    """Calculate Camarilla pivot levels for given period"""
+    # Camarilla formula based on previous period's range
+    range_ = high - low
+    # Calculate levels
+    r4 = close + range_ * 1.1 / 2
+    r3 = close + range_ * 1.1 / 4
+    s3 = close - range_ * 1.1 / 4
+    s4 = close - range_ * 1.1 / 2
+    return r4, r3, s3, s4
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -56,47 +53,49 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
-    # Load 1d data for Camarilla pivots and volatility filter ONCE before loop
+    # Load 1d data for Camarilla pivot levels (from previous day) ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Camarilla levels from previous day's OHLC
+    # Calculate 1d Camarilla levels using previous day's OHLC
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
     # Shift by 1 to use previous day's levels (avoid look-ahead)
-    camarilla_H3, camarilla_L3, camarilla_H4, camarilla_L4 = calculate_camarilla(high_1d, low_1d, close_1d)
-    camarilla_H3 = np.roll(camarilla_H3, 1)
-    camarilla_L3 = np.roll(camarilla_L3, 1)
-    camarilla_H4 = np.roll(camarilla_H4, 1)
-    camarilla_L4 = np.roll(camarilla_L4, 1)
-    # First day has no previous day
-    camarilla_H3[0] = np.nan
-    camarilla_L3[0] = np.nan
-    camarilla_H4[0] = np.nan
-    camarilla_L4[0] = np.nan
+    high_1d_prev = np.roll(high_1d, 1)
+    low_1d_prev = np.roll(low_1d, 1)
+    close_1d_prev = np.roll(close_1d, 1)
+    # Set first value to NaN as there's no previous day
+    high_1d_prev[0] = np.nan
+    low_1d_prev[0] = np.nan
+    close_1d_prev[0] = np.nan
     
-    # Calculate 1d volatility (ATR as percentage of price)
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, ATR_PERIOD)
-    volatility = atr_1d / close_1d  # ATR as fraction of price
+    camarilla_r4, camarilla_r3, camarilla_s3, camarilla_s4 = calculate_camarilla(
+        high_1d_prev, low_1d_prev, close_1d_prev
+    )
     
-    # Align 1d indicators to 4h timeframe
-    camarilla_H3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H3)
-    camarilla_L3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L3)
-    camarilla_H4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_H4)
-    camarilla_L4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_L4)
-    volatility_aligned = align_htf_to_ltf(prices, df_1d, volatility)
+    # Load 1w data for EMA200 trend filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_200w = calculate_ema(close_1w, EMA_TREND_PERIOD)
     
-    # 4h data for entry execution and ATR
+    # Align indicators to 6h timeframe
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
+    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    ema_200w_aligned = align_htf_to_ltf(prices, df_1w, ema_200w)
+    
+    # 6h data for entry timing and ATR
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ATR for stop loss (4h)
+    # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     # Volume confirmation
@@ -108,12 +107,13 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, 2) + 1  # Need at least 2 days for volatility
+    start = max(EMA_TREND_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(camarilla_H3_aligned[i]) or np.isnan(camarilla_L3_aligned[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(volatility_aligned[i])):
+        if (np.isnan(camarilla_r4_aligned[i]) or np.isnan(camarilla_r3_aligned[i]) or 
+            np.isnan(camarilla_s3_aligned[i]) or np.isnan(camarilla_s4_aligned[i]) or 
+            np.isnan(ema_200w_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -135,45 +135,58 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation: volume above average
+        # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Volatility filter: avoid extremely volatile markets (chaotic)
-        vol_ok = volatility_aligned[i] < VOLATILITY_THRESHOLD
+        # Trend direction from 1w EMA200
+        above_ema = close[i] > ema_200w_aligned[i]
+        below_ema = close[i] < ema_200w_aligned[i]
         
-        # Camarilla level conditions
-        at_H3 = abs(close[i] - camarilla_H3_aligned[i]) < (camarilla_H4_aligned[i] - camarilla_H3_aligned[i]) * 0.1
-        at_L3 = abs(close[i] - camarilla_L3_aligned[i]) < (camarilla_L3_aligned[i] - camarilla_L4_aligned[i]) * 0.1
+        # Breakout signals
+        long_breakout = volume_ok and above_ema and close[i] > camarilla_r4_aligned[i]
+        short_breakout = volume_ok and below_ema and close[i] < camarilla_s4_aligned[i]
+        
+        # Fade signals (counter-trend at R3/S3)
+        long_fade = volume_ok and below_ema and close[i] < camarilla_r3_aligned[i] and close[i] > camarilla_s3_aligned[i]
+        short_fade = volume_ok and above_ema and close[i] > camarilla_s3_aligned[i] and close[i] < camarilla_r3_aligned[i]
         
         # Generate signals
         if position == 0:
-            # Long at L3 support with volume and low volatility
-            if at_L3 and volume_ok and vol_ok:
+            if long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            # Short at H3 resistance with volume and low volatility
-            elif at_H3 and volume_ok and vol_ok:
+            elif short_breakout:
                 signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            elif long_fade:
+                signals[i] = FADE_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif short_fade:
+                signals[i] = -FADE_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long at H3 (opposite level) or stop
-            if close[i] >= camarilla_H3_aligned[i]:
+            # Exit long on close below S3 (support break) or above R4 with weakening momentum
+            if close[i] < camarilla_s3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = SIGNAL_SIZE
+                signals[i] = SIGNAL_SIZE if position == 1 else 0.0
         elif position == -1:
-            # Exit short at L3 (opposite level) or stop
-            if close[i] <= camarilla_L3_aligned[i]:
+            # Exit short on close above R3 (resistance break) or below S4 with weakening momentum
+            if close[i] > camarilla_r3_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -SIGNAL_SIZE
+                signals[i] = -SIGNAL_SIZE if position == -1 else 0.0
     
     return signals
