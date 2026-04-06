@@ -1,67 +1,47 @@
 #!/usr/bin/env python3
 """
-4h Bollinger Band Squeeze + Mean Reversion.
-Hypothesis: In low volatility regimes (BB squeeze), price tends to revert to the mean.
-Long when price touches lower BB in squeeze, short when touches upper BB.
-Exit when price returns to middle band or volatility expands.
-Works in both bull (buy dips) and bear (sell rallies) markets.
-Target: 75-200 total trades over 4 years (19-50/year).
+1d Donchian Breakout with 1w Trend Filter and Volume Confirmation.
+Hypothesis: Price breaks above/below weekly-adjusted Donchian(20) channels
+with volume confirmation capture true breakouts in both bull and bear markets.
+Weekly EMA50 filter ensures alignment with higher timeframe trend.
+Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14317_4h_bb_squeeze_meanrev_v1"
-timeframe = "4h"
+name = "exp_14318_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 1d data for trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load 1w data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 50-period EMA for daily trend filter
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 50-period EMA for weekly trend filter
+    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 4h data
+    # Daily data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2.0
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper_band = sma + (bb_std * std)
-    lower_band = sma - (bb_std * std)
+    # Donchian Channel (20-period high/low)
+    donch_period = 20
+    upper_channel = pd.Series(high).rolling(window=donch_period, min_periods=donch_period).max().values
+    lower_channel = pd.Series(low).rolling(window=donch_period, min_periods=donch_period).min().values
     
-    # Bollinger Band Width for squeeze detection
-    bb_width = (upper_band - lower_band) / sma
-    # Squeeze when BBW is below 20-period average (low volatility)
-    bbw_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze = bb_width < bbw_ma
-    
-    # RSI for mean reversion confirmation
-    rsi_period = 14
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # Volume confirmation: volume > 1.2x average
+    # Volume confirmation: volume > 1.5x 20-day average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.2 * vol_ma)
+    vol_confirm = volume > (1.5 * vol_ma)
     
     # ATR for stoploss
     tr1 = high - low
@@ -76,12 +56,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(bb_period, 20, rsi_period) + 1
+    start = max(donch_period, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(sma[i]) or np.isnan(upper_band[i]) or \
-           np.isnan(lower_band[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or \
+           np.isnan(vol_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -90,29 +70,33 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price returns to middle band OR stoploss
-            if close[i] >= sma[i] or close[i] <= entry_price - 2.0 * atr[i]:
+            # Exit: price returns to lower channel OR stoploss
+            if close[i] <= lower_channel[i] or close[i] <= entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price returns to middle band OR stoploss
-            if close[i] <= sma[i] or close[i] >= entry_price + 2.0 * atr[i]:
+            # Exit: price returns to upper channel OR stoploss
+            if close[i] >= upper_channel[i] or close[i] >= entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: BB squeeze + price at band + RSI extreme + volume
-            long_setup = squeeze[i] and (close[i] <= lower_band[i]) and (rsi[i] < 30) and vol_confirm[i]
-            short_setup = squeeze[i] and (close[i] >= upper_band[i]) and (rsi[i] > 70) and vol_confirm[i]
+            # Look for entries: Donchian breakout + volume + weekly trend filter
+            long_breakout = close[i] > upper_channel[i]
+            short_breakout = close[i] < lower_channel[i]
             
-            if long_setup:
+            # Weekly trend filter: only trade in direction of weekly EMA50
+            weekly_uptrend = close[i] > ema_1w_aligned[i]
+            weekly_downtrend = close[i] < ema_1w_aligned[i]
+            
+            if long_breakout and vol_confirm[i] and weekly_uptrend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_setup:
+            elif short_breakout and vol_confirm[i] and weekly_downtrend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
