@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
-# In bull markets, breakouts capture strong uptrends; in bear markets, they catch sharp downtrends.
-# The daily EMA ensures alignment with higher timeframe momentum, while volume filters out false breakouts.
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag and improve generalization.
-# This strategy builds on proven Donchian breakout patterns but uses daily timeframe for better trend filtering.
+# Hypothesis: 4-hour Donchian(20) breakout with daily EMA trend filter and volume confirmation.
+# Breakouts capture momentum in both bull and bear markets. Daily EMA ensures alignment with higher timeframe trend.
+# Volume confirmation filters false breakouts. Target: 100-200 total trades over 4 years (25-50/year).
+# Uses ATR-based stoploss to manage risk. Designed for BTC/ETH/SOL across market regimes.
 
 name = "exp_13286_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
@@ -15,7 +14,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 20  # Daily EMA for trend filter
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
