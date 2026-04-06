@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d trend for direction bias and volume for conviction. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend). Target: 75-150 trades over 4 years (19-38/year) to balance opportunity and cost.
+4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d trend for direction bias and volume for conviction. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend). Target: 100-180 trades over 4 years (25-45/year) to balance opportunity and cost.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dtrend_vol_v2"
-timeframe = "12h"
+name = "4h_donchian20_1dtrend_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -48,7 +48,7 @@ def generate_signals(prices):
     # Trend bias: above EMA = bullish, below = bearish
     trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     trend_bias_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
     
     # Donchian channels (20-period) from 1d data
@@ -63,7 +63,7 @@ def generate_signals(prices):
         upper_1d[i] = np.max(high_1d[i-20:i])
         lower_1d[i] = np.min(low_1d[i-20:i])
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     upper_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
     lower_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
     
@@ -143,3 +143,4 @@ def generate_signals(prices):
                 bars_since_entry += 1
     
     return signals
+</s>
