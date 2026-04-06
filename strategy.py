@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray Index + Weekly Trend Filter
-Hypothesis: Elder Ray (Bull Power/Bear Power) identifies institutional buying/selling pressure.
-Combined with weekly trend (price vs 200 EMA) to filter direction. Works in bull (buy on bull power)
-and bear (sell on bear power). Target: 80-150 total trades over 4 years (20-38/year).
-Uses weekly trend filter to avoid counter-trend trades. Volume confirmation reduces false signals.
+12h Camarilla Pivot + Volume + Chop Regime
+Hypothesis: Camarilla pivot levels from daily timeframe provide institutional support/resistance.
+Price approaching these levels with volume confirmation and in choppy market (range-bound) 
+offers mean-reversion opportunities. Works in both bull and bear markets as price respects 
+these levels during consolidation periods. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "14435_6h_elder_ray_weekly_trend_v1"
-timeframe = "6h"
+name = "14436_12h_camarilla_pivot_vol_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,34 +20,66 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 1d data for Camarilla pivots (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Weekly 200 EMA for trend filter
-    close_1w_series = pd.Series(close_1w)
-    ema200_1w = close_1w_series.ewm(span=200, min_periods=200, adjust=False).mean().values
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    # Calculate Camarilla pivot levels for previous day
+    # PP = (High + Low + Close) / 3
+    # R4 = Close + ((High - Low) * 1.1 / 2)
+    # R3 = Close + ((High - Low) * 1.1/4)
+    # R2 = Close + ((High - Low) * 1.1/6)
+    # R1 = Close + ((High - Low) * 1.1/12)
+    # S1 = Close - ((High - Low) * 1.1/12)
+    # S2 = Close - ((High - Low) * 1.1/6)
+    # S3 = Close - ((High - Low) * 1.1/4)
+    # S4 = Close - ((High - Low) * 1.1/2)
     
-    # 6h data
+    pp = (high_1d + low_1d + close_1d) / 3
+    range_hl = high_1d - low_1d
+    
+    r4 = close_1d + (range_hl * 1.1 / 2)
+    r3 = close_1d + (range_hl * 1.1 / 4)
+    r2 = close_1d + (range_hl * 1.1 / 6)
+    r1 = close_1d + (range_hl * 1.1 / 12)
+    s1 = close_1d - (range_hl * 1.1 / 12)
+    s2 = close_1d - (range_hl * 1.1 / 6)
+    s3 = close_1d - (range_hl * 1.1 / 4)
+    s4 = close_1d - (range_hl * 1.1 / 2)
+    
+    # Align Camarilla levels to 12h timeframe
+    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Elder Ray components (13-period EMA)
-    ema13 = pd.Series(close).ewm(span=13, min_periods=13, adjust=False).mean().values
+    # Choppy market filter using Choppy Index (EHLERS)
+    def calculate_chop(high, low, close, window=14):
+        """Calculate Choppy Index - values > 61.8 indicate ranging market"""
+        atr_sum = pd.Series(high - low).rolling(window=window, min_periods=window).sum()
+        highest_high = pd.Series(high).rolling(window=window, min_periods=window).max()
+        lowest_low = pd.Series(low).rolling(window=window, min_periods=window).min()
+        true_range = highest_high - lowest_low
+        chop = 100 * np.log10(atr_sum / true_range) / np.log10(window)
+        return chop.fillna(50).values  # neutral when undefined
     
-    # Bull Power = High - EMA13
-    bull_power = high - ema13
-    # Bear Power = Low - EMA13
-    bear_power = low - ema13
+    chop = calculate_chop(high, low, close, window=14)
+    chop_filter = chop > 61.8  # choppy/ranging market
     
-    # Smooth the power values (13-period EMA)
-    bull_power_smooth = pd.Series(bull_power).ewm(span=13, min_periods=13, adjust=False).mean().values
-    bear_power_smooth = pd.Series(bear_power).ewm(span=13, min_periods=13, adjust=False).mean().values
-    
-    # Volume filter: avoid low volume periods
+    # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (0.7 * vol_ma)  # Require at least 70% of average volume
     
@@ -64,45 +96,55 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(13, 200) + 10
+    start = 20  # need enough data for indicators
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i]) or
-            np.isnan(ema200_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(s2_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(chop[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Determine weekly trend
-        weekly_uptrend = close[i] > ema200_1w_aligned[i]
-        weekly_downtrend = close[i] < ema200_1w_aligned[i]
+        # Check if we're in choppy market
+        if not chop_filter[i]:
+            # In trending market, reduce activity or go flat
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            continue
         
         # Check exits
         if position == 1:  # long position
-            # Exit: bear power turns positive (selling pressure) OR stoploss
-            if (bear_power_smooth[i] > 0 or
-                close[i] <= entry_price - 2.5 * atr[i]):
+            # Exit: price reaches S1 (stop loss) or R1 (take profit) or chop ends
+            if (close[i] <= s1_aligned[i] or close[i] >= r1_aligned[i] or chop[i] <= 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: bull power turns negative (buying pressure) OR stoploss
-            if (bull_power_smooth[i] < 0 or
-                close[i] >= entry_price + 2.5 * atr[i]):
+            # Exit: price reaches R1 (stop loss) or S1 (take profit) or chop ends
+            if (close[i] >= r1_aligned[i] or close[i] <= s1_aligned[i] or chop[i] <= 61.8):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Elder Ray signals + weekly trend + volume
-            long_setup = (bull_power_smooth[i] > 0 and bear_power_smooth[i] < 0 and
-                         weekly_uptrend and vol_filter[i])
-            short_setup = (bear_power_smooth[i] > 0 and bull_power_smooth[i] < 0 and
-                          weekly_downtrend and vol_filter[i])
+            # Look for mean-reversion entries near pivot levels
+            # Long when price touches/slightly penetrates S1 with rejection
+            long_setup = (close[i] <= s1_aligned[i] * 1.002 and  # allow slight penetration
+                         close[i] > s1_aligned[i] and  # but close above the level
+                         vol_filter[i])
+            
+            # Short when price touches/slightly penetrates R1 with rejection
+            short_setup = (close[i] >= r1_aligned[i] * 0.998 and  # allow slight penetration
+                          close[i] < r1_aligned[i] and  # but close below the level
+                          vol_filter[i])
             
             if long_setup:
                 signals[i] = 0.25
