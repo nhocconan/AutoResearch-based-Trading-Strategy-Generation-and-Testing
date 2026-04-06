@@ -1,57 +1,49 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1d trend filter and volume confirmation
-Hypothesis: Donchian breakouts capture strong momentum moves. 1d EMA50 filters trend direction to avoid counter-trend trades. Volume confirms institutional participation. Works in both bull (buy breakouts above) and bear (sell breakdowns below). Target: 50-150 total trades over 4 years.
+4h Donchian(20) breakout with 12h trend filter and volume confirmation
+Hypothesis: Donchian breakouts capture momentum; 12h EMA50 filters for trend alignment; volume confirms institutional participation. Works in both bull and bear markets by filtering breakout direction with higher timeframe trend. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian20_12h_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data for trend filter (once before loop)
+    df_12h = get_htf_data(prices, '12h')
     
-    # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_prev = np.roll(ema50_1d, 1)
-    ema50_1d_prev[0] = ema50_1d[0]
-    ema50_rising = ema50_1d > ema50_1d_prev
-    ema50_falling = ema50_1d < ema50_1d_prev
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema50_rising_aligned = align_htf_to_ltf(prices, df_1d, ema50_rising)
-    ema50_falling_aligned = align_htf_to_ltf(prices, df_1d, ema50_falling)
+    # 12h EMA50 for trend filter
+    close_12h = df_12h['close'].values
+    ema50_12h = pd.Series(close_12h).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_12h_prev = np.roll(ema50_12h, 1)
+    ema50_12h_prev[0] = ema50_12h[0]
+    ema50_rising = ema50_12h > ema50_12h_prev
+    ema50_falling = ema50_12h < ema50_12h_prev
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    ema50_rising_aligned = align_htf_to_ltf(prices, df_12h, ema50_rising)
+    ema50_falling_aligned = align_htf_to_ltf(prices, df_12h, ema50_falling)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.max(arr[i-window+1:i+1])
-        return res
-    
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.min(arr[i-window+1:i+1])
-        return res
-    
-    donchian_high = rolling_max(high, 20)
-    donchian_low = rolling_min(low, 20)
+    # Donchian(20) channels
+    lookback = 20
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    for i in range(lookback, n):
+        upper[i] = np.max(high[i-lookback:i])
+        lower[i] = np.min(low[i-lookback:i])
     
     # Volume filter: 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -61,13 +53,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 50  # For EMA50 and Donchian
+    start = max(50, lookback)  # For EMA50 and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(ema50_rising_aligned[i]) or np.isnan(ema50_falling_aligned[i])):
+        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+            np.isnan(ema50_12h_aligned[i]) or np.isnan(ema50_rising_aligned[i]) or 
+            np.isnan(ema50_falling_aligned[i]) or np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -76,36 +68,34 @@ def generate_signals(prices):
         
         # Check exits: reverse signal or stoploss
         if position == 1:  # long position
-            # Exit: price crosses below Donchian low OR stoploss
-            atr = (high[i] - low[i])  # Simple ATR proxy
-            if (close[i] <= donchian_low[i] or 
-                close[i] <= entry_price - 2.0 * atr):
+            # Exit: price breaks below lower Donchian OR stoploss
+            if (close[i] <= lower[i] or 
+                close[i] <= entry_price - 2.5 * (high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price crosses above Donchian high OR stoploss
-            atr = (high[i] - low[i])
-            if (close[i] >= donchian_high[i] or 
-                close[i] >= entry_price + 2.0 * atr):
+            # Exit: price breaks above upper Donchian OR stoploss
+            if (close[i] >= upper[i] or 
+                close[i] >= entry_price + 2.5 * (high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
             # Look for entries: Donchian breakout + trend + volume
-            long_breakout = close[i] > donchian_high[i]
-            short_breakout = close[i] < donchian_low[i]
+            bull_breakout = close[i] > upper[i]
+            bear_breakout = close[i] < lower[i]
             
-            long_entry = long_breakout and ema50_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
-            short_entry = short_breakout and ema50_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bull_entry = bull_breakout and ema50_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bear_entry = bear_breakout and ema50_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
             
-            if long_entry:
+            if bull_entry:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_entry:
+            elif bear_entry:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
@@ -113,3 +103,5 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
+
+</lyzard>
