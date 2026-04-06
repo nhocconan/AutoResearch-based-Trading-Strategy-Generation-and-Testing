@@ -8,12 +8,10 @@ timeframe = "4h"
 leverage = 1.0
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-# Uses 1d EMA(50) for trend direction: price above EMA = bullish bias (long only),
-# price below EMA = bearish bias (short only). Entry on 4h Donchian breakout in
-# direction of 1d trend with volume > 1.5x average. Exit on Donchian reversal or
-# trend change. Designed for 75-200 total trades over 4 years (19-50/year) to
-# minimize fee drag. Works in bull (breaks above with trend) and bear (breaks
-# below with trend) with EMA filter.
+# Goes long when price breaks above Donchian upper band during 1d uptrend with volume > 1.5x average.
+# Goes short when price breaks below Donchian lower band during 1d downtrend with volume > 1.5x average.
+# Uses 2x ATR stop loss. Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+# Works in bull (breaks above with trend) and bear (breaks below with trend) with EMA filter.
 
 def calculate_ema(close, period):
     """Calculate Exponential Moving Average"""
