@@ -3,74 +3,77 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with 1d trend filter
-# - Use Ichimoku (Tenkan-sen, Kijun-sen, Senkou Span A/B) on 6h
-# - Long when price > Kumo (cloud) and TK cross bullish, confirmed by 1d uptrend (price > 1d EMA200)
-# - Short when price < Kumo and TK cross bearish, confirmed by 1d downtrend (price < 1d EMA200)
-# - Exit when TK cross reverses or price enters cloud
-# - Ichimoku provides built-in support/resistance and trend strength
-# - 1d EMA200 filter ensures we trade with higher timeframe trend
-# - Target: 50-150 trades over 4 years
+# Hypothesis: 12h Donchian(20) breakout with daily volume confirmation and ADX trend filter
+# Enter long on breakout above 20-period high when ADX > 25 and volume > 1.5x average
+# Enter short on breakdown below 20-period low when ADX > 25 and volume > 1.5x average
+# Exit when price returns to opposite Donchian band or ADX < 20 (trend weakening)
+# Uses daily trend filter to avoid counter-trend trades in choppy markets
+# Target: 60-120 trades over 4 years (15-30/year) with focus on strong trending moves
 
-name = "6h_ichimoku_1dema200_trend_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Ichimoku components on 6h
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    period9_high = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    period9_low = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (period9_high + period9_low) / 2
+    # Donchian channels (20-period)
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_high = high_roll.values
+    donchian_low = low_roll.values
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    period26_high = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    period26_low = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (period26_high + period26_low) / 2
+    # ADX for trend strength (14-period)
+    # Calculate True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = 0  # First element has no previous close
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
     
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    up_move[0] = 0
+    down_move[0] = 0
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
     
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    period52_high = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    period52_low = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (period52_high + period52_low) / 2
+    # Smoothed values
+    tr_14 = pd.Series(tr).rolling(window=14, min_periods=14).sum()
+    plus_dm_14 = pd.Series(plus_dm).rolling(window=14, min_periods=14).sum()
+    minus_dm_14 = pd.Series(minus_dm).rolling(window=14, min_periods=14).sum()
     
-    # Kumo (Cloud) boundaries: Senkou Span A and B shifted forward 26 periods
-    # For backtesting, we use current Senkou spans as cloud (no look-ahead)
-    # Kumo top = max(Senkou A, Senkou B)
-    # Kumo bottom = min(Senkou A, Senkou B)
-    kumo_top = np.maximum(senkou_a, senkou_b)
-    kumo_bottom = np.minimum(senkou_a, senkou_b)
+    # Directional Indicators
+    plus_di = 100 * plus_dm_14 / tr_14
+    minus_di = 100 * minus_dm_14 / tr_14
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).rolling(window=14, min_periods=14).mean()
+    adx_values = adx.values
     
-    # TK Cross: Tenkan crossing above/below Kijun
-    tk_cross = tenkan - kijun
-    tk_cross_above = (tk_cross > 0) & (np.roll(tk_cross, 1) <= 0)  # bullish cross
-    tk_cross_below = (tk_cross < 0) & (np.roll(tk_cross, 1) >= 0)  # bearish cross
-    
-    # 1d EMA200 for trend filter
+    # Daily volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_200 = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
-    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
+    volume_1d = df_1d['volume'].values
+    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Wait for Senkou B to stabilize
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(kumo_top[i]) or np.isnan(kumo_bottom[i]) or
-            np.isnan(ema_200_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(adx_values[i]) or np.isnan(volume_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -78,35 +81,32 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: TK cross bearish OR price enters cloud (below Kumo top)
-            if tk_cross_below[i] or close[i] < kumo_top[i]:
+            # Exit: price breaks below lower Donchian band OR ADX < 20 (trend weakening)
+            if close[i] <= donchian_low[i] or adx_values[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: TK cross bullish OR price enters cloud (above Kumo bottom)
-            if tk_cross_above[i] or close[i] > kumo_bottom[i]:
+            # Exit: price breaks above upper Donchian band OR ADX < 20 (trend weakening)
+            if close[i] >= donchian_high[i] or adx_values[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: price outside cloud + TK cross + 1d trend filter
-            price_above_kumo = close[i] > kumo_top[i]
-            price_below_kumo = close[i] < kumo_bottom[i]
-            bullish_tk = tk_cross[i] > 0
-            bearish_tk = tk_cross[i] < 0
-            uptrend_1d = close[i] > ema_200_aligned[i]
-            downtrend_1d = close[i] < ema_200_aligned[i]
+            # Look for entries: Donchian breakout + ADX > 25 + volume confirmation
+            volume_ok = volume[i] > 1.5 * volume_ma_1d_aligned[i]
+            adx_strong = adx_values[i] > 25
             
-            # Long: price above cloud + bullish TK cross + 1d uptrend
-            if price_above_kumo and bullish_tk and uptrend_1d:
-                signals[i] = 0.25
-                position = 1
-            # Short: price below cloud + bearish TK cross + 1d downtrend
-            elif price_below_kumo and bearish_tk and downtrend_1d:
-                signals[i] = -0.25
-                position = -1
+            if volume_ok and adx_strong:
+                if close[i] > donchian_high[i]:
+                    # Breakout above upper band - bullish
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < donchian_low[i]:
+                    # Breakdown below lower band - bearish
+                    signals[i] = -0.25
+                    position = -1
     
     return signals
