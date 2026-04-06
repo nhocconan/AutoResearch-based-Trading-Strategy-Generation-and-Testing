@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12713_4h_donchian20_12h_vol_breakout_v1"
-timeframe = "4h"
+name = "exp_12714_1h_donchian20_1d_vol_trend_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
@@ -24,25 +24,31 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h Donchian channels
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    upper_12h = pd.Series(high_12h).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lower_12h = pd.Series(low_12h).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Calculate daily trend (close vs 50 EMA)
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_up = close_1d > ema_50
+    trend_down = close_1d < ema_50
     
-    # Align Donchian levels to 4h timeframe
-    upper_12h_aligned = align_htf_to_ltf(prices, df_12h, upper_12h)
-    lower_12h_aligned = align_htf_to_ltf(prices, df_12h, lower_12h)
+    # Align daily trend to 1h
+    trend_up_1h = align_htf_to_ltf(prices, df_1d, trend_up.astype(float))
+    trend_down_1h = align_htf_to_ltf(prices, df_1d, trend_down.astype(float))
     
-    # Calculate 4h indicators
+    # Calculate 1h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -50,6 +56,7 @@ def generate_signals(prices):
     
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    donch_up, donch_low = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -57,11 +64,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD, 50) + 1
     
     for i in range(start, n):
-        # Skip if Donchian levels not available
-        if np.isnan(upper_12h_aligned[i]) or np.isnan(lower_12h_aligned[i]):
+        # Skip if daily trend not available
+        if np.isnan(trend_up_1h[i]) or np.isnan(trend_down_1h[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -83,18 +90,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout logic
-        breakout_long = volume_ok and close[i] >= upper_12h_aligned[i]
-        breakdown_short = volume_ok and close[i] <= lower_12h_aligned[i]
+        # Donchian breakout in direction of daily trend
+        breakout_long = volume_ok and close[i] >= donch_up[i]
+        breakout_short = volume_ok and close[i] <= donch_low[i]
+        
+        # Filter by daily trend
+        long_entry = breakout_long and trend_up_1h[i] > 0.5
+        short_entry = breakout_short and trend_down_1h[i] > 0.5
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakdown_short:
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
