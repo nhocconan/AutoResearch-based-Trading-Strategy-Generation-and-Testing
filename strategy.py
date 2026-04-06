@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band breakout with weekly trend filter and volume confirmation
-# Enter long when price breaks above upper BB(20,2) with close > weekly EMA(50) and volume > 2x avg
-# Enter short when price breaks below lower BB(20,2) with close < weekly EMA(50) and volume > 2x avg
-# Exit when price returns to middle BB or opposite band is touched
-# Uses weekly trend to filter breakouts, targeting 50-150 total trades over 4 years
-# Bollinger Bands capture volatility expansion, weekly EMA ensures trend alignment
+# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Enter long when price breaks above upper Donchian(20) with close > daily EMA(50) and volume > 2x avg
+# Enter short when price breaks below lower Donchian(20) with close < daily EMA(50) and volume > 2x avg
+# Exit when price returns to middle Donchian or opposite band is touched
+# Uses daily trend to filter breakouts, targeting 50-150 total trades over 4 years
+# Donchian channels capture volatility expansion, daily EMA ensures trend alignment
 
-name = "6h_bb_breakout_weeklytrend_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,21 +25,21 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2) on 6h
-    close_s = pd.Series(close)
-    bb_middle = close_s.rolling(window=20, min_periods=20).mean()
-    bb_std = close_s.rolling(window=20, min_periods=20).std()
-    bb_upper = bb_middle + 2 * bb_std
-    bb_lower = bb_middle - 2 * bb_std
-    bb_middle = bb_middle.values
-    bb_upper = bb_upper.values
-    bb_lower = bb_lower.values
+    # Donchian Channels (20) on 12h
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    dc_upper = high_series.rolling(window=20, min_periods=20).max()
+    dc_lower = low_series.rolling(window=20, min_periods=20).min()
+    dc_middle = (dc_upper + dc_lower) / 2
+    dc_upper = dc_upper.values
+    dc_lower = dc_lower.values
+    dc_middle = dc_middle.values
     
-    # Weekly EMA(50) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Daily EMA(50) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # Volume confirmation: volume > 2x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -50,8 +50,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or 
-            np.isnan(bb_middle[i]) or np.isnan(ema_50_aligned[i]) or 
+        if (np.isnan(dc_upper[i]) or np.isnan(dc_lower[i]) or 
+            np.isnan(dc_middle[i]) or np.isnan(ema_50_aligned[i]) or 
             np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -60,28 +60,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price touches middle BB OR touches lower BB (reversal)
-            if close[i] <= bb_middle[i] or close[i] <= bb_lower[i]:
+            # Exit: price touches middle Donchian OR touches lower DC (reversal)
+            if close[i] <= dc_middle[i] or close[i] <= dc_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price touches middle BB OR touches upper BB (reversal)
-            if close[i] >= bb_middle[i] or close[i] >= bb_upper[i]:
+            # Exit: price touches middle Donchian OR touches upper DC (reversal)
+            if close[i] >= dc_middle[i] or close[i] >= dc_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for breakouts: price outside BB + trend filter + volume
+            # Look for breakouts: price outside DC + trend filter + volume
             if volume[i] > volume_threshold[i]:
-                if close[i] > bb_upper[i] and close[i] > ema_50_aligned[i]:
-                    # Bullish breakout above upper BB with weekly uptrend
+                if close[i] > dc_upper[i] and close[i] > ema_50_aligned[i]:
+                    # Bullish breakout above upper DC with daily uptrend
                     signals[i] = 0.25
                     position = 1
-                elif close[i] < bb_lower[i] and close[i] < ema_50_aligned[i]:
-                    # Bearish breakout below lower BB with weekly downtrend
+                elif close[i] < dc_lower[i] and close[i] < ema_50_aligned[i]:
+                    # Bearish breakout below lower DC with daily downtrend
                     signals[i] = -0.25
                     position = -1
     
