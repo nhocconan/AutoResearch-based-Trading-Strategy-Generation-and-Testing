@@ -3,37 +3,41 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with daily ADX filter and volume confirmation.
-# Works in bull/bear by capturing strong trends (ADX>25) with volume confirmation,
-# while avoiding whipsaws in ranging markets. Weekly pivot direction provides
-# structural bias to reduce false breakouts.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 6h ADX + Williams Alligator combination
+# Uses ADX for trend strength and Williams Alligator (3 SMAs) for direction.
+# Works in bull/bear because ADX filters weak trends, Alligator confirms direction.
+# Target: 80-150 trades over 4 years (20-38/year) with low frequency to minimize fee drag.
+# Only trade when ADX > 25 (strong trend) and price is outside Alligator's mouth.
 
-name = "exp_12887_6h_donchian20_1d_adx_vol_wp_v1"
+name = "exp_12887_6h_adx_alligator_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
 ADX_PERIOD = 14
 ADX_THRESHOLD = 25
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+ALLIGATOR_JAW = 13  # SMMA(13, 8)
+ALLIGATOR_TEETH = 8  # SMMA(8, 5)
+ALLIGATOR_LIPS = 5   # SMMA(5, 3)
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
+def smma(data, period):
+    """Smoothed Moving Average (SMMA) - Williams Alligator uses this"""
+    if len(data) < period:
+        return np.full_like(data, np.nan)
+    smma = np.full_like(data, np.nan)
+    smma[period-1] = np.mean(data[:period])
+    for i in range(period, len(data)):
+        smma[i] = (smma[i-1] * (period-1) + data[i]) / period
+    return smma
 
 def calculate_adx(high, low, close, period):
     """Calculate ADX (Average Directional Index)"""
+    if len(high) < period + 1:
+        return np.full_like(high, np.nan)
+    
     # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
@@ -47,94 +51,78 @@ def calculate_adx(high, low, close, period):
                         np.maximum(np.roll(low, 1) - low, 0), 0)
     
     # Smooth TR, +DM, -DM
-    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    atr = np.zeros_like(tr)
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    
+    plus_dm_smooth = np.zeros_like(plus_dm)
+    minus_dm_smooth = np.zeros_like(minus_dm)
+    plus_dm_smooth[period-1] = np.mean(plus_dm[:period])
+    minus_dm_smooth[period-1] = np.mean(minus_dm[:period])
+    for i in range(period, len(tr)):
+        plus_dm_smooth[i] = (plus_dm_smooth[i-1] * (period-1) + plus_dm[i]) / period
+        minus_dm_smooth[i] = (minus_dm_smooth[i-1] * (period-1) + minus_dm[i]) / period
     
     # Directional Indicators
-    plus_di = 100 * plus_dm_smooth / tr_smooth
-    minus_di = 100 * minus_dm_smooth / tr_smooth
+    plus_di = 100 * plus_dm_smooth / atr
+    minus_di = 100 * minus_dm_smooth / atr
     
     # DX and ADX
+    dx = np.zeros_like(plus_di)
     dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dx[plus_di + minus_di == 0] = 0
+    
+    adx = np.zeros_like(dx)
+    adx[2*period-2] = np.mean(dx[:2*period-1])
+    for i in range(2*period-1, len(dx)):
+        adx[i] = (adx[i-1] * (period-1) + dx[i]) / period
+    
     return adx
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
-def calculate_pivot_points(high, low, close):
-    """Calculate weekly pivot points"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, r2, r3, s1, s2, s3
+def calculate_atr(high, low, close, period):
+    """Calculate ATR using Wilder's smoothing"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr = np.zeros_like(tr)
+    atr[period-1] = np.mean(tr[:period])
+    for i in range(period, len(tr)):
+        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    return atr
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load daily data ONCE before loop for ADX calculation
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily ADX
+    # Calculate ADX on daily timeframe
     high_d = df_daily['high'].values
     low_d = df_daily['low'].values
     close_d = df_daily['close'].values
     adx_d = calculate_adx(high_d, low_d, close_d, ADX_PERIOD)
-    adx_d_aligned = align_htf_to_ltf(prices, df_daily, adx_d)
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx_d)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    
-    # Calculate weekly pivot points
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
-    
-    pivot_vals = np.zeros(len(close_w))
-    r1_vals = np.zeros(len(close_w))
-    r2_vals = np.zeros(len(close_w))
-    r3_vals = np.zeros(len(close_w))
-    s1_vals = np.zeros(len(close_w))
-    s2_vals = np.zeros(len(close_w))
-    s3_vals = np.zeros(len(close_w))
-    
-    for i in range(len(close_w)):
-        pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(high_w[i], low_w[i], close_w[i])
-        pivot_vals[i] = pivot
-        r1_vals[i] = r1
-        r2_vals[i] = r2
-        r3_vals[i] = r3
-        s1_vals[i] = s1
-        s2_vals[i] = s2
-        s3_vals[i] = s3
-    
-    # Align to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot_vals)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1_vals)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2_vals)
-    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3_vals)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1_vals)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2_vals)
-    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3_vals)
-    
-    # Calculate 6h indicators
+    # Calculate Williams Alligator on 6h timeframe
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    donch_up, donch_low = calculate_donchian(high, low, DONCHIAN_PERIOD)
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    # Alligator lines: SMMA with different periods and shifts
+    jaw = smma(high, ALLIGATOR_JAW)  # Jaw (blue) - SMMA(13, 8)
+    teeth = smma(low, ALLIGATOR_TEETH)  # Teeth (red) - SMMA(8, 5)
+    lips = smma(close, ALLIGATOR_LIPS)  # Lips (green) - SMMA(5, 3)
+    
+    # Apply shifts as per Williams Alligator definition
+    jaw = np.roll(jaw, ALLIGATOR_JAW//2) if ALLIGATOR_JAW//2 > 0 else jaw
+    teeth = np.roll(teeth, ALLIGATOR_TEETH//2) if ALLIGATOR_TEETH//2 > 0 else teeth
+    lips = np.roll(lips, ALLIGATOR_LIPS//2) if ALLIGATOR_LIPS//2 > 0 else lips
+    
+    # Calculate ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -143,11 +131,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, ADX_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(ADX_PERIOD*2, ALLIGATOR_JAW*2) + 1
     
     for i in range(start, n):
-        # Skip if required data not available
-        if np.isnan(adx_d_aligned[i]) or np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(volume_ma[i]):
+        # Skip if ADX not available
+        if np.isnan(adx_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -166,28 +154,37 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        # ADX trend strength filter
+        strong_trend = adx_aligned[i] > ADX_THRESHOLD
         
-        # ADX trend filter
-        trend_strong = adx_d_aligned[i] > ADX_THRESHOLD
+        # Alligator signals: price outside mouth
+        # Mouth is between teeth and lips
+        jaw_val = jaw[i] if not np.isnan(jaw[i]) else 0
+        teeth_val = teeth[i] if not np.isnan(teeth[i]) else 0
+        lips_val = lips[i] if not np.isnan(lips[i]) else 0
         
-        # Weekly pivot bias
-        pivot_bias_up = close[i] > pivot_aligned[i]
-        pivot_bias_down = close[i] < pivot_aligned[i]
+        # Avoid division by zero or invalid comparisons
+        if np.isnan(jaw_val) or np.isnan(teeth_val) or np.isnan(lips_val):
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+            continue
         
-        # Breakout conditions
-        breakout_long = volume_ok and trend_strong and pivot_bias_up and close[i] >= donch_up[i]
-        breakout_short = volume_ok and trend_strong and pivot_bias_down and close[i] <= donch_low[i]
+        # Price above all lines = bullish
+        # Price below all lines = bearish
+        # Price between teeth and lips = inside mouth (no trade)
+        above_all = close[i] > jaw_val and close[i] > teeth_val and close[i] > lips_val
+        below_all = close[i] < jaw_val and close[i] < teeth_val and close[i] < lips_val
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            if strong_trend and above_all:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_short:
+            elif strong_trend and below_all:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
