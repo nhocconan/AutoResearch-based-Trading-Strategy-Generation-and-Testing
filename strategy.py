@@ -6,7 +6,7 @@ Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d tr
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_to_ltf, get_htf_data
 
 name = "4h_donchian20_1dtrend_vol_v2"
 timeframe = "4h"
@@ -49,7 +49,7 @@ def generate_signals(prices):
     trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
     
     # Align to 4h timeframe
-    trend_bias_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
+    trend_bias_aligned = get_htf_to_ltf(prices, df_1d, trend_bias_1d)
     
     # Donchian channels (20-period) from 1d data
     high_1d = df_1d['high'].values
@@ -64,8 +64,8 @@ def generate_signals(prices):
         lower_1d[i] = np.min(low_1d[i-20:i])
     
     # Align to 4h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    upper_aligned = get_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_aligned = get_htf_to_ltf(prices, df_1d, lower_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -143,3 +143,4 @@ def generate_signals(prices):
                 bars_since_entry += 1
     
     return signals
+</>
