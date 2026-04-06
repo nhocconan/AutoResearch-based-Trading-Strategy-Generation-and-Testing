@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + Volume + ADX Filter (Optimized v14)
-Hypothesis: Donchian breakouts on 12h timeframe capture medium-term momentum with proven performance.
+4h Donchian(20) Breakout + Volume + ADX Filter
+Hypothesis: Donchian breakouts on 4h timeframe capture medium-term momentum with proven performance.
 Volume confirms institutional participation. ADX filter from 1d ensures we only trade in trending markets.
-Optimized for 12h timeframe with proper position sizing to achieve target trade count of 50-150 total over 4 years.
+Optimized for 4h timeframe with proper position sizing to achieve target trade count of 75-200 total over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_volume_adx_v14"
-timezone = "12h"
+name = "4h_donchian20_volume_adx_v15"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -64,7 +64,7 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilder_smooth(dx, period_adx)
     
-    # Align ADX to 12h timeframe
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Price and volume data
@@ -99,7 +99,7 @@ def generate_signals(prices):
         # Volume filter (20-period average)
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            volume_filter = volume[i] > vol_ma * 2.0  # Adjusted for 12h timeframe
+            volume_filter = volume[i] > vol_ma * 2.0
         else:
             volume_filter = False
         
@@ -122,7 +122,7 @@ def generate_signals(prices):
             # Look for entries: Donchian breakout + volume + ADX trend
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
-            trend_filter = adx_aligned[i] > 25  # Adjusted for 12h timeframe
+            trend_filter = adx_aligned[i] > 25
             
             if i >= 20 and bull_breakout and volume_filter and trend_filter:
                 signals[i] = 0.25
