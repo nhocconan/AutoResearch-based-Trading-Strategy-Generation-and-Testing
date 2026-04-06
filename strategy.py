@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12830_1d_weekly_pivot_breakout_v1"
-timeframe = "1d"
+name = "exp_12831_6d_1d_breakout_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-VOLUME_MA_PERIOD = 20
+BREAKOUT_PERIOD = 20
+VOLUME_MA_PERIOD = 24
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_DAYS = 20  # Max 20 days
+MAX_HOLD_BARS = 48  # Max 12 days (48 * 6h)
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -24,58 +25,32 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_pivot_points(high, low, close):
-    """Calculate weekly pivot points"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, r2, r3, s1, s2, s3
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot points
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
+    # Calculate daily Donchian channels
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    close_d = df_daily['close'].values
     
-    pivot_vals = np.zeros(len(close_w))
-    r1_vals = np.zeros(len(close_w))
-    r2_vals = np.zeros(len(close_w))
-    r3_vals = np.zeros(len(close_w))
-    s1_vals = np.zeros(len(close_w))
-    s2_vals = np.zeros(len(close_w))
-    s3_vals = np.zeros(len(close_w))
+    upper_d, lower_d = calculate_donchian(high_d, low_d, BREAKOUT_PERIOD)
     
-    for i in range(len(close_w)):
-        pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(high_w[i], low_w[i], close_w[i])
-        pivot_vals[i] = pivot
-        r1_vals[i] = r1
-        r2_vals[i] = r2
-        r3_vals[i] = r3
-        s1_vals[i] = s1
-        s2_vals[i] = s2
-        s3_vals[i] = s3
+    # Align to 6h timeframe
+    upper_d_aligned = align_htf_to_ltf(prices, df_daily, upper_d)
+    lower_d_aligned = align_htf_to_ltf(prices, df_daily, lower_d)
     
-    # Align to daily timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot_vals)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1_vals)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2_vals)
-    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3_vals)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1_vals)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2_vals)
-    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3_vals)
-    
-    # Calculate daily indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -88,16 +63,16 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
-    days_since_entry = 0
+    bars_since_entry = 0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, BREAKOUT_PERIOD) + 1
     
     for i in range(start, n):
-        days_since_entry += 1
+        bars_since_entry += 1
         
-        # Skip if pivot levels not available
-        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        # Skip if daily Donchian not available
+        if np.isnan(upper_d_aligned[i]) or np.isnan(lower_d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -109,28 +84,28 @@ def generate_signals(prices):
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
-                days_since_entry = 0
+                bars_since_entry = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
-                days_since_entry = 0
+                bars_since_entry = 0
                 continue
         
         # Time-based exit to prevent overtrading
-        if days_since_entry >= MAX_HOLD_DAYS:
+        if bars_since_entry >= MAX_HOLD_BARS:
             signals[i] = 0.0
             position = 0
-            days_since_entry = 0
+            bars_since_entry = 0
             continue
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above R3 or breakdown below S3
-        breakout_long = volume_ok and close[i] >= r3_aligned[i]
-        breakout_short = volume_ok and close[i] <= s3_aligned[i]
+        # Breakout above daily upper or below daily lower
+        breakout_long = volume_ok and close[i] >= upper_d_aligned[i]
+        breakout_short = volume_ok and close[i] <= lower_d_aligned[i]
         
         # Generate signals
         if position == 0:
@@ -139,13 +114,13 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                days_since_entry = 0
+                bars_since_entry = 0
             elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                days_since_entry = 0
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
