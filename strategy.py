@@ -1,89 +1,97 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) breakout with weekly trend filter and volume confirmation.
-Hypothesis: Breakouts above/below 20-day high/low aligned with weekly trend capture strong moves, while volume confirmation filters false signals. Works in both bull and bear markets by following trend.
+1d Donchian breakout with volume confirmation and volatility filter.
+Hypothesis: Donchian(20) breakouts on daily timeframe capture strong trends, while volume confirmation filters false breakouts and volatility filter (ATR) avoids choppy periods. Works in both bull and bear markets by capturing momentum bursts.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14298_1d_donchian20_1w_trend_vol_v1"
+name = "exp_14298_1d_donchian20_vol_filter_v1"
 timeframe = "1d"
 leverage = 1.0
-
-def calculate_ema(close, period):
-    """Calculate EMA with proper min_periods"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 1d data for Donchian calculation (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly EMA(20) for trend filter
-    ema_1w = calculate_ema(close_1w, 20)
+    # Calculate Donchian channels (20-period high/low)
+    # Using pandas rolling for proper min_periods
+    high_series = pd.Series(high_1d)
+    low_series = pd.Series(low_1d)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Align to daily timeframe (shifted by 1 week for completed bars only)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate ATR(14) for volatility filter
+    high_low = high_1d - low_1d
+    high_close = np.abs(high_1d - np.roll(close_1d, 1))
+    low_close = np.abs(low_1d - np.roll(close_1d, 1))
+    high_close[0] = high_1d[0] - low_1d[0]  # First value
+    low_close[0] = high_1d[0] - low_1d[0]   # First value
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
-    # Daily data
-    high = prices['high'].values
-    low = prices['low'].values
+    # Align to 1d timeframe (already aligned, but shift for completed bars)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr)
+    
+    # 1d data
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian(20) channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (1.5 * vol_ma)
     
+    # Volatility filter: avoid extremely low volatility (chop)
+    vol_ma_long = pd.Series(atr).rolling(window=50, min_periods=50).mean().values
+    vol_ma_long_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_long)
+    vol_filter = atr_aligned > (0.5 * vol_ma_long_aligned)  # Avoid low volatility
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start from warmup period (max of 20 for Donchian, 20 for EMA)
-    start = max(20, 20)
+    # Start from warmup period
+    start = max(20, 14, 50) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or \
-           np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or \
+           np.isnan(atr_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(vol_filter[i]):
             signals[i] = 0.0
             continue
         
-        # Check exits: price crosses back through the 20-day mid-point or opposite channel
-        mid_point = (high_20[i] + low_20[i]) / 2
-        
+        # Check exits: close back inside Donchian channel or volatility too low
         if position == 1:  # long position
-            if close[i] <= mid_point or close[i] <= low_20[i]:
+            if close[i] <= donchian_high_aligned[i] or not vol_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] >= mid_point or close[i] >= high_20[i]:
+            if close[i] >= donchian_low_aligned[i] or not vol_filter[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: breakout with trend and volume confirmation
-            # Long when price breaks above 20-day high in uptrend
-            # Short when price breaks below 20-day low in downtrend
-            long_setup = (close[i] > high_20[i]) and (close[i] > ema_1w_aligned[i]) and vol_confirm[i]
-            short_setup = (close[i] < low_20[i]) and (close[i] < ema_1w_aligned[i]) and vol_confirm[i]
+            # Look for entries: breakout with volume and volatility confirmation
+            long_breakout = close[i] > donchian_high_aligned[i]
+            short_breakout = close[i] < donchian_low_aligned[i]
             
-            if long_setup:
+            if long_breakout and vol_confirm[i] and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
-            elif short_setup:
+            elif short_breakout and vol_confirm[i] and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
             else:
