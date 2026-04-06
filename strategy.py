@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) breakout with 1w trend filter and volume confirmation
-Hypothesis: Donchian breakouts on daily chart capture institutional momentum, filtered by weekly EMA trend for bias and weekly volume for conviction. Works in bull (buy breakouts above weekly EMA) and bear (sell breakdowns below weekly EMA). Target: 75-150 total trades over 4 years (19-38/year).
+6h Donchian(20) breakout with 1d volume confirmation and 1w trend filter
+Hypothesis: Donchian breakouts capture momentum, filtered by 1w trend (higher timeframe bias) and 1d volume surge (institutional participation). Works in bull (buy breakouts above 1w EMA) and bear (sell breakdowns below 1w EMA). Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_1w_trend_vol_v1"
-timeframe = "1d"
+name = "6h_donchian20_1d_vol_1w_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price and volume data
@@ -36,35 +36,36 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 1w data for trend filter (EMA21)
+    # Get 1d data for volume confirmation
+    df_1d = get_htf_data(prices, '1d')
+    volume_1d = df_1d['volume'].values
+    
+    # 20-period average volume on 1d
+    vol_ma_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    
+    # Align volume MA to 6h timeframe
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Get 1w data for trend filter (EMA50)
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # EMA21 on 1w close
+    # EMA50 on 1w close
     ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 21:
-        ema_1w[20] = np.mean(close_1w[:21])
-        for i in range(21, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 19) / 21
+    if len(close_1w) >= 50:
+        ema_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 48) / 50
     
-    # 1w trend: above EMA21 = bullish, below = bearish
+    # 1w trend: above EMA50 = bullish, below = bearish
     trend_1w = np.where(close_1w > ema_1w, 1, -1)
     
-    # Align 1w trend to 1d timeframe
+    # Align 1w trend to 6h timeframe
     trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # Get 1w data for volume confirmation
-    volume_1w = df_1w['volume'].values
-    
-    # 20-period average volume on 1w
-    vol_ma_1w = np.full(len(volume_1w), np.nan)
-    for i in range(20, len(volume_1w)):
-        vol_ma_1w[i] = np.mean(volume_1w[i-20:i])
-    
-    # Align volume MA to 1d timeframe
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    
-    # Donchian channels (20-period) from 1d data
+    # Donchian channels (20-period) from 6h data
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
     
@@ -84,7 +85,7 @@ def generate_signals(prices):
         # Skip if required data not available
         if (np.isnan(atr[i]) or np.isnan(trend_1w_aligned[i]) or 
             np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(vol_ma_1w_aligned[i])):
+            np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -92,9 +93,9 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 1d volume > 1.5x 1w average volume (scaled)
-        # Scale 1w volume to 1d: approx 1/7 of 1w volume (since 7x 1d in 1w)
-        vol_threshold = vol_ma_1w_aligned[i] / 7.0 * 1.5
+        # Volume filter: current 6h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d volume to 6h: approx 1/4 of 1d volume (since 4x 6h in 1d)
+        vol_threshold = vol_ma_1d_aligned[i] / 4.0 * 1.5
         volume_filter = volume[i] > vol_threshold
         
         # Check exits and stoploss
@@ -124,8 +125,8 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 14 bars flat
-            if bars_since_entry >= 14:
+            # Minimum holding period: only allow new entry after 12 bars flat
+            if bars_since_entry >= 12:
                 # Breakout entries: upper/lower with 1w trend
                 bull_breakout = close[i] > upper[i]
                 bear_breakout = close[i] < lower[i]
