@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1D Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts on 12h capture medium-term momentum, 1D volume confirms breakout strength, ATR stoploss limits drawdown. Designed for low trade frequency (target 50-150 total over 4 years) to minimize fee decay.
+4h Donchian(20) Breakout + Volume Filter + ATR Stoploss
+Hypothesis: Donchian breakouts capture momentum, volume confirms breakout strength, ATR stoploss limits drawdown.
+Trades only in direction of price relative to prior 4h bar's close to avoid whipsaw. Designed for low trade frequency (target 75-200 total over 4 years) to minimize fee decay.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dvol_atr_v1"
-timezone = "UTC"
-timeframe = "12h"
+name = "4h_donchian20_vol_atr_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,15 +38,6 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1D volume average (using 1D data for volume filter)
-    df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = np.full(len(vol_1d), np.nan)
-    if len(vol_1d) >= 20:
-        for i in range(19, len(vol_1d)):
-            vol_ma_1d[i] = np.mean(vol_1d[i-19:i+1])
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -56,7 +47,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(vol_ma_1d_aligned[i]):
+        if np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -67,8 +58,9 @@ def generate_signals(prices):
         highest_high = np.max(high[i-20:i])
         lowest_low = np.min(low[i-20:i])
         
-        # Volume filter: current 12h volume > 1.5x 1D average volume
-        volume_filter = volume[i] > vol_ma_1d_aligned[i] * 1.5
+        # Volume filter (20-period average)
+        vol_ma = np.mean(volume[i-20:i])
+        volume_filter = volume[i] > vol_ma * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
