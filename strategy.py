@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h trend filter and 1d volume confirmation.
-# RSI < 30 oversold/ > 70 overbought for entries.
-# 4h EMA(50) trend filter: only long when price > EMA50, short when price < EMA50.
-# 1d volume spike (>1.5x 20-period average) confirms institutional participation.
-# Designed for 1h timeframe targeting 60-150 trades over 4 years with session filter (08-20 UTC).
+# Hypothesis: 6-hour Ichimoku Cloud strategy with daily timeframe filter
+# Uses Ichimoku (Tenkan-sen, Kijun-sen, Senkou Span A/B) for trend direction
+# Filters trades using daily timeframe cloud position to avoid counter-trend entries
+# Designed for 6h timeframe to target 50-150 trades over 4 years with medium frequency
+# Ichimoku works well in both trending and ranging markets, providing clear entry/exit signals
 
-name = "1h_rsi4hema1dvol_v1"
-timeframe = "1h"
+name = "6h_ichimoku1d_filter_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,97 +22,151 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # RSI(14)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = np.zeros_like(gain)
-    avg_loss = np.zeros_like(loss)
-    avg_gain[13] = np.mean(gain[1:14]) if len(gain) >= 14 else np.nan
-    avg_loss[13] = np.mean(loss[1:14]) if len(loss) >= 14 else np.nan
-    
-    for i in range(14, len(close)):
-        avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
-        avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
-    
-    rs = np.divide(avg_gain, avg_loss, out=np.full_like(avg_gain, np.nan), where=avg_loss!=0)
-    rsi = 100 - (100 / (1 + rs))
-    
-    # 4h EMA(50) for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = np.zeros_like(close_4h)
-    ema_4h[0] = close_4h[0]
-    for i in range(1, len(close_4h)):
-        ema_4h[i] = (close_4h[i] * 2 / (50 + 1)) + (ema_4h[i-1] * (48 / (50 + 1)))
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1d volume average for confirmation
+    # 1-day Ichimoku components for trend filter
     df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = np.zeros_like(volume_1d)
-    for i in range(19, len(volume_1d)):
-        vol_ma_1d[i] = np.mean(volume_1d[i-19:i+1])
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    period_tenkan = 9
+    highest_high_tenkan = np.full(len(close_1d), np.nan)
+    lowest_low_tenkan = np.full(len(close_1d), np.nan)
+    tenkan_sen = np.full(len(close_1d), np.nan)
+    
+    for i in range(period_tenkan - 1, len(close_1d)):
+        highest_high_tenkan[i] = np.max(high_1d[i - period_tenkan + 1:i + 1])
+        lowest_low_tenkan[i] = np.min(low_1d[i - period_tenkan + 1:i + 1])
+        tenkan_sen[i] = (highest_high_tenkan[i] + lowest_low_tenkan[i]) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    period_kijun = 26
+    highest_high_kijun = np.full(len(close_1d), np.nan)
+    lowest_low_kijun = np.full(len(close_1d), np.nan)
+    kijun_sen = np.full(len(close_1d), np.nan)
+    
+    for i in range(period_kijun - 1, len(close_1d)):
+        highest_high_kijun[i] = np.max(high_1d[i - period_kijun + 1:i + 1])
+        lowest_low_kijun[i] = np.min(low_1d[i - period_kijun + 1:i + 1])
+        kijun_sen[i] = (highest_high_kijun[i] + lowest_low_kijun[i]) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan-sen + Kijun-sen) / 2
+    senkou_span_a = np.full(len(close_1d), np.nan)
+    for i in range(len(close_1d)):
+        if not np.isnan(tenkan_sen[i]) and not np.isnan(kijun_sen[i]):
+            senkou_span_a[i] = (tenkan_sen[i] + kijun_sen[i]) / 2
+    
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    period_senkou_b = 52
+    highest_high_senkou_b = np.full(len(close_1d), np.nan)
+    lowest_low_senkou_b = np.full(len(close_1d), np.nan)
+    senkou_span_b = np.full(len(close_1d), np.nan)
+    
+    for i in range(period_senkou_b - 1, len(close_1d)):
+        highest_high_senkou_b[i] = np.max(high_1d[i - period_senkou_b + 1:i + 1])
+        lowest_low_senkou_b[i] = np.min(low_1d[i - period_senkou_b + 1:i + 1])
+        senkou_span_b[i] = (highest_high_senkou_b[i] + lowest_low_senkou_b[i]) / 2
+    
+    # Shift Senkou Spans forward by 26 periods
+    senkou_span_a_shifted = np.full(len(close_1d), np.nan)
+    senkou_span_b_shifted = np.full(len(close_1d), np.nan)
+    for i in range(len(close_1d) - 26):
+        senkou_span_a_shifted[i + 26] = senkou_span_a[i]
+        senkou_span_b_shifted[i + 26] = senkou_span_b[i]
+    
+    # Align Ichimoku components to 6h timeframe
+    tenkan_sen_aligned = align_htf_to_ltf(prices, df_1d, tenkan_sen)
+    kijun_sen_aligned = align_htf_to_ltf(prices, df_1d, kijun_sen)
+    senkou_span_a_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_a_shifted)
+    senkou_span_b_aligned = align_htf_to_ltf(prices, df_1d, senkou_span_b_shifted)
+    
+    # 6-hour Ichimoku components for entry signals
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    highest_high_tenkan_6h = np.full(n, np.nan)
+    lowest_low_tenkan_6h = np.full(n, np.nan)
+    tenkan_sen_6h = np.full(n, np.nan)
+    
+    for i in range(period_tenkan - 1, n):
+        highest_high_tenkan_6h[i] = np.max(high[i - period_tenkan + 1:i + 1])
+        lowest_low_tenkan_6h[i] = np.min(low[i - period_tenkan + 1:i + 1])
+        tenkan_sen_6h[i] = (highest_high_tenkan_6h[i] + lowest_low_tenkan_6h[i]) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    highest_high_kijun_6h = np.full(n, np.nan)
+    lowest_low_kijun_6h = np.full(n, np.nan)
+    kijun_sen_6h = np.full(n, np.nan)
+    
+    for i in range(period_kijun - 1, n):
+        highest_high_kijun_6h[i] = np.max(high[i - period_kijun + 1:i + 1])
+        lowest_low_kijun_6h[i] = np.min(low[i - period_kijun + 1:i + 1])
+        kijun_sen_6h[i] = (highest_high_kijun_6h[i] + lowest_low_kijun_6h[i]) / 2
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(14, 19)
+    start = max(period_kijun, period_senkou_b) + 26  # Ensure all Ichimoku components are available
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or 
-            np.isnan(vol_ma_1d_aligned[i])):
+        if (np.isnan(tenkan_sen_aligned[i]) or np.isnan(kijun_sen_aligned[i]) or 
+            np.isnan(senkou_span_a_aligned[i]) or np.isnan(senkou_span_b_aligned[i]) or
+            np.isnan(tenkan_sen_6h[i]) or np.isnan(kijun_sen_6h[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.5x daily average
-        volume_filter = volume[i] > vol_ma_1d_aligned[i] * 1.5
+        # Determine cloud color and price position relative to cloud
+        # Green cloud: Senkou Span A > Senkou Span B (bullish)
+        # Red cloud: Senkou Span A < Senkou Span B (bearish)
+        cloud_top = np.maximum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
+        cloud_bottom = np.minimum(senkou_span_a_aligned[i], senkou_span_b_aligned[i])
         
-        # Trend condition from 4h EMA
-        uptrend = close[i] > ema_4h_aligned[i]
-        downtrend = close[i] < ema_4h_aligned[i]
+        # Price above/below cloud
+        price_above_cloud = close[i] > cloud_top
+        price_below_cloud = close[i] < cloud_bottom
         
-        # Check exits and stoploss
+        # Tenkan/Kijun cross
+        tk_cross_bullish = tenkan_sen_6h[i] > kijun_sen_6h[i] and tenkan_sen_6h[i-1] <= kijun_sen_6h[i-1]
+        tk_cross_bearish = tenkan_sen_6h[i] < kijun_sen_6h[i] and tenkan_sen_6h[i-1] >= kijun_sen_6h[i-1]
+        
+        # Daily timeframe filter: only trade in direction of daily cloud
+        daily_bullish = senkou_span_a_aligned[i] > senkou_span_b_aligned[i]
+        daily_bearish = senkou_span_a_aligned[i] < senkou_span_b_aligned[i]
+        
+        # Check exits
         if position == 1:  # long position
-            # Exit: RSI overbought or stoploss
-            if (rsi[i] > 70 or 
-                close[i] < entry_price - 2.0 * (high[i] - low[i])):
+            # Exit: price crosses below Kijun-sen or enters opposite cloud
+            if (close[i] < kijun_sen_6h[i] or 
+                (daily_bearish and price_above_cloud)):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: RSI oversold or stoploss
-            if (rsi[i] < 30 or 
-                close[i] > entry_price + 2.0 * (high[i] - low[i])):
+            # Exit: price crosses above Kijun-sen or enters opposite cloud
+            if (close[i] > kijun_sen_6h[i] or 
+                (daily_bullish and price_below_cloud)):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries with volume filter and session filter (08-20 UTC)
-            hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-            in_session = 8 <= hour <= 20
-            
-            if volume_filter and in_session:
-                # Long: oversold in uptrend
-                if rsi[i] < 30 and uptrend:
-                    signals[i] = 0.20
+            # Look for entries aligned with daily timeframe
+            if daily_bullish:
+                # Long: price above cloud + bullish TK cross
+                if price_above_cloud and tk_cross_bullish:
+                    signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: overbought in downtrend
-                elif rsi[i] > 70 and downtrend:
-                    signals[i] = -0.20
+            elif daily_bearish:
+                # Short: price below cloud + bearish TK cross
+                if price_below_cloud and tk_cross_bearish:
+                    signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
             else:
