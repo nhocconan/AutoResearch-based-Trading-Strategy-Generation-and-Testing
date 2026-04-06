@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Camarilla pivot levels with volume confirmation on 12h timeframe
-# Uses 12h bars for entries/exits, with daily Camarilla levels as support/resistance.
-# Volume filter ensures only significant breakouts trigger trades.
-# Works in bull/bear because pivot levels adapt to volatility and volume confirms strength.
-# Target: 50-150 trades over 4 years (12-37/year) to balance opportunity and fee drag.
+# Hypothesis: 4h Donchian channel breakout with daily volume confirmation and weekly ATR filter
+# Works in bull/bear by capturing strong momentum moves, filtering weak signals with volume,
+# and adapting stoploss to volatility. Target: 100-200 trades over 4 years (25-50/year).
 
-name = "exp_12916_12h_camarilla_pivot_v1"
-timeframe = "12h"
+name = "exp_12917_4h_donchian20_1d_vol_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -29,71 +28,37 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    range_ = high - low
-    pivot = (high + low + close) / 3.0
-    r4 = close + range_ * 1.1 / 2
-    r3 = close + range_ * 1.1 / 4
-    r2 = close + range_ * 1.1 / 6
-    r1 = close + range_ * 1.1 / 12
-    s1 = close - range_ * 1.1 / 12
-    s2 = close - range_ * 1.1 / 6
-    s3 = close - range_ * 1.1 / 4
-    s4 = close - range_ * 1.1 / 2
-    return r1, r2, r3, r4, s1, s2, s3, s4
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
+    # Load daily data ONCE before loop for volume and ATR
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla levels
-    high_d = df_daily['high'].values
-    low_d = df_daily['low'].values
-    close_d = df_daily['close'].values
+    # Calculate daily indicators
+    high_d = df_1d['high'].values
+    low_d = df_1d['low'].values
+    close_d = df_1d['close'].values
+    volume_d = df_1d['volume'].values
     
-    r1_d = np.zeros(len(close_d))
-    r2_d = np.zeros(len(close_d))
-    r3_d = np.zeros(len(close_d))
-    r4_d = np.zeros(len(close_d))
-    s1_d = np.zeros(len(close_d))
-    s2_d = np.zeros(len(close_d))
-    s3_d = np.zeros(len(close_d))
-    s4_d = np.zeros(len(close_d))
+    volume_ma = pd.Series(volume_d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    atr_d = calculate_atr(high_d, low_d, close_d, ATR_PERIOD)
     
-    for i in range(len(close_d)):
-        r1, r2, r3, r4, s1, s2, s3, s4 = calculate_camarilla(high_d[i], low_d[i], close_d[i])
-        r1_d[i] = r1
-        r2_d[i] = r2
-        r3_d[i] = r3
-        r4_d[i] = r4
-        s1_d[i] = s1
-        s2_d[i] = s2
-        s3_d[i] = s3
-        s4_d[i] = s4
+    # Align daily indicators to 4h timeframe
+    volume_ma_aligned = align_htf_to_ltf(prices, df_1d, volume_ma)
+    atr_aligned = align_htf_to_ltf(prices, df_1d, atr_d)
     
-    # Align to 12h timeframe (each daily bar = 2 x 12h bars)
-    r1_12h = align_htf_to_ltf(prices, df_daily, r1_d)
-    r2_12h = align_htf_to_ltf(prices, df_daily, r2_d)
-    r3_12h = align_htf_to_ltf(prices, df_daily, r3_d)
-    r4_12h = align_htf_to_ltf(prices, df_daily, r4_d)
-    s1_12h = align_htf_to_ltf(prices, df_daily, s1_d)
-    s2_12h = align_htf_to_ltf(prices, df_daily, s2_d)
-    s3_12h = align_htf_to_ltf(prices, df_daily, s3_d)
-    s4_12h = align_htf_to_ltf(prices, df_daily, s4_d)
-    
-    # Calculate 12h indicators
+    # Calculate 4h Donchian channels
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -101,11 +66,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if Camarilla levels not available
-        if np.isnan(r4_12h[i]) or np.isnan(s4_12h[i]):
+        # Skip if daily data not available
+        if np.isnan(volume_ma_aligned[i]) or np.isnan(atr_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -125,11 +90,11 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_ma_aligned[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma_aligned[i]) else False
         
-        # Breakout above R4 or breakdown below S4
-        breakout_long = volume_ok and close[i] >= r4_12h[i]
-        breakout_short = volume_ok and close[i] <= s4_12h[i]
+        # Donchian breakout
+        breakout_long = volume_ok and (i >= DONCHIAN_PERIOD) and (high[i] >= donchian_upper[i-1])
+        breakout_short = volume_ok and (i >= DONCHIAN_PERIOD) and (low[i] <= donchian_lower[i-1])
         
         # Generate signals
         if position == 0:
@@ -137,12 +102,12 @@ def generate_signals(prices):
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr_aligned[i])
             elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr_aligned[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
