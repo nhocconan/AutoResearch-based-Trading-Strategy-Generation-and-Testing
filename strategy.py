@@ -3,29 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12507_6d_camarilla1d_v1"
-timeframe = "6h"
+name = "exp_12508_12h_donchian20_1w_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_MULT = 1.1
+DONCHIAN_PERIOD = 20
+TREND_EMA_PERIOD = 50
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-MIN_CANDLES = 10
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla levels (H4/L4 for entry, H3/L3 for stop reference)"""
-    range_val = high - low
-    # H4 = Close + 1.1 * Range * 1.5
-    # L4 = Close - 1.1 * Range * 1.5
-    # H3 = Close + 1.1 * Range * 1.25
-    # L3 = Close - 1.1 * Range * 1.25
-    h4 = close + CAMARILLA_MULT * range_val * 1.5
-    l4 = close - CAMARILLA_MULT * range_val * 1.5
-    h3 = close + CAMARILLA_MULT * range_val * 1.25
-    l3 = close - CAMARILLA_MULT * range_val * 1.25
-    return h4, l4, h3, l3
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -36,30 +29,32 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
-    if n < MIN_CANDLES:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly EMA for trend
+    ema_1w = calculate_ema(df_1w['close'].values, TREND_EMA_PERIOD)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    h4_1d, l4_1d, h3_1d, l3_1d = calculate_camarilla(high_1d, low_1d, close_1d)
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
-    
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -68,11 +63,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily levels not available
-        if np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -91,17 +86,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Fade at H4/L4 with reversal signals
-        near_h4 = close[i] >= h4_1d_aligned[i] * 0.999  # near or above H4
-        near_l4 = close[i] <= l4_1d_aligned[i] * 1.001  # near or below L4
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Check for rejection (price moving back inside levels)
-        reject_high = (close[i] < h4_1d_aligned[i]) and (prices['close'].values[i-1] >= h4_1d_aligned[i-1])
-        reject_low = (close[i] > l4_1d_aligned[i]) and (prices['close'].values[i-1] <= l4_1d_aligned[i-1])
+        # Trend filter (weekly)
+        uptrend_1w = close[i] > ema_1w_aligned[i]
+        downtrend_1w = close[i] < ema_1w_aligned[i]
+        
+        # Donchian breakout conditions
+        long_breakout = close[i] > upper[i-1]  # break above previous upper band
+        short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
         # Entry conditions
-        long_entry = near_l4 and reject_low
-        short_entry = near_h4 and reject_high
+        long_entry = volume_ok and uptrend_1w and long_breakout
+        short_entry = volume_ok and downtrend_1w and short_breakout
         
         # Generate signals
         if position == 0:
