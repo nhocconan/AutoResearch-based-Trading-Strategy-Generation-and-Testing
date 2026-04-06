@@ -3,31 +3,35 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13954_1h_rsi_multitf_v1"
-timeframe = "1h"
+name = "exp_13955_6d_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
-# Hypothesis: 1h RSI(14) mean reversion with 4h trend filter and 1d volatility regime filter.
-# Long when: RSI < 30 (oversold) + 4h close > 4h EMA(50) (bullish trend) + 1d ATR ratio < 0.8 (low volatility)
-# Short when: RSI > 70 (overbought) + 4h close < 4h EMA(50) (bearish trend) + 1d ATR ratio < 0.8 (low volatility)
-# Exit when RSI crosses 50 or volatility regime changes (ATR ratio > 1.2)
-# Uses 4h/1d for signal direction and regime filter, 1h only for entry timing.
-# Target: 80-150 total trades over 4 years (20-38/year) to balance opportunity and fee drag.
+# Hypothesis: 6h Donchian(20) breakout with 1-week pivot point bias and volume confirmation.
+# Uses weekly Camarilla pivot levels (R3/S3, R4/S4) from prior week for bias:
+# - Price > weekly R3: bullish bias (long only on breakouts)
+# - Price < weekly S3: bearish bias (short only on breakouts)
+# - Between S3/R3: no bias (await breakout in either direction with volume)
+# Entry on 6h Donchian breakout in direction of bias with volume > 2x average.
+# Exit on Donchian reversal or when price crosses opposite pivot level (S3/R3).
+# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Weekly pivot provides structural bias that works in both bull (buy strength) and bear (sell weakness).
 
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_pivot_points(high, low, close):
+    """Calculate Camarilla pivot points for given period"""
+    pivot = (high + low + close) / 3.0
+    range_val = high - low
+    r3 = pivot + (range_val * 1.1 / 4.0)
+    s3 = pivot - (range_val * 1.1 / 4.0)
+    r4 = pivot + (range_val * 1.1 / 2.0)
+    s4 = pivot - (range_val * 1.1 / 2.0)
+    return pivot, r3, s3, r4, s4
 
-def calculate_rsi(close, period):
-    """Calculate Relative Strength Index"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def calculate_donchian(high, low, period):
+    """Calculate Donchian upper and lower bands"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -41,94 +45,135 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 4h data for EMA trend filter ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    ema_4h = calculate_ema(df_4h['close'].values, 50)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Load weekly data for pivot points ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Load 1d data for volatility regime filter ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    atr_1d = calculate_atr(df_1d['high'].values, df_1d['low'].values, df_1d['close'].values, 14)
-    atr_1d_ma = pd.Series(atr_1d).rolling(window=10, min_periods=10).mean().values
-    atr_1d_ma_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_ma)
-    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    # Calculate weekly pivot points (using weekly close from prior week)
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # 1h data for RSI and ATR
+    # Calculate pivots for each week
+    wpivot, wr3, ws3, wr4, ws4 = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
+    
+    # Align weekly pivot levels to 6h timeframe (shifted by 1 week for look-ahead bias)
+    wpivot_aligned = align_htf_to_ltf(prices, df_1w, wpivot)
+    wr3_aligned = align_htf_to_ltf(prices, df_1w, wr3)
+    ws3_aligned = align_htf_to_ltf(prices, df_1w, ws3)
+    wr4_aligned = align_htf_to_ltf(prices, df_1w, wr4)
+    ws4_aligned = align_htf_to_ltf(prices, df_1w, ws4)
+    
+    # 6h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # RSI(14)
-    rsi = calculate_rsi(close, 14)
+    # Donchian channels (20-period)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
     
-    # ATR(14) for stop loss and volatility regime
-    atr_1h = calculate_atr(high, low, close, 14)
+    # ATR for stop loss
+    atr = calculate_atr(high, low, close, 14)
     
-    # Volatility regime: current ATR / 10-period MA of ATR
-    atr_ma = pd.Series(atr_1h).rolling(window=10, min_periods=10).mean().values
-    atr_ratio = atr_1h / (atr_ma + 1e-10)
+    # Volume confirmation (20-period average)
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
     
     # Start from warmup period
-    start = max(50, 14, 10) + 1
+    start = max(50, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(rsi[i]) or np.isnan(ema_4h_aligned[i]) or np.isnan(atr_1d_ma_aligned[i]) or \
-           np.isnan(atr_1d_aligned[i]) or np.isnan(atr_ratio[i]):
+        if np.isnan(wr3_aligned[i]) or np.isnan(ws3_aligned[i]) or \
+           np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
+           np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volatility regime filter: only trade in low volatility (ATR ratio < 0.8)
-        vol_regime_low = atr_ratio[i] < 0.8
-        vol_regime_high = atr_ratio[i] > 1.2  # exit condition
+        # Check stops
+        if position == 1:  # long position
+            # Check stop loss
+            if close[i] <= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
         
-        # 4h trend filter
-        bullish_trend = close[i] > ema_4h_aligned[i]
-        bearish_trend = close[i] < ema_4h_aligned[i]
+        elif position == -1:  # short position
+            # Check stop loss
+            if close[i] >= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
         
-        # RSI signals
-        rsi_oversold = rsi[i] < 30
-        rsi_overbought = rsi[i] > 70
-        rsi_neutral = (rsi[i] >= 40) & (rsi[i] <= 60)
+        # Determine bias from weekly Camarilla levels
+        price = close[i]
+        r3 = wr3_aligned[i]
+        s3 = ws3_aligned[i]
+        r4 = wr4_aligned[i]
+        s4 = ws4_aligned[i]
+        
+        bullish_bias = price > r3  # Above R3: bullish bias
+        bearish_bias = price < s3  # Below S3: bearish bias
+        neutral_bias = (price >= s3) and (price <= r3)  # Between S3/R3: neutral
+        
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * 2.0)
+        
+        # Donchian breakout signals
+        breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
+        breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
         # Entry signals
-        long_entry = rsi_oversold and bullish_trend and vol_regime_low
-        short_entry = rsi_overbought and bearish_trend and vol_regime_low
-        
-        # Exit signals
-        long_exit = rsi_neutral or vol_regime_high or not bullish_trend
-        short_exit = rsi_neutral or vol_regime_high or not bearish_trend
+        if bullish_bias:
+            # Only long on breakout up with volume
+            long_signal = volume_ok and breakout_up
+            short_signal = False
+        elif bearish_bias:
+            # Only short on breakout down with volume
+            long_signal = False
+            short_signal = volume_ok and breakout_down
+        else:
+            # Neutral: allow breakout in either direction with volume
+            long_signal = volume_ok and breakout_up
+            short_signal = volume_ok and breakout_down
         
         # Generate signals
         if position == 0:
-            if long_entry:
-                signals[i] = 0.20
+            if long_signal:
+                signals[i] = 0.25
                 position = 1
-            elif short_entry:
-                signals[i] = -0.20
+                entry_price = close[i]
+                stop_price = entry_price - (2.0 * atr[i])
+            elif short_signal:
+                signals[i] = -0.25
                 position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (2.0 * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            if long_exit:
+            # Exit long on Donchian breakdown or price crosses S3 (bearish bias)
+            if close[i] < donchian_lower[i] or price < s3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            if short_exit:
+            # Exit short on Donchian breakout or price crosses R3 (bullish bias)
+            if close[i] > donchian_upper[i] or price > r3:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
