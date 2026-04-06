@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-4H Donchian 20 Breakout with Volume Confirmation and ADX Trend Filter (Revised)
+4H Donchian 20 Breakout with Volume Confirmation and ADX Trend Filter
 Hypothesis: Donchian channel breakouts capture strong directional moves. Volume confirmation
-ensures breakout strength, while ADX filter avoids choppy markets. Adjusted parameters to
-increase trade frequency while maintaining edge. Target: 75-200 trades over 4 years.
+ensures breakout strength, while ADX filter avoids choppy markets. Designed for 75-200 trades
+over 4 years to minimize fee drag while adapting to bull/bear markets via ADX trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_volume_adx_filter_v2"
+name = "4h_donchian20_volume_adx_filter_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -80,7 +80,7 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Volume filter (20-period moving average)
+    # Volume filter
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -121,8 +121,8 @@ def generate_signals(prices):
             # Look for entries: Donchian breakout + volume + ADX trend
             bull_breakout = close[i] > donchian_high[i]
             bear_breakout = close[i] < donchian_low[i]
-            volume_filter = volume[i] > vol_ma[i] * 1.3  # Reduced threshold
-            trend_filter = adx_aligned[i] > 20  # Reduced threshold
+            volume_filter = volume[i] > vol_ma[i] * 1.5
+            trend_filter = adx_aligned[i] > 25  # Strong trend
             
             if bull_breakout and volume_filter and trend_filter:
                 signals[i] = 0.25
