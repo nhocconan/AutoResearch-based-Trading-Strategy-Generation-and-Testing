@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
+"""
+Strategy: 1h OHLC Breakout with 4h Trend Filter and Volume Confirmation
+Timeframe: 1h
+Hypothesis: Use 4h EMA for trend direction, enter on 1h breakouts above/below prior 1h high/low with volume confirmation. Works in bull (breakouts) and bear (fades) by aligning with 4h trend. Designed for low trade frequency (15-37/year) to minimize fee drag.
+"""
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14112_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_14114_1h_breakout_4h_trend_v1"
+timeframe = "1h"
 leverage = 1.0
-
-def calculate_ema(arr, period):
-    """Calculate EMA with proper min_periods"""
-    return pd.Series(arr).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR with proper min_periods"""
@@ -23,28 +24,24 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for EMA filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load 4h data for trend filter (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate 1d EMA (50-period) for trend filter
-    ema_1d = calculate_ema(close_1d, 50)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 4h EMA(20) for trend
+    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # 12h data
+    # 1h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period) - upper and lower bands
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 1.5x 20-period average (prevents low-volume noise)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > (1.5 * vol_ma)
     
@@ -56,72 +53,64 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 50 for EMA, 14 for ATR)
-    start = max(20, 50, 14) + 1
+    # Start from warmup period (max of 20 for volume/ema, 14 for ATR)
+    start = max(20, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_1d_aligned[i]) or \
-           np.isnan(atr[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
         
         # Check stops
         if position == 1:  # long position
-            # Check stop loss
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         
         elif position == -1:  # short position
-            # Check stop loss
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
                 continue
         
-        # Donchian breakout signals with volume confirmation
-        # Long: price breaks above upper band with volume confirmation
-        # Short: price breaks below lower band with volume confirmation
-        breakout_up = close[i] > high_20[i-1] and vol_filter[i]
-        breakout_down = close[i] < low_20[i-1] and vol_filter[i]
-        
-        # 1d EMA trend filter
-        # Only take longs when price > 1d EMA, shorts when price < 1d EMA
-        trend_filter_long = close[i] > ema_1d_aligned[i]
-        trend_filter_short = close[i] < ema_1d_aligned[i]
+        # Entry conditions
+        # Long: break above prior 1h high with volume, 4h uptrend
+        # Short: break below prior 1h low with volume, 4h downtrend
+        breakout_long = (close[i] > high[i-1]) and vol_filter[i] and (ema_4h_aligned[i] > ema_4h_aligned[i-1])
+        breakout_short = (close[i] < low[i-1]) and vol_filter[i] and (ema_4h_aligned[i] < ema_4h_aligned[i-1])
         
         # Generate signals
         if position == 0:
-            if breakout_up and trend_filter_long:
-                signals[i] = 0.25
+            if breakout_long:
+                signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (2.0 * atr[i])
-            elif breakout_down and trend_filter_short:
-                signals[i] = -0.25
+            elif breakout_short:
+                signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (2.0 * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on stop or reversal breakout
-            if close[i] <= stop_price or breakout_down:
+            # Exit long on stop or reversal signal
+            if close[i] <= stop_price or (close[i] < low[i-1] and vol_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
-            # Exit short on stop or reversal breakout
-            if close[i] >= stop_price or breakout_up:
+            # Exit short on stop or reversal signal
+            if close[i] >= stop_price or (close[i] > high[i-1] and vol_filter[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
