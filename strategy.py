@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Williams %R(14) mean-reversion signals filtered by 1-day ADX(14) trend strength.
-# In trending markets (ADX > 25), we trade pullbacks: long when Williams %R < -80 (oversold),
-# short when Williams %R > -20 (overbought). In ranging markets (ADX <= 25), we fade extremes:
-# long at Williams %R < -90, short at Williams %R > -10. Volume confirmation (>1.5x 1-day average)
-# ensures institutional participation. Designed for low frequency (~20-40 trades/year) with
-# clear entry/exit rules to minimize fee drag. Williams %R identifies mean-reversion
-# opportunities, ADX filters for appropriate market regime, and volume avoids false breakouts.
+# Hypothesis: 4-hour KAMA (Kaufman Adaptive Moving Average) with daily price channel and volume confirmation.
+# KAMA adapts to market noise, reducing whipsaws in sideways markets while capturing trends.
+# Daily price channel (Donchian) provides clear breakout signals with built-in trend filter.
+# Volume confirmation ensures institutional participation.
+# Designed for 4h timeframe targeting 75-200 trades over 4 years with balanced frequency.
 
-name = "12h_willr1d_adx1d_vol_v1"
-timeframe = "12h"
+name = "4h_kama1d_donchian_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,92 +24,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day Williams %R(14)
+    # 1-day KAMA for trend direction (adaptive to market noise)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Williams %R calculation
-    highest_high = np.full(len(close_1d), np.nan)
-    lowest_low = np.full(len(close_1d), np.nan)
-    willr = np.full(len(close_1d), np.nan)
+    # Efficiency Ratio (ER) calculation
+    change = np.abs(np.diff(close_1d, prepend=close_1d[0]))
+    volatility = np.abs(np.diff(close_1d))
+    er = np.zeros_like(close_1d)
+    for i in range(1, len(close_1d)):
+        if np.sum(volatility[max(0, i-9):i+1]) > 0:
+            er[i] = np.sum(change[max(0, i-9):i+1]) / np.sum(volatility[max(0, i-9):i+1])
+        else:
+            er[i] = 1.0
     
-    for i in range(13, len(close_1d)):
-        highest_high[i] = np.max(high_1d[i-13:i+1])
-        lowest_low[i] = np.min(low_1d[i-13:i+1])
-        if highest_high[i] != lowest_low[i]:
-            willr[i] = -100 * (highest_high[i] - close_1d[i]) / (highest_high[i] - lowest_low[i])
+    # Smoothing constants
+    sc = (er * (2/(2+1) - 2/(30+1)) + 2/(30+1)) ** 2  # fast=2, slow=30
     
-    willr_aligned = align_htf_to_ltf(prices, df_1d, willr)
+    # KAMA calculation
+    kama = np.zeros_like(close_1d)
+    kama[0] = close_1d[0]
+    for i in range(1, len(close_1d)):
+        kama[i] = kama[i-1] + sc[i] * (close_1d[i] - kama[i-1])
     
-    # 1-day ADX(14) for trend strength
-    high_1d_adx = df_1d['high'].values
-    low_1d_adx = df_1d['low'].values
-    close_1d_adx = df_1d['close'].values
+    kama_trend = kama > np.roll(kama, 1)  # 1 = up, 0 = down
+    kama_trend[0] = 1  # Initialize
     
-    # True Range and Directional Movement
-    tr = np.full(len(close_1d_adx), np.nan)
-    dm_plus = np.full(len(close_1d_adx), np.nan)
-    dm_minus = np.full(len(close_1d_adx), np.nan)
+    kama_trend_aligned = align_htf_to_ltf(prices, df_1d, kama_trest.astype(float))
     
-    if len(close_1d_adx) > 1:
-        tr[0] = high_1d_adx[0] - low_1d_adx[0]
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        for i in range(1, len(close_1d_adx)):
-            tr[i] = max(high_1d_adx[i] - low_1d_adx[i],
-                       abs(high_1d_adx[i] - close_1d_adx[i-1]),
-                       abs(low_1d_adx[i] - close_1d_adx[i-1]))
-            dm_plus[i] = max(high_1d_adx[i] - high_1d_adx[i-1], 0)
-            dm_minus[i] = max(low_1d_adx[i-1] - low_1d_adx[i], 0)
-            if dm_plus[i] > dm_minus[i]:
-                dm_minus[i] = 0
-            else:
-                dm_plus[i] = 0
+    # 1-day Donchian channel for breakout signals
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # Smoothed TR, DM+, DM- using Wilder's smoothing
-    atr_1d = np.full(len(close_1d_adx), np.nan)
-    s_dm_plus = np.full(len(close_1d_adx), np.nan)
-    s_dm_minus = np.full(len(close_1d_adx), np.nan)
+    donchian_high = np.full_like(high_1d, np.nan)
+    donchian_low = np.full_like(low_1d, np.nan)
     
-    if len(close_1d_adx) >= 14:
-        atr_1d[13] = np.nansum(tr[1:14])
-        s_dm_plus[13] = np.nansum(dm_plus[1:14])
-        s_dm_minus[13] = np.nansum(dm_minus[1:14])
-        for i in range(14, len(close_1d_adx)):
-            atr_1d[i] = atr_1d[i-1] - (atr_1d[i-1]/14) + tr[i]
-            s_dm_plus[i] = s_dm_plus[i-1] - (s_dm_plus[i-1]/14) + dm_plus[i]
-            s_dm_minus[i] = s_dm_minus[i-1] - (s_dm_minus[i-1]/14) + dm_minus[i]
+    for i in range(19, len(high_1d)):  # 20-period lookback
+        donchian_high[i] = np.max(high_1d[i-19:i+1])
+        donchian_low[i] = np.min(low_1d[i-19:i+1])
     
-    # DI+ and DI-
-    di_plus = np.full(len(close_1d_adx), np.nan)
-    di_minus = np.full(len(close_1d_adx), np.nan)
-    dx = np.full(len(close_1d_adx), np.nan)
-    
-    for i in range(13, len(close_1d_adx)):
-        if atr_1d[i] != 0:
-            di_plus[i] = 100 * s_dm_plus[i] / atr_1d[i]
-            di_minus[i] = 100 * s_dm_minus[i] / atr_1d[i]
-            if di_plus[i] + di_minus[i] != 0:
-                dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
-    
-    # ADX calculation (smoothed DX)
-    adx = np.full(len(close_1d_adx), np.nan)
-    if len(close_1d_adx) >= 27:
-        dx_valid = dx[13:]
-        if len(dx_valid) >= 14:
-            adx[26] = np.nanmean(dx_valid[:14])
-            for i in range(27, len(close_1d_adx)):
-                adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
     
     # 1-day volume average for confirmation
     vol_1d = df_1d['volume'].values
-    vol_ma_1d = np.full(len(vol_1d), np.nan)
-    for i in range(19, len(vol_1d)):
-        vol_ma_1d[i] = np.mean(vol_1d[i-19:i+1])  # 20-period average
+    vol_ma_1d = np.full_like(vol_1d, np.nan)
+    for i in range(19, len(vol_1d)):  # 20-period average
+        vol_ma_1d[i] = np.mean(vol_1d[i-19:i+1])
     
     vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
@@ -120,12 +79,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(27, 13, 19)  # ADX needs 27, Williams %R needs 13, volume needs 19
+    start = 20  # Donchian needs 20 periods
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(willr_aligned[i]) or np.isnan(adx_aligned[i]) or 
-            np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(kama_trend_aligned[i]) or np.isnan(donchian_high_aligned[i]) or 
+            np.isnan(donchian_low_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -135,54 +94,37 @@ def generate_signals(prices):
         # Volume condition: current volume > 1.5x daily average
         volume_filter = volume[i] > vol_ma_aligned[i] * 1.5
         
-        # ADX filter: trending (ADX > 25) or ranging (ADX <= 25)
-        trending_market = adx_aligned[i] > 25
-        ranging_market = adx_aligned[i] <= 25
-        
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: Williams %R overbought or stoploss
-            if (willr_aligned[i] > -20 or 
+            # Exit: price breaks below Donchian low or stoploss
+            if (close[i] < donchian_low_aligned[i] or 
                 close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Williams %R oversold or stoploss
-            if (willr_aligned[i] < -80 or 
+            # Exit: price breaks above Donchian high or stoploss
+            if (close[i] > donchian_high_aligned[i] or 
                 close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries based on market regime
-            if trending_market:
-                # In trending markets, trade pullbacks
-                if volume_filter:
-                    # Long: pullback to oversold in uptrend
-                    if (willr_aligned[i] < -80 and close[i] > close[i-1]):
-                        signals[i] = 0.25
-                        position = 1
-                        entry_price = close[i]
-                    # Short: pullback to overbought in downtrend
-                    elif (willr_aligned[i] > -20 and close[i] < close[i-1]):
-                        signals[i] = -0.25
-                        position = -1
-                        entry_price = close[i]
-            else:  # ranging market
-                # In ranging markets, fade extremes
-                if volume_filter:
-                    # Long: extreme oversold
-                    if willr_aligned[i] < -90:
-                        signals[i] = 0.25
-                        position = 1
-                        entry_price = close[i]
-                    # Short: extreme overbought
-                    elif willr_aligned[i] > -10:
-                        signals[i] = -0.25
-                        position = -1
-                        entry_price = close[i]
+            # Look for entries: breakout with volume confirmation and KAMA trend filter
+            if volume_filter:
+                # Long: price breaks above Donchian high with upward KAMA trend
+                if (close[i] > donchian_high_aligned[i] and kama_trend_aligned[i]):
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close[i]
+                # Short: price breaks below Donchian low with downward KAMA trend
+                elif (close[i] < donchian_low_aligned[i] and not kama_trend_aligned[i]):
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close[i]
+            else:
+                signals[i] = 0.0
     
     return signals
