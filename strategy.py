@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #11887: 6h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: 6h Donchian(20) breakouts capture medium-term trends. 1d EMA provides trend bias,
+Experiment #11883: 4h Donchian Breakout with 12h Trend and Volume Confirmation
+Hypothesis: 4h Donchian(20) breakouts capture intermediate-term trends. 12h EMA provides trend bias,
 and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1d trend filter. Target: 50-150 trades over 4 years.
+bear (breakouts reverse quickly) by using 12h trend filter. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11887_6h_donchian20_1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_11883_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -47,14 +47,14 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA for trend
-    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 12h EMA for trend
+    ema_12h = calculate_ema(df_12h['close'].values, TREND_EMA_PERIOD)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -73,8 +73,8 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 1d EMA not available
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if 12h EMA not available
+        if np.isnan(ema_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -100,13 +100,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (1d)
-        uptrend_1d = close[i] > ema_1d_aligned[i]
-        downtrend_1d = close[i] < ema_1d_aligned[i]
+        # Trend filter (12h)
+        uptrend_12h = close[i] > ema_12h_aligned[i]
+        downtrend_12h = close[i] < ema_12h_aligned[i]
         
         # Entry conditions
-        long_entry = breakout_up and volume_ok and uptrend_1d
-        short_entry = breakout_down and volume_ok and downtrend_1d
+        long_entry = breakout_up and volume_ok and uptrend_12h
+        short_entry = breakout_down and volume_ok and downtrend_12h
         
         # Generate signals
         if position == 0:
