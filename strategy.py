@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 1d Donchian Breakout with 1w Trend Filter and Volume Confirmation
-Hypothesis: Daily Donchian(20) breakouts filtered by weekly trend direction and volume capture major trends.
-Works in bull markets (buy breakouts above weekly uptrend) and bear markets (sell breakouts below weekly downtrend).
-Designed for 30-100 trades over 4 years to minimize fee drag on 1d timeframe.
+Hypothesis: Daily Donchian(20) breakouts capture multi-week momentum.
+Weekly EMA200 filters trend direction to avoid counter-trend trades.
+Volume confirms breakout strength. Designed for 30-100 trades over 4 years.
+Works in bull (buy breakouts above) and bear (sell breakouts below) via trend filter.
 """
 
 import numpy as np
@@ -16,24 +17,24 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 250:
+    if n < 200:
         return np.zeros(n)
     
     # Load 1w data for trend filter (once before loop)
     df_1w = get_htf_data(prices, '1w')
     
-    # Weekly EMA50 for trend filter
+    # Weekly EMA200 for trend filter
     close_1w = df_1w['close'].values
-    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1w_prev = np.roll(ema50_1w, 1)
-    ema50_1w_prev[0] = ema50_1w[0]
-    ema50_rising = ema50_1w > ema50_1w_prev
-    ema50_falling = ema50_1w < ema50_1w_prev
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
-    ema50_rising_aligned = align_htf_to_ltf(prices, df_1w, ema50_rising)
-    ema50_falling_aligned = align_htf_to_ltf(prices, df_1w, ema50_falling)
+    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
+    ema200_1w_prev = np.roll(ema200_1w, 1)
+    ema200_1w_prev[0] = ema200_1w[0]
+    ema200_rising = ema200_1w > ema200_1w_prev
+    ema200_falling = ema200_1w < ema200_1w_prev
+    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
+    ema200_rising_aligned = align_htf_to_ltf(prices, df_1w, ema200_rising)
+    ema200_falling_aligned = align_htf_to_ltf(prices, df_1w, ema200_falling)
     
-    # Daily data
+    # 1d data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -54,13 +55,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 200  # For daily Donchian and volume EMA
+    start = 200  # For weekly EMA200
     
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(ema50_1w_aligned[i]) or 
-            np.isnan(ema50_rising_aligned[i]) or np.isnan(ema50_falling_aligned[i])):
+            np.isnan(vol_ema[i]) or np.isnan(ema200_1w_aligned[i]) or 
+            np.isnan(ema200_rising_aligned[i]) or np.isnan(ema200_falling_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -89,8 +90,8 @@ def generate_signals(prices):
             bull_breakout = close[i] > highest_high[i]
             bear_breakout = close[i] < lowest_low[i]
             
-            bull_entry = bull_breakout and ema50_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
-            bear_entry = bear_breakout and ema50_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bull_entry = bull_breakout and ema200_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bear_entry = bear_breakout and ema200_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
             
             if bull_entry:
                 signals[i] = 0.25
