@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with daily EMA trend filter and volume confirmation.
-# Uses 4-hour as primary timeframe (target: 75-200 trades over 4 years). Daily EMA ensures alignment
-# with higher timeframe trend. Volume confirmation filters false breakouts. Works in both bull
-# and bear markets by capturing strong trending moves with institutional participation.
-# Risk management via ATR-based stoploss.
+# Hypothesis: 12-hour Camarilla pivot levels from daily data with volume confirmation and 1-week trend filter.
+# Captures mean-reversion bounces off institutional pivot levels in ranging markets.
+# Uses daily Camarilla levels (H3/L3) for entry, 1-week EMA for trend filter, and volume spike for confirmation.
+# Works in both bull and bear markets by fading extremes during ranging conditions.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13561_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13562_12h_camarilla1d_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+CAMARILLA_MULT = 1.1
 EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
@@ -40,26 +40,37 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load daily data for Camarilla levels ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend filter
+    # Calculate daily Camarilla levels (H3, L3)
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 4-hour indicators
+    # Calculate pivot and ranges
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
+    range_1d = high_1d - low_1d
+    
+    # Camarilla levels: H3/L3
+    h3_1d = pivot_1d + (range_1d * CAMARILLA_MULT / 2.0)
+    l3_1d = pivot_1d - (range_1d * CAMARILLA_MULT / 2.0)
+    
+    # Align to 12h timeframe
+    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
+    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    
+    # Load weekly EMA for trend filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Volume MA
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -70,11 +81,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        # Skip if data not available
+        if np.isnan(h3_1d_aligned[i]) or np.isnan(l3_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,29 +104,32 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Volume confirmation (using 12h volume)
+        volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+        volume_ok = not np.isnan(volume_ma[i]) and volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter: price above/below daily EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Trend filter: price relative to weekly EMA
+        uptrend = close[i] > ema_1w_aligned[i]
+        downtrend = close[i] < ema_1w_aligned[i]
         
-        # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
+        # Mean-reversion signals at Camarilla H3/L3 levels
+        touch_h3 = high[i] >= h3_1d_aligned[i]  # Price touches or exceeds H3
+        touch_l3 = low[i] <= l3_1d_aligned[i]   # Price touches or goes below L3
         
-        # Generate signals
+        # Generate signals: fade extremes in ranging conditions
         if position == 0:
-            if breakout_up:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            # Short at H3 resistance in downtrend or ranging
+            if touch_h3 and (not uptrend) and volume_ok:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            # Long at L3 support in uptrend or ranging
+            elif touch_l3 and (not downtrend) and volume_ok:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
