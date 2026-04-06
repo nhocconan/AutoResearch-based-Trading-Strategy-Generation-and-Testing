@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1-day Trend Filter and Volume Confirmation
-Hypothesis: Donchian(20) breakouts capture strong trends. 1-day EMA50 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in bull (buy breakouts above) and bear (sell breakouts below). Target: 75-200 total trades over 4 years.
+12h Donchian Breakout with 1-week Trend Filter and Volume Confirmation
+Hypothesis: Donchian(20) breakouts on 12h capture intermediate trends. 1-week EMA50 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in bull (buy breakouts above) and bear (sell breakouts below). Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_trend_volume_v1"
-timeframe = "4h"
+name = "12h_donchian20_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,21 +17,21 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_prev = np.roll(ema50_1d, 1)
-    ema50_1d_prev[0] = ema50_1d[0]
-    ema50_rising = ema50_1d > ema50_1d_prev
-    ema50_falling = ema50_1d < ema50_1d_prev
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema50_rising_aligned = align_htf_to_ltf(prices, df_1d, ema50_rising)
-    ema50_falling_aligned = align_htf_to_ltf(prices, df_1d, ema50_falling)
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_prev = np.roll(ema50_1w, 1)
+    ema50_1w_prev[0] = ema50_1w[0]
+    ema50_rising = ema50_1w > ema50_1w_prev
+    ema50_falling = ema50_1w < ema50_1w_prev
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ema50_rising_aligned = align_htf_to_ltf(prices, df_1w, ema50_rising)
+    ema50_falling_aligned = align_htf_to_ltf(prices, df_1w, ema50_falling)
     
-    # 4h data
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -57,7 +57,7 @@ def generate_signals(prices):
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(vol_ema[i]) or np.isnan(ema50_1w_aligned[i]) or 
             np.isnan(ema50_rising_aligned[i]) or np.isnan(ema50_falling_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
