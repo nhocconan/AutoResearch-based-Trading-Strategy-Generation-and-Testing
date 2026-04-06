@@ -1,19 +1,15 @@
-# 12h Donchian(20) Breakout with 1d EMA(50) Trend Filter and Volume Confirmation
-# Hypothesis: Price breaking out of 20-period Donchian channel on 12h timeframe, aligned with daily EMA trend and volume confirmation, captures significant momentum moves while avoiding whipsaws in both bull and bear markets. The 12h timeframe reduces trade frequency to manageable levels (~20-50/year) minimizing fee drag, while the 1d EMA filter ensures alignment with higher timeframe trend. Volume confirmation adds robustness to breakout signals.
-# Risk management via ATR-based stoploss (2.5x ATR) limits drawdown.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_ema50_vol_v1"
-timeframe = "12h"
+name = "6h_elder_ray_bull_bear_power_1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -35,11 +31,13 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # Get 1d data for trend filter
+    # Get 1d data for trend filter (Elder Ray uses 13-period EMA)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on 1d
+    # Calculate EMA(13) on 1d for Elder Ray
     def ema(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -50,17 +48,28 @@ def generate_signals(prices):
             ema_val[i] = alpha * arr[i] + (1 - alpha) * ema_val[i-1]
         return ema_val
     
-    ema_50 = ema(close_1d, 50)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_13_1d = ema(close_1d, 13)
+    ema_13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_13_1d)
     
-    # Donchian channels (20-period) on 12h
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donchian_high[i] = np.max(high[i-20:i])
-        donchian_low[i] = np.min(low[i-20:i])
+    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
+    bull_power = high - ema_13_1d_aligned
+    bear_power = low - ema_13_1d_aligned
     
-    # Volume filter: current volume > 1.5x average over last 20 periods
+    # Smooth the power values with 6-period EMA (for 6h timeframe)
+    def ema_series(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        alpha = 2.0 / (period + 1)
+        ema_val = np.full_like(arr, np.nan)
+        ema_val[period-1] = np.mean(arr[:period])
+        for i in range(period, len(arr)):
+            ema_val[i] = alpha * arr[i] + (1 - alpha) * ema_val[i-1]
+        return ema_val
+    
+    bull_power_smooth = ema_series(bull_power, 6)
+    bear_power_smooth = ema_series(bear_power, 6)
+    
+    # Volume filter: current volume > 1.3x average over last 20 periods
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -70,11 +79,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20)
+    start = max(20, 13)
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(atr[i]) or np.isnan(bull_power_smooth[i]) or np.isnan(bear_power_smooth[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -82,37 +91,37 @@ def generate_signals(prices):
             continue
         
         # Volume condition (moderate)
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        volume_filter = volume[i] > vol_ma[i] * 1.3
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian low or stoploss hit
-            if (close[i] < donchian_low[i] or
-                close[i] < entry_price - 2.5 * atr[i]):
+            # Exit: Bear power turns positive (bullish momentum fading) or stoploss hit
+            if (bear_power_smooth[i] > 0 or
+                close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian high or stoploss hit
-            if (close[i] > donchian_high[i] or
-                close[i] > entry_price + 2.5 * atr[i]):
+            # Exit: Bull power turns negative (bearish momentum fading) or stoploss hit
+            if (bull_power_smooth[i] < 0 or
+                close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
             # Look for entries
-            # Long: price breaks above Donchian high, above 1d EMA50, with volume
-            if (close[i] > donchian_high[i] and 
-                close[i] > ema_50_aligned[i] and 
+            # Long: Bull power positive AND rising, with volume filter
+            if (bull_power_smooth[i] > 0 and 
+                i > start and bull_power_smooth[i] > bull_power_smooth[i-1] and
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low, below 1d EMA50, with volume
-            elif (close[i] < donchian_low[i] and 
-                  close[i] < ema_50_aligned[i] and 
+            # Short: Bear power negative AND falling (more negative), with volume filter
+            elif (bear_power_smooth[i] < 0 and 
+                  i > start and bear_power_smooth[i] < bear_power_smooth[i-1] and
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
