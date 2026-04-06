@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend Filter and Volume Confirmation v3
-Hypothesis: Donchian(20) breakouts capture strong trends. 1d EMA25 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in bull (buy breakouts above) and bear (sell breakouts below). Target: 75-200 total trades over 4 years.
+6h Weekly Pivot Breakout with Trend Filter v1
+Hypothesis: Weekly pivot levels act as strong support/resistance. Price breaking above weekly R3 or below S3 with momentum (price > weekly EMA20) captures trending moves. Works in bull (breakouts above R3) and bear (breakdowns below S3). Weekly EMA20 filters counter-trend trades. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_trend_volume_v3"
-timeframe = "4h"
+name = "6h_weekly_pivot_breakout_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,32 +17,41 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for pivot and trend filter (once before loop)
+    df_w = get_htf_data(prices, '1w')
     
-    # 1d EMA25 for trend filter
-    close_1d = df_1d['close'].values
-    ema25_1d = pd.Series(close_1d).ewm(span=25, adjust=False, min_periods=25).mean().values
-    ema25_1d_prev = np.roll(ema25_1d, 1)
-    ema25_1d_prev[0] = ema25_1d[0]
-    ema25_rising = ema25_1d > ema25_1d_prev
-    ema25_falling = ema25_1d < ema25_1d_prev
-    ema25_1d_aligned = align_htf_to_ltf(prices, df_1d, ema25_1d)
-    ema25_rising_aligned = align_htf_to_ltf(prices, df_1d, ema25_rising)
-    ema25_falling_aligned = align_htf_to_ltf(prices, df_1d, ema25_falling)
+    # Weekly high, low, close for pivot calculation
+    high_w = df_w['high'].values
+    low_w = df_w['low'].values
+    close_w = df_w['close'].values
     
-    # 4h data
+    # Calculate weekly pivot points (standard formula)
+    pp_w = (high_w + low_w + close_w) / 3.0
+    r1_w = 2 * pp_w - low_w
+    s1_w = 2 * pp_w - high_w
+    r2_w = pp_w + (high_w - low_w)
+    s2_w = pp_w - (high_w - low_w)
+    r3_w = high_w + 2 * (pp_w - low_w)
+    s3_w = low_w - 2 * (high_w - pp_w)
+    r4_w = r3_w + (high_w - low_w)
+    s4_w = s3_w - (high_w - low_w)
+    
+    # Weekly EMA20 for trend filter
+    ema20_w = pd.Series(close_w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema20_w_prev = np.roll(ema20_w, 1)
+    ema20_w_prev[0] = ema20_w[0]
+    ema20_above = ema20_w > ema20_w_prev  # Rising EMA20 = bullish bias
+    
+    # Align weekly data to 6h timeframe
+    r3_w_aligned = align_htf_to_ltf(prices, df_w, r3_w)
+    s3_w_aligned = align_htf_to_ltf(prices, df_w, s3_w)
+    ema20_above_aligned = align_htf_to_ltf(prices, df_w, ema20_above)
+    
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channel (20-period)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(20, n):
-        highest_high[i] = np.max(high[i-20:i])
-        lowest_low[i] = np.min(low[i-20:i])
     
     # Volume filter: 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -52,43 +61,42 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 50  # For EMA25 and Donchian
+    start = 50  # For weekly EMA20 and pivots
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(ema25_1d_aligned[i]) or 
-            np.isnan(ema25_rising_aligned[i]) or np.isnan(ema25_falling_aligned[i])):
+        if (np.isnan(r3_w_aligned[i]) or np.isnan(s3_w_aligned[i]) or 
+            np.isnan(ema20_above_aligned[i]) or np.isnan(vol_ema[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: opposite breakout or stoploss
+        # Check exits: opposite pivot level break or stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian band OR stoploss
-            if (close[i] <= lowest_low[i] or 
+            # Exit: price breaks below weekly S3 OR stoploss
+            if (close[i] <= s3_w_aligned[i] or 
                 close[i] <= entry_price - 2.5 * (high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian band OR stoploss
-            if (close[i] >= highest_high[i] or 
+            # Exit: price breaks above weekly R3 OR stoploss
+            if (close[i] >= r3_w_aligned[i] or 
                 close[i] >= entry_price + 2.5 * (high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + trend + volume
-            bull_breakout = close[i] > highest_high[i]
-            bear_breakout = close[i] < lowest_low[i]
+            # Look for entries: pivot breakout + trend + volume
+            bull_breakout = close[i] > r3_w_aligned[i]
+            bear_breakout = close[i] < s3_w_aligned[i]
             
-            bull_entry = bull_breakout and ema25_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
-            bear_entry = bear_breakout and ema25_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bull_entry = bull_breakout and ema20_above_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bear_entry = bear_breakout and ema20_above_aligned[i] and volume[i] > vol_ema[i] * 1.5
             
             if bull_entry:
                 signals[i] = 0.25
