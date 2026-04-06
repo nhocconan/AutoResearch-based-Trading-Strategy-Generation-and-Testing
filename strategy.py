@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour trend filter and volume confirmation
-# Long when price breaks above 20-period high AND 12h close above 12h EMA(20) AND volume > 1.5x average
-# Short when price breaks below 20-period low AND 12h close below 12h EMA(20) AND volume > 1.5x average
-# Uses 12h trend filter to avoid counter-trend trades and volume to confirm breakout strength.
-# Target: 100-200 total trades over 4 years (25-50/year) to stay within optimal range.
+# Hypothesis: 1-day Donchian(20) breakout with 1-week trend filter and volume confirmation
+# Long when price breaks above 20-day high AND 1-week close above 1-week EMA(20) AND volume > 1.5x average
+# Short when price breaks below 20-day low AND 1-week close below 1-week EMA(20) AND volume > 1.5x average
+# Uses 1-week trend filter to avoid counter-trend trades and volume to confirm breakout strength.
+# Target: 30-100 total trades over 4 years (7-25/year) to stay within optimal range.
 
-name = "4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,23 +35,23 @@ def generate_signals(prices):
     volume_series = pd.Series(volume)
     vol_avg = volume_series.rolling(window=20, min_periods=20).mean()
     
-    # 12h trend filter: EMA(20) on 12h close
-    df_12h = get_htf_data(prices, '12h')
-    twelve_hour_close = df_12h['close'].values
+    # 1w trend filter: EMA(20) on 1w close
+    df_1w = get_htf_data(prices, '1w')
+    one_week_close = df_1w['close'].values
     
-    # Calculate 20-period EMA on 12h close
-    twelve_hour_close_series = pd.Series(twelve_hour_close)
-    twelve_hour_ema = twelve_hour_close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
+    # Calculate 20-period EMA on 1w close
+    one_week_close_series = pd.Series(one_week_close)
+    one_week_ema = one_week_close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Align 12h EMA to 4h timeframe
-    twelve_hour_ema_aligned = align_htf_to_ltf(prices, df_12h, twelve_hour_ema)
+    # Align 1w EMA to 1d timeframe
+    one_week_ema_aligned = align_htf_to_ltf(prices, df_1w, one_week_ema)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        # Skip if 12h EMA data not available
-        if np.isnan(twelve_hour_ema_aligned[i]):
+        # Skip if 1w EMA data not available
+        if np.isnan(one_week_ema_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -63,32 +63,32 @@ def generate_signals(prices):
         
         # Check exits: reverse position or trend change
         if position == 1:  # long position
-            # Exit: price breaks below 20-period low OR 12h trend turns bearish
+            # Exit: price breaks below 20-day low OR 1w trend turns bearish
             if (close[i] <= donchian_low[i] or 
-                twelve_hour_close[i] < twelve_hour_ema_aligned[i]):
+                one_week_close[i] < one_week_ema_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above 20-period high OR 12h trend turns bullish
+            # Exit: price breaks above 20-day high OR 1w trend turns bullish
             if (close[i] >= donchian_high[i] or 
-                twelve_hour_close[i] > twelve_hour_ema_aligned[i]):
+                one_week_close[i] > one_week_ema_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
             # Look for entries with trend and volume confirmation
-            # Long: price breaks above 20-period high AND 12h close above 12h EMA AND volume confirmed
+            # Long: price breaks above 20-day high AND 1w close above 1w EMA AND volume confirmed
             if (close[i] > donchian_high[i] and 
-                twelve_hour_close[i] > twelve_hour_ema_aligned[i] and
+                one_week_close[i] > one_week_ema_aligned[i] and
                 vol_confirmed):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-period low AND 12h close below 12h EMA AND volume confirmed
+            # Short: price breaks below 20-day low AND 1w close below 1w EMA AND volume confirmed
             elif (close[i] < donchian_low[i] and 
-                  twelve_hour_close[i] < twelve_hour_ema_aligned[i] and
+                  one_week_close[i] < one_week_ema_aligned[i] and
                   vol_confirmed):
                 signals[i] = -0.25
                 position = -1
