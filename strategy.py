@@ -1,22 +1,21 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stop
-Hypothesis: Uses 12h timeframe for Donchian breakout signals with 1d EMA trend bias and volume confirmation.
-Designed for 12h timeframe to achieve 12-37 trades/year (50-150 total over 4 years) with low fee drift.
-Works in bull markets (breakouts with trend) and bear markets (breakdowns with trend).
+4h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stop
+Hypothesis: Combines price channel breakouts with daily trend bias and volume confirmation to capture momentum while avoiding chop.
+Works in bull (breakouts with trend) and bear (breakdowns with trend). Target 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dtrend_vol_v1"
-timezone = "12h"
+name = "4h_donchian20_1dtrend_vol_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -38,7 +37,7 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1d EMA20 for trend bias (from daily data)
+    # 1d EMA20 for trend bias
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema_1d = np.full(len(close_1d), np.nan)
@@ -50,7 +49,7 @@ def generate_signals(prices):
     # Trend bias: above EMA = bullish, below = bearish
     trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     trend_bias_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
     
     signals = np.zeros(n)
@@ -131,3 +130,5 @@ def generate_signals(prices):
                 bars_since_entry += 1
     
     return signals
+
+</think>
