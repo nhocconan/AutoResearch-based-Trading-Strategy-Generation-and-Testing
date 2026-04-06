@@ -3,16 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) + 12h EMA(50) trend filter + volume confirmation
-# Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# Long when Bull Power > 0 AND price > 12h EMA(50) AND volume > 1.5x 20-period average
-# Short when Bear Power < 0 AND price < 12h EMA(50) AND volume > 1.5x 20-period average
-# Exit when Elder Power crosses zero (Bull Power < 0 for long exit, Bear Power > 0 for short exit)
-# Uses 6h timeframe to balance signal frequency and noise, Elder Ray for momentum,
-# 12h EMA for trend filter, volume for confirmation. Works in bull (trend following) and bear (mean reversion via power shifts).
+# Hypothesis: 12h Choppiness Index regime filter with Donchian(20) breakout and volume confirmation
+# In trending markets (CHOP < 38.2): trade breakouts in trend direction
+# In ranging markets (CHOP > 61.8): fade extremes at Donchian bands
+# Uses 1w trend filter to avoid counter-trend trades in strong trends
+# Target: 50-150 total trades over 4 years (12-37/year) for optimal 12h performance
 
-name = "6h_elder_ray_12h_ema_vol_v1"
-timeframe = "6h"
+name = "12h_chop_donchian_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,21 +24,29 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Elder Ray: EMA(13) of close
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, min_periods=13, adjust=False).mean().values
+    # Donchian Channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_upper = highest_high.values
+    donchian_lower = lowest_low.values
+    donchian_mid = (donchian_upper + donchian_lower) / 2
     
-    # Bull Power = High - EMA(13)
-    bull_power = high - ema13
-    # Bear Power = Low - EMA(13)
-    bear_power = low - ema13
+    # Choppiness Index (14-period) for regime detection
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]  # First TR
+    atr14 = pd.Series(tr).rolling(window=14, min_periods=14).mean()
+    highest_high14 = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low14 = pd.Series(low).rolling(window=14, min_periods=14).min()
     
-    # 12-hour EMA(50) trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    close_12h_series = pd.Series(close_12h)
-    ema50_12h = close_12h_series.ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    chop = 100 * np.log10(atr14 / (highest_high14 - lowest_low14)) / np.log10(14)
+    chop_values = chop.values
+    
+    # 1-week EMA(50) trend filter
+    df_1w = get_htf_data(prices, '1w')
+    weekly_close = df_1w['close'].values
+    weekly_close_series = pd.Series(weekly_close)
+    weekly_ema = weekly_close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
     
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -51,35 +57,55 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if required data not available
-        if np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or np.isnan(ema50_12h_aligned[i]) or np.isnan(volume_threshold[i]):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(chop_values[i]) or np.isnan(weekly_ema_aligned[i]) or 
+            np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: Elder Power crosses zero
+        chop_val = chop_values[i]
+        vol_ok = volume[i] > volume_threshold[i]
+        
+        # Exit conditions
         if position == 1:  # long position
-            if bull_power[i] < 0:  # Bull Power turned negative
+            if close[i] < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if bear_power[i] > 0:  # Bear Power turned positive
+            if close[i] > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with trend filter and volume confirmation
-            # Long: Bull Power > 0 AND price > 12h EMA(50) AND volume confirmation
-            if (bull_power[i] > 0 and close[i] > ema50_12h_aligned[i] and volume[i] > volume_threshold[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: Bear Power < 0 AND price < 12h EMA(50) AND volume confirmation
-            elif (bear_power[i] < 0 and close[i] < ema50_12h_aligned[i] and volume[i] > volume_threshold[i]):
-                signals[i] = -0.25
-                position = -1
+            # Regime-based entries
+            if vol_ok:
+                # Trending regime (CHOP < 38.2): trade breakouts with trend filter
+                if chop_val < 38.2:
+                    # Long breakout in uptrend
+                    if (close[i] > donchian_upper[i] and close[i-1] <= donchian_upper[i-1] and 
+                        close[i] > weekly_ema_aligned[i]):
+                        signals[i] = 0.25
+                        position = 1
+                    # Short breakdown in downtrend
+                    elif (close[i] < donchian_lower[i] and close[i-1] >= donchian_lower[i-1] and 
+                          close[i] < weekly_ema_aligned[i]):
+                        signals[i] = -0.25
+                        position = -1
+                # Ranging regime (CHOP > 61.8): fade extremes
+                elif chop_val > 61.8:
+                    # Short at upper band in range
+                    if close[i] > donchian_upper[i] and close[i-1] <= donchian_upper[i-1]:
+                        signals[i] = -0.25
+                        position = -1
+                    # Long at lower band in range
+                    elif close[i] < donchian_lower[i] and close[i-1] >= donchian_lower[i-1]:
+                        signals[i] = 0.25
+                        position = 1
     
     return signals
