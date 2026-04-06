@@ -3,22 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 1w trend filter and volume confirmation
-# Long when price breaks above upper BB, weekly EMA(8) rising, and volume > 2x average
-# Short when price breaks below lower BB, weekly EMA(8) falling, and volume > 2x average
-# Exit when price returns to middle BB or opposite breakout occurs
-# Stoploss at 2.0 * ATR(14)
+# Hypothesis: 6s Ichimoku cloud filter with 1w Ichimoku base line for trend direction
+# Uses 1w Ichimoku base line (Kijun-sen) to establish trend direction (above/below)
+# Long when: price > 1w base line, 6s price > 6s cloud top, and 6s TK cross bullish
+# Short when: price < 1w base line, 6s price < 6s cloud bottom, and 6s TK cross bearish
+# Exit when: price crosses opposite side of 6s cloud or 1w base line
+# Stoploss: 2.5 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses Bollinger Band squeeze (low volatility) as entry condition
-# Target: 75-150 total trades over 4 years (19-38/year)
+# Uses weekly trend filter to avoid counter-trend trades in volatile markets
+# Target: 50-150 total trades over 4 years (12-38/year)
 
-name = "6h_bb_squeeze_1w_ema_vol_v1"
-timeframe = "6h"
+name = "6s_ichimoku_1w_base_cloud_tk"
+timeframe = "6s"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price data
@@ -27,36 +28,47 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1w data for EMA trend filter
+    # 1w data for Ichimoku base line (trend filter)
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 10:
+    if len(df_1w) < 52:
         return np.zeros(n)
     
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=8, adjust=False).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 6h Bollinger Bands (20, 2)
-    close_s = pd.Series(close)
-    ma_20 = close_s.rolling(window=20, min_periods=20).mean().values
-    std_20 = close_s.rolling(window=20, min_periods=20).std().values
-    upper_bb = ma_20 + 2 * std_20
-    lower_bb = ma_20 - 2 * std_20
-    middle_bb = ma_20
+    # 1w Ichimoku base line (Kijun-sen): (highest high + lowest low)/2 over 26 periods
+    high_series_1w = pd.Series(high_1w)
+    low_series_1w = pd.Series(low_1w)
+    base_line_1w = ((high_series_1w.rolling(window=26, min_periods=26).max() + 
+                     low_series_1w.rolling(window=26, min_periods=26).min()) / 2).values
+    base_line_1w_aligned = align_htf_to_ltf(prices, df_1w, base_line_1w)
     
-    # Bollinger Band width for squeeze detection
-    bb_width = (upper_bb - lower_bb) / middle_bb
-    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
-    squeeze_condition = bb_width < 0.8 * bb_width_ma  # Bollinger Band squeeze
+    # 6s Ichimoku components
+    # Conversion line (Tenkan-sen): (9-period high + low)/2
+    high_series_6s = pd.Series(high)
+    low_series_6s = pd.Series(low)
+    conversion_line = ((high_series_6s.rolling(window=9, min_periods=9).max() + 
+                        low_series_6s.rolling(window=9, min_periods=9).min()) / 2).values
     
-    # 1d volume for confirmation
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 20:
-        return np.zeros(n)
+    # Base line (Kijun-sen): (26-period high + low)/2
+    base_line_6s = ((high_series_6s.rolling(window=26, min_periods=26).max() + 
+                     low_series_6s.rolling(window=26, min_periods=26).min()) / 2).values
     
-    volume_1d = df_1d['volume'].values
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
-    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
+    # Leading Span A (Senkou Span A): (Conversion + Base)/2 shifted 26 periods ahead
+    leading_span_a = ((conversion_line + base_line_6s) / 2)
+    # Leading Span B (Senkou Span B): (52-period high + low)/2 shifted 26 periods ahead
+    high_52s = high_series_6s.rolling(window=52, min_periods=52).max()
+    low_52s = low_series_6s.rolling(window=52, min_periods=52).min()
+    leading_span_b = ((high_52s + low_52s) / 2)
+    
+    # Cloud top/bottom (current cloud, not shifted)
+    cloud_top = np.maximum(leading_span_a, leading_span_b)
+    cloud_bottom = np.minimum(leading_span_a, leading_span_b)
+    
+    # TK Cross: Conversion line crossing Base line
+    tk_cross = np.where(conversion_line > base_line_6s, 1, 
+                        np.where(conversion_line < base_line_6s, -1, 0))
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -71,11 +83,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(52, n):
         # Skip if required data not available
-        if (np.isnan(ema_1w_aligned[i]) or np.isnan(upper_bb[i]) or 
-            np.isnan(lower_bb[i]) or np.isnan(middle_bb[i]) or 
-            np.isnan(volume_ma_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(base_line_1w_aligned[i]) or np.isnan(cloud_top[i]) or 
+            np.isnan(cloud_bottom[i]) or np.isnan(tk_cross[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -83,46 +94,44 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.0 * ATR
-            if close[i] < entry_price - 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price returns to middle BB or breaks below lower BB
-            elif close[i] <= middle_bb[i] or close[i] < lower_bb[i]:
+            # Exit: price below cloud bottom or below 1w base line
+            elif close[i] < cloud_bottom[i] or close[i] < base_line_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.0 * ATR
-            if close[i] > entry_price + 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price returns to middle BB or breaks above upper BB
-            elif close[i] >= middle_bb[i] or close[i] > upper_bb[i]:
+            # Exit: price above cloud top or above 1w base line
+            elif close[i] > cloud_top[i] or close[i] > base_line_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and Bollinger Band squeeze
-            # Long: price breaks above upper BB, weekly EMA rising, volume spike, BB squeeze
-            if (close[i] > upper_bb[i] and
-                ema_1w_aligned[i] > ema_1w_aligned[i-1] and  # EMA rising
-                volume[i] > 2.0 * volume_ma_1d_aligned[i] and
-                squeeze_condition[i]):
+            # Look for entries with Ichimoku signals and weekly trend alignment
+            # Long: price above cloud, above 1w base line, and bullish TK cross
+            if (close[i] > cloud_top[i] and
+                close[i] > base_line_1w_aligned[i] and
+                tk_cross[i] == 1):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below lower BB, weekly EMA falling, volume spike, BB squeeze
-            elif (close[i] < lower_bb[i] and
-                  ema_1w_aligned[i] < ema_1w_aligned[i-1] and  # EMA falling
-                  volume[i] > 2.0 * volume_ma_1d_aligned[i] and
-                  squeeze_condition[i]):
+            # Short: price below cloud, below 1w base line, and bearish TK cross
+            elif (close[i] < cloud_bottom[i] and
+                  close[i] < base_line_1w_aligned[i] and
+                  tk_cross[i] == -1):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
