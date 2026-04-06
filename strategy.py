@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d Volume Spike + 1w EMA Trend Filter
-Hypothesis: On 12h timeframe, Donchian breakouts with volume confirmation and 
-weekly EMA trend filter capture strong directional moves while minimizing whipsaws.
-Volume spike (2x 20-period average) ensures momentum behind breakouts.
-Weekly EMA filter ensures trading only in higher timeframe trend direction.
-Target: 50-150 total trades over 4 years with low frequency to minimize fee drag.
-Works in both bull (breakouts with trend) and bear (breakouts against trend filtered out).
+4h Donchian(20) Breakout + 12h EMA Trend + Volume Filter
+Hypothesis: On 4h timeframe, Donchian breakouts combined with 12h EMA trend filter and volume confirmation 
+capture significant moves while maintaining low trade frequency. 12h EMA filter ensures we only trade 
+in the direction of the higher timeframe trend, reducing whipsaws in both bull and bear markets.
+Target: 75-200 total trades over 4 years (19-50/year) with low frequency to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dvol_1wema_v1"
-timeframe = "12h"
+name = "4h_donchian20_12hma_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,34 +20,22 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for volume average (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    vol_1d = df_1d['volume'].values
+    # Load 12h data for EMA (once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Load 1w data for EMA (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # 20-period volume average on daily
-    vol_ma_1d = np.full_like(vol_1d, np.nan)
-    if len(vol_1d) >= 20:
-        vol_ma_1d = np.convolve(vol_1d, np.ones(20)/20, mode='same')
-        vol_ma_1d[:10] = np.nan
-        vol_ma_1d[-10:] = np.nan
-    
-    # 50-period EMA on weekly
-    ema_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 50:
+    # 50-period EMA on 12h
+    ema_12h = np.full_like(close_12h, np.nan)
+    if len(close_12h) >= 50:
         multiplier = 2 / (50 + 1)
-        ema_1w[0] = close_1w[0]
-        for i in range(1, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * multiplier) + (ema_1w[i-1] * (1 - multiplier))
+        ema_12h[0] = close_12h[0]
+        for i in range(1, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * multiplier) + (ema_12h[i-1] * (1 - multiplier))
     
-    # Align to 12h timeframe
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align EMA to 4h timeframe
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Price data
+    # Price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -63,7 +49,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(vol_ma_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]):
+        if np.isnan(ema_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -78,37 +64,41 @@ def generate_signals(prices):
             highest_high = np.max(high[:i+1]) if i > 0 else high[i]
             lowest_low = np.min(low[:i+1]) if i > 0 else low[i]
         
-        # Volume filter: current volume > 2x 20-period daily average
-        volume_filter = volume[i] > (vol_ma_1d_aligned[i] * 2.0) if not np.isnan(vol_ma_1d_aligned[i]) else False
+        # Volume filter (20-period average)
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
+            volume_filter = volume[i] > vol_ma * 1.5
+        else:
+            volume_filter = False
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR price below weekly EMA
-            if close[i] < lowest_low or close[i] < ema_1w_aligned[i]:
+            # Exit: price closes below Donchian lower OR price below 12h EMA
+            if close[i] < lowest_low or close[i] < ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR price above weekly EMA
-            if close[i] > highest_high or close[i] > ema_1w_aligned[i]:
+            # Exit: price closes above Donchian upper OR price above 12h EMA
+            if close[i] > highest_high or close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + weekly EMA trend filter
+            # Look for entries: Donchian breakout + volume + 12h EMA trend filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # Only go long if price above weekly EMA, short if below
-            weekly_uptrend = close[i] > ema_1w_aligned[i]
-            weekly_downtrend = close[i] < ema_1w_aligned[i]
+            # Only go long if price above 12h EMA, short if below
+            trend_uptrend = close[i] > ema_12h_aligned[i]
+            trend_downtrend = close[i] < ema_12h_aligned[i]
             
-            if i >= 20 and bull_breakout and volume_filter and weekly_uptrend:
+            if i >= 20 and bull_breakout and volume_filter and trend_uptrend:
                 signals[i] = 0.25
                 position = 1
-            elif i >= 20 and bear_breakout and volume_filter and weekly_downtrend:
+            elif i >= 20 and bear_breakout and volume_filter and trend_downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
