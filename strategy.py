@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 1d EMA(50) Trend + Volume Filter + ATR Stoploss (v7)
-Hypothesis: Donchian breakouts capture momentum aligned with daily EMA trend, volume confirms breakout strength, ATR stoploss limits drawdown. Further refined entry conditions to reduce trade frequency and target 75-200 total trades over 4 years by tightening volume filter and adding a minimum volatility filter.
+1h Donchian(20) Breakout + 4h EMA(20) Trend + Volume Filter + ATR Stoploss
+Hypothesis: Donchian breakouts capture momentum aligned with 4h EMA trend, volume confirms breakout strength, ATR stoploss limits drawdown. Using 1h timeframe with 4h trend filter to reduce noise and target 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1dema_vol_v7"
-timeframe = "4h"
+name = "1h_donchian20_4hema_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,15 +36,15 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Load 1d EMA(50) once before loop
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 49) / 51
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Load 4h EMA(20) once before loop
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= 20:
+        ema_4h[19] = np.mean(close_4h[:20])
+        for i in range(20, len(close_4h)):
+            ema_4h[i] = (close_4h[i] * 2 + ema_4h[i-1] * 18) / 20
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -68,12 +68,9 @@ def generate_signals(prices):
         highest_high = np.max(high[i-20:i])
         lowest_low = np.min(low[i-20:i])
         
-        # Volume filter (20-period average) - tightened to 2.0x
+        # Volume filter (20-period average)
         vol_ma = np.mean(volume[i-20:i])
-        volume_filter = volume[i] > vol_ma * 2.0
-        
-        # Volatility filter: require ATR > 0.5% of price to avoid choppy markets
-        vol_filter = atr[i] > close[i] * 0.005
+        volume_filter = volume[i] > vol_ma * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
@@ -99,22 +96,22 @@ def generate_signals(prices):
                 signals[i] = -0.20
             bars_since_entry += 1
         else:
-            # Look for entries: Donchian breakout + volume + trend + volatility filter
-            # Minimum holding period: only allow new entry after 15 bars flat (increased from 10)
-            if bars_since_entry >= 15:
+            # Look for entries: Donchian breakout + volume + trend filter
+            # Minimum holding period: only allow new entry after 10 bars flat
+            if bars_since_entry >= 10:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
-                # Trend filter: only trade long if close > 1d EMA, short if close < 1d EMA
-                trend_filter_long = close[i] > ema_1d_aligned[i]
-                trend_filter_short = close[i] < ema_1d_aligned[i]
+                # Trend filter: only trade long if close > 4h EMA, short if close < 4h EMA
+                trend_filter_long = close[i] > ema_4h_aligned[i]
+                trend_filter_short = close[i] < ema_4h_aligned[i]
                 
-                if bull_breakout and volume_filter and trend_filter_long and vol_filter:
+                if bull_breakout and volume_filter and trend_filter_long:
                     signals[i] = 0.20
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                elif bear_breakout and volume_filter and trend_filter_short and vol_filter:
+                elif bear_breakout and volume_filter and trend_filter_short:
                     signals[i] = -0.20
                     position = -1
                     entry_price = close[i]
