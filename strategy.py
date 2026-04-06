@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian(20) breakouts with 1w EMA(50) trend filter and volume confirmation.
-# Uses 1w trend for direction, 1d Donchian breakouts for entries, volume for confirmation.
-# Designed for ~75-150 total trades over 4 years (19-38/year) to avoid excessive fees.
+# Hypothesis: 4-hour strategy using 1d Donchian(20) breakouts with 1w EMA(50) trend filter and volume confirmation.
+# Uses 1w trend for direction (bull/bear filter), 1d Donchian breakouts for entries, volume for confirmation.
+# Designed for ~100-150 total trades over 4 years (25-38/year) to avoid excessive fees.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
-# Target: 75-150 total trades, 0.25 position size, max DD < -50%.
+# Target: 100-200 total trades, 0.25 position size, max DD < -50%.
 
 name = "exp_13741_4h_donchian20_1w_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
-# Parameters - tuned for low trade frequency
+# Parameters - tuned for moderate trade frequency
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 8
