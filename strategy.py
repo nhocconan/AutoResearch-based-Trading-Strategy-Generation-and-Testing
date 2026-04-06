@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-6h Camarilla Pivot + Volume + Trend Filter
-Hypothesis: Camarilla pivot levels provide high-probability reversal (R3/S3) and breakout (R4/S4) levels.
-Fade at R3/S3 with volume confirmation, breakout continuation at R4/S4 with trend filter.
-Uses 1d Camarilla levels for context. Works in both bull and bear markets by adapting to price action.
-Target: 75-150 total trades over 4 years (19-38/year).
+12h Donchian(20) breakout + 1w SMA trend + volume confirmation
+Hypothesis: Donchian breakout captures trend continuation, confirmed by weekly trend and volume.
+Works in bull (breakouts above upper band) and bear (breakdowns below lower band).
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "14387_6h_camarilla_pivot_vol_trend_v1"
-timeframe = "6h"
+name = "14388_12h_donchian20_1w_sma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,52 +19,28 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Camarilla pivots (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Load 1w data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate previous day's Camarilla levels
-    # Using previous day's high, low, close (shifted by 1)
-    ph = np.roll(high_1d, 1)
-    pl = np.roll(low_1d, 1)
-    pc = np.roll(close_1d, 1)
-    ph[0] = high_1d[0]
-    pl[0] = low_1d[0]
-    pc[0] = close_1d[0]
+    # Weekly SMA(50) for trend filter
+    sma_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    sma_1w_aligned = align_htf_to_ltf(prices, df_1w, sma_1w)
     
-    # Camarilla multipliers
-    # R4 = PC + 1.1 * (PH - PL)
-    # R3 = PC + 1.1 * (PH - PL) / 2
-    # S3 = PC - 1.1 * (PH - PL) / 2
-    # S4 = PC - 1.1 * (PH - PL)
-    camarilla_range = 1.1 * (ph - pl)
-    r4 = pc + camarilla_range
-    r3 = pc + camarilla_range / 2
-    s3 = pc - camarilla_range / 2
-    s4 = pc - camarilla_range
-    
-    # Align Camarilla levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # 6h data
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume filter: require volume above 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.2 * vol_ma)  # 20% above average
+    # Donchian channels (20-period) on 12h
+    donchian_window = 20
+    donchian_high = pd.Series(high).rolling(window=donchian_window, min_periods=donchian_window).max().values
+    donchian_low = pd.Series(low).rolling(window=donchian_window, min_periods=donchian_window).min().values
     
-    # Trend filter: 50-period EMA on 6h
-    ema50 = pd.Series(close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    trend_up = close > ema50
-    trend_down = close < ema50
+    # Volume filter: avoid low volume periods
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (0.8 * vol_ma)  # Require at least 80% of average volume
     
     # ATR for stoploss
     tr1 = high - low
@@ -80,13 +55,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 50  # for EMA50
+    start = max(donchian_window, 50) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(ema50[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(sma_1w_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -95,37 +69,40 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: stoploss or trend reversal
-            if (close[i] <= entry_price - 2.5 * atr[i] or not trend_up[i]):
+            # Exit: price breaks below Donchian low OR trend turns bearish OR stoploss
+            if (close[i] <= donchian_low[i] or
+                close[i] < sma_1w_aligned[i] or
+                close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: stoploss or trend reversal
-            if (close[i] >= entry_price + 2.5 * atr[i] or not trend_down[i]):
+            # Exit: price breaks above Donchian high OR trend turns bullish OR stoploss
+            if (close[i] >= donchian_high[i] or
+                close[i] > sma_1w_aligned[i] or
+                close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries
-            # Fade at R3/S3: price touches level with rejection
-            # Breakout at R4/S4: price closes beyond level
+            # Look for entries: Donchian breakout + trend filter + volume
+            long_breakout = close[i] > donchian_high[i]
+            short_breakout = close[i] < donchian_low[i]
             
-            # Long setups
-            long_fade = (low[i] <= s3_aligned[i] and close[i] > s3_aligned[i] and vol_filter[i])
-            long_breakout = (close[i] > r4_aligned[i] and trend_up[i] and vol_filter[i])
+            # Trend filter: only long in uptrend, short in downtrend
+            trend_up = close[i] > sma_1w_aligned[i]
+            trend_down = close[i] < sma_1w_aligned[i]
             
-            # Short setups
-            short_fade = (high[i] >= r3_aligned[i] and close[i] < r3_aligned[i] and vol_filter[i])
-            short_breakout = (close[i] < s4_aligned[i] and trend_down[i] and vol_filter[i])
+            long_setup = long_breakout and trend_up and vol_filter[i]
+            short_setup = short_breakout and trend_down and vol_filter[i]
             
-            if long_fade or long_breakout:
+            if long_setup:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_fade or short_breakout:
+            elif short_setup:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
