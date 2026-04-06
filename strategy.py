@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-4h Donchian breakout with 12h trend filter and volume confirmation.
-- Long: price breaks above 4h Donchian(20) + price > 12h EMA(50) + volume > 1.5x average
-- Short: price breaks below 4h Donchian(20) + price < 12h EMA(50) + volume > 1.5x average
+6h Donchian breakout with 1w pivot direction and volume confirmation.
+- Long: price breaks above 6h Donchian(20) + price > 1w pivot point + volume > 1.5x average
+- Short: price breaks below 6h Donchian(20) + price < 1w pivot point + volume > 1.5x average
 - Exit: stop loss (2*ATR) or reversal signal
 - Position size: 0.25 (25%)
 - Target: 75-200 trades over 4 years (19-50/year)
@@ -12,8 +12,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14193_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_14195_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period):
@@ -30,20 +30,29 @@ def calculate_ema(close, period):
     """Calculate EMA with proper min_periods"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
+def calculate_pivot_points(high, low, close):
+    """Calculate pivot points: P = (H + L + C)/3, R1 = 2P - L, S1 = 2P - H"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    return pivot, r1, s1
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for EMA filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load 1w data for pivot points (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h EMA(50)
-    ema_12h = calculate_ema(close_12h, 50)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 1w pivot points
+    pivot_1w, r1_1w, s1_1w = calculate_pivot_points(high_1w, low_1w, close_1w)
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
     
-    # 4h data
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -65,12 +74,12 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 50 for EMA)
-    start = max(20, 20, 14, 50) + 1
+    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR)
+    start = max(20, 20, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_12h_aligned[i]) or \
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(pivot_1w_aligned[i]) or \
            np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -93,11 +102,11 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout signals with 12h EMA filter and volume
-        # Long: break above upper band + price > 12h EMA + volume
-        # Short: break below lower band + price < 12h EMA + volume
-        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_12h_aligned[i]) and vol_filter[i]
-        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_12h_aligned[i]) and vol_filter[i]
+        # Donchian breakout signals with 1w pivot filter and volume
+        # Long: break above upper band + price > 1w pivot + volume
+        # Short: break below lower band + price < 1w pivot + volume
+        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > pivot_1w_aligned[i]) and vol_filter[i]
+        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < pivot_1w_aligned[i]) and vol_filter[i]
         
         # Generate signals
         if position == 0:
