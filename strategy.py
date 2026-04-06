@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian breakout with daily EMA trend filter and volume confirmation
-# Works in bull/bear because breakouts capture strong directional moves, EMA filter ensures
-# we trade with the dominant trend, and volume confirms breakout validity.
-# Target: 80-120 trades over 4 years (20-30/year) to balance opportunity and cost.
+# Hypothesis: 4h Donchian(20) breakout with daily volume confirmation and ATR stoploss
+# Works in bull/bear because breakouts capture strong directional moves, volume filters weak signals,
+# and ATR stoploss adapts to volatility. Daily timeframe for HTF ensures alignment with major sessions.
+# Target: 75-200 trades over 4 years (19-50/year) to balance opportunity and cost.
 
-name = "exp_13005_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13006_4h_donchian20_1d_vol_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -30,10 +29,6 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
 def calculate_donchian(high, low, period):
     """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
@@ -48,18 +43,21 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend filter
-    close_d = df_daily['close'].values
-    ema_d = calculate_ema(close_d, EMA_PERIOD)
-    ema_d_aligned = align_htf_to_ltf(prices, df_daily, ema_d)
+    # Calculate daily Donchian channels
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    upper_d, lower_d = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
     
-    # Calculate 12h indicators
+    # Align to 4h timeframe
+    upper_d_aligned = align_htf_to_ltf(prices, df_daily, upper_d)
+    lower_d_aligned = align_htf_to_ltf(prices, df_daily, lower_d)
+    
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    donch_up, donch_low = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -69,11 +67,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_d_aligned[i]) or np.isnan(donch_up[i]) or np.isnan(donch_low[i]):
+        # Skip if Donchian levels not available
+        if np.isnan(upper_d_aligned[i]) or np.isnan(lower_d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -95,9 +93,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions with trend filter
-        breakout_long = volume_ok and close[i] >= donch_up[i] and close[i] > ema_d_aligned[i]
-        breakout_short = volume_ok and close[i] <= donch_low[i] and close[i] < ema_d_aligned[i]
+        # Breakout above upper band or breakdown below lower band
+        breakout_long = volume_ok and close[i] >= upper_d_aligned[i]
+        breakout_short = volume_ok and close[i] <= lower_d_aligned[i]
         
         # Generate signals
         if position == 0:
