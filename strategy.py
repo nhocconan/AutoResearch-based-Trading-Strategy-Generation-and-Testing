@@ -3,41 +3,54 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams Alligator with 1-day Elder Ray (bull/bear power) for trend filtering.
-# Uses Alligator's jaw/teeth/lips to identify trend direction and strength, while Elder Ray confirms
-# bullish/bearish power from daily timeframe. Works in trending markets (both bull and bear) by
-# filtering counter-trend noise. Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12-hour Donchian(25) breakout with daily volume confirmation and ADX trend filter.
+# Uses price channel breakouts aligned with strong trend conditions (ADX>25) and volume confirmation.
+# Designed for 12h timeframe to target 50-150 trades over 4 years (12-37/year). 
+# Works in both bull and bear markets by capturing breakouts in the direction of the trend.
+# Tight entry conditions reduce trade frequency to minimize fee drag.
 
-name = "exp_13511_6h_alligator_1d_elder_ray_v1"
-timeframe = "6h"
+name = "exp_13512_12h_donchian25_adx_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-ALLIGATOR_JAW = 13    # Blue line
-ALLIGATOR_TEETH = 8   # Red line
-ALLIGATOR_LIPS = 5    # Green line
-ELDER_RAY_PERIOD = 13 # EMA period for Elder Ray
+DONCHIAN_PERIOD = 25
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_ema(close, period):
-    """Calculate EMA with proper Wilder's smoothing equivalent"""
-    return pd.Series(close).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-
-def calculate_alligator(close, jaw_period, teeth_period, lips_period):
-    """Calculate Williams Alligator lines"""
-    jaw = calculate_ema(close, jaw_period)
-    teeth = calculate_ema(close, teeth_period)
-    lips = calculate_ema(close, lips_period)
-    return jaw, teeth, lips
-
-def calculate_elder_ray(high, low, close, period):
-    """Calculate Elder Ray: Bull Power = High - EMA, Bear Power = Low - EMA"""
-    ema = calculate_ema(close, period)
-    bull_power = high - ema
-    bear_power = low - ema
-    return bull_power, bear_power
+def calculate_adx(high, low, close, period):
+    """Calculate ADX (Average Directional Index)"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    
+    # Directional Movement
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    # Smooth the values
+    tr_ma = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    plus_dm_ma = pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    minus_dm_ma = pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    # Directional Indicators
+    plus_di = 100 * plus_dm_ma / tr_ma
+    minus_di = 100 * minus_dm_ma / tr_ma
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    return adx
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -53,26 +66,23 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate daily Elder Ray for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    bull_power, bear_power = calculate_elder_ray(high_1d, low_1d, close_1d, ELDER_RAY_PERIOD)
-    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
-    
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Alligator lines
-    jaw, teeth, lips = calculate_alligator(close, ALLIGATOR_JAW, ALLIGATOR_TEETH, ALLIGATOR_LIPS)
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # ATR
+    # Volume MA
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ADX for trend strength
+    adx = calculate_adx(high, low, close, ADX_PERIOD)
+    
+    # ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -81,13 +91,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ALLIGATOR_JAW, ALLIGATOR_TEETH, ALLIGATOR_LIPS, ELDER_RAY_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ADX_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
-            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
-            np.isnan(atr[i])):
+        # Skip if any indicator not available
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(adx[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -106,24 +115,24 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Alligator trend conditions
-        # Uptrend: Lips > Teeth > Jaw (green > red > blue)
-        # Downtrend: Jaw > Teeth > Lips (blue > red > green)
-        uptrend = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        downtrend = jaw[i] > teeth[i] and teeth[i] > lips[i]
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Elder Ray confirmation: Bull Power > 0 and Bear Power < 0 for strength
-        strong_bull = bull_power_aligned[i] > 0
-        strong_bear = bear_power_aligned[i] < 0
+        # Trend filter: ADX > threshold indicates strong trend
+        strong_trend = adx[i] > ADX_THRESHOLD
         
-        # Entry signals
+        # Breakout signals using Donchian channels
+        breakout_up = volume_ok and strong_trend and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and strong_trend and (low[i] < lowest_low[i-1])
+        
+        # Generate signals
         if position == 0:
-            if uptrend and strong_bull:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif downtrend and strong_bear:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -131,18 +140,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Stay in long while uptrend and bull power positive
-            if uptrend and strong_bull:
-                signals[i] = SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-                position = 0
+            signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Stay in short while downtrend and bear power negative
-            if downtrend and strong_bear:
-                signals[i] = -SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-                position = 0
+            signals[i] = -SIGNAL_SIZE
     
     return signals
