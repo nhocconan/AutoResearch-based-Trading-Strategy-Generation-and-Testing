@@ -3,10 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with daily trend filter and volume confirmation.
-# Uses Donchian channels (20-period high/low) from 4h data.
-# Daily trend filter (price vs EMA50) ensures trades align with higher timeframe bias.
-# Volume confirmation (current volume > 1.5x 20-period average) filters low-quality breakouts.
+# Hypothesis: 4-hour Donchian channel breakout with daily trend filter and volume confirmation.
+# Uses Donchian(20) breakout for entry, daily EMA(50) for trend bias, and volume > 1.5x 20-period average for confirmation.
 # Designed for 4h timeframe to target 75-200 trades over 4 years.
 # Works in bull/bear markets via daily EMA trend bias and breakout logic.
 
@@ -39,7 +37,7 @@ def generate_signals(prices):
     # Align EMA50 to 4h timeframe (shifted by 1 daily bar for no look-ahead)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian Channels (20-period high/low)
+    # Donchian Channel (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(19, n):
@@ -50,7 +48,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):  # Start after Donchian is available
+    for i in range(20, n):
         # Skip if required data not available
         if np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]):
             if position != 0:
@@ -71,8 +69,8 @@ def generate_signals(prices):
         bearish_bias = close[i] < ema_50_aligned[i]
         
         # Donchian breakout conditions
-        breakout_above = close[i] > donchian_high[i] and close[i-1] <= donchian_high[i]
-        breakout_below = close[i] < donchian_low[i] and close[i-1] >= donchian_low[i]
+        breakout_up = close[i] > donchian_high[i-1]  # Break above previous high
+        breakout_down = close[i] < donchian_low[i-1]  # Break below previous low
         
         # Check exits and stoploss
         if position == 1:  # long position
@@ -100,13 +98,13 @@ def generate_signals(prices):
         else:
             # Look for entries in direction of daily trend with volume confirmation
             if volume_filter:
-                # Long: breakout above Donchian in uptrend
-                if breakout_above and bullish_bias:
+                # Long: breakout up in uptrend
+                if breakout_up and bullish_bias:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: breakout below Donchian in downtrend
-                elif breakout_below and bearish_bias:
+                # Short: breakout down in downtrend
+                elif breakout_down and bearish_bias:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
