@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 12h Donchian(20) Breakout + Volume Spike + 1d EMA Trend Filter + ATR Stoploss
-Hypothesis: Donchian breakouts on 12h timeframe with volume spike (>2x average) and strong 1d trend (price > EMA200) capture high-probability moves while minimizing trades. The 1d EMA filter reduces whipsaws and works in both bull/bear by aligning with higher timeframe trend. Target: 50-150 total trades over 4 years.
+Hypothesis: Donchian breakouts with volume spike (>2x average) and strong 1d trend (price > EMA200) capture high-probability moves. The 1d EMA filter reduces whipsaws in ranging markets and works in both bull/bear by aligning with higher timeframe trend. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
