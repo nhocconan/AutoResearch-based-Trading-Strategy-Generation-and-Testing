@@ -4,9 +4,9 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA trend filter and volume confirmation.
-# Donchian channels capture breakout trends, EMA filter avoids counter-trend trades,
-# volume confirms institutional interest. Works in bull markets (breakouts above upper band)
-# and bear markets (breakdowns below lower band). Target: 75-200 total trades over 4 years.
+# Uses Donchian channels for clear breakout levels, EMA for trend alignment, and volume to confirm
+# institutional participation. Works in bull markets (breakouts above upper band) and bear markets
+# (breakdowns below lower band). Target: 75-200 total trades over 4 years.
 
 name = "exp_13363_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
@@ -60,7 +60,7 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -78,7 +78,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if EMA not available
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        if np.isnan(ema_12h_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -105,8 +105,8 @@ def generate_signals(prices):
         downtrend = close[i] < ema_12h_aligned[i]
         
         # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > donchian_upper[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < donchian_lower[i-1])
+        breakout_up = volume_ok and uptrend and (high[i] > upper[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lower[i-1])
         
         # Generate signals
         if position == 0:
