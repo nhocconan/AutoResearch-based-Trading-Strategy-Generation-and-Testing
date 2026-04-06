@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
 1d Donchian(20) Breakout + 1w EMA Trend + Volume Spike + ATR Stop
-Hypothesis: Daily breakouts aligned with weekly trend and volume confirmation
-capture major trends while avoiding whipsaws. Works in bull (breakouts with trend)
-and bear (breakdowns against trend). Target: 15-25 trades/year for low fee drag.
+Hypothesis: Daily breakouts with weekly trend bias and volume confirmation capture
+multi-week momentum while avoiding chop. Designed for low trade frequency (~10-20/year)
+to minimize fee drift and work in both bull (breakouts with trend) and bear (breakdowns
+with trend) regimes.
 """
 
 import numpy as np
@@ -50,7 +51,7 @@ def generate_signals(prices):
     # Trend bias: above EMA = bullish, below = bearish
     trend_bias_1w = np.where(close_1w > ema_1w, 1, -1)
     
-    # Align to daily timeframe
+    # Align to 1d timeframe
     trend_bias_aligned = align_htf_to_ltf(prices, df_1w, trend_bias_1w)
     
     signals = np.zeros(n)
