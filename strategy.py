@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h ATR breakout with 1d trend filter and volume confirmation.
-# Long when price breaks above ATR(20) band + 1d close > SMA50 + volume > 20-period MA.
-# Short when price breaks below ATR(20) band + 1d close < SMA50 + volume > 20-period MA.
-# Uses ATR for volatility-adaptive breakouts, 1d trend for direction, volume for confirmation.
-# Works in trending markets (breakouts) and avoids chop via trend filter.
-# Target: 60-150 total trades over 4 years (15-38/year) with controlled risk.
+# Hypothesis: 12h Donchian(20) breakout with volume confirmation and ATR stoploss.
+# Breakouts from 20-period high/low provide directional bias in both bull and bear markets.
+# Volume filter ensures breakouts have institutional participation.
+# ATR-based stops manage risk during volatile periods.
+# Target: 50-150 total trades over 4 years (12-37/year) with controlled risk.
 
-name = "6h_atr_breakout_1d_trend_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_vol_sl_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,41 +24,32 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Donchian channels (20-period high/low)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # 1d SMA50 for trend filter
-    sma50_1d = pd.Series(df_1d['close'].values).rolling(window=50, min_periods=50).mean().values
-    sma50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma50_1d)
-    
-    # ATR(20) for volatility band
+    # ATR for stoploss and position sizing
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
-    tr1[0] = 0
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).rolling(window=20, min_periods=20).mean().values
-    
-    # Upper and lower bands: close ± ATR * multiplier
-    mult = 1.5
-    upper_band = close + atr * mult
-    lower_band = close - atr * mult
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     # Volume moving average for filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(sma50_1d_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(atr[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -70,29 +60,39 @@ def generate_signals(prices):
         vol_filter = volume[i] > vol_ma[i]
         
         if position == 1:  # long position
-            # Exit: price closes below lower band (breakdown) or trend turns bearish
-            if close[i] < lower_band[i] or sma50_1d_aligned[i] > close[i]:
+            # Stoploss: 2 * ATR below entry
+            if close[i] < entry_price - 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit: close below Donchian low (mean reversion)
+            elif close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above upper band (breakout) or trend turns bullish
-            if close[i] > upper_band[i] or sma50_1d_aligned[i] < close[i]:
+            # Stoploss: 2 * ATR above entry
+            if close[i] > entry_price + 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+            # Exit: close above Donchian high (mean reversion)
+            elif close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume and trend filter
+            # Look for entries with volume filter
             if vol_filter:
-                # Bullish breakout: price above upper band + 1d uptrend
-                if close[i] > upper_band[i] and sma50_1d_aligned[i] < close[i]:
+                # Long breakout: close above Donchian high
+                if close[i] > donchian_high[i]:
                     signals[i] = 0.25
                     position = 1
-                # Bearish breakdown: price below lower band + 1d downtrend
-                elif close[i] < lower_band[i] and sma50_1d_aligned[i] > close[i]:
+                    entry_price = close[i]
+                # Short breakout: close below Donchian low
+                elif close[i] < donchian_low[i]:
                     signals[i] = -0.25
                     position = -1
+                    entry_price = close[i]
     
     return signals
