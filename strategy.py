@@ -47,7 +47,7 @@ def generate_signals(prices):
     ema_1w = calculate_ema(df_1w['close'].values, TREND_EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate daily indicators
+    # Calculate 1d indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
