@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h EMA filter and volume confirmation
-# Long when price > 4h EMA20 + RSI(14) > 50 + volume > 1.2x average
-# Short when price < 4h EMA20 + RSI(14) < 50 + volume > 1.2x average
-# Uses 4h EMA20 for trend filter to avoid counter-trend trades
-# Target: 60-150 total trades over 4 years with controlled risk
-# RSI prevents entries in weak momentum, volume filter avoids low-liquidity noise
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 12h trend filter and volume confirmation
+# Long when Bull Power > 0 + Bear Power < 0 + 12h EMA50 up + volume > 1.5x avg
+# Short when Bull Power < 0 + Bear Power > 0 + 12h EMA50 down + volume > 1.5x avg
+# Uses Elder Ray to measure bull/bear strength relative to EMA13
+# Target: 75-150 total trades over 4 years with controlled risk
+# ATR-based stoploss to limit drawdown
 
-name = "1h_momentum_4h_ema_volume_v3"
-timeframe = "1h"
+name = "6h_elderray_12h_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,33 +25,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for EMA20 trend filter
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # 12h data for EMA50 trend filter and EMA13 for Elder Ray
+    df_12h = get_htf_data(prices, '12h')
+    if len(df_12h) < 50:
         return np.zeros(n)
     
-    close_4h = df_4h['close'].values
+    close_12h = df_12h['close'].values
     
-    # EMA20 calculation
-    ema20_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
+    # EMA50 and EMA13 calculation for 12h
+    ema50_12h = pd.Series(close_12h).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema13_12h = pd.Series(close_12h).ewm(span=13, min_periods=13, adjust=False).mean().values
     
-    # Align 4h EMA20 to 1h timeframe
-    ema20_4h_aligned = align_htf_to_ltf(prices, df_4h, ema20_4h)
+    # Align 12h indicators to 6h timeframe
+    ema50_12h_aligned = align_htf_to_ltf(prices, df_12h, ema50_12h)
+    ema13_12h_aligned = align_htf_to_ltf(prices, df_12h, ema13_12h)
     
-    # RSI(14) calculation
-    def calculate_rsi(close_prices, period=14):
-        delta = np.diff(close_prices, prepend=close_prices[0])
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        
-        avg_gain = pd.Series(gain).ewm(alpha=1/period, min_periods=period, adjust=False).mean().values
-        avg_loss = pd.Series(loss).ewm(alpha=1/period, min_periods=period, adjust=False).mean().values
-        
-        rs = avg_gain / (avg_loss + 1e-10)
-        rsi = 100 - (100 / (1 + rs))
-        return rsi
-    
-    rsi = calculate_rsi(close, 14)
+    # Elder Ray Power calculations (using 12h data aligned to 6h)
+    bull_power = high - ema13_12h_aligned  # Bull Power = High - EMA13
+    bear_power = low - ema13_12h_aligned   # Bear Power = Low - EMA13
     
     # Volume average (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -60,46 +51,58 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(ema20_4h_aligned[i]) or np.isnan(rsi[i]) or 
-            np.isnan(volume_ma[i])):
+        if (np.isnan(ema50_12h_aligned[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(volume_ma[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
         if position == 1:  # long position
-            # Exit: price below 4h EMA20 or RSI < 40
-            if close[i] < ema20_4h_aligned[i] or rsi[i] < 40:
+            # Stoploss: 2 * ATR approximation using price range
+            if close[i] < entry_price - 2.0 * (high[i] - low[i]):
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+            # Exit: Bear Power turns positive or trend changes
+            elif bear_power[i] > 0 or close[i] < ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price above 4h EMA20 or RSI > 60
-            if close[i] > ema20_4h_aligned[i] or rsi[i] > 60:
+            # Stoploss: 2 * ATR approximation
+            if close[i] > entry_price + 2.0 * (high[i] - low[i]):
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+            # Exit: Bull Power turns negative or trend changes
+            elif bull_power[i] < 0 or close[i] > ema50_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
             # Look for entries with volume confirmation
-            # Long: price > 4h EMA20 + RSI > 50 + volume spike
-            if (close[i] > ema20_4h_aligned[i] and 
-                rsi[i] > 50 and
-                volume[i] > 1.2 * volume_ma[i]):
-                signals[i] = 0.20
+            # Long: Bull Power > 0 AND Bear Power < 0 + uptrend + volume spike
+            if (bull_power[i] > 0 and 
+                bear_power[i] < 0 and
+                close[i] > ema50_12h_aligned[i] and
+                volume[i] > 1.5 * volume_ma[i]):
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price < 4h EMA20 + RSI < 50 + volume spike
-            elif (close[i] < ema20_4h_aligned[i] and 
-                  rsi[i] < 50 and
-                  volume[i] > 1.2 * volume_ma[i]):
-                signals[i] = -0.20
+            # Short: Bull Power < 0 AND Bear Power > 0 + downtrend + volume spike
+            elif (bull_power[i] < 0 and 
+                  bear_power[i] > 0 and
+                  close[i] < ema50_12h_aligned[i] and
+                  volume[i] > 1.5 * volume_ma[i]):
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
     
