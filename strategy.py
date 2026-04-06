@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
-# Buy when price breaks above 20-day high with volume > 1.5x MA and above weekly EMA (uptrend).
-# Sell when price breaks below 20-day low with volume > 1.5x MA and below weekly EMA (downtrend).
-# Uses ATR-based stop loss (2x ATR). Designed to capture trends in both bull and bear markets
-# by aligning with higher timeframe momentum while using daily price structure for entries.
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 1-day Donchian breakout with volume confirmation and weekly EMA trend filter.
+# Uses daily price channels (Donchian 20) for breakout signals, volume surge for confirmation,
+# and weekly EMA to ensure alignment with higher timeframe momentum. This avoids counter-trend
+# trades and works in both bull (breakouts above resistance) and bear (breakdowns below support)
+# markets. Target: 75-250 total trades over 4 years (~20-60/year) to balance signal quality
+# and fee drag. Position size 0.25 to manage drawdown.
 
 name = "exp_13298_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
@@ -16,12 +16,12 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 20   # Weekly EMA
+EMA_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -41,7 +41,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for trend filter
+    # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     # Load daily data ONCE before loop for Donchian channels
     df_1d = get_htf_data(prices, '1d')
@@ -54,10 +54,8 @@ def generate_signals(prices):
     # Calculate daily Donchian channels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    
-    # Upper band: highest high over period
+    # Upper band: highest high over period, Lower band: lowest low over period
     upper = pd.Series(high_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    # Lower band: lowest low over period
     lower = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Align Donchian levels to daily timeframe
@@ -82,7 +80,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if indicators not available
