@@ -1,16 +1,22 @@
-# 1d Donchian(20) Breakout + 1-week EMA200 Trend + Volume Confirmation
-# Trend-following strategy for daily timeframe with weekly trend bias.
-# Uses Donchian breakouts in direction of weekly EMA200 trend with volume filter.
-# Designed for low trade frequency (30-100 total over 4 years) to minimize fee drag.
-# Works in bull/bear markets via weekly EMA200 trend filter and ATR-based risk control.
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_1w_ema200_vol_v1"
-timeframe = "1d"
+# Hypothesis: 6-hour Donchian(20) breakout with 12-hour EMA50 trend and volume confirmation.
+# Uses 12-hour EMA50 to establish trend bias (long above EMA50, short below EMA50).
+# Breakouts in direction of EMA trend with volume capture institutional moves.
+# Designed for 6h timeframe to target 50-150 trades over 4 years with proven structure.
+# Works in bull/bear markets via EMA-based directional bias and volume confirmation.
+# Controls trade frequency with volume filter and strict breakout conditions.
+
+name = "6h_donchian20_12h_ema50_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
     # Price and volume data
@@ -19,21 +25,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-week EMA200 for trend bias
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # 12-hour EMA50 for trend bias
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate EMA200 on 1w closes
-    ema_200_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 200:
-        ema_200_1w[199] = np.mean(close_1w[:200])
-        for i in range(200, len(close_1w)):
-            ema_200_1w[i] = (close_1w[i] * 2 / 201) + (ema_200_1w[i-1] * 199 / 201)
+    # Calculate EMA50 on 12h closes
+    ema_50_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 50:
+        ema_50_12h[49] = np.mean(close_12h[:50])
+        for i in range(50, len(close_12h)):
+            ema_50_12h[i] = (close_12h[i] * 2 / 51) + (ema_50_12h[i-1] * 49 / 51)
     
-    # Align EMA200 to 1d timeframe (shifted by 1 1w bar for no look-ahead)
-    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    # Align EMA50 to 6h timeframe (shifted by 1 12h bar for no look-ahead)
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
     
-    # 1-day Donchian channel (20-period)
+    # 6-hour Donchian channel (20-period)
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
     
@@ -41,7 +47,7 @@ def generate_signals(prices):
         highest_high[i] = np.max(high[i-19:i+1])
         lowest_low[i] = np.min(low[i-19:i+1])
     
-    # Volume confirmation: 1d volume > 1.5x 20-period average
+    # Volume confirmation: 6h volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volume[i-19:i+1])
@@ -52,7 +58,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_200_aligned[i]) or np.isnan(highest_high[i]) or 
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(highest_high[i]) or 
             np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -63,34 +69,34 @@ def generate_signals(prices):
         # Volume condition: current volume > 1.5x 20-period average
         volume_filter = volume[i] > vol_ma[i] * 1.5
         
-        # Trend bias: long above EMA200, short below EMA200
-        bullish_bias = close[i] > ema_200_aligned[i]
-        bearish_bias = close[i] < ema_200_aligned[i]
+        # Trend bias: long above EMA50, short below EMA50
+        bullish_bias = close[i] > ema_50_aligned[i]
+        bearish_bias = close[i] < ema_50_aligned[i]
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price below EMA200 or stoploss (2x ATR approximation using Donchian width)
+            # Exit: price below EMA50 or stoploss (2x ATR approximation using Donchian width)
             donch_width = highest_high[i] - lowest_low[i]
             if donch_width > 0:
                 stop_loss_level = entry_price - 2.0 * donch_width
             else:
                 stop_loss_level = entry_price - 2.0 * (highest_high[i] - lowest_low[i] + 0.001)
             
-            if (close[i] < ema_200_aligned[i] or 
+            if (close[i] < ema_50_aligned[i] or 
                 close[i] < stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price above EMA200 or stoploss
+            # Exit: price above EMA50 or stoploss
             donch_width = highest_high[i] - lowest_low[i]
             if donch_width > 0:
                 stop_loss_level = entry_price + 2.0 * donch_width
             else:
                 stop_loss_level = entry_price + 2.0 * (highest_high[i] - lowest_low[i] + 0.001)
             
-            if (close[i] > ema_200_aligned[i] or 
+            if (close[i] > ema_50_aligned[i] or 
                 close[i] > stop_loss_level):
                 signals[i] = 0.0
                 position = 0
