@@ -23,15 +23,15 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Load 1w data for EMA filter (once before loop)
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate 1w EMA (50-period) for trend filter
-    ema_1w = calculate_ema(close_1w, 50)
+    # Calculate 1w EMA (20-period) for trend filter
+    ema_1w = calculate_ema(close_1w, 20)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # 12h data
@@ -56,8 +56,8 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 50 for EMA, 14 for ATR)
-    start = max(20, 50, 14) + 1
+    # Start from warmup period (max of 20 for Donchian, 20 for EMA, 14 for ATR)
+    start = max(20, 20, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
