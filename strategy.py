@@ -1,109 +1,125 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray with Weekly Trend Filter and Volume Confirmation
-Hypothesis: Elder Ray (bull/bear power) identifies institutional buying/selling pressure.
-In bull markets: buy when bull power > 0 and EMA13 > 0. In bear markets: short when bear power < 0 and EMA13 < 0.
-Weekly trend filter ensures we trade with the dominant trend. Volume confirms institutional participation.
-Works in both bull and bear by switching between long and short based on weekly trend.
-Target: 75-150 total trades over 4 years (19-38/year).
+6h Weekly Pivot + Donchian Breakout with Volume Confirmation
+Hypothesis: Weekly pivot levels act as strong support/resistance. Breakouts above weekly R4 or below S4 with volume confirmation and 1d trend alignment capture significant moves. Works in bull (breakouts above R4 in uptrend) and bear (breakdowns below S4 in downtrend). Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_elder_ray_weekly_trend_volume"
+name = "6h_weekly_pivot_donchian_breakout_volume_v2"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 300:
         return np.zeros(n)
     
-    # Load weekly data for trend filter (once before loop)
-    df_weekly = get_htf_data(prices, '1w')
+    # Load weekly and daily data (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly EMA(20) for long-term trend
-    close_weekly = df_weekly['close'].values
-    ema20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False).mean().values
-    ema20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
+    # Calculate weekly OHLC from weekly data
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    
+    # Calculate pivot points: P = (H+L+C)/3
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    
+    # Calculate support/resistance levels
+    # R1 = 2*P - L, S1 = 2*P - H
+    # R2 = P + (H - L), S2 = P - (H - L)
+    # R3 = H + 2*(P - L), S3 = L - 2*(H - P)
+    # R4 = R3 + (H - L), S4 = S3 - (H - L)
+    weekly_range = weekly_high - weekly_low
+    r1 = 2 * weekly_pivot - weekly_low
+    s1 = 2 * weekly_pivot - weekly_high
+    r2 = weekly_pivot + weekly_range
+    s2 = weekly_pivot - weekly_range
+    r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
+    r4 = r3 + weekly_range
+    s4 = s3 - weekly_range
+    
+    # Align weekly levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
+    
+    # Daily EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
     # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    open_time = prices['open_time']
     
-    # 6h EMA(13) - Elder Ray uses EMA13 as reference
-    ema13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
+    # Donchian channel (20 periods)
+    lookback = 20
+    highest_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    lowest_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
-    # Elder Ray components
-    bull_power = high - ema13  # Bull power: high - EMA13
-    bear_power = low - ema13   # Bear power: low - EMA13
-    
-    # 6h volume filter
+    # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)  # Require above-average volume
-    
-    # 6h ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    vol_filter = volume > (1.8 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start from warmup period
-    start = 50  # For EMA13 and ATR14
+    start = max(200, lookback)  # Ensure sufficient data
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(ema20_weekly_aligned[i]) or np.isnan(ema13[i]) or
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Determine weekly trend
-        weekly_uptrend = ema20_weekly_aligned[i] > 0  # Price above weekly EMA20
-        weekly_downtrend = ema20_weekly_aligned[i] < 0  # Price below weekly EMA20
-        
         # Check exits
         if position == 1:  # long position
-            # Exit: bear power turns negative OR stoploss
-            if (bear_power[i] < 0 or
-                close[i] <= entry_price - 2.5 * atr[i]):
+            # Exit: price closes below weekly pivot OR stoploss
+            if (close[i] <= pivot_aligned[i] or
+                close[i] <= entry_price - 2.5 * (highest_high[i] - lowest_low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: bull power turns positive OR stoploss
-            if (bull_power[i] > 0 or
-                close[i] >= entry_price + 2.5 * atr[i]):
+            # Exit: price closes above weekly pivot OR stoploss
+            if (close[i] >= pivot_aligned[i] or
+                close[i] >= entry_price + 2.5 * (highest_high[i] - lowest_low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Elder Ray + weekly trend + volume
-            long_setup = (bull_power[i] > 0 and weekly_uptrend and vol_filter[i])
-            short_setup = (bear_power[i] < 0 and weekly_downtrend and vol_filter[i])
+            # Look for entries: breakout beyond weekly R4/S4 with volume and trend alignment
+            # Uptrend: price > daily EMA50
+            uptrend = close[i] > ema_50_1d_aligned[i]
+            # Downtrend: price < daily EMA50
+            downtrend = close[i] < ema_50_1d_aligned[i]
             
-            if long_setup:
+            # Long: break above weekly R4 with volume
+            long_breakout = (high[i] > r4_aligned[i]) and vol_filter[i] and uptrend
+            # Short: break below weekly S4 with volume
+            short_breakout = (low[i] < s4_aligned[i]) and vol_filter[i] and downtrend
+            
+            if long_breakout:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_setup:
+            elif short_breakout:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
