@@ -3,24 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation.
-# Elder Ray uses EMA(13) to measure bullish/bearish power: Bull Power = High - EMA, Bear Power = Low - EMA.
-# In trending markets, strong bull/bear power signals continuation; in ranging markets, extreme values signal reversals.
-# Volume confirmation ensures institutional participation. 1d EMA filter prevents counter-trend trades.
-# Target: 80-160 total trades over 4 years (20-40/year).
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
+# Uses daily trend to filter breakouts: only take long breakouts in uptrend (price > daily EMA),
+# only short breakdowns in downtrend (price < daily EMA). Volume confirms institutional participation.
+# Works in bull markets (breakouts above upper band in uptrend) and bear markets (breakdowns below lower band in downtrend).
+# Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "exp_13419_6h_elder_ray_1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_13420_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-ELDER_EMA_PERIOD = 13
-TREND_EMA_PERIOD = 50
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -45,19 +45,18 @@ def generate_signals(prices):
     
     # Calculate 1d EMA for trend filter
     close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
+    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Elder Ray components: EMA(13) and Bull/Bear Power
-    ema_13 = calculate_ema(close, ELDER_EMA_PERIOD)
-    bull_power = high - ema_13  # Bull Power = High - EMA
-    bear_power = low - ema_13   # Bear Power = Low - EMA
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -71,11 +70,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ELDER_EMA_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(ema_13[i]) or np.isnan(bull_power[i]) or np.isnan(bear_power[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -97,24 +96,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter from 1d EMA
+        # Trend filter: price above/below 1d EMA
         uptrend = close[i] > ema_1d_aligned[i]
         downtrend = close[i] < ema_1d_aligned[i]
         
-        # Elder Ray signals with volume and trend confirmation
-        # Long: strong bull power in uptrend OR extreme bear power in downtrend (potential reversal)
-        long_signal = volume_ok and ((bull_power[i] > 0 and uptrend) or (bear_power[i] < np.percentile(bear_power[max(0, i-50):i+1], 5) and downtrend))
-        # Short: strong bear power in downtrend OR extreme bull power in uptrend (potential reversal)
-        short_signal = volume_ok and ((bear_power[i] < 0 and downtrend) or (bull_power[i] > np.percentile(bull_power[max(0, i-50):i+1], 95) and uptrend))
+        # Breakout signals using Donchian channels
+        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
-            if long_signal:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_signal:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
