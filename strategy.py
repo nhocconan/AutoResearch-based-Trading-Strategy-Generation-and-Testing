@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 4h Donchian breakout with 12h EMA trend filter and volume confirmation.
-# Goes long when price breaks above 4h Donchian upper channel with above-average volume and price above 12h EMA,
-# short when breaks below lower channel with volume and price below 12h EMA.
-# Uses 12h EMA as trend filter to avoid counter-trend trades.
+# Hypothesis: 4h strategy using 12h Donchian breakout with volume confirmation and ATR stoploss.
+# Goes long when price breaks above 12h Donchian upper channel with above-average volume,
+# short when breaks below lower channel with volume.
+# Uses 12h EMA50 as trend filter to avoid counter-trend trades.
 # Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
 # Donchian channels provide clear breakout levels that work across market regimes.
 
-name = "exp_13793_4h_donchian4h_12h_ema_vol_v1"
+name = "exp_13793_4h_donchian12h_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -49,24 +49,28 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 12h data for EMA trend filter ONCE before loop
+    # Load 12h data for Donchian channels and EMA trend filter ONCE before loop
     df_12h = get_htf_data(prices, '12h')
+    
+    # Calculate 12h Donchian channels
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    donchian_upper, donchian_lower = calculate_donchian(high_12h, low_12h, DONCHIAN_PERIOD)
     
     # Calculate 12h EMA for trend filter
     close_12h = df_12h['close'].values
     ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
     
-    # Align 12h EMA to 4h timeframe
+    # Align 12h indicators to 4h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # 4h data for Donchian channels, entry timing and ATR
+    # 4h data for entry timing and ATR
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Calculate 4h Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -84,7 +88,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -114,8 +118,8 @@ def generate_signals(prices):
         below_ema = close[i] < ema_12h_aligned[i]
         
         # Donchian breakout signals
-        long_signal = volume_ok and above_ema and close[i] > donchian_upper[i]
-        short_signal = volume_ok and below_ema and close[i] < donchian_lower[i]
+        long_signal = volume_ok and above_ema and close[i] > donchian_upper_aligned[i]
+        short_signal = volume_ok and below_ema and close[i] < donchian_lower_aligned[i]
         
         # Generate signals
         if position == 0:
@@ -133,14 +137,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Exit long on close below Donchian lower (trend reversal)
-            if close[i] < donchian_lower[i]:
+            if close[i] < donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
             # Exit short on close above Donchian upper (trend reversal)
-            if close[i] > donchian_upper[i]:
+            if close[i] > donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
