@@ -1,32 +1,38 @@
 #!/usr/bin/env python3
 """
-Experiment #12274: 1h Price Action with 4h Trend and Volume Confirmation
-Hypothesis: Use 4h EMA for trend direction, volume surge for confirmation, and 1h price action
-(entry near VWAP or pullback to EMA) for precise entries. This reduces false breakouts and
-captures trends in both bull and bear markets. Target: 60-150 total trades over 4 years.
+Experiment #12277: 4h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: Use 1d EMA for trend direction, 4h Donchian channel breakout for entry,
+and volume surge for confirmation. This strategy targets breakouts in trending
+markets while avoiding false signals in ranging conditions. Works in both bull
+and bear markets by following the 1d trend. Target: 100-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12274_1h_price_action_4h_trend_vol_v1"
-timeframe = "1h"
+name = "exp_12277_4h_donchian_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 TREND_EMA_PERIOD = 50
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-SESSION_START_HOUR = 8
-SESSION_END_HOUR = 20
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_ema(close, period):
     """Calculate EMA"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channel upper and lower bands"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -37,37 +43,29 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_vwap(high, low, close, volume):
-    """Calculate VWAP"""
-    typical_price = (high + low + close) / 3.0
-    vwap_num = np.cumsum(typical_price * volume)
-    vwap_den = np.cumsum(volume)
-    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, 0.0)
-    return vwap
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA for trend
-    ema_4h = calculate_ema(df_4h['close'].values, TREND_EMA_PERIOD)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate 1d EMA for trend
+    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 1h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    vwap = calculate_vwap(high, low, close, volume)
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Precompute session hours
+    # Precompute session hours (optional - can remove if not needed)
     hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
@@ -76,15 +74,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(TREND_EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Session filter: 8-20 UTC
-        hour = hours[i]
-        in_session = SESSION_START_HOUR <= hour <= SESSION_END_HOUR
-        
-        # Skip if 4h EMA not available
-        if np.isnan(ema_4h_aligned[i]):
+        # Skip if 1d EMA not available
+        if np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -106,19 +100,17 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (4h)
-        uptrend_4h = close[i] > ema_4h_aligned[i]
-        downtrend_4h = close[i] < ema_4h_aligned[i]
+        # Trend filter (1d)
+        uptrend_1d = close[i] > ema_1d_aligned[i]
+        downtrend_1d = close[i] < ema_1d_aligned[i]
         
-        # Entry conditions: price near VWAP or pullback to EMA(20)
-        ema_20 = calculate_ema(close, 20)[i] if i >= 20 else np.nan
-        near_vwap = abs(close[i] - vwap[i]) < (0.5 * atr[i]) if not np.isnan(vwap[i]) else False
-        pullback_to_ema = (close[i] > ema_20 and close[i] < ema_20 + atr[i]) if not np.isnan(ema_20) else False
-        price_condition = near_vwap or pullback_to_ema
+        # Breakout conditions
+        breakout_up = close[i] > upper[i-1] if i > 0 else False  # Previous bar's upper band
+        breakout_down = close[i] < lower[i-1] if i > 0 else False  # Previous bar's lower band
         
         # Entry conditions
-        long_entry = in_session and volume_ok and uptrend_4h and price_condition
-        short_entry = in_session and volume_ok and downtrend_4h and price_condition
+        long_entry = uptrend_1d and volume_ok and breakout_up
+        short_entry = downtrend_1d and volume_ok and breakout_down
         
         # Generate signals
         if position == 0:
