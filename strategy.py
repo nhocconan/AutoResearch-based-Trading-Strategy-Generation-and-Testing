@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d trend filter and volume confirmation
-# Long when: price breaks above 6h Donchian upper channel, price > 1d EMA(50), volume > 1.5x avg
-# Short when: price breaks below 6h Donchian lower channel, price < 1d EMA(50), volume > 1.5x avg
-# Exit when: price crosses back through Donchian midline (10-period average of high/low)
-# Uses daily trend to filter breakouts, targeting 50-150 trades over 4 years
+# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation
+# Enter long when: price breaks above Donchian(20) high, price > 1d EMA(50), volume > 1.5x avg
+# Enter short when: price breaks below Donchian(20) low, price < 1d EMA(50), volume > 1.5x avg
+# Exit when: price crosses opposite Donchian(5) level or trend weakens
+# Uses daily trend to filter breakout direction, targeting 75-200 trades over 4 years
 
-name = "6h_donchian20_1d_ema_vol_v1"
-timeframe = "6h"
+name = "4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -24,10 +24,13 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 6h Donchian channels (20-period)
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_roll + low_roll) / 2.0
+    # Donchian(20) channels
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Donchian(5) for exit (tighter channel)
+    high_5 = pd.Series(high).rolling(window=5, min_periods=5).max().values
+    low_5 = pd.Series(low).rolling(window=5, min_periods=5).min().values
     
     # 1d EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -44,7 +47,7 @@ def generate_signals(prices):
     
     for i in range(20, n):  # Wait for Donchian to stabilize
         # Skip if required data not available
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -53,28 +56,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price crosses below Donchian midline
-            if close[i] < donchian_mid[i]:
+            # Exit: price below Donchian(5) low OR price < 1d EMA(50)
+            if close[i] < low_5[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price crosses above Donchian midline
-            if close[i] > donchian_mid[i]:
+            # Exit: price above Donchian(5) high OR price > 1d EMA(50)
+            if close[i] > high_5[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for breakout entries
+            # Look for entries: Donchian breakout + trend filter + volume
             if volume[i] > volume_threshold[i]:
-                # Long breakout: price breaks above upper channel
-                if close[i] > high_roll[i] and close[i] > ema_50_aligned[i]:
+                if close[i] > high_20[i] and close[i] > ema_50_aligned[i]:
+                    # Breakout above 20-period high with daily uptrend
                     signals[i] = 0.25
                     position = 1
-                # Short breakout: price breaks below lower channel
-                elif close[i] < low_roll[i] and close[i] < ema_50_aligned[i]:
+                elif close[i] < low_20[i] and close[i] < ema_50_aligned[i]:
+                    # Breakdown below 20-period low with daily downtrend
                     signals[i] = -0.25
                     position = -1
     
