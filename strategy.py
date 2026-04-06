@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) breakout with 12h EMA(50) filter and volume concentration.
-Hypothesis: Breakouts aligned with 12h trend and volume concentration capture medium-term trends.
-6h timeframe reduces noise vs lower timeframes while providing sufficient trade frequency.
-Works in both bull and bear markets with proper filtering. Target: 50-150 trades over 4 years.
+6h Donchian breakout with 12h EMA filter and volume concentration.
+Hypothesis: Breakouts aligned with 12h trend (EMA50) and volume concentration
+capture medium-term trends while avoiding false breakouts. Works in bull (breakouts)
+and bear (breakdowns) with proper filtering. Target: 100-200 trades over 4 years.
 """
 
 import numpy as np
