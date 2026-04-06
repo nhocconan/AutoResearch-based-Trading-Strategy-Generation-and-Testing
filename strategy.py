@@ -3,24 +3,36 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Camarilla pivot levels from 1D with volume confirmation.
-# In bull markets, price breaks above R4 with volume, signaling continuation.
-# In bear markets, price breaks below S4 with volume, signaling continuation.
-# Fade at R3/S3 when price fails to break through on weak volume.
-# Target: 100-200 total trades over 4 years (25-50/year) to balance opportunity and cost.
+# Hypothesis: 12-hour Williams %R with 1-day trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions. In trending markets, it can signal pullbacks to continue the trend.
+# In ranging markets, it signals reversals at extremes. The 1-day EMA ensures alignment with higher timeframe trend.
+# Volume confirmation filters out low-conviction signals. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13231_6h_camarilla1d_vol_v1"
-timeframe = "6h"
+name = "exp_13232_12h_williamsr_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-PIVOT_LOOKBACK = 1
+WILLIAMS_PERIOD = 14
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_BREAKOUT_THRESHOLD = 1.5
-VOLUME_FADE_THRESHOLD = 0.8
+WILLIAMS_OVERBOUGHT = -20
+WILLIAMS_OVERSOLD = -80
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_williams_r(high, low, close, period):
+    """Calculate Williams %R"""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    return williams_r.values
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -31,57 +43,27 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given high, low, close"""
-    range_val = high - low
-    if range_val <= 0:
-        return close, close, close, close, close, close, close, close
-    c = close + (range_val * 1.1 / 12)
-    l3 = close - (range_val * 1.1 / 6)
-    h3 = close + (range_val * 1.1 / 6)
-    l4 = close - (range_val * 1.1 / 2)
-    h4 = close + (range_val * 1.1 / 2)
-    return c, l3, h3, l4, h4
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for Camarilla levels
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily EMA for trend filter
     close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    camarilla_c = np.full_like(close_1d, np.nan)
-    camarilla_l3 = np.full_like(close_1d, np.nan)
-    camarilla_h3 = np.full_like(close_1d, np.nan)
-    camarilla_l4 = np.full_like(close_1d, np.nan)
-    camarilla_h4 = np.full_like(close_1d, np.nan)
-    
-    for i in range(len(close_1d)):
-        c, l3, h3, l4, h4 = calculate_camarilla(high_1d[i], low_1d[i], close_1d[i])
-        camarilla_c[i] = c
-        camarilla_l3[i] = l3
-        camarilla_h3[i] = h3
-        camarilla_l4[i] = l4
-        camarilla_h4[i] = h4
-    
-    # Align Camarilla levels to 6H timeframe (shifted by 1 day for completed bar)
-    camarilla_c_aligned = align_htf_to_ltf(prices, df_1d, camarilla_c)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    
-    # Calculate 6H indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Williams %R
+    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -95,13 +77,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(WILLIAMS_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if Camarilla levels not available
-        if (np.isnan(camarilla_c_aligned[i]) or np.isnan(camarilla_l3_aligned[i]) or 
-            np.isnan(camarilla_h3_aligned[i]) or np.isnan(camarilla_l4_aligned[i]) or 
-            np.isnan(camarilla_h4_aligned[i])):
+        # Skip if EMA not available
+        if np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -120,62 +100,34 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume conditions
-        vol_ma = volume_ma[i]
-        vol_ok = not np.isnan(vol_ma)
-        volume_high = vol_ok and (volume[i] > (vol_ma * VOLUME_BREAKOUT_THRESHOLD))
-        volume_low = vol_ok and (volume[i] < (vol_ma * VOLUME_FADE_THRESHOLD))
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Camarilla levels
-        c = camarilla_c_aligned[i]
-        l3 = camarilla_l3_aligned[i]
-        h3 = camarilla_h3_aligned[i]
-        l4 = camarilla_l4_aligned[i]
-        h4 = camarilla_h4_aligned[i]
+        # Trend filter: price above/below daily EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # Breakout and fade signals
-        breakout_up = volume_high and (close[i] > h4)
-        breakout_down = volume_high and (close[i] < l4)
-        fade_up = volume_low and (close[i] > h3 and close[i] < h4)
-        fade_down = volume_low and (close[i] > l3 and close[i] < l4)
+        # Williams %R signals
+        williams_buy = williams_r[i] < WILLIAMS_OVERSOLD  # Oversold
+        williams_sell = williams_r[i] > WILLIAMS_OVERBOUGHT  # Overbought
         
         # Generate signals
         if position == 0:
-            if breakout_up:
+            if williams_buy and volume_ok and uptrend:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            elif williams_sell and volume_ok and downtrend:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-            elif fade_up:
-                signals[i] = -SIGNAL_SIZE * 0.5  # Small short on fade
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-            elif fade_down:
-                signals[i] = SIGNAL_SIZE * 0.5  # Small long on fade
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on fade down or reverse signal
-            if fade_down or (close[i] < l3):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = SIGNAL_SIZE
+            signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on fade up or reverse signal
-            if fade_up or (close[i] > h3):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -SIGNAL_SIZE
+            signals[i] = -SIGNAL_SIZE
     
     return signals
