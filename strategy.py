@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout with 1w Trend Filter and Volume Confirmation
-Hypothesis: Breakouts from daily Donchian channels, filtered by weekly trend direction (EMA crossover),
-and confirmed by volume spikes, capture momentum across market regimes. Using weekly trend
-avoids whipsaws in sideways markets while capturing trends in both bull and bear phases.
-Volume ensures breakout legitimacy. Target: 30-100 total trades over 4 years.
+6h Heikin-Ashi Trend Continuation with 12h KAMA Filter and Volume Spike
+Hypothesis: Heikin-Ashi smooths noise to identify true trends, while 12h KAMA adapts to market regime (trending vs ranging).
+Volume spikes confirm momentum. In trending markets (KAMA slope aligned), we trade HA continuation.
+In ranging markets, we avoid trades. This reduces whipsaws in sideways markets while capturing trends.
+Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_1w_trend_vol_v1"
-timeframe = "1d"
+name = "6h_ha_kama_vol_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,52 +26,60 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR for stops and filters
-    atr = np.full(n, np.nan)
-    if n >= 14:
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-        if len(tr) > 0:
-            atr[14] = np.mean(tr[:14])
-            for i in range(15, n):
-                atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
+    # Heikin-Ashi calculation
+    ha_close = (high + low + close + open) / 4 if 'open' in prices.columns else (high + low + close + close) / 4
+    if 'open' not in prices.columns:
+        # Calculate open from close if not available (approximation)
+        ha_open = np.zeros(n)
+        ha_open[0] = close[0]
+        for i in range(1, n):
+            ha_open[i] = (ha_open[i-1] + ha_close[i-1]) / 2
+    else:
+        open_price = prices['open'].values
+        ha_open = (open_price + close) / 2  # Simplified HA open
     
-    # Donchian channels (20-period high/low)
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
+    ha_high = np.maximum(high, np.maximum(ha_open, ha_close))
+    ha_low = np.minimum(low, np.minimum(ha_open, ha_close))
     
-    for i in range(20, n):
-        donch_high[i] = np.max(high[i-20:i])
-        donch_low[i] = np.min(low[i-20:i])
+    # HA trend: green candle (bullish) if ha_close > ha_open, red if ha_close < ha_open
+    ha_bullish = ha_close > ha_open
+    ha_bearish = ha_close < ha_open
     
-    # Get 1w data for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # 12h KAMA (adaptive moving average) for regime detection
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate EMA for trend on 1w
-    def ema(arr, period):
-        if len(arr) < period:
-            return np.full_like(arr, np.nan)
-        alpha = 2.0 / (period + 1)
-        ema_val = np.full_like(arr, np.nan)
-        ema_val[period-1] = np.mean(arr[:period])
-        for i in range(period, len(arr)):
-            ema_val[i] = alpha * arr[i] + (1 - alpha) * ema_val[i-1]
-        return ema_val
+    # Efficiency Ratio and KAMA calculation
+    def kama(price, period=10, fast=2, slow=30):
+        if len(price) < period:
+            return np.full_like(price, np.nan)
+        # Change and volatility
+        change = np.abs(np.diff(price, period))
+        volatility = np.sum(np.abs(np.diff(price)), axis=1) if len(price) > 1 else np.array([0])
+        # Pad volatility to match change length
+        volatility = np.concatenate([np.full(period-1, np.nan), volatility[:-period+1]]) if len(volatility) >= period-1 else np.full(len(price), np.nan)
+        # Avoid division by zero
+        er = np.where(volatility > 0, change / volatility, 0)
+        # Smoothing constants
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        # KAMA calculation
+        kama_val = np.full_like(price, np.nan)
+        kama_val[period-1] = np.mean(price[:period])
+        for i in range(period, len(price)):
+            if not np.isnan(sc[i]) and not np.isnan(kama_val[i-1]):
+                kama_val[i] = kama_val[i-1] + sc[i] * (price[i] - kama_val[i-1])
+            else:
+                kama_val[i] = kama_val[i-1]
+        return kama_val
     
-    ema_fast = ema(close_1w, 9)
-    ema_slow = ema(close_1w, 21)
-    ema_fast_aligned = align_htf_to_ltf(prices, df_1w, ema_fast)
-    ema_slow_aligned = align_htf_to_ltf(prices, df_1w, ema_slow)
+    kama_12h = kama(close_12h, period=10, fast=2, slow=30)
+    kama_12h_aligned = align_htf_to_ltf(prices, df_12h, kama_12h)
     
-    # Determine trend: 1 if fast EMA > slow EMA (bullish), -1 if fast EMA < slow EMA (bearish)
-    trend_1w = np.where(ema_fast > ema_slow, 1, -1)
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # KAMA slope for trend direction (1 if rising, -1 if falling)
+    kama_slope = np.diff(kama_12h_aligned, prepend=kama_12h_aligned[0])
+    kama_trend = np.where(kama_slope > 0, 1, -1)
     
-    # Volume filter: current volume > 2.0x average over last 20 periods
+    # Volume filter: current volume > 1.5x average over last 20 periods
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -81,61 +89,48 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20)
+    start = max(30, 20)
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
-           np.isnan(trend_1w_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(kama_12h_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
-                signals[i] = position * 0.30
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 2.0
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
-        # Check exits and stoploss
+        # Check exits
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low OR trend turns bearish
-            # Stoploss: price drops 2.0*ATR below entry
-            if (close[i] <= donch_low[i] or
-                trend_1w_aligned[i] == -1 or
-                close[i] < entry_price - 2.0 * atr[i]):
+            # Exit: HA turns bearish OR KAMA trend turns bearish
+            if ha_bearish[i] or kama_trend[i] == -1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.30
+                signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high OR trend turns bullish
-            # Stoploss: price rises 2.0*ATR above entry
-            if (close[i] >= donch_high[i] or
-                trend_1w_aligned[i] == 1 or
-                close[i] > entry_price + 2.0 * atr[i]):
+            # Exit: HA turns bullish OR KAMA trend turns bullish
+            if ha_bullish[i] or kama_trend[i] == 1:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.30
+                signals[i] = -0.25
         else:
-            # Look for breakout entries
-            # Long: price breaks above Donchian high in bullish 1w trend with volume
-            if (close[i] > donch_high[i] and
-                trend_1w_aligned[i] == 1 and
-                volume_filter):
-                signals[i] = 0.30
+            # Look for entries: HA continuation in direction of KAMA trend with volume
+            # Long: HA bullish and KAMA trending up
+            if ha_bullish[i] and kama_trend[i] == 1 and volume_filter:
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low in bearish 1w trend with volume
-            elif (close[i] < donch_low[i] and
-                  trend_1w_aligned[i] == -1 and
-                  volume_filter):
-                signals[i] = -0.30
+            # Short: HA bearish and KAMA trending down
+            elif ha_bearish[i] and kama_trend[i] == -1 and volume_filter:
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
             else:
                 signals[i] = 0.0
     
     return signals
-
-</think>
