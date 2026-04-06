@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(100) trend filter and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(100) trend filter and volume confirmation.
 # Enter long when price breaks above Donchian(20) upper band in uptrend (1d EMA100 rising).
 # Enter short when price breaks below Donchian(20) lower band in downtrend (1d EMA100 falling).
 # Volume > 1.5x 20-period average confirms breakout strength.
 # Exit on opposite Donchian breakout or when price crosses 1d EMA100.
-# Target: 50-150 total trades over 4 years (12-37/year) to balance signal quality and fee drag.
+# Target: 80-160 total trades over 4 years (20-40/year) to balance signal quality and fee drag.
 
-name = "12h_donchian20_1dema100_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1dema100_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -42,7 +42,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(100, n):
         # Skip if required data not available
         if (np.isnan(ema_100_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
