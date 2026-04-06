@@ -3,29 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray + Daily Trend Filter + Volume Spike
-# Elder Ray (bull power = high - EMA13, bear power = EMA13 - low) captures institutional buying/selling pressure.
-# Daily trend filter (price > EMA50) ensures trades align with higher timeframe direction.
-# Volume spike (>2x 20-period average) confirms institutional participation.
-# Works in bull/bear because it follows institutional flow with trend alignment.
-# Target: 80-150 trades over 4 years (20-38/year) for statistical validity.
+# Hypothesis: 12h Donchian breakout with 1w trend filter and volume confirmation
+# Works in bull/bear because breakouts capture strong moves, 1w trend filter avoids counter-trend trades,
+# and volume filters out false breakouts. Target: 60-120 trades over 4 years (15-30/year).
 
-name = "exp_12927_6h_elderay_daily_trend_vol_v1"
-timeframe = "6h"
+name = "exp_12928_12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-EMA13_PERIOD = 13
-EMA50_PERIOD = 50
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_ema(close, period):
-    """Calculate EMA with proper Wilder's smoothing"""
-    return pd.Series(close).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -36,29 +29,43 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate daily EMA50 for trend filter
-    close_d = df_daily['close'].values
-    ema50_d = calculate_ema(close_d, EMA50_PERIOD)
-    ema50_d_aligned = align_htf_to_ltf(prices, df_daily, ema50_d)
+    # Calculate weekly EMA for trend filter
+    close_w = df_weekly['close'].values
+    ema_w = calculate_ema(close_w, EMA_PERIOD)
+    ema_w_aligned = align_htf_to_ltf(prices, df_weekly, ema_w)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    ema13 = calculate_ema(close, EMA13_PERIOD)
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    # Donchian channels
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
+    # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR for stoploss
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,11 +73,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA13_PERIOD, EMA50_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily EMA50 not available
-        if np.isnan(ema50_d_aligned[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(ema_w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -89,27 +96,25 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Elder Ray components
-        bull_power = high[i] - ema13[i]  # High - EMA13
-        bear_power = ema13[i] - low[i]   # EMA13 - Low
-        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter from daily timeframe
-        uptrend = close[i] > ema50_d_aligned[i]
-        downtrend = close[i] < ema50_d_aligned[i]
+        # Breakout above upper band or breakdown below lower band
+        breakout_long = volume_ok and close[i] >= donchian_upper[i]
+        breakout_short = volume_ok and close[i] <= donchian_lower[i]
         
-        # Entry conditions
+        # Trend filter: only long in uptrend, only short in downtrend
+        uptrend = close[i] > ema_w_aligned[i]
+        downtrend = close[i] < ema_w_aligned[i]
+        
+        # Generate signals
         if position == 0:
-            # Long: bull power > bear power (buying pressure) + uptrend + volume spike
-            if bull_power > bear_power and uptrend and volume_ok:
+            if breakout_long and uptrend:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            # Short: bear power > bull power (selling pressure) + downtrend + volume spike
-            elif bear_power > bull_power and downtrend and volume_ok:
+            elif breakout_short and downtrend:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
