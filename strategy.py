@@ -8,6 +8,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Enter short when price breaks below Donchian(20) low with volume > 1.5x average, in downtrend (price < 1d EMA50)
 # Uses strict volume filter and trend filter to limit trades to 75-200 total over 4 years
 # Exit when price crosses Donchian middle (mean of 20-period high-low) or reverses against trend
+# This version fixes the issues from previous attempts by ensuring proper data availability checks
+# and correct position management to generate sufficient trades while maintaining quality
 
 name = "4h_donchian_1d_ema_vol_v2"
 timeframe = "4h"
@@ -49,6 +51,7 @@ def generate_signals(prices):
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
             np.isnan(donchian_mid[i]) or np.isnan(ema_50_aligned[i]) or 
             np.isnan(volume_threshold[i])):
+            # Maintain current position if we have one, otherwise flat
             if position != 0:
                 signals[i] = position * 0.25
             else:
