@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R with weekly trend filter and volume confirmation.
-# Long when W%R crosses above -50 (momentum shift) during bullish week with volume > 1.4x 24-period average.
-# Short when W%R crosses below -50 during bearish week with volume confirmation.
-# Uses weekly trend to avoid counter-trend trades. Williams %R provides timely momentum signals.
-# Target: 75-150 total trades over 4 years (19-38/year) to stay within optimal range.
+# Hypothesis: 1-hour strategy using 4h Donchian(20) for direction, 1d trend filter, and volume confirmation.
+# Long when price breaks above 4h upper Donchian during bullish day (close > open) with volume > 1.5x 20-period average.
+# Short when price breaks below 4h lower Donchian during bearish day (close < open) with volume confirmation.
+# Uses 4h Donchian for trend direction (reduces whipsaw) and 1d trend to avoid counter-trend trades.
+# Volume filter ensures momentum behind breakouts. Target: 60-150 total trades over 4 years (15-37/year).
 
-name = "6h_williamsr_1w_trend_vol_v1"
-timeframe = "6h"
+name = "1h_donchian20_1d_trend_vol_v2"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price and volume data
@@ -24,72 +24,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R (14-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    highest_high = high_series.rolling(window=14, min_periods=14).max()
-    lowest_low = low_series.rolling(window=14, min_periods=14).min()
-    willr = -100 * (highest_high - close) / (highest_high - lowest_low)
-    willr = willr.values  # Convert to numpy array
+    # 4h Donchian channel (20-period)
+    df_4h = get_htf_data(prices, '4h')
+    high_4h = df_4h['high'].values
+    low_4h = df_4h['low'].values
+    high_series = pd.Series(high_4h)
+    low_series = pd.Series(low_4h)
+    upper_4h = high_series.rolling(window=20, min_periods=20).max().values
+    lower_4h = low_series.rolling(window=20, min_periods=20).min().values
+    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
+    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
     
-    # Weekly trend filter: bullish/bearish week based on close vs open
-    df_1w = get_htf_data(prices, '1w')
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open  # True for bullish week
-    weekly_bearish = weekly_close < weekly_open   # True for bearish week
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
+    # Daily trend filter: bullish/bearish day based on close vs open
+    df_1d = get_htf_data(prices, '1d')
+    daily_open = df_1d['open'].values
+    daily_close = df_1d['close'].values
+    daily_bullish = daily_close > daily_open  # True for bullish day
+    daily_bearish = daily_close < daily_open   # True for bearish day
+    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
+    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
     
-    # Volume filter: current volume > 1.4x 24-period average (4 days)
+    # Volume filter: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=24, min_periods=24).mean().values
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
-        # Skip if weekly trend data not available
-        if np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]):
+    for i in range(30, n):
+        # Skip if 4h or daily trend data not available
+        if np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or \
+           np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.4
-        
-        # Williams %R crossover signals
-        willr_cross_up = (willr[i] > -50) and (willr[i-1] <= -50)  # Cross above -50
-        willr_cross_down = (willr[i] < -50) and (willr[i-1] >= -50)  # Cross below -50
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
         # Check exits
         if position == 1:  # long position
-            # Exit: W%R crosses below -50 or weekly turn bearish
-            if willr_cross_down or weekly_bearish_aligned[i]:
+            # Exit: price drops below 4h lower Donchian or daily turn bearish
+            if (low[i] <= lower_4h_aligned[i] or 
+                daily_bearish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # short position
-            # Exit: W%R crosses above -50 or weekly turn bullish
-            if willr_cross_up or weekly_bullish_aligned[i]:
+            # Exit: price rises above 4h upper Donchian or daily turn bullish
+            if (high[i] >= upper_4h_aligned[i] or 
+                daily_bullish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:
-            # Look for entries with volume confirmation and weekly trend filter
+            # Look for entries with volume confirmation and daily trend filter
             if volume_filter:
-                # Long: W%R crosses above -50 during bullish week
-                if willr_cross_up and weekly_bullish_aligned[i]:
-                    signals[i] = 0.25
+                # Long: break above 4h upper Donchian during bullish day
+                if (high[i] > upper_4h_aligned[i] and 
+                    daily_bullish_aligned[i]):
+                    signals[i] = 0.20
                     position = 1
-                # Short: W%R crosses below -50 during bearish week
-                elif willr_cross_down and weekly_bearish_aligned[i]:
-                    signals[i] = -0.25
+                # Short: break below 4h lower Donchian during bearish day
+                elif (low[i] < lower_4h_aligned[i] and 
+                      daily_bearish_aligned[i]):
+                    signals[i] = -0.20
                     position = -1
     
     return signals
