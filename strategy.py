@@ -3,33 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R with 1-day trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. In trending markets,
-# we fade extreme readings only when aligned with higher timeframe trend.
-# Volume confirms institutional participation. Works in bull markets (buy oversold in uptrend)
-// and bear markets (sell overbought in downtrend). Target: 50-150 total trades over 4 years.
+# Hypothesis: 12-hour Donchian channel breakout with daily EMA trend filter and volume confirmation.
+# In bull markets, price breaks above upper Donchian band with volume and above daily EMA.
+# In bear markets, price breaks below lower Donchian band with volume and below daily EMA.
+# Uses Donchian(20) from 12h data and EMA(50) from daily for trend filter.
+# Volume confirmation reduces false breakouts. Target: 75-200 total trades over 4 years.
 
-name = "exp_13295_6h_williamsr_1d_trend_vol_v2"
-timeframe = "6h"
+name = "exp_13296_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-WILLIAMS_PERIOD = 14
-OVERBOUGHT = -20
-OVERSOLD = -80
-TREND_EMA_PERIOD = 50
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_williams_r(high, low, close, period):
-    """Calculate Williams %R"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-    return wr.fillna(0).values
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -49,22 +40,23 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load daily data ONCE before loop for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate daily EMA for trend filter
     close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
+    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R
-    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -78,11 +70,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WILLIAMS_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if EMA not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -108,18 +100,18 @@ def generate_signals(prices):
         uptrend = close[i] > ema_1d_aligned[i]
         downtrend = close[i] < ema_1d_aligned[i]
         
-        # Williams %R signals: fade extremes in direction of trend
-        williams_buy = williams_r[i] < OVERSOLD and williams_r[i-1] >= OVERSOLD
-        williams_sell = williams_r[i] > OVERBOUGHT and williams_r[i-1] <= OVERBOUGHT
+        # Breakout signals using Donchian channels
+        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
-            if williams_buy and uptrend and volume_ok:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif williams_sell and downtrend and volume_ok:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
