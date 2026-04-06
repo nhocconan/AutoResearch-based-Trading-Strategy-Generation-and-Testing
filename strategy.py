@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Donchian(20) breakout with 12-hour EMA trend and volume confirmation.
-# Uses 12-hour EMA50 to establish trend bias (long above EMA50, short below EMA50).
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA trend and volume confirmation.
+# Uses 1-day EMA50 to establish trend bias (long above EMA50, short below EMA50).
 # Breakouts in direction of EMA trend with volume capture institutional moves.
-# Designed for 6h timeframe to target 50-150 trades over 4 years with proven structure.
+# Designed for 4h timeframe to target 75-200 trades over 4 years with proven structure.
 # Works in bull/bear markets via EMA-based directional bias and volume confirmation.
 
-name = "6h_donchian20_12h_ema_vol_v1"
-timeframe = "6h"
+name = "4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,21 +24,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12-hour EMA50 for trend bias
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # 1-day EMA50 for trend bias
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA50 on 12h closes
-    ema_50_12h = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 50:
-        ema_50_12h[49] = np.mean(close_12h[:50])
-        for i in range(50, len(close_12h)):
-            ema_50_12h[i] = (close_12h[i] * 2 / 51) + (ema_50_12h[i-1] * 49 / 51)
+    # Calculate EMA50 on daily closes
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 / 51) + (ema_50_1d[i-1] * 49 / 51)
     
-    # Align EMA50 to 6h timeframe (shifted by 1 12h bar for no look-ahead)
-    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50_12h)
+    # Align EMA50 to 4h timeframe (shifted by 1 day for no look-ahead)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # 6-hour Donchian channel (20-period)
+    # 4-hour Donchian channel (20-period)
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
     
@@ -46,7 +46,7 @@ def generate_signals(prices):
         highest_high[i] = np.max(high[i-19:i+1])
         lowest_low[i] = np.min(low[i-19:i+1])
     
-    # Volume confirmation: 6h volume > 1.5x 20-period average
+    # Volume confirmation: 4h volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volume[i-19:i+1])
