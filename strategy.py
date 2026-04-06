@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian(20) breakouts with 1d EMA(50) trend filter and volume confirmation.
-# Uses 1d trend for direction, 4h Donchian breakouts for entries, volume for confirmation.
-# Designed for ~100-200 total trades over 4 years (25-50/year) to avoid excessive fees.
+# Hypothesis: 4h strategy using 1d Donchian(20) breakouts with 1w EMA(50) trend filter and volume confirmation.
+# Uses 1w trend for direction, 1d Donchian breakouts for entries, volume for confirmation.
+# Designed for ~75-150 total trades over 4 years (19-38/year) to avoid excessive fees.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
-# Target: 100-200 total trades, 0.25 position size, max DD < -50%.
+# Target: 75-150 total trades, 0.25 position size, max DD < -50%.
 
-name = "exp_13740_4h_donchian20_1d_ema_vol_v1"
+name = "exp_13741_4h_donchian20_1w_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
-# Parameters - tuned for moderate trade frequency
+# Parameters - tuned for low trade frequency
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 8
@@ -41,17 +41,19 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load 1d data for filters ONCE before loop
+    # Load 1d and 1w data for filters ONCE before loop
     df_1d = get_htf_data(prices, '1d')
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 1w EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = calculate_ema(close_1w, TREND_EMA_PERIOD)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 1d Donchian channels (for entry signals)
+    # Calculate 1d indicators for entries
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
     # ATR for stop loss (using 4h data)
@@ -79,7 +81,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma_1d[i]):
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma_1d[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -104,9 +106,9 @@ def generate_signals(prices):
         # Volume confirmation (using 1d volume)
         volume_ok = volume_1d[i] > (volume_ma_1d[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 1d EMA
-        above_ema = close_1d[i] > ema_1d_aligned[i]
-        below_ema = close_1d[i] < ema_1d_aligned[i]
+        # Trend direction from 1w EMA
+        above_ema = close_1d[i] > ema_1w_aligned[i]
+        below_ema = close_1d[i] < ema_1w_aligned[i]
         
         # Donchian breakout signals
         if i > 0 and not np.isnan(donchian_high[i-1]) and not np.isnan(donchian_low[i-1]):
