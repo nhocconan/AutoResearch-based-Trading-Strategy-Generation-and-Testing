@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stop
-Hypothesis: Combines price channel breakouts with daily timeframe trend bias
-and volume confirmation to capture momentum while avoiding chop.
-Works in bull (breakouts with trend) and bear (short breakdowns with trend).
-Designed for moderate trade frequency (~25-40/year) to minimize fee drift.
+12h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stop
+Hypothesis: Uses daily trend bias with 12h price channel breakouts and volume confirmation.
+Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend).
+Designed for low trade frequency (~15-25/year) to minimize fee drag and avoid overtrading.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1detrend_vol_v3"
-timeframe = "4h"
+name = "12h_donchian20_1dtrend_vol_v2"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -51,8 +50,8 @@ def generate_signals(prices):
     # Trend bias: above EMA = bullish, below = bearish
     trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align to 4h timeframe
-    trend_bias_aligned = align_ltf_to_htf(prices, df_1d, trend_bias_1d)
+    # Align to 12h timeframe
+    trend_bias_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -107,8 +106,8 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries: Donchian breakout + 1d trend + volume spike
-            # Minimum holding period: only allow new entry after 15 bars flat
-            if bars_since_entry >= 15:
+            # Minimum holding period: only allow new entry after 20 bars flat
+            if bars_since_entry >= 20:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
