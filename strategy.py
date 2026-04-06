@@ -1,19 +1,14 @@
-# 6h Camarilla Pivot + 12h Trend + Volume Confirmation
-# Hypothesis: Camarilla levels (R3/S3, R4/S4) act as key support/resistance on 6h.
-# Trend from 12h filters direction: only long in uptrend, short in downtrend.
-# Volume ensures momentum behind moves. Works in bull via R4 breakouts, bear via S4 breakdowns.
-# Target: 75-200 total trades over 4 years (19-50/year).
-
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12439_6h_camarilla12h_trend_vol_v1"
-timeframe = "6h"
+name = "exp_12440_4h_donchian20_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_PERIOD = 1
+DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
@@ -34,47 +29,31 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for given period"""
-    # Typical price for the period
-    typical_price = (high + low + close) / 3.0
-    # Range
-    range_ = high - low
-    
-    # Camarilla levels
-    r4 = typical_price + (range_ * 1.1 / 2)
-    r3 = typical_price + (range_ * 1.1 / 4)
-    r2 = typical_price + (range_ * 1.1 / 6)
-    r1 = typical_price + (range_ * 1.1 / 12)
-    
-    s1 = typical_price - (range_ * 1.1 / 12)
-    s2 = typical_price - (range_ * 1.1 / 6)
-    s3 = typical_price - (range_ * 1.1 / 4)
-    s4 = typical_price - (range_ * 1.1 / 2)
-    
-    return r1, r2, r3, r4, s1, s2, s3, s4
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h EMA for trend
-    ema_12h = calculate_ema(df_12h['close'].values, TREND_EMA_PERIOD)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate daily EMA for trend
+    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Camarilla levels from previous bar
-    r1, r2, r3, r4, s1, s2, s3, s4 = calculate_camarilla(high, low, close)
-    
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -84,11 +63,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 12h EMA not available
-        if np.isnan(ema_12h_aligned[i]):
+        # Skip if daily EMA not available
+        if np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -107,29 +86,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation (use current bar volume vs MA of previous bar)
-        vol_ma_prev = volume_ma[i-1] if i > 0 and not np.isnan(volume_ma[i-1]) else 0
-        volume_ok = volume[i] > (vol_ma_prev * VOLUME_THRESHOLD) if vol_ma_prev > 0 else False
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (12h)
-        uptrend_12h = close[i] > ema_12h_aligned[i]
-        downtrend_12h = close[i] < ema_12h_aligned[i]
+        # Trend filter (daily)
+        uptrend_1d = close[i] > ema_1d_aligned[i]
+        downtrend_1d = close[i] < ema_1d_aligned[i]
         
-        # Camarilla conditions (use previous bar levels)
-        r3_prev = r3[i-1] if i > 0 and not np.isnan(r3[i-1]) else 0
-        r4_prev = r4[i-1] if i > 0 and not np.isnan(r4[i-1]) else 0
-        s3_prev = s3[i-1] if i > 0 and not np.isnan(s3[i-1]) else 0
-        s4_prev = s4[i-1] if i > 0 and not np.isnan(s4[i-1]) else 0
+        # Donchian breakout conditions
+        long_breakout = close[i] > upper[i-1]  # break above previous upper band
+        short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
-        # Long conditions: break above R3/R4 in uptrend
-        long_break_r3 = close[i] > r3_prev and close[i-1] <= r3_prev
-        long_break_r4 = close[i] > r4_prev and close[i-1] <= r4_prev
-        long_entry = volume_ok and uptrend_12h and (long_break_r3 or long_break_r4)
-        
-        # Short conditions: break below S3/S4 in downtrend
-        short_break_s3 = close[i] < s3_prev and close[i-1] >= s3_prev
-        short_break_s4 = close[i] < s4_prev and close[i-1] >= s4_prev
-        short_entry = volume_ok and downtrend_12h and (short_break_s3 or short_break_s4)
+        # Entry conditions
+        long_entry = volume_ok and uptrend_1d and long_breakout
+        short_entry = volume_ok and downtrend_1d and short_breakout
         
         # Generate signals
         if position == 0:
