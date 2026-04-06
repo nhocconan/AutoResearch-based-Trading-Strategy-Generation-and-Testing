@@ -1,37 +1,48 @@
 #!/usr/bin/env python3
 """
-Experiment #12434: 1h RSI Mean Reversion with 4h Trend Filter and Volume Spike
-Hypothesis: In ranging markets (common in 2025), RSI extremes revert. Use 4h EMA for trend filter to avoid counter-trend trades, and volume spikes to confirm reversal momentum. Target 60-150 trades over 4 years.
+Experiment #12435: 6h Donchian Breakout + Weekly Pivot Direction + Volume Confirmation
+Hypothesis: Use weekly pivot levels for trend direction, 6h Donchian(20) breakouts for entry,
+and volume spikes for confirmation. This strategy targets breakouts in trending markets
+while avoiding chop. Weekly pivots provide institutional-level support/resistance.
+Designed to work in both bull (breakout longs) and bear (breakdown shorts) markets.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12434_1h_rsi_meanrev_4h_trend_vol"
-timeframe = "1h"
+name = "exp_12435_6h_donchian20_weekly_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-TREND_EMA_PERIOD = 50
-VOLUME_SPIKE_MULTIPLIER = 2.0
-SIGNAL_SIZE = 0.20
+DONCHIAN_PERIOD = 20
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 2.0
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
+PIVOT_LOOKBACK = 5  # For swing high/low detection
 
-def calculate_rsi(close, period):
-    """Calculate RSI"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def calculate_pivot_points(high, low, close):
+    """Calculate weekly pivot points: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H, etc."""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, s1, r2, s2, r3, s3
+
+def calculate_swing_high(high, lookback):
+    """Calculate swing high"""
+    return pd.Series(high).rolling(window=2*lookback+1, center=True).max().values
+
+def calculate_swing_low(low, lookback):
+    """Calculate swing low"""
+    return pd.Series(low).rolling(window=2*lookback+1, center=True).min().values
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -46,26 +57,44 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA for trend filter
-    ema_4h = calculate_ema(df_4h['close'].values, TREND_EMA_PERIOD)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate weekly pivot points from weekly OHLC
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Calculate indicators on 1h data
-    close = prices['close'].values
+    pivot, r1, s1, r2, s2, r3, s3 = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
+    
+    # Align weekly pivot levels to 6h timeframe (forward filled, shifted by 1 week)
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
+    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    rsi = calculate_rsi(close, RSI_PERIOD)
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -74,11 +103,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, TREND_EMA_PERIOD, 20, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 4h EMA not available
-        if np.isnan(ema_4h_aligned[i]):
+        # Skip if weekly pivot data not available
+        if np.isnan(pivot_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -97,20 +126,22 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume spike confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_SPIKE_MULTIPLIER) if not np.isnan(volume_ma[i]) else False
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (4h EMA)
-        uptrend_4h = close[i] > ema_4h_aligned[i]
-        downtrend_4h = close[i] < ema_4h_aligned[i]
+        # Determine trend based on weekly pivot
+        # Uptrend: price above weekly pivot and holding above S1
+        # Downtrend: price below weekly pivot and holding below R1
+        uptrend = close[i] > pivot_aligned[i] and close[i] > s1_aligned[i]
+        downtrend = close[i] < pivot_aligned[i] and close[i] < r1_aligned[i]
         
-        # RSI mean reversion signals
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        # Donchian breakout conditions
+        long_breakout = close[i] > upper[i-1]  # break above previous upper band
+        short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
         # Entry conditions
-        long_entry = volume_ok and rsi_oversold and uptrend_4h
-        short_entry = volume_ok and rsi_overbought and downtrend_4h
+        long_entry = volume_ok and uptrend and long_breakout
+        short_entry = volume_ok and downtrend and short_breakout
         
         # Generate signals
         if position == 0:
