@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + Volume + 1w ADX Filter
-Hypothesis: Daily Donchian breakouts capture medium-term trends with low frequency. 
-Volume confirms institutional participation. Weekly ADX filter ensures we only trade in strong trends, reducing whipsaws.
+1d Donchian(20) Breakout + Volume + ADX Filter (Weekly)
+Hypothesis: Donchian breakouts on daily timeframe capture longer-term momentum with fewer trades. 
+Volume confirms participation. Weekly ADX filter ensures we only trade in trending markets, reducing whipsaws in ranges.
 Designed for 30-100 trades over 4 years (7-25/year) to minimize fee drag. Works in both bull (breakouts) and bear (breakdowns) markets.
 """
 
@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_volume_1wadx_v1"
+name = "1d_donchian20_volume_weekly_adx_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -19,26 +19,26 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for ADX (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Load weekly data for ADX (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
     
-    # ADX calculation on 1w
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # ADX calculation on weekly
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
     
     # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr1 = np.abs(high_w[1:] - low_w[1:])
+    tr2 = np.abs(high_w[1:] - close_w[:-1])
+    tr3 = np.abs(low_w[1:] - close_w[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
     # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.where((high_w[1:] - high_w[:-1]) > (low_w[:-1] - low_w[1:]), 
+                       np.maximum(high_w[1:] - high_w[:-1], 0), 0)
+    dm_minus = np.where((low_w[:-1] - low_w[1:]) > (high_w[1:] - high_w[:-1]), 
+                        np.maximum(low_w[:-1] - low_w[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -64,10 +64,10 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilder_smooth(dx, period_adx)
     
-    # Align ADX to 1d timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    # Align ADX to daily timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_weekly, adx)
     
-    # 1d data
+    # Daily data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
