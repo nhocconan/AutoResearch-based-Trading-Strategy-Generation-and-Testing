@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
 """
-12h Donchian(40) breakout with 1d trend filter and volume confirmation
-Hypothesis: Longer Donchian period reduces whipsaw in sideways markets while capturing trends.
-Uses 1d EMA50 for trend bias and volume > 1.5x 20-period average for confirmation.
-Works in bull (buy breakouts above 1d EMA50) and bear (sell breakdowns below 1d EMA50).
-Target: 50-150 total trades over 4 years.
+12h Donchian(20) breakout with 1d trend filter and volume confirmation
+Hypothesis: Breakouts above/below Donchian channels filtered by 1d EMA trend and volume spikes capture medium-term momentum.
+Trades only in direction of 1d EMA trend (EMA50) to avoid counter-trend trades. Uses volume > 1.5x 20-period average for confirmation.
+Designed to work in both bull (buy breakouts above EMA50) and bear (sell breakdowns below EMA50) markets.
+Target: 50-150 total trades over 4 years with strict entry conditions to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian40_1d_trend_vol_v1"
+name = "12h_donchian20_1d_trend_vol_v2"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -50,11 +50,13 @@ def generate_signals(prices):
         for i in range(50, len(close_1d)):
             ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 48) / 50
     
-    # Align trend to 12h timeframe
+    # 1d trend: above EMA50 = bullish (1), below = bearish (-1)
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
+    
+    # Align trend to 12h timeframe
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Get volume data for confirmation
+    # Get 1d volume data for confirmation
     volume_1d = df_1d['volume'].values
     
     # 20-period average volume on 1d
@@ -65,21 +67,21 @@ def generate_signals(prices):
     # Align volume MA to 12h timeframe
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Donchian channels (40-period) from 12h data
+    # Donchian channels (20-period) from 12h data
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
     
-    for i in range(40, n):
-        upper[i] = np.max(high[i-40:i])
-        lower[i] = np.min(low[i-40:i])
+    for i in range(20, n):
+        upper[i] = np.max(high[i-20:i])
+        lower[i] = np.min(low[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_entry = 0
+    bars_since_exit = 0
     
     # Start from warmup period
-    start = 80  # Need enough data for Donchian(40) and alignments
+    start = 40  # Need enough data for Donchian and alignments
     
     for i in range(start, n):
         # Skip if required data not available
@@ -90,17 +92,13 @@ def generate_signals(prices):
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
-            bars_since_entry += 1
+            bars_since_exit += 1
             continue
         
         # Volume filter: current 12h volume > 1.5x average of 1d volume (scaled)
         # Scale 1d volume to 12h: approx 1/2 of 1d volume (since 2x 12h in 1d)
-        vol_threshold = vol_ma_1d_aligned[i] / 2.0 * 1.5
+        vol_threshold = (vol_ma_1d_aligned[i] / 2.0) * 1.5
         volume_filter = volume[i] > vol_threshold
-        
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        session_filter = 8 <= hour <= 20
         
         # Check exits and stoploss
         if position == 1:  # long position
@@ -111,10 +109,10 @@ def generate_signals(prices):
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
                 signals[i] = 0.25
-            bars_since_entry += 1
+            bars_since_exit += 1
         elif position == -1:  # short position
             # Exit: price breaks above upper Donchian OR against trend
             # Stoploss: price rises 2*ATR above entry
@@ -123,35 +121,34 @@ def generate_signals(prices):
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
                 signals[i] = -0.25
-            bars_since_entry += 1
+            bars_since_exit += 1
         else:
-            # Look for entries
-            # Minimum holding period: only allow new entry after 6 bars flat
-            if bars_since_entry >= 6:
+            # Look for entries - only after minimum 4 bars flat to prevent whipsaw
+            if bars_since_exit >= 4:
                 # Breakout entries: upper/lower with trend
                 bull_breakout = close[i] > upper[i]
                 bear_breakout = close[i] < lower[i]
                 
-                # Long: breakout above upper with bullish trend + volume + session
-                if bull_breakout and trend_1d_aligned[i] == 1 and volume_filter and session_filter:
+                # Long: breakout above upper with bullish trend + volume
+                if bull_breakout and trend_1d_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                    bars_since_entry = 0
-                # Short: breakdown below lower with bearish trend + volume + session
-                elif bear_breakout and trend_1d_aligned[i] == -1 and volume_filter and session_filter:
+                    bars_since_exit = 0
+                # Short: breakdown below lower with bearish trend + volume
+                elif bear_breakout and trend_1d_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
-                    bars_since_entry = 0
+                    bars_since_exit = 0
                 else:
                     signals[i] = 0.0
-                    bars_since_entry += 1
+                    bars_since_exit += 1
             else:
                 signals[i] = 0.0
-                bars_since_entry += 1
+                bars_since_exit += 1
     
     return signals
