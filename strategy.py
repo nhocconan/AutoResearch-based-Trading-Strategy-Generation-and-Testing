@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4H Donchian breakout + 1D EMA trend + volume confirmation. Works in bull/bear by capturing strong directional moves with volume filtering false breakouts. EMA filter ensures alignment with higher timeframe trend. Target: 100-200 total trades over 4 years (25-50/year) to balance opportunity and fee drag.
+# Hypothesis: Weekly Donchian breakout with volume confirmation on 1d timeframe
+# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
+# and Donchian channels provide structural support/resistance that works across regimes.
+# Target: 30-80 trades over 4 years (7-20/year) to minimize fee drag.
 
-name = "exp_12989_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_12990_1d_weekly_donchian_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -33,33 +35,33 @@ def calculate_donchian(high, low, period):
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1D data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 1D EMA
-    close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly Donchian channels
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
     
-    # Calculate 4H indicators
+    upper_w, lower_w = calculate_donchian(high_w, low_w, DONCHIAN_PERIOD)
+    
+    # Align to daily timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_weekly, upper_w)
+    lower_aligned = align_htf_to_ltf(prices, df_weekly, lower_w)
+    
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -67,11 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        # Skip if Donchian levels not available
+        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,9 +95,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Donchian breakout with EMA filter
-        breakout_long = volume_ok and close[i] >= donchian_upper[i] and close[i] > ema_1d_aligned[i]
-        breakout_short = volume_ok and close[i] <= donchian_lower[i] and close[i] < ema_1d_aligned[i]
+        # Breakout above upper or breakdown below lower
+        breakout_long = volume_ok and close[i] >= upper_aligned[i]
+        breakout_short = volume_ok and close[i] <= lower_aligned[i]
         
         # Generate signals
         if position == 0:
