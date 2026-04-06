@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12695_6d_weekly_pivot_volume_v1"
-timeframe = "6h"
+name = "exp_12696_12h_donchian20_1d_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-WEEKLY_PERIOD = 1
-VOLUME_MA_PERIOD = 30
-VOLUME_THRESHOLD = 2.5
+DONCHIAN_PERIOD = 20
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -24,38 +24,30 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_pivot(high, low, close):
-    """Calculate pivot points"""
-    pivot = (high + low + close) / 3
-    range_val = high - low
-    r1 = pivot + range_val
-    s1 = pivot - range_val
-    r2 = pivot + 2 * range_val
-    s2 = pivot - 2 * range_val
-    return pivot, r1, s1, r2, s2
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly pivot levels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    pivot_1w, r1_1w, s1_1w, r2_1w, s2_1w = calculate_pivot(high_1w, low_1w, close_1w)
+    # Calculate daily Donchian channels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    upper_1d, lower_1d = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
     
-    # Align pivot levels to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    # Align Donchian channels to 12h timeframe
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -70,11 +62,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly pivot levels not available
-        if np.isnan(pivot_1w_aligned[i]) or np.isnan(r2_1w_aligned[i]):
+        # Skip if daily Donchian levels not available
+        if np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -96,12 +88,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry conditions: buy near weekly support, sell near weekly resistance
-        near_support = close[i] <= s1_1w_aligned[i] * 1.02  # within 2% above S1
-        near_resistance = close[i] >= r1_1w_aligned[i] * 0.98  # within 2% below R1
+        # Donchian breakout
+        breakout_long = volume_ok and close[i] >= upper_1d_aligned[i]
+        breakout_short = volume_ok and close[i] <= lower_1d_aligned[i]
         
-        long_entry = volume_ok and near_support
-        short_entry = volume_ok and near_resistance
+        # Entry conditions
+        long_entry = breakout_long
+        short_entry = breakout_short
         
         # Generate signals
         if position == 0:
