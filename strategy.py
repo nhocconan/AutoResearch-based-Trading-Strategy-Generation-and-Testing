@@ -1,29 +1,18 @@
 #!/usr/bin/env python3
 """
-6h Donchian breakout with 1w RSI filter and volume confirmation.
-Hypothesis: Weekly RSI filters market regime (bull/bear/range) to avoid counter-trend breakouts.
-In bull markets (weekly RSI > 50), take long breakouts; in bear markets (weekly RSI < 50), take short breakdowns.
-Volume confirmation ensures momentum. Target: 80-180 trades over 4 years.
+6h Donchian breakout with 1d EMA filter and volume confirmation
+Hypothesis: Breakouts aligned with daily trend (1d EMA) and volume confirmation capture strong momentum moves.
+In bull markets, captures upward breakouts; in bear markets, captures downward breakdowns.
+Volume filter ensures momentum, reducing false breakouts. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14255_6h_donchian20_1w_rsi_vol_v1"
+name = "exp_14255_6d_donchian20_1d_ema_vol_v1"
 timeframe = "6h"
 leverage = 1.0
-
-def calculate_rsi(close, period):
-    """Calculate RSI with proper min_periods"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR with proper min_periods"""
@@ -35,18 +24,22 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_ema(close, period):
+    """Calculate EMA with proper min_periods"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for RSI filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 1d data for EMA filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly RSI(14)
-    rsi_1w = calculate_rsi(close_1w, 14)
-    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
+    # Calculate 1d EMA(50)
+    ema_1d = calculate_ema(close_1d, 50)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # 6h data
     high = prices['high'].values
@@ -70,12 +63,12 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 14 for RSI)
-    start = max(20, 20, 14, 14) + 1
+    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 50 for EMA)
+    start = max(20, 20, 14, 50) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(rsi_1w_aligned[i]) or \
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_1d_aligned[i]) or \
            np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -98,17 +91,11 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Weekly RSI regime filter
-        # Bull regime: weekly RSI > 50 -> favor longs
-        # Bear regime: weekly RSI < 50 -> favor shorts
-        bull_regime = rsi_1w_aligned[i] > 50
-        bear_regime = rsi_1w_aligned[i] < 50
-        
-        # Donchian breakout signals with weekly RSI filter and volume
-        # Long: break above upper band + bull regime + volume
-        # Short: break below lower band + bear regime + volume
-        breakout_long = (close[i] > highest_high[i-1]) and bull_regime and vol_filter[i]
-        breakout_short = (close[i] < lowest_low[i-1]) and bear_regime and vol_filter[i]
+        # Donchian breakout signals with 1d EMA filter and volume
+        # Long: break above upper band + price > 1d EMA + volume
+        # Short: break below lower band + price < 1d EMA + volume
+        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_1d_aligned[i]) and vol_filter[i]
+        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_1d_aligned[i]) and vol_filter[i]
         
         # Generate signals
         if position == 0:
