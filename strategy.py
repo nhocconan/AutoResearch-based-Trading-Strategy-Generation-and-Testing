@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12757_4h_donchian20_1d_vol_v1"
+name = "exp_12757_4h_donchian20_1d_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 3.0  # Increased to reduce trades
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5  # Wider stop to reduce premature exits
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -84,7 +84,7 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
+        # Volume confirmation - require volume > 3x MA
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Breakout above upper band or breakdown below lower band
