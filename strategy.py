@@ -3,17 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12712_12h_donchian20_1d_vol_v1"
-timeframe = "12h"
+name = "exp_12712_12h_donchian20_1d_vol_trend_v1"
+timezone = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+ATR_PERIOD = 14
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.25
-ATR_PERIOD = 14
+SIGNAL_SIZE = 0.30
 ATR_STOP_MULTIPLIER = 2.0
+ATR_TRAIL_MULTIPLIER = 3.0
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -41,11 +46,12 @@ def generate_signals(prices):
     # Calculate daily Donchian channels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    donch_up, donch_low = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
+    close_1d = df_1d['close'].values
+    upper_1d, lower_1d = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
     
-    # Align Donchian levels to 12h timeframe
-    donch_up_aligned = align_htf_to_ltf(prices, df_1d, donch_up)
-    donch_low_aligned = align_htf_to_ltf(prices, df_1d, donch_low)
+    # Align Donchian channels to 12h timeframe
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
     
     # Calculate 12h indicators
     high = prices['high'].values
@@ -59,28 +65,39 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    stop_price = 0.0
+    highest_high = 0.0
+    lowest_low = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if daily Donchian levels not available
-        if np.isnan(donch_up_aligned[i]) or np.isnan(donch_low_aligned[i]):
+        if np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
         
-        # Check stoploss
+        # Check stoploss or trailing stop
         if position == 1:  # long position
-            if close[i] <= stop_price:
+            # Update highest high
+            if close[i] > highest_high:
+                highest_high = close[i]
+            # Check stoploss or trailing stop
+            if close[i] <= (entry_price - ATR_STOP_MULTIPLIER * atr[i]) or \
+               close[i] <= (highest_high - ATR_TRAIL_MULTIPLIER * atr[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
         elif position == -1:  # short position
-            if close[i] >= stop_price:
+            # Update lowest low
+            if close[i] < lowest_low:
+                lowest_low = close[i]
+            # Check stoploss or trailing stop
+            if close[i] >= (entry_price + ATR_STOP_MULTIPLIER * atr[i]) or \
+               close[i] >= (lowest_low + ATR_TRAIL_MULTIPLIER * atr[i]):
                 signals[i] = 0.0
                 position = 0
                 continue
@@ -88,26 +105,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above upper Donchian channel or breakdown below lower Donchian channel
-        breakout_long = volume_ok and close[i] > donch_up_aligned[i]
-        breakout_short = volume_ok and close[i] < donch_low_aligned[i]
-        
-        # Entry conditions
-        long_entry = breakout_long
-        short_entry = breakout_short
+        # Donchian breakout with volume
+        long_breakout = volume_ok and close[i] >= upper_1d_aligned[i]
+        short_breakout = volume_ok and close[i] <= lower_1d_aligned[i]
         
         # Generate signals
         if position == 0:
-            if long_entry:
+            if long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
+                highest_high = close[i]
+            elif short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                lowest_low = close[i]
             else:
                 signals[i] = 0.0
         elif position == 1:
