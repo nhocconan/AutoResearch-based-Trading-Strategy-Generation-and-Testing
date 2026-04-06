@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_ema50_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema50_vol_v5"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -49,14 +49,14 @@ def generate_signals(prices):
     ema_50 = ema(close_1d, 50)
     ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Donchian channels (20-period) on 12h
+    # Donchian channels (20-period) on 4h
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(20, n):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Volume filter: current volume > 2.0x average over last 20 periods
+    # Volume filter: current volume > 1.5x average over last 20 periods
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -66,7 +66,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(60, 20)
+    start = max(50, 20)
     
     for i in range(start, n):
         # Skip if required data not available
@@ -77,8 +77,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume condition (more restrictive)
-        volume_filter = volume[i] > vol_ma[i] * 2.0
+        # Volume condition (moderate)
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
