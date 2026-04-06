@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(10) breakout with 1w ADX filter and volume confirmation
-# Uses shorter Donchian period for more frequent signals while maintaining quality
-# ADX > 25 ensures we only trade in trending markets, reducing whipsaws
-# Volume > 20-period average confirms breakout strength
-# Target: 50-150 total trades over 4 years with controlled risk in both bull and bear markets
-# Shorter Donchian period increases trade frequency but ADX filter maintains quality
+# Hypothesis: 1d KAMA direction with RSI(14) and 1w EMA(20) trend filter
+# Long when KAMA is rising, RSI(14) > 50, and 1w EMA(20) > prior
+# Short when KAMA is falling, RSI(14) < 50, and 1w EMA(20) < prior
+# Uses KAMA for adaptive trend, RSI for momentum filter, 1w EMA for trend alignment
+# Target: 30-100 total trades over 4 years with controlled risk in both bull and bear markets
+# Uses 1d timeframe with 1w trend filter to reduce trade frequency and improve signal quality
 
-name = "1d_donchian10_1w_adx_vol_v1"
+name = "1d_kama_rsi_1w_ema_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -21,78 +21,43 @@ def generate_signals(prices):
     
     # Price data
     close = prices['close'].values
-    high = prices['high'].values
-    low = prices['low'].values
-    volume = prices['volume'].values
     
-    # 1w data for ADX trend filter
+    # 1w data for trend filter
     df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 30:
+    if len(df_1w) < 20:
         return np.zeros(n)
     
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=20, min_periods=20, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate ADX (14-period) on 1w data
-    # True Range
-    tr1 = np.abs(high_1w[1:] - low_1w[1:])
-    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
-    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])  # First value is NaN
+    # KAMA (adaptive moving average)
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close))
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (0.6667 - 0.0645) + 0.0645) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
     
-    # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    
-    # Smoothed values
-    def smooth(val, period):
-        return np.convolve(val, np.ones(period)/period, mode='same')
-    
-    atr = np.zeros_like(tr)
-    atr[14:] = np.convolve(tr[14:], np.ones(14)/14, mode='valid')[:len(atr)-14]
-    atr = np.concatenate([np.full(14, np.nan), atr[14:]])
-    
-    dm_plus_smooth = np.zeros_like(dm_plus)
-    dm_minus_smooth = np.zeros_like(dm_minus)
-    dm_plus_smooth[14:] = np.convolve(dm_plus[14:], np.ones(14)/14, mode='valid')[:len(dm_plus)-14]
-    dm_minus_smooth[14:] = np.convolve(dm_minus[14:], np.ones(14)/14, mode='valid')[:len(dm_minus)-14]
-    dm_plus_smooth = np.concatenate([np.full(14, np.nan), dm_plus_smooth[14:]])
-    dm_minus_smooth = np.concatenate([np.full(14, np.nan), dm_minus_smooth[14:]])
-    
-    # DI+ and DI-
-    di_plus = np.where(atr != 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr != 0, 100 * dm_minus_smooth / atr, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = np.zeros_like(dx)
-    adx[27:] = np.convolve(dx[27:], np.ones(14)/14, mode='valid')[:len(dx)-27]
-    adx = np.concatenate([np.full(27, np.nan), adx[27:]])
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # Donchian channels (10-period for more signals)
-    high_max = pd.Series(high).rolling(window=10, min_periods=10).max().values
-    low_min = pd.Series(low).rolling(window=10, min_periods=10).min().values
-    
-    # Volume filter
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > vol_ma
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(30, n):
+    for i in range(14, n):
         # Skip if required data not available
-        if (np.isnan(adx_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(ema_1w_aligned[i]) or np.isnan(kama[i]) or 
+            np.isnan(rsi[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -101,12 +66,12 @@ def generate_signals(prices):
         
         if position == 1:  # long position
             # Stoploss: 2 * ATR approximation using price range
-            if close[i] < entry_price - 2.0 * (high[i] - low[i]):
+            if i > 0 and close[i] < entry_price - 2.0 * (abs(close[i] - close[i-1])):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks below Donchian low or ADX < 20 (trend weakening)
-            elif close[i] < low_min[i] or adx_aligned[i] < 20:
+            # Exit: KAMA turns down or RSI < 50 or 1w EMA turns down
+            elif kama[i] < kama[i-1] or rsi[i] < 50 or ema_1w_aligned[i] < ema_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -114,29 +79,26 @@ def generate_signals(prices):
                 signals[i] = 0.25
         elif position == -1:  # short position
             # Stoploss: 2 * ATR approximation
-            if close[i] > entry_price + 2.0 * (high[i] - low[i]):
+            if i > 0 and close[i] > entry_price + 2.0 * (abs(close[i] - close[i-1])):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks above Donchian high or ADX < 20 (trend weakening)
-            elif close[i] > high_max[i] or adx_aligned[i] < 20:
+            # Exit: KAMA turns up or RSI > 50 or 1w EMA turns up
+            elif kama[i] > kama[i-1] or rsi[i] > 50 or ema_1w_aligned[i] > ema_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and strong trend (ADX > 25)
-            if vol_filter[i] and adx_aligned[i] > 25:
-                # Long when price breaks above Donchian high
-                if close[i] > high_max[i]:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                # Short when price breaks below Donchian low
-                elif close[i] < low_min[i]:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
+            # Look for entries with trend alignment
+            if kama[i] > kama[i-1] and rsi[i] > 50 and ema_1w_aligned[i] > ema_1w_aligned[i-1]:
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+            elif kama[i] < kama[i-1] and rsi[i] < 50 and ema_1w_aligned[i] < ema_1w_aligned[i-1]:
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
     
     return signals
