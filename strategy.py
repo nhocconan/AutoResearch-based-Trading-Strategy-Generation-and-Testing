@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12824_1d_weekly_breakout_v1"
-timeframe = "1d"
+name = "exp_12825_12h_donchian20_1d_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
-# Parameters - optimized for 1d timeframe
-WEEKLY_LOOKBACK = 1
+# Parameters
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 60  # Max 60 days
+ATR_STOP_MULTIPLIER = 2.0
+MAX_HOLD_BARS = 30  # Max 30 days (30 * 12h)
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -26,7 +26,7 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
+    """Calculate Donchian channel"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -36,31 +36,27 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate weekly Donchian channels (20-period)
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
-    volume_w = df_weekly['volume'].values
+    # Calculate daily Donchian channel
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    close_d = df_daily['close'].values
     
-    donchian_upper, donchian_lower = calculate_donchian(high_w, low_w, 20)
+    upper_d, lower_d = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
     
-    # Calculate weekly volume MA
-    volume_ma_w = pd.Series(volume_w).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    # Align to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_daily, upper_d)
+    lower_aligned = align_htf_to_ltf(prices, df_daily, lower_d)
     
-    # Align to daily timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_weekly, donchian_upper)
-    lower_aligned = align_htf_to_ltf(prices, df_weekly, donchian_lower)
-    volume_ma_aligned = align_htf_to_ltf(prices, df_weekly, volume_ma_w)
-    
-    # Calculate daily indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -70,13 +66,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(20, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if weekly levels not available
-        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]) or np.isnan(volume_ma_aligned[i]):
+        # Skip if Donchian levels not available
+        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -105,9 +101,9 @@ def generate_signals(prices):
             continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma_aligned[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma_aligned[i]) else False
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above weekly upper or breakdown below weekly lower
+        # Breakout above upper Donchian or breakdown below lower Donchian
         breakout_long = volume_ok and close[i] >= upper_aligned[i]
         breakout_short = volume_ok and close[i] <= lower_aligned[i]
         
