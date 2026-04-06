@@ -23,16 +23,16 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_ema(arr, span):
+def calculate_ema(values, span):
     """Calculate EMA"""
-    return pd.Series(arr).ewm(span=span, adjust=False, min_periods=span).mean().values
+    return pd.Series(values).ewm(span=span, adjust=False, min_periods=span).mean().values
 
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 12h data for trend filter (once before loop)
+    # Load 12h data for EMA trend filter (once before loop)
     df_12h = get_htf_data(prices, '12h')
     
     # Calculate 12h EMA(50) for trend bias
@@ -88,17 +88,17 @@ def generate_signals(prices):
                 continue
         
         # Determine trend bias from 12h EMA (50)
-        bullish_trend = close[i] > ema_12h_aligned[i]
-        bearish_trend = close[i] < ema_12h_aligned[i]
+        bullish_trend = close[i] > ema_12h_aligned[i]  # price above 12h EMA50 = bullish
+        bearish_trend = close[i] < ema_12h_aligned[i]  # price below 12h EMA50 = bearish
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * 1.5)
         
         # Donchian breakout signals (using previous bar's bands)
-        breakout_up = close[i] > donchian_upper[i-1]
-        breakout_down = close[i] < donchian_lower[i-1]
+        breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
+        breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
-        # Entry signals with trend filter and volume confirmation
+        # Entry signals with trend and volume filters
         long_signal = bullish_trend and volume_ok and breakout_up
         short_signal = bearish_trend and volume_ok and breakout_down
         
