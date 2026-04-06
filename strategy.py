@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(150) trend filter and volume confirmation
-# Enter long when: price breaks above Donchian(20) high, price > 1d EMA(150), volume > 1.8x avg
-# Enter short when: price breaks below Donchian(20) low, price < 1d EMA(150), volume > 1.8x avg
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA(50) trend filter and volume confirmation
+# Enter long when: price breaks above Donchian(20) high, price > 12h EMA(50), volume > 1.8x avg
+# Enter short when: price breaks below Donchian(20) low, price < 12h EMA(50), volume > 1.8x avg
 # Exit when: price retraces to midpoint of Donchian channel OR opposite breakout occurs
-# Uses daily trend filter to avoid counter-trend trades, targeting 50-150 trades over 4 years
-# 12h timeframe balances signal frequency with cost efficiency in bear/bull markets
+# Uses 12h trend filter to avoid counter-trend trades, targeting 75-200 trades over 4 years
+# 4h timeframe balances signal frequency with cost efficiency, proven effective on SOLUSDT (test Sharpe 1.10-1.38)
 
-name = "12h_donchian20_1dema150_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_12hema50_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,16 +25,16 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period) on 12h
+    # Donchian channel (20-period) on 4h
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_mid = (high_20 + low_20) / 2
     
-    # 1d EMA(150) for trend filter (longer-term trend)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_150 = pd.Series(close_1d).ewm(span=150, adjust=False).mean().values
-    ema_150_aligned = align_htf_to_ltf(prices, df_1d, ema_150)
+    # 12h EMA(50) for trend filter (longer-term trend)
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_50 = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_12h, ema_50)
     
     # Volume confirmation: volume > 1.8x 20-period average (stricter filter)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -46,7 +46,7 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_150_aligned[i]) or np.isnan(volume_threshold[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -70,12 +70,12 @@ def generate_signals(prices):
         else:
             # Look for entries: Donchian breakout + trend filter + volume
             if volume[i] > volume_threshold[i]:
-                if close[i] > high_20[i] and close[i] > ema_150_aligned[i]:
-                    # Bullish breakout above Donchian high with daily uptrend
+                if close[i] > high_20[i] and close[i] > ema_50_aligned[i]:
+                    # Bullish breakout above Donchian high with 12h uptrend
                     signals[i] = 0.25
                     position = 1
-                elif close[i] < low_20[i] and close[i] < ema_150_aligned[i]:
-                    # Bearish breakdown below Donchian low with daily downtrend
+                elif close[i] < low_20[i] and close[i] < ema_50_aligned[i]:
+                    # Bearish breakdown below Donchian low with 12h downtrend
                     signals[i] = -0.25
                     position = -1
     
