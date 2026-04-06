@@ -1,81 +1,92 @@
 #!/usr/bin/env python3
 """
-1h RSI(14) extreme reversal with 4h trend filter and volume confirmation
-Hypothesis: RSI extremes (<30 or >70) signal exhaustion; trades taken only when aligned with 4h trend (EMA50) and volume > 1.5x 4h average. Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend). Target: 100-150 total trades over 4 years (25-38/year).
+6h Ichimoku Cloud with 1d Filter
+Hypothesis: Ichimoku provides strong trend signals (TK cross) and dynamic support/resistance (cloud). Filtering by 1d price relative to cloud ensures we only trade in the direction of the higher timeframe trend, reducing whipsaws. Works in bull (buy when price above cloud + TK cross up) and bear (sell when price below cloud + TK cross down). Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_rsi14_extreme_4h_trend_vol_v1"
-timeframe = "1h"
+name = "6h_ichimoku_1d_filter_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price and volume data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    volume = prices['volume'].values
+    close = prices['close'].values
     
-    # 14-period RSI
-    rsi = np.full(n, np.nan)
-    if n >= 15:
-        delta = np.diff(close)
-        gain = np.where(delta > 0, delta, 0)
-        loss = np.where(delta < 0, -delta, 0)
-        avg_gain = np.full(n, np.nan)
-        avg_loss = np.full(n, np.nan)
-        if n >= 15:
-            avg_gain[14] = np.mean(gain[1:15])
-            avg_loss[14] = np.mean(loss[1:15])
-            for i in range(15, n):
-                avg_gain[i] = (avg_gain[i-1] * 13 + gain[i-1]) / 14
-                avg_loss[i] = (avg_loss[i-1] * 13 + loss[i-1]) / 14
-                rs = avg_gain[i] / avg_loss[i] if avg_loss[i] != 0 else 0
-                rsi[i] = 100 - (100 / (1 + rs))
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + low) / 2
+    tenkan = np.full(n, np.nan)
+    for i in range(9, n):
+        tenkan[i] = (np.max(high[i-9:i]) + np.min(low[i-9:i])) / 2
     
-    # 14-period ATR
-    atr = np.full(n, np.nan)
-    if n >= 15:
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-        if len(tr) > 0:
-            atr[1] = tr[0]
-            for i in range(2, n):
-                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
+    # Kijun-sen (Base Line): (26-period high + low) / 2
+    kijun = np.full(n, np.nan)
+    for i in range(26, n):
+        kijun[i] = (np.max(high[i-26:i]) + np.min(low[i-26:i])) / 2
     
-    # Get 4h data for trend filter (EMA50) and volume
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    volume_4h = df_4h['volume'].values
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
+    senkou_a = np.full(n, np.nan)
+    for i in range(26, n):
+        if not np.isnan(tenkan[i]) and not np.isnan(kijun[i]):
+            senkou_a[i] = (tenkan[i] + kijun[i]) / 2
     
-    # EMA50 on 4h close
-    ema_4h = np.full(len(close_4h), np.nan)
-    if len(close_4h) >= 50:
-        ema_4h[49] = np.mean(close_4h[:50])
-        for i in range(50, len(close_4h)):
-            ema_4h[i] = (close_4h[i] * 2 + ema_4h[i-1] * 48) / 50
+    # Senkou Span B (Leading Span B): (52-period high + low) / 2
+    senkou_b = np.full(n, np.nan)
+    for i in range(52, n):
+        senkou_b[i] = (np.max(high[i-52:i]) + np.min(low[i-52:i])) / 2
     
-    # 4h trend: above EMA50 = bullish, below = bearish
-    trend_4h = np.where(close_4h > ema_4h, 1, -1)
+    # Get 1d data for trend filter (price vs cloud)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 20-period average volume on 4h
-    vol_ma_4h = np.full(len(volume_4h), np.nan)
-    for i in range(20, len(volume_4h)):
-        vol_ma_4h[i] = np.mean(volume_4h[i-20:i])
+    # Ichimoku on 1d (same parameters)
+    tenkan_1d = np.full(len(close_1d), np.nan)
+    for i in range(9, len(close_1d)):
+        tenkan_1d[i] = (np.max(high_1d[i-9:i]) + np.min(low_1d[i-9:i])) / 2
     
-    # Align 4h indicators to 1h timeframe
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
+    kijun_1d = np.full(len(close_1d), np.nan)
+    for i in range(26, len(close_1d)):
+        kijun_1d[i] = (np.max(high_1d[i-26:i]) + np.min(low_1d[i-26:i])) / 2
+    
+    senkou_a_1d = np.full(len(close_1d), np.nan)
+    for i in range(26, len(close_1d)):
+        if not np.isnan(tenkan_1d[i]) and not np.isnan(kijun_1d[i]):
+            senkou_a_1d[i] = (tenkan_1d[i] + kijun_1d[i]) / 2
+    
+    senkou_b_1d = np.full(len(close_1d), np.nan)
+    for i in range(52, len(close_1d)):
+        senkou_b_1d[i] = (np.max(high_1d[i-52:i]) + np.min(low_1d[i-52:i])) / 2
+    
+    # 1d cloud top and bottom
+    cloud_top_1d = np.maximum(senkou_a_1d, senkou_b_1d)
+    cloud_bottom_1d = np.minimum(senkou_a_1d, senkou_b_1d)
+    
+    # Align 1d Ichimoku to 6h timeframe
+    tenkan_1d_aligned = align_htf_to_ltf(prices, df_1d, tenkan_1d)
+    kijun_1d_aligned = align_htf_to_ltf(prices, df_1d, kijun_1d)
+    cloud_top_1d_aligned = align_htf_to_ltf(prices, df_1d, cloud_top_1d)
+    cloud_bottom_1d_aligned = align_htf_to_ltf(prices, df_1d, cloud_bottom_1d)
+    
+    # 6h TK cross signals
+    tk_cross_up = np.zeros(n, dtype=bool)
+    tk_cross_down = np.zeros(n, dtype=bool)
+    for i in range(1, n):
+        if not np.isnan(tenkan[i-1]) and not np.isnan(kijun[i-1]) and not np.isnan(tenkan[i]) and not np.isnan(kijun[i]):
+            if tenkan[i-1] <= kijun[i-1] and tenkan[i] > kijun[i]:
+                tk_cross_up[i] = True
+            if tenkan[i-1] >= kijun[i-1] and tenkan[i] < kijun[i]:
+                tk_cross_down[i] = True
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -83,63 +94,73 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 50  # Need enough data for RSI, ATR, and alignments
+    start = 60  # Need enough data for Ichimoku and alignments
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(rsi[i]) or np.isnan(atr[i]) or 
-            np.isnan(trend_4h_aligned[i]) or
-            np.isnan(vol_ma_4h_aligned[i])):
+        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
+            np.isnan(cloud_top_1d_aligned[i]) or np.isnan(cloud_bottom_1d_aligned[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 1h volume > 1.5x 4h average volume (scaled)
-        # Scale 4h volume to 1h: approx 1/4 of 4h volume (since 4x 1h in 4h)
-        vol_threshold = vol_ma_4h_aligned[i] / 4.0 * 1.5
-        volume_filter = volume[i] > vol_threshold
-        
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: RSI returns to neutral (50) OR stoploss: price drops 2*ATR below entry
-            if (rsi[i] >= 50 or
-                close[i] < entry_price - 2.0 * atr[i]):
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
+            # Exit: price below 1d cloud bottom OR TK cross down
+            # Stoploss: price drops 2*ATR below entry (using 6h ATR)
+            # Calculate ATR for stoploss
+            if i >= 1:
+                tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+                # Simplified ATR approximation for stoploss
+                atr_approx = tr  # Using current TR as proxy
+                if (close[i] < cloud_bottom_1d_aligned[i] or
+                    tk_cross_down[i] or
+                    close[i] < entry_price - 2.0 * atr_approx):
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.25
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: RSI returns to neutral (50) OR stoploss: price rises 2*ATR above entry
-            if (rsi[i] <= 50 or
-                close[i] > entry_price + 2.0 * atr[i]):
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
+            # Exit: price above 1d cloud top OR TK cross up
+            # Stoploss: price rises 2*ATR above entry
+            if i >= 1:
+                tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+                atr_approx = tr
+                if (close[i] > cloud_top_1d_aligned[i] or
+                    tk_cross_up[i] or
+                    close[i] > entry_price + 2.0 * atr_approx):
+                    signals[i] = 0.0
+                    position = 0
+                    bars_since_entry = 0
+                else:
+                    signals[i] = -0.25
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 8 bars flat
-            if bars_since_entry >= 8:
-                # RSI extreme entries with 4h trend
-                rsi_oversold = rsi[i] < 30
-                rsi_overbought = rsi[i] > 70
+            # Minimum holding period: only allow new entry after 12 bars flat
+            if bars_since_entry >= 12:
+                # Entry conditions
+                price_above_1d_cloud = close[i] > cloud_top_1d_aligned[i]
+                price_below_1d_cloud = close[i] < cloud_bottom_1d_aligned[i]
                 
-                # Long: RSI oversold with bullish 4h trend + volume
-                if rsi_oversold and trend_4h_aligned[i] == 1 and volume_filter:
-                    signals[i] = 0.20
+                # Long: price above 1d cloud + TK cross up
+                if price_above_1d_cloud and tk_cross_up[i]:
+                    signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: RSI overbought with bearish 4h trend + volume
-                elif rsi_overbought and trend_4h_aligned[i] == -1 and volume_filter:
-                    signals[i] = -0.20
+                # Short: price below 1d cloud + TK cross down
+                elif price_below_1d_cloud and tk_cross_down[i]:
+                    signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
                     bars_since_entry = 0
