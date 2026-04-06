@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend and Volume Filter
-Hypothesis: In trending markets, price breaking Donchian(20) channels on 4h with
-1d EMA(50) alignment and volume confirmation captures directional moves.
-Volume confirms institutional participation. Works in bull (breakouts above) and
-bear (breakdowns below). Target: 75-200 total trades over 4 years (19-50/year).
+4h Donchian Breakout with Volume Confirmation and 1d Trend Filter
+Hypothesis: In trending markets, breakouts above/below Donchian(20) channels capture momentum.
+Volume confirms institutional participation. 1d EMA(50) filter ensures alignment with higher timeframe trend.
+Works in bull (long with uptrend) and bear (short with downtrend).
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
@@ -20,7 +20,7 @@ def generate_signals(prices):
     if n < 200:
         return np.zeros(n)
     
-    # Load 1d data for trend (once before loop)
+    # Load 1d data for trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
     # 1d EMA(50) for trend direction
@@ -34,13 +34,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 4h Donchian(20) channels
+    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # 4h volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_filter = volume > (1.5 * vol_ma)  # Require high volume
     
     # 4h ATR(14) for stoploss
     tr1 = high - low
@@ -59,40 +59,39 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(high_max[i]) or np.isnan(low_min[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or
+            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
+        # Determine trend alignment: price vs 1d EMA50
+        uptrend = close[i] > ema_50_1d_aligned[i]
+        downtrend = close[i] < ema_50_1d_aligned[i]
+        
         # Check exits
         if position == 1:  # long position
-            # Exit: price crosses below Donchian low OR stoploss
-            if (close[i] <= low_min[i] or
+            # Exit: breakdown below lower band OR stoploss
+            if (close[i] <= donch_low[i] or
                 close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price crosses above Donchian high OR stoploss
-            if (close[i] >= high_max[i] or
+            # Exit: breakout above upper band OR stoploss
+            if (close[i] >= donch_high[i] or
                 close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + trend alignment + volume
-            long_setup = (close[i] > high_max[i] and
-                          ema_50_1d_aligned[i] > close[i] and  # Uptrend: price above EMA50
-                          vol_filter[i])
-            short_setup = (close[i] < low_min[i] and
-                           ema_50_1d_aligned[i] < close[i] and  # Downtrend: price below EMA50
-                           vol_filter[i])
+            # Look for entries: breakout + trend alignment + volume
+            long_setup = (close[i] > donch_high[i] and uptrend and vol_filter[i])
+            short_setup = (close[i] < donch_low[i] and downtrend and vol_filter[i])
             
             if long_setup:
                 signals[i] = 0.25
