@@ -3,12 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation.
-# Uses daily trend to avoid whipsaws while capturing breakouts in both bull and bear markets.
-# Volume confirmation ensures institutional participation. Target: 50-150 total trades over 4 years.
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation.
+# Uses 1d trend to capture long-term trend while using 4h breakouts for entries.
+# Volume confirmation ensures institutional participation. Target: 75-200 total trades over 4 years.
+# Works in bull markets (breakouts with volume) and bear markets (shorts on breakdowns with volume).
 
-name = "exp_13685_12h_donchian20_1d_trend_vol_v1"
-timeframe = "12h"
+name = "exp_13686_4h_donchian20_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -19,8 +20,6 @@ VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-ATR_BREAKEVEN = 1.5
-ATR_TRAIL_START = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -49,13 +48,13 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ATR for stop loss and trailing
+    # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     # Donchian channels
@@ -69,7 +68,6 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
-    max_favorable = 0.0  # track max favorable excursion for trailing
     
     # Start from warmup period
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
@@ -85,52 +83,18 @@ def generate_signals(prices):
         
         # Check stops
         if position == 1:  # long position
-            # Update max favorable
-            max_favorable = max(max_favorable, close[i] - entry_price)
-            
             # Check stop loss
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
-                max_favorable = 0.0
                 continue
-            
-            # Break-even stop
-            if max_favorable >= (ATR_BREAKEVEN * atr[i]):
-                stop_price = max(stop_price, entry_price)
-            
-            # Trailing stop
-            if max_favorable >= (ATR_TRAIL_START * atr[i]):
-                trail_price = entry_price + (max_favorable - (ATR_TRAIL_START * atr[i]))
-                if close[i] <= trail_price:
-                    signals[i] = 0.0
-                    position = 0
-                    max_favorable = 0.0
-                    continue
         
         elif position == -1:  # short position
-            # Update max favorable (positive for shorts)
-            max_favorable = max(max_favorable, entry_price - close[i])
-            
             # Check stop loss
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
-                max_favorable = 0.0
                 continue
-            
-            # Break-even stop
-            if max_favorable >= (ATR_BREAKEVEN * atr[i]):
-                stop_price = min(stop_price, entry_price)
-            
-            # Trailing stop
-            if max_favorable >= (ATR_TRAIL_START * atr[i]):
-                trail_price = entry_price - (max_favorable - (ATR_TRAIL_START * atr[i]))
-                if close[i] >= trail_price:
-                    signals[i] = 0.0
-                    position = 0
-                    max_favorable = 0.0
-                    continue
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
@@ -160,13 +124,11 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                max_favorable = 0.0
             elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                max_favorable = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
@@ -176,7 +138,6 @@ def generate_signals(prices):
                 if close[i] < low_prev and close[i-1] >= low_prev:
                     signals[i] = 0.0
                     position = 0
-                    max_favorable = 0.0
                 else:
                     signals[i] = SIGNAL_SIZE
             else:
@@ -188,7 +149,6 @@ def generate_signals(prices):
                 if close[i] > high_prev and close[i-1] <= high_prev:
                     signals[i] = 0.0
                     position = 0
-                    max_favorable = 0.0
                 else:
                     signals[i] = -SIGNAL_SIZE
             else:
