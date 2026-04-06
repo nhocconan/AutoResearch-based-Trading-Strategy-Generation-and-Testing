@@ -1,53 +1,51 @@
 #!/usr/bin/env python3
 """
-6h Donchian Breakout + Weekly Pivot Direction + Volume Filter
-Hypothesis: Donchian channel breakouts capture momentum, while weekly pivot direction filters for higher timeframe trend. Volume confirmation reduces false breakouts. Works in bull (buy breakouts above weekly pivot) and bear (sell breakdowns below weekly pivot). Target: 100-180 total trades over 4 years (25-45/year).
+12h Donchian Breakout + Volume Confirmation + HMA Trend
+Hypothesis: Donchian channels capture volatility-based breakouts with clear entry/exit levels.
+Volume confirmation ensures breakouts have participation. HMA on weekly timeframe filters false signals.
+Works in bull markets (breakouts continue) and bear markets (breakdowns continue).
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "14427_6h_donchian20_1w_pivot_vol_v1"
-timeframe = "6h"
+name = "14428_12h_donchian20_volume_hma_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for pivot points (once before loop)
+    # Load weekly data for HMA trend filter (once before loop)
     df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Weekly Pivot Points (standard calculation)
-    pivot_1w = (high_1w + low_1w + close_1w) / 3
-    r1_1w = 2 * pivot_1w - low_1w
-    s1_1w = 2 * pivot_1w - high_1w
-    r2_1w = pivot_1w + (high_1w - low_1w)
-    s2_1w = pivot_1w - (high_1w - low_1w)
-    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
-    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
+    # Calculate HMA(21) on weekly close
+    def hma(arr, period):
+        if len(arr) < period:
+            return np.full_like(arr, np.nan)
+        half = period // 2
+        sqrt = int(np.sqrt(period))
+        wma1 = pd.Series(arr).rolling(window=half, min_periods=half).mean().values
+        wma2 = pd.Series(arr).rolling(window=period, min_periods=period).mean().values
+        raw = 2 * wma1 - wma2
+        hma_vals = pd.Series(raw).rolling(window=sqrt, min_periods=sqrt).mean().values
+        return hma_vals
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
-    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
-    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
-    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
+    hma_21 = hma(close_1w, 21)
+    hma_21_aligned = align_htf_to_ltf(prices, df_1w, hma_21)
     
-    # 6h data for Donchian and volume
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
+    # Donchian(20) channels
     donchian_period = 20
     donchian_high = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
     donchian_low = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
@@ -74,45 +72,46 @@ def generate_signals(prices):
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(pivot_1w_aligned[i]) or np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(hma_21_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Determine weekly pivot direction (bullish if price above weekly pivot, bearish if below)
-        weekly_bullish = close[i] > pivot_1w_aligned[i]
-        weekly_bearish = close[i] < pivot_1w_aligned[i]
-        
         # Check exits
         if position == 1:  # long position
-            # Exit: Donchian breakdown OR weekly bias turns bearish OR stoploss
-            if (close[i] <= donchian_low[i] or not weekly_bullish or
+            # Exit: price breaks below Donchian low OR HMA turns flat/declining OR stoploss
+            if (close[i] <= donchian_low[i] or
+                hma_21_aligned[i] < hma_21_aligned[i-1] or
                 close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Donchian breakout OR weekly bias turns bullish OR stoploss
-            if (close[i] >= donchian_high[i] or not weekly_bearish or
+            # Exit: price breaks above Donchian high OR HMA turns flat/rising OR stoploss
+            if (close[i] >= donchian_high[i] or
+                hma_21_aligned[i] > hma_21_aligned[i-1] or
                 close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + weekly pivot direction + volume
-            long_setup = (close[i] >= donchian_high[i] and weekly_bullish and vol_filter[i])
-            short_setup = (close[i] <= donchian_low[i] and weekly_bearish and vol_filter[i])
+            # Look for entries: Donchian breakout + volume + HMA trend filter
+            long_breakout = close[i] > donchian_high[i]
+            short_breakout = close[i] < donchian_low[i]
             
-            if long_setup:
+            # HMA trend: rising for long, falling for short
+            hma_rising = hma_21_aligned[i] > hma_21_aligned[i-1]
+            hma_falling = hma_21_aligned[i] < hma_21_aligned[i-1]
+            
+            if long_breakout and vol_filter[i] and hma_rising:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_setup:
+            elif short_breakout and vol_filter[i] and hma_falling:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
