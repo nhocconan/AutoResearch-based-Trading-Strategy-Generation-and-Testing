@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 """
-Experiment #11947: 6h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: 6h Donchian(20) breakouts capture medium-term trends. 1d EMA provides trend bias,
-and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1d trend filter. Target: 50-150 trades over 4 years.
+Experiment #11951: 6h Donchian Breakout with 1d Trend and Volume Confirmation v2
+Hypothesis: Reduced signal frequency by tightening conditions - require both 1d trend alignment 
+AND volume spike to enter, with ATR-based stops. Target: 50-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11947_6h_donchian20_1d_ema_vol_v1"
+name = "exp_11951_6h_donchian20_1d_ema_vol_v2"
 timeframe = "6h"
 leverage = 1.0
 
-# Parameters
+# Parameters - tightened for fewer trades
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 2.0  # Increased from 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -97,14 +96,14 @@ def generate_signals(prices):
         breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
         breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # Volume confirmation
+        # Volume confirmation - tightened threshold
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter (1d)
         uptrend_1d = close[i] > ema_1d_aligned[i]
         downtrend_1d = close[i] < ema_1d_aligned[i]
         
-        # Entry conditions
+        # Entry conditions - require ALL conditions
         long_entry = breakout_up and volume_ok and uptrend_1d
         short_entry = breakout_down and volume_ok and downtrend_1d
         
