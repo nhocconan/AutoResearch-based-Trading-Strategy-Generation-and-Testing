@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-1h Donchian(20) breakout with 4h EMA trend filter and volume confirmation
-Hypothesis: Donchian breakouts on 1h timeframe capture short-term momentum.
-Filter by 4h EMA for trend bias and volume confirmation for conviction.
-Use 1d for additional trend filter to avoid counter-trend trades.
-Target: 60-150 total trades over 4 years = 15-37/year for 1h.
-Works in bull (buy breakouts above 4h EMA) and bear (sell breakdowns below 4h EMA).
+12h Camarilla pivot with 1d trend filter and volume confirmation
+Hypothesis: Camarilla pivot levels on daily timeframe act as strong support/resistance.
+Price reversals at these levels with 1d trend alignment and volume confirmation provide
+high-probability entries. Works in bull (buy at S1/S2 in uptrend) and bear (sell at R1/R2 in downtrend).
+Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_donchian20_4h_trend_vol_v1"
-timeframe = "1h"
+name = "12h_camarilla_pivot_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,28 +39,40 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 4h data for trend filter (EMA20)
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    
-    # EMA20 on 4h close
-    ema_4h = np.full(len(close_4h), np.nan)
-    if len(close_4h) >= 20:
-        ema_4h[19] = np.mean(close_4h[:20])
-        for i in range(20, len(close_4h)):
-            ema_4h[i] = (close_4h[i] * 2 + ema_4h[i-1] * 18) / 20
-    
-    # 4h trend: above EMA20 = bullish, below = bearish
-    trend_4h = np.where(close_4h > ema_4h, 1, -1)
-    
-    # Align 4h trend to 1h timeframe
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
-    
-    # Get 1d data for additional trend filter (EMA50)
+    # Get 1d data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # EMA50 on 1d close
+    # Calculate Camarilla levels from previous 1d bar
+    camarilla_r4 = np.full(len(close_1d), np.nan)
+    camarilla_r3 = np.full(len(close_1d), np.nan)
+    camarilla_r2 = np.full(len(close_1d), np.nan)
+    camarilla_r1 = np.full(len(close_1d), np.nan)
+    camarilla_s1 = np.full(len(close_1d), np.nan)
+    camarilla_s2 = np.full(len(close_1d), np.nan)
+    camarilla_s3 = np.full(len(close_1d), np.nan)
+    camarilla_s4 = np.full(len(close_1d), np.nan)
+    
+    for i in range(1, len(close_1d)):
+        # Previous day's range
+        prev_high = high_1d[i-1]
+        prev_low = low_1d[i-1]
+        prev_close = close_1d[i-1]
+        range_ = prev_high - prev_low
+        
+        if range_ > 0:
+            camarilla_r4[i] = prev_close + range_ * 1.1 / 2
+            camarilla_r3[i] = prev_close + range_ * 1.1 / 4
+            camarilla_r2[i] = prev_close + range_ * 1.1 / 6
+            camarilla_r1[i] = prev_close + range_ * 1.1 / 12
+            camarilla_s1[i] = prev_close - range_ * 1.1 / 12
+            camarilla_s2[i] = prev_close - range_ * 1.1 / 6
+            camarilla_s3[i] = prev_close - range_ * 1.1 / 4
+            camarilla_s4[i] = prev_close - range_ * 1.1 / 2
+    
+    # Get 1d data for trend filter (EMA50)
     ema_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 50:
         ema_1d[49] = np.mean(close_1d[:50])
@@ -71,109 +82,91 @@ def generate_signals(prices):
     # 1d trend: above EMA50 = bullish, below = bearish
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align 1d trend to 1h timeframe
+    # Align 1d data to 12h timeframe
+    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
+    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
+    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
+    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Get 4h data for volume confirmation
-    volume_4h = df_4h['volume'].values
-    
-    # 20-period average volume on 4h
-    vol_ma_4h = np.full(len(volume_4h), np.nan)
-    for i in range(20, len(volume_4h)):
-        vol_ma_4h[i] = np.mean(volume_4h[i-20:i])
-    
-    # Align volume MA to 1h timeframe
-    vol_ma_4h_aligned = align_htf_to_ltf(prices, df_4h, vol_ma_4h)
-    
-    # Donchian channels (20-period) from 1h data
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(20, n):
-        upper[i] = np.max(high[i-20:i])
-        lower[i] = np.min(low[i-20:i])
+    # Get 1d volume for confirmation
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    
     # Start from warmup period
-    start = 40  # Need enough data for Donchian and alignments
+    start = 50  # Need enough data for Camarilla and EMA
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(trend_4h_aligned[i]) or 
-            np.isnan(trend_1d_aligned[i]) or np.isnan(upper[i]) or 
-            np.isnan(lower[i]) or np.isnan(vol_ma_4h_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(trend_1d_aligned[i]) or 
+            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             bars_since_entry += 1
             continue
         
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            if position != 0:
-                signals[i] = position * 0.20
-            else:
-                signals[i] = 0.0
-            bars_since_entry += 1
-            continue
-        
-        # Volume filter: current 1h volume > 1.5x 4h average volume (scaled)
-        # Scale 4h volume to 1h: approx 1/4 of 4h volume (since 4x 1h in 4h)
-        vol_threshold = vol_ma_4h_aligned[i] / 4.0 * 1.5
+        # Volume filter: current 12h volume > 1.5x 1d average volume
+        vol_threshold = vol_ma_1d_aligned[i] * 1.5
         volume_filter = volume[i] > vol_threshold
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian OR against 4h trend OR 1d trend
+            # Exit: price crosses S1 (stop reversal) or against 1d trend
             # Stoploss: price drops 2*ATR below entry
-            if (close[i] < lower[i] or
-                trend_4h_aligned[i] == -1 or
+            if (close[i] < camarilla_s1_aligned[i] or
                 trend_1d_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian OR against 4h trend OR 1d trend
+            # Exit: price crosses R1 (stop reversal) or against 1d trend
             # Stoploss: price rises 2*ATR above entry
-            if (close[i] > upper[i] or
-                trend_4h_aligned[i] == 1 or
+            if (close[i] > camarilla_r1_aligned[i] or
                 trend_1d_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
             bars_since_entry += 1
         else:
             # Look for entries
             # Minimum holding period: only allow new entry after 12 bars flat
             if bars_since_entry >= 12:
-                # Breakout entries: upper/lower with 4h and 1d trend
-                bull_breakout = close[i] > upper[i]
-                bear_breakout = close[i] < lower[i]
+                # Mean reversion entries at Camarilla levels with 1d trend
+                # Long: price at S1/S2 in uptrend with volume
+                near_s1 = abs(close[i] - camarilla_s1_aligned[i]) < (0.1 * atr[i])
+                near_s2 = abs(close[i] - camarilla_s2_aligned[i]) < (0.15 * atr[i])
+                long_setup = (near_s1 or near_s2) and trend_1d_aligned[i] == 1 and volume_filter
                 
-                # Long: breakout above upper with bullish 4h and 1d trend + volume
-                if bull_breakout and trend_4h_aligned[i] == 1 and trend_1d_aligned[i] == 1 and volume_filter:
-                    signals[i] = 0.20
+                # Short: price at R1/R2 in downtrend with volume
+                near_r1 = abs(close[i] - camarilla_r1_aligned[i]) < (0.1 * atr[i])
+                near_r2 = abs(close[i] - camarilla_r2_aligned[i]) < (0.15 * atr[i])
+                short_setup = (near_r1 or near_r2) and trend_1d_aligned[i] == -1 and volume_filter
+                
+                if long_setup:
+                    signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: breakdown below lower with bearish 4h and 1d trend + volume
-                elif bear_breakout and trend_4h_aligned[i] == -1 and trend_1d_aligned[i] == -1 and volume_filter:
-                    signals[i] = -0.20
+                elif short_setup:
+                    signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
                     bars_since_entry = 0
