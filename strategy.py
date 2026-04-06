@@ -1,41 +1,37 @@
+# In the spirit of humility and learning from failures, I will build upon the strongest pattern from the session: the 4h Donchian breakout with volume confirmation and EMA trend filter, which achieved 0.438 Sharpe.
+# The key to success in this session was the 4h timeframe with 12h HTF for trend context.
+# I will simplify the approach, reduce the number of state variables, and focus on the core logic that worked.
+# Hypothesis: A 4h Donchian(20) breakout strategy with volume confirmation and 12h EMA(50) trend filter will capture trends in both bull and bear markets with controlled trade frequency.
+# The 12h EMA provides the trend filter to avoid counter-trend trades, while the Donchian breakout with volume confirmation ensures we only enter on strong moves.
+# This design aims for 75-200 trades over 4 years by using the 4h timeframe and requiring confluence of three conditions (breakout, volume, trend).
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 12h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation.
-# Goes long when Bull Power > 0 (close > EMA13) AND Bear Power < 0 (low < EMA13) indicating bullish momentum,
-# short when Bear Power > 0 AND Bull Power < 0 indicating bearish momentum.
-# Uses 1d EMA50 as trend filter to avoid counter-trend trades.
-# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
-# Works in bull (bullish momentum with volume) and bear (bearish momentum with volume) markets.
-# Elder Ray captures institutional buying/selling pressure that works across market regimes.
-
-name = "exp_13799_6h_elderray12h_ema1d_vol_v1"
-timeframe = "6h"
+name = "exp_13800_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
-# Parameters
-ELDER_RAY_PERIOD = 13
+# Parameters - Optimized for trade frequency and robustness
+DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
-VOLUME_MA_PERIOD = 10
+VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+
+def calculate_donchian(high, low, period):
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_ema(close, period):
-    """Calculate EMA"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def calculate_elder_ray(high, low, close, ema):
-    """Calculate Elder Ray: Bull Power = High - EMA, Bear Power = Low - EMA"""
-    bull_power = high - ema
-    bear_power = low - ema
-    return bull_power, bear_power
-
 def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -46,41 +42,33 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for Elder Ray calculation
+    # Load 12h data ONCE before loop for HTF context
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 12h EMA for Elder Ray
-    close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, ELDER_RAY_PERIOD)
-    
-    # Calculate Elder Ray components
+    # Calculate 12h indicators
     high_12h = df_12h['high'].values
     low_12h = df_12h['low'].values
-    bull_power, bear_power = calculate_elder_ray(high_12h, low_12h, close_12h, ema_12h)
+    close_12h = df_12h['close'].values
     
-    # Load 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
+    donchian_upper, donchian_lower = calculate_donchian(high_12h, low_12h, DONCHIAN_PERIOD)
+    ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
     
-    # Align indicators to 6h timeframe
-    bull_power_aligned = align_htf_to_ltf(prices, df_12h, bull_power)
-    bear_power_aligned = align_htf_to_ltf(prices, df_12h, bear_power)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align 12h indicators to 4h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_12h, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_12h, donchian_lower)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # 6h data for entry timing and ATR
+    # 4h data for execution
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ATR for stop loss
+    # Indicators for entry and risk
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Volume confirmation
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
@@ -88,52 +76,42 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period
-    start = max(ELDER_RAY_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    # Start from sufficient warmup
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if required data not available
-        if np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(volume_ma[i]):
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
+        # Skip if data not ready
+        if np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(volume_ma[i]):
+            # Hold current position
+            signals[i] = position * SIGNAL_SIZE
             continue
         
-        # Check stops
-        if position == 1:  # long position
-            # Check stop loss
-            if close[i] <= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
+        # Check stop loss
+        if position == 1 and close[i] <= stop_price:
+            signals[i] = 0.0
+            position = 0
+            continue
+        elif position == -1 and close[i] >= stop_price:
+            signals[i] = 0.0
+            position = 0
+            continue
         
-        elif position == -1:  # short position
-            # Check stop loss
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
-        
-        # Volume confirmation
+        # Entry conditions
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        above_ema = close[i] > ema_12h_aligned[i]
+        below_ema = close[i] < ema_12h_aligned[i]
         
-        # Trend direction from 1d EMA
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
-        
-        # Elder Ray signals with volume and trend confirmation
-        long_signal = volume_ok and above_ema and (bull_power_aligned[i] > 0) and (bear_power_aligned[i] < 0)
-        short_signal = volume_ok and below_ema and (bear_power_aligned[i] > 0) and (bull_power_aligned[i] < 0)
+        long_breakout = close[i] > donchian_upper_aligned[i]
+        short_breakout = close[i] < donchian_lower_aligned[i]
         
         # Generate signals
         if position == 0:
-            if long_signal:
+            if volume_ok and above_ema and long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_signal:
+            elif volume_ok and below_ema and short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -141,15 +119,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long when bullish momentum fades (Bear Power > 0 or Bull Power < 0)
-            if (bear_power_aligned[i] >= 0) or (bull_power_aligned[i] <= 0):
+            # Hold or exit on trend change
+            if close[i] < ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short when bearish momentum fades (Bull Power > 0 or Bear Power < 0)
-            if (bull_power_aligned[i] >= 0) or (bear_power_aligned[i] <= 0):
+            # Hold or exit on trend change
+            if close[i] > ema_12h_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
