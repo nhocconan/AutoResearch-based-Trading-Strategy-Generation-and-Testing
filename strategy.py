@@ -3,17 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Bollinger Mean Reversion with 4h Trend Filter
-# Long when: price < lower Bollinger Band (20,2.0) AND 4h EMA(21) rising
-# Short when: price > upper Bollinger Band (20,2.0) AND 4h EMA(21) falling
-# Exit when: price crosses middle Bollinger Band (SMA20) OR 4h EMA direction changes
-# Uses 4h for trend direction (reduces whipsaw) and 1h for entry timing
-# Bollinger Bands capture mean reversion in ranging markets, EMA filter avoids counter-trend trades
-# Target: 60-150 trades over 4 years by requiring both Bollinger break and trend alignment
-# Works in bull/bear: trend filter ensures we only trade with higher timeframe momentum
+# Hypothesis: 1d Donchian(20) breakout + 1w EMA(50) trend + volume confirmation
+# Long when price breaks above 20-day high AND weekly close > EMA50 AND volume > 1.5x average
+# Short when price breaks below 20-day low AND weekly close < EMA50 AND volume > 1.5x average
+# Exit when price crosses opposite Donchian band OR weekly trend reverses
+# Target: 50-150 total trades over 4 years (12-38/year)
 
-name = "1h_bb_meanrev_4h_trend_v1"
-timeframe = "1h"
+name = "1d_donchian20_1w_ema_vol_v2"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -27,64 +24,58 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20,2.0) on 1h
-    close_s = pd.Series(close)
-    basis = close_s.rolling(window=20, min_periods=20).mean()
-    dev = close_s.rolling(window=20, min_periods=20).std()
-    upper = basis + 2.0 * dev
-    lower = basis - 2.0 * dev
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 4h EMA(21) for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    weekly_close = df_1w['close'].values
     
-    # 4h EMA direction (rising/falling)
-    ema_rising = np.zeros(n, dtype=bool)
-    ema_falling = np.zeros(n, dtype=bool)
-    for i in range(1, n):
-        if not np.isnan(ema_4h_aligned[i]) and not np.isnan(ema_4h_aligned[i-1]):
-            ema_rising[i] = ema_4h_aligned[i] > ema_4h_aligned[i-1]
-            ema_falling[i] = ema_4h_aligned[i] < ema_4h_aligned[i-1]
-        else:
-            ema_rising[i] = ema_rising[i-1]
-            ema_falling[i] = ema_falling[i-1]
+    # Weekly EMA(50)
+    ema_50 = pd.Series(weekly_close).ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Align weekly EMA to daily timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_threshold = 1.5 * volume_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if np.isnan(basis[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(ema_4h_aligned[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Exit conditions: price crosses middle band OR 4h EMA direction changes
+        # Exit conditions
         if position == 1:  # long position
-            if close[i] > basis[i] or not ema_rising[i]:
+            if close[i] <= lowest_low[i] or weekly_close[i-1] < ema_50[i-1]:  # price breaks below 20-day low OR weekly trend turns down
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] < basis[i] or not ema_falling[i]:
+            if close[i] >= highest_high[i] or weekly_close[i-1] > ema_50[i-1]:  # price breaks above 20-day high OR weekly trend turns up
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries: Bollinger break + 4h trend alignment
-            # Long: price < lower band AND 4h EMA rising
-            if close[i] < lower[i] and ema_rising[i]:
-                signals[i] = 0.20
+            # Look for entries: Donchian breakout + weekly trend + volume confirmation
+            # Long: price breaks above 20-day high AND weekly close > EMA50 AND volume confirmation
+            if (close[i] > highest_high[i-1] and weekly_close[i-1] > ema_50[i-1] and volume[i] > volume_threshold[i]):
+                signals[i] = 0.25
                 position = 1
-            # Short: price > upper band AND 4h EMA falling
-            elif close[i] > upper[i] and ema_falling[i]:
-                signals[i] = -0.20
+            # Short: price breaks below 20-day low AND weekly close < EMA50 AND volume confirmation
+            elif (close[i] < lowest_low[i-1] and weekly_close[i-1] < ema_50[i-1] and volume[i] > volume_threshold[i]):
+                signals[i] = -0.25
                 position = -1
     
     return signals
