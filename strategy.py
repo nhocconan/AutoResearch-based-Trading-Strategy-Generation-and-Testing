@@ -3,64 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour ADX + Bollinger Band breakout with volume confirmation and daily trend filter.
-# Uses ADX to identify trending markets (ADX > 25) and Bollinger Bands for entry/exit.
-# In trending markets, buy on upper band breakout with volume, sell on lower band breakout.
-# Daily EMA filter ensures alignment with higher timeframe trend to avoid counter-trend trades.
-# Target: 75-150 total trades over 4 years (19-38/year) to balance opportunity and cost.
-# Works in bull (captures uptrends) and bear (captures downtrends) via symmetric long/short logic.
+# Hypothesis: 12-hour Camarilla pivot levels with 1-day volume spike and 1-week trend filter.
+# Camarilla levels act as support/resistance; price bouncing off these levels with volume
+# confirms institutional interest. Weekly EMA ensures alignment with higher timeframe momentum.
+# Works in bull markets (buying dips at support) and bear markets (selling rallies at resistance).
+# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 
-name = "exp_13262_12h_adx_bb_vol_v1"
+name = "exp_13262_12h_camarilla_pivot_vol_trend_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
-BB_PERIOD = 20
-BB_STD = 2.0
+CAMARILLA_MULTIPLIER = 1.1
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-EMA_PERIOD = 50  # Daily EMA for trend filter
+VOLUME_THRESHOLD = 1.8
+EMA_PERIOD_WEEKLY = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_adx(high, low, close, period):
-    """Calculate ADX (Average Directional Index)"""
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    
-    # Smooth TR, DM+ and DM-
-    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return adx
-
-def calculate_bbands(close, period, std_dev):
-    """Calculate Bollinger Bands"""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
-    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
-    upper = sma + (std_dev * std)
-    lower = sma - (std_dev * std)
-    return upper, lower
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -75,30 +35,74 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_camarilla_levels(high, low, close):
+    """Calculate Camarilla pivot levels for the day"""
+    # Typical price
+    typical_price = (high + low + close) / 3
+    # Range
+    range_ = high - low
+    # Camarilla levels
+    L4 = close + (range_ * CAMARILLA_MULTIPLIER * 1.1 / 2)
+    L3 = close + (range_ * CAMARILLA_MULTIPLIER * 1.1 / 4)
+    L2 = close + (range_ * CAMARILLA_MULTIPLIER * 1.1 / 6)
+    L1 = close + (range_ * CAMARILLA_MULTIPLIER * 1.1 / 12)
+    H1 = close - (range_ * CAMARILLA_MULTIPLIER * 1.1 / 12)
+    H2 = close - (range_ * CAMARILLA_MULTIPLIER * 1.1 / 6)
+    H3 = close - (range_ * CAMARILLA_MULTIPLIER * 1.1 / 4)
+    H4 = close - (range_ * CAMARILLA_MULTIPLIER * 1.1 / 2)
+    return L4, L3, L2, L1, H1, H2, H3, H4
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load daily data for Camarilla levels
     df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily EMA for trend filter
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = calculate_ema(close_1w, EMA_PERIOD_WEEKLY)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Calculate daily Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Initialize arrays for Camarilla levels
+    L4 = np.full(len(close_1d), np.nan)
+    L3 = np.full(len(close_1d), np.nan)
+    L2 = np.full(len(close_1d), np.nan)
+    L1 = np.full(len(close_1d), np.nan)
+    H1 = np.full(len(close_1d), np.nan)
+    H2 = np.full(len(close_1d), np.nan)
+    H3 = np.full(len(close_1d), np.nan)
+    H4 = np.full(len(close_1d), np.nan)
+    
+    # Calculate Camarilla levels for each day
+    for i in range(len(close_1d)):
+        L4[i], L3[i], L2[i], L1[i], H1[i], H2[i], H3[i], H4[i] = calculate_camarilla_levels(
+            high_1d[i], low_1d[i], close_1d[i]
+        )
+    
+    # Align Camarilla levels to 12h timeframe
+    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
+    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
+    L2_aligned = align_htf_to_ltf(prices, df_1d, L2)
+    L1_aligned = align_htf_to_ltf(prices, df_1d, L1)
+    H1_aligned = align_htf_to_ltf(prices, df_1d, H1)
+    H2_aligned = align_htf_to_ltf(prices, df_1d, H2)
+    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
+    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
     
     # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # ADX
-    adx = calculate_adx(high, low, close, ADX_PERIOD)
-    
-    # Bollinger Bands
-    bb_upper, bb_lower = calculate_bbands(close, BB_PERIOD, BB_STD)
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -112,11 +116,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ADX_PERIOD, BB_PERIOD, VOLUME_MA_PERIOD, EMA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if EMA not available
-        if np.isnan(ema_1d_aligned[i]):
+        if np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -135,28 +139,34 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Trend filter: price above/below daily EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
-        
-        # ADX filter: trending market
-        trending = adx[i] > ADX_THRESHOLD if not np.isnan(adx[i]) else False
-        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Bollinger Band breakout signals
-        breakout_up = trending and uptrend and volume_ok and (close[i] > bb_upper[i-1])
-        breakout_down = trending and downtrend and volume_ok and (close[i] < bb_lower[i-1])
+        # Trend filter: price above/below weekly EMA
+        uptrend = close[i] > ema_1w_aligned[i]
+        downtrend = close[i] < ema_1w_aligned[i]
+        
+        # Camarilla level touches with volume and trend
+        # Long setup: price touches L3 or L4 support in uptrend with volume
+        long_setup = volume_ok and uptrend and (
+            (low[i] <= L3_aligned[i] and close[i] > L3_aligned[i]) or  # Touch L3 and bounce
+            (low[i] <= L4_aligned[i] and close[i] > L4_aligned[i])   # Touch L4 and bounce
+        )
+        
+        # Short setup: price touches H3 or H4 resistance in downtrend with volume
+        short_setup = volume_ok and downtrend and (
+            (high[i] >= H3_aligned[i] and close[i] < H3_aligned[i]) or  # Touch H3 and reject
+            (high[i] >= H4_aligned[i] and close[i] < H4_aligned[i])    # Touch H4 and reject
+        )
         
         # Generate signals
         if position == 0:
-            if breakout_up:
+            if long_setup:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            elif short_setup:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
