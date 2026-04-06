@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA(50) + Volume Filter
-Hypothesis: On 12h timeframe, Donchian breakouts with daily EMA trend filter and volume confirmation 
-capture significant moves while maintaining low trade frequency. Daily EMA ensures we trade in direction 
-of higher timeframe trend, reducing whipsaws. Target: 50-150 total trades over 4 years.
+12h Donchian(20) Breakout + 1d EMA Trend + Volume Filter
+Hypothesis: On 12h timeframe, Donchian breakouts combined with 1d EMA trend filter and volume confirmation 
+capture significant moves while maintaining low trade frequency. 1d EMA filter ensures we only trade 
+in the direction of the higher timeframe trend, reducing whipsaws in both bull and bear markets.
+Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag and improve test generalization.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dema50_volume_v1"
+name = "12h_donchian20_1dema_volume_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -23,7 +24,7 @@ def generate_signals(prices):
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # 50-period EMA on daily
+    # 50-period EMA on 1d
     ema_1d = np.full_like(close_1d, np.nan)
     if len(close_1d) >= 50:
         multiplier = 2 / (50 + 1)
@@ -72,32 +73,32 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR price below daily EMA
+            # Exit: price closes below Donchian lower OR price below 1d EMA
             if close[i] < lowest_low or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR price above daily EMA
+            # Exit: price closes above Donchian upper OR price above 1d EMA
             if close[i] > highest_high or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + daily EMA trend filter
+            # Look for entries: Donchian breakout + volume + 1d EMA trend filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # Only go long if price above daily EMA, short if below
-            daily_uptrend = close[i] > ema_1d_aligned[i]
-            daily_downtrend = close[i] < ema_1d_aligned[i]
+            # Only go long if price above 1d EMA, short if below
+            trend_uptrend = close[i] > ema_1d_aligned[i]
+            trend_downtrend = close[i] < ema_1d_aligned[i]
             
-            if i >= 20 and bull_breakout and volume_filter and daily_uptrend:
+            if i >= 20 and bull_breakout and volume_filter and trend_uptrend:
                 signals[i] = 0.25
                 position = 1
-            elif i >= 20 and bear_breakout and volume_filter and daily_downtrend:
+            elif i >= 20 and bear_breakout and volume_filter and trend_downtrend:
                 signals[i] = -0.25
                 position = -1
             else:
