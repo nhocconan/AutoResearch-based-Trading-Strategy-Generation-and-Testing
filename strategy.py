@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts capture momentum in the direction of the weekly trend, volume confirms breakout strength, ATR stoploss limits drawdown.
-Designed for low trade frequency (target 50-150 total over 4 years) to minimize fee decay. Works in both bull and bear markets by filtering trades with weekly trend.
+4h Donchian(20) Breakout + 1d EMA(50) Trend + Volume Filter
+Hypothesis: Donchian breakouts capture momentum, 1d EMA filters trend direction, volume confirms breakout strength.
+Designed for low trade frequency (target 75-200 total over 4 years) to minimize fee decay.
+Works in bull (long breakouts above EMA) and bear (short breakouts below EMA).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_vol_atr_v3"
-timeframe = "12h"
+name = "4h_donchian20_1dema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 60:
         return np.zeros(n)
     
     # Price and volume data
@@ -32,37 +33,31 @@ def generate_signals(prices):
             np.abs(high[1:] - close[:-1]),
             np.abs(low[1:] - close[:-1])
         )
-        atr[0] = np.nan
         if len(tr) > 0:
             atr[1] = tr[0]
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Weekly trend using 50-period EMA on weekly data
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) >= 50:
-        close_weekly = df_weekly['close'].values
-        ema_weekly = np.full(len(close_weekly), np.nan)
-        ema_weekly[0] = close_weekly[0]
-        for i in range(1, len(close_weekly)):
-            ema_weekly[i] = (close_weekly[i] * 2 + ema_weekly[i-1] * 49) / 51
-        ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
-        weekly_uptrend = close > ema_weekly_aligned
-        weekly_downtrend = close < ema_weekly_aligned
-    else:
-        weekly_uptrend = np.ones(n, dtype=bool)
-        weekly_downtrend = np.ones(n, dtype=bool)
+    # Get 1d EMA(50) - ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 49) / 51
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = 20  # For Donchian
+    start = 50  # For EMA and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]):
+        if np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -97,16 +92,19 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + weekly trend filter
+            # Look for entries: Donchian breakout + volume + 1d EMA trend filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # Only trade in direction of weekly trend
-            if bull_breakout and volume_filter and weekly_uptrend[i]:
+            # 1d EMA trend filter: long only if price > EMA, short only if price < EMA
+            price_above_ema = close[i] > ema_1d_aligned[i]
+            price_below_ema = close[i] < ema_1d_aligned[i]
+            
+            if bull_breakout and volume_filter and price_above_ema:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_breakout and volume_filter and weekly_downtrend[i]:
+            elif bear_breakout and volume_filter and price_below_ema:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
