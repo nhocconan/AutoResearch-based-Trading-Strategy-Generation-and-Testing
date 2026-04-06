@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Experiment #12166: 4h Donchian Breakout with 1d Trend and Volume Confirmation
+Experiment #12169: 4h Donchian Breakout with 1d Trend and Volume Confirmation
 Hypothesis: 4h Donchian(20) breakouts capture intermediate-term trends. 1d EMA provides trend bias,
 and volume filter ensures institutional participation. Works in bull (breakouts continue) and
 bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 trades over 4 years.
@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12166_4h_donchian20_1d_ema_vol_v2"
+name = "exp_12169_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -18,7 +18,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0  # Increased to reduce trades
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -97,7 +97,7 @@ def generate_signals(prices):
         breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
         breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # Volume confirmation - increased threshold
+        # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter (1d)
