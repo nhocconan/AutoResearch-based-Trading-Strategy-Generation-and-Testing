@@ -3,27 +3,60 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly EMA trend filter and volume confirmation.
-# Captures strong trending moves aligned with weekly momentum. Volume ensures institutional participation.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Target: 30-100 total trades over 4 years (7-25/year).
+# Hypothesis: 6h Williams Alligator with 1d trend filter and volume confirmation.
+# Uses Alligator's Jaw/Teeth/Lips to identify trend strength and direction.
+# Works in bull markets (teeth above jaw, lips above teeth) and bear markets (opposite).
+# Volume ensures institutional participation in breakouts.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13558_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_13559_6h_alligator_1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 21
+ALLIGATOR_JAW_PERIOD = 13   # Blue line
+ALLIGATOR_TEETH_PERIOD = 8  # Red line
+ALLIGATOR_LIPS_PERIOD = 5   # Green line
+JAW_SHIFT = 8
+TEETH_SHIFT = 5
+LIPS_SHIFT = 3
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_alligator_lines(data, jaw_period, teeth_period, lips_period, jaw_shift, teeth_shift, lips_shift):
+    """Calculate Williams Alligator lines (SMMA with forward shift)"""
+    # Calculate SMMA (Smoothed Moving Average)
+    def smma(series, period):
+        sma = pd.Series(series).rolling(window=period, min_periods=period).mean()
+        # Wilder's smoothing: SMMA(t) = (SMMA(t-1) * (period-1) + price(t)) / period
+        smma_vals = np.full_like(series, np.nan, dtype=float)
+        if len(series) >= period:
+            smma_vals[period-1] = sma[period-1]
+            for i in range(period, len(series)):
+                if not np.isnan(sma[i]):
+                    smma_vals[i] = (smma_vals[i-1] * (period-1) + sma[i]) / period
+                else:
+                    smma_vals[i] = smma_vals[i-1]
+        return smma_vals
+    
+    jaw = smma(data, jaw_period)
+    teeth = smma(data, teeth_period)
+    lips = smma(data, lips_period)
+    
+    # Apply forward shift (jaw: 8 bars, teeth: 5 bars, lips: 3 bars)
+    jaw = np.roll(jaw, jaw_shift)
+    teeth = np.roll(teeth, teeth_shift)
+    lips = np.roll(lips, lips_shift)
+    
+    # Set shifted values to NaN
+    jaw[:jaw_shift] = np.nan
+    teeth[:teeth_shift] = np.nan
+    lips[:lips_shift] = np.nan
+    
+    return jaw, teeth, lips
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -39,23 +72,25 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate daily EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False, min_periods=21).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate daily indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Williams Alligator lines
+    jaw, teeth, lips = calculate_alligator_lines(
+        close, ALLIGATOR_JAW_PERIOD, ALLIGATOR_TEETH_PERIOD, ALLIGATOR_LIPS_PERIOD,
+        JAW_SHIFT, TEETH_SHIFT, LIPS_SHIFT
+    )
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -69,11 +104,18 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(
+        ALLIGATOR_JAW_PERIOD + JAW_SHIFT,
+        ALLIGATOR_TEETH_PERIOD + TEETH_SHIFT,
+        ALLIGATOR_LIPS_PERIOD + LIPS_SHIFT,
+        VOLUME_MA_PERIOD,
+        ATR_PERIOD
+    ) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        # Skip if indicators not available
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
+            np.isnan(lips[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,24 +135,25 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Trend filter: price above/below daily EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
+        # Alligator signals: teeth above jaw AND lips above teeth = uptrend
+        # teeth below jaw AND lips below teeth = downtrend
+        alligator_long = (teeth[i] > jaw[i]) and (lips[i] > teeth[i])
+        alligator_short = (teeth[i] < jaw[i]) and (lips[i] < teeth[i])
         
         # Generate signals
         if position == 0:
-            if breakout_up:
+            if volume_ok and uptrend and alligator_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            elif volume_ok and downtrend and alligator_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
