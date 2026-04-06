@@ -3,38 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12819_6h_daily_ichimoku_v1"
-timeframe = "6h"
+name = "exp_12821_4h_donchian20_1d_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-CONVERSION_PERIOD = 9
-BASE_PERIOD = 26
-LEADING_SPAN_B_PERIOD = 52
-DISPLACEMENT = 26
+DONCHIAN_PERIOD = 20
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 48  # Max 12 days
-SIGNAL_SIZE = 0.25
-
-def calculate_ichimoku(high, low):
-    """Calculate Ichimoku components"""
-    # Conversion Line (Tenkan-sen): (9-period high + 9-period low)/2
-    conversion = (pd.Series(high).rolling(window=CONVERSION_PERIOD, min_periods=CONVERSION_PERIOD).max() + 
-                  pd.Series(low).rolling(window=CONVERSION_PERIOD, min_periods=CONVERSION_PERIOD).min()) / 2
-    
-    # Base Line (Kijun-sen): (26-period high + 26-period low)/2
-    base = (pd.Series(high).rolling(window=BASE_PERIOD, min_periods=BASE_PERIOD).max() + 
-            pd.Series(low).rolling(window=BASE_PERIOD, min_periods=BASE_PERIOD).min()) / 2
-    
-    # Leading Span A (Senkou Span A): (Conversion + Base)/2
-    leading_span_a = (conversion + base) / 2
-    
-    # Leading Span B (Senkou Span B): (52-period high + 52-period low)/2
-    leading_span_b = (pd.Series(high).rolling(window=LEADING_SPAN_B_PERIOD, min_periods=LEADING_SPAN_B_PERIOD).max() + 
-                      pd.Series(low).rolling(window=LEADING_SPAN_B_PERIOD, min_periods=LEADING_SPAN_B_PERIOD).min()) / 2
-    
-    return conversion, base, leading_span_a, leading_span_b
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -45,97 +24,88 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 52:
+    if n < 50:
         return np.zeros(n)
     
     # Load daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate Ichimoku on daily data
+    # Calculate daily Donchian channels
     high_d = df_daily['high'].values
     low_d = df_daily['low'].values
     close_d = df_daily['close'].values
     
-    conversion_d, base_d, leading_span_a_d, leading_span_b_d = calculate_ichimoku(high_d, low_d)
+    donchian_upper, donchian_lower = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
     
-    # Align to 6h timeframe
-    conversion_a = align_htf_to_ltf(prices, df_daily, conversion_d)
-    base_a = align_htf_to_ltf(prices, df_daily, base_d)
-    leading_span_a_a = align_htf_to_ltf(prices, df_daily, leading_span_a_d)
-    leading_span_b_a = align_htf_to_ltf(prices, df_daily, leading_span_b_d)
+    # Align to 4h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_daily, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_daily, donchian_lower)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
-    bars_since_entry = 0
     
     # Start from warmup period
-    start = max(LEADING_SPAN_B_PERIOD, ATR_PERIOD) + DISPLACEMENT + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        bars_since_entry += 1
+        # Check stoploss
+        if position == 1:  # long position
+            if close[i] <= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
         
-        # Skip if Ichimoku data not available
-        if (np.isnan(conversion_a[i]) or np.isnan(base_a[i]) or 
-            np.isnan(leading_span_a_a[i]) or np.isnan(leading_span_b_a[i])):
+        # Skip if Donchian levels not available
+        if np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
         
-        # Check stoploss
-        if position == 1:  # long position
-            if close[i] <= stop_price:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
-        elif position == -1:  # short position
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Time-based exit to prevent overtrading
-        if bars_since_entry >= MAX_HOLD_BARS:
-            signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
-            continue
-        
-        # Ichimoku signals
-        # Bullish: Conversion > Base AND price above cloud
-        bullish = (conversion_a[i] > base_a[i]) and (close[i] > max(leading_span_a_a[i], leading_span_b_a[i]))
-        # Bearish: Conversion < Base AND price below cloud
-        bearish = (conversion_a[i] < base_a[i]) and (close[i] < min(leading_span_a_a[i], leading_span_b_a[i]))
+        # Breakout above upper Donchian or breakdown below lower Donchian
+        breakout_long = volume_ok and close[i] >= donchian_upper_aligned[i]
+        breakout_short = volume_ok and close[i] <= donchian_lower_aligned[i]
         
         # Generate signals
         if position == 0:
-            if bullish:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            elif bearish:
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
