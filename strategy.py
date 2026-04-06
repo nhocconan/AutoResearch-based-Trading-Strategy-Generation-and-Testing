@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian channel breakout with 12-hour trend filter and volume confirmation.
-# Donchian(20) breakouts capture momentum in trending markets. 12-hour EMA(50) ensures alignment
-# with higher timeframe trend direction. Volume confirmation filters out weak breakouts.
-# Works in bull markets (breakout above upper band) and bear markets (breakdown below lower band).
+# Hypothesis: Daily Donchian(20) breakout with weekly trend filter (1w EMA slope) and volume confirmation.
+# Captures multi-day trends in both bull and bear markets. Weekly trend ensures alignment with higher timeframe momentum.
+# Volume confirmation filters false breakouts. ATR-based stop loss manages risk.
+# Target: 30-100 trades over 4 years (7-25/year) for low turnover and minimal fee drag.
 
-name = "exp_13603_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13604_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
@@ -45,16 +45,16 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for trend filter ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load weekly data for trend filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 12h EMA for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
-    ema_12h_slope = np.diff(ema_12h, prepend=ema_12h[0])  # slope approximation
-    ema_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_slope)
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = calculate_ema(close_1w, TREND_EMA_PERIOD)
+    ema_1w_slope = np.diff(ema_1w, prepend=ema_1w[0])  # slope approximation
+    ema_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_slope)
     
-    # Calculate 4h indicators
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -79,7 +79,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_12h_slope_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_1w_slope_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -101,9 +101,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 12h EMA slope
-        uptrend = ema_12h_slope_aligned[i] > 0
-        downtrend = ema_12h_slope_aligned[i] < 0
+        # Trend direction from weekly EMA slope
+        uptrend = ema_1w_slope_aligned[i] > 0
+        downtrend = ema_1w_slope_aligned[i] < 0
         
         # Donchian breakout signals
         breakout_up = close[i] > upper[i-1]  # break above previous upper band
