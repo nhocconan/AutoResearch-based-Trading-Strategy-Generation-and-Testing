@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12834_1h_4h1d_trend_vol"
+name = "exp_12834_1h_4h_1d_ema_volume_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
+EMA_FAST_PERIOD = 12
+EMA_SLOW_PERIOD = 26
+VOLUME_MA_PERIOD = 24
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-MIN_BARS_HOLD = 12  # Minimum hold period to reduce turnover
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -29,19 +30,25 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load HTF data ONCE before loop
+    # Load 4h and 1d data ONCE before loop
     df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA for trend direction
+    # Calculate 4h EMA trend
     close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    ema_4h_fast = pd.Series(close_4h).ewm(span=EMA_FAST_PERIOD, adjust=False, min_periods=EMA_FAST_PERIOD).mean().values
+    ema_4h_slow = pd.Series(close_4h).ewm(span=EMA_SLOW_PERIOD, adjust=False, min_periods=EMA_SLOW_PERIOD).mean().values
+    ema_4h_trend = ema_4h_fast - ema_4h_slow  # Positive = bullish
     
-    # Calculate 1d EMA for trend filter
+    # Calculate 1d EMA trend
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_1d_fast = pd.Series(close_1d).ewm(span=EMA_FAST_PERIOD, adjust=False, min_periods=EMA_FAST_PERIOD).mean().values
+    ema_1d_slow = pd.Series(close_1d).ewm(span=EMA_SLOW_PERIOD, adjust=False, min_periods=EMA_SLOW_PERIOD).mean().values
+    ema_1d_trend = ema_1d_fast - ema_1d_slow  # Positive = bullish
+    
+    # Align to 1h timeframe
+    ema_4h_trend_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_trend)
+    ema_1d_trend_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_trend)
     
     # Calculate 1h indicators
     high = prices['high'].values
@@ -59,13 +66,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, 100) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, EMA_SLOW_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if HTF data not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+        # Skip if EMA trends not available
+        if np.isnan(ema_4h_trend_aligned[i]) or np.isnan(ema_1d_trend_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -86,32 +93,22 @@ def generate_signals(prices):
                 bars_since_entry = 0
                 continue
         
-        # Minimum hold period to prevent overtrading
-        if bars_since_entry < MIN_BARS_HOLD:
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filters: 4h and 1d EMA alignment
-        trend_up = ema_4h_aligned[i] > ema_1d_aligned[i]
-        trend_down = ema_4h_aligned[i] < ema_1d_aligned[i]
+        # Combined trend filter (4h and 1d both agree)
+        trend_bullish = ema_4h_trend_aligned[i] > 0 and ema_1d_trend_aligned[i] > 0
+        trend_bearish = ema_4h_trend_aligned[i] < 0 and ema_1d_trend_aligned[i] < 0
         
-        # Entry conditions
+        # Generate signals
         if position == 0:
-            # Long: volume + uptrend + price above 4h EMA
-            if volume_ok and trend_up and close[i] > ema_4h_aligned[i]:
+            if volume_ok and trend_bullish:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
                 bars_since_entry = 0
-            # Short: volume + downtrend + price below 4h EMA
-            elif volume_ok and trend_down and close[i] < ema_4h_aligned[i]:
+            elif volume_ok and trend_bearish:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
