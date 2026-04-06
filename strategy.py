@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
-# Long when price breaks above Donchian high + 1d EMA50 up + volume > 1.8x average
-# Short when price breaks below Donchian low + 1d EMA50 down + volume > 1.8x average
-# Exit when price crosses Donchian midpoint
-# Uses 4h timeframe targeting 75-200 total trades over 4 years (19-50/year)
-# Works in trending markets by following breakouts with daily trend filter
+# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation
+# Long when price breaks above Donchian high + weekly trend up + volume > 1.5x average
+# Short when price breaks below Donchian low + weekly trend down + volume > 1.5x average
+# Exit when price crosses Donchian midpoint or weekly trend reverses
+# Uses 1d timeframe targeting 30-100 total trades over 4 years (7-25/year)
+# Weekly trend filter reduces whipsaw in ranging markets
 
-name = "4h_donchian_1d_ema_vol_v4"
-timeframe = "4h"
+name = "1d_donchian_1w_trend_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,58 +30,52 @@ def generate_signals(prices):
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donch_mid = (donch_high + donch_low) / 2
     
-    # EMA50 on 1d timeframe
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_prev = np.roll(ema_1d, 1)
-    ema_1d_prev[0] = ema_1d[0]
-    ema_1d_up = ema_1d > ema_1d_prev
+    # Weekly trend: EMA(21)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=21, min_periods=21, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Align EMA to 4h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    ema_1d_up_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_up)
-    
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_threshold = 1.8 * volume_ma
+    volume_threshold = 1.5 * volume_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
         # Skip if required data not available
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(volume_threshold[i]):
+        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or np.isnan(ema_1w_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Exit conditions: price crosses Donchian midpoint
+        # Exit conditions: price crosses Donchian midpoint or weekly trend reverses
         if position == 1:  # long position
-            if close[i] <= donch_mid[i]:
+            if close[i] <= donch_mid[i] or ema_1w_aligned[i] < ema_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] >= donch_mid[i]:
+            if close[i] >= donch_mid[i] or ema_1w_aligned[i] > ema_1w_aligned[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
             # Look for breakouts with trend and volume confirmation
-            # Bullish breakout: price above Donchian high + 1d EMA up + volume
+            # Bullish breakout: price above Donchian high + weekly trend up + volume
             if (close[i] > donch_high[i] and 
-                ema_1d_up_aligned[i] and 
+                ema_1w_aligned[i] > ema_1w_aligned[i-1] and 
                 volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Bearish breakout: price below Donchian low + 1d EMA down + volume
+            # Bearish breakout: price below Donchian low + weekly trend down + volume
             elif (close[i] < donch_low[i] and 
-                  not ema_1d_up_aligned[i] and 
+                  ema_1w_aligned[i] < ema_1w_aligned[i-1] and 
                   volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
