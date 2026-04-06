@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(20) trend filter and volume confirmation.
-# Uses daily trend to filter counter-trend trades, volume to reduce false breakouts.
-# Designed for fewer trades (target 75-200 over 4 years) to minimize fee drift.
+# Hypothesis: Daily Donchian(20) breakout with weekly EMA(20) trend filter and volume confirmation.
+# Uses weekly trend to filter counter-trend trades, volume to reduce false breakouts.
+# Designed for fewer trades (target 30-100 over 4 years) to minimize fee drag.
 # Works in bull/bear by only trading with higher timeframe trend.
 
-name = "4h_donchian20_1d_ema20_vol_v1"
-timeframe = "4h"
+name = "1d_donchian20_weekly_ema20_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,19 +36,19 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # 20-period EMA on 1-day timeframe
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # 20-period EMA on weekly timeframe
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
     
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        ema_1d[19] = np.mean(close_1d[:20])
-        for i in range(20, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
+    ema_weekly = np.full(len(close_weekly), np.nan)
+    if len(close_weekly) >= 20:
+        ema_weekly[19] = np.mean(close_weekly[:20])
+        for i in range(20, len(close_weekly)):
+            ema_weekly[i] = (close_weekly[i] * 2 + ema_weekly[i-1] * 18) / 20
     
-    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
-    # 20-period Donchian channels on 4h
+    # 20-period Donchian channels on daily
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     for i in range(20, n):
@@ -69,7 +69,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(ema_aligned[i]) or 
+        if (np.isnan(atr[i]) or np.isnan(ema_weekly_aligned[i]) or 
             np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -83,16 +83,16 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below EMA or stoploss hit
-            if (close[i] < ema_aligned[i] or
+            # Exit: price closes below weekly EMA or stoploss hit
+            if (close[i] < ema_weekly_aligned[i] or
                 close[i] < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above EMA or stoploss hit
-            if (close[i] > ema_aligned[i] or
+            # Exit: price closes above weekly EMA or stoploss hit
+            if (close[i] > ema_weekly_aligned[i] or
                 close[i] > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -100,15 +100,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries
-            # Long: price breaks above Donchian high with volume and above EMA (bullish)
+            # Long: price breaks above Donchian high with volume and above weekly EMA (bullish)
             if (close[i] > donch_high[i] and volume_filter and 
-                close[i] > ema_aligned[i]):
+                close[i] > ema_weekly_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low with volume and below EMA (bearish)
+            # Short: price breaks below Donchian low with volume and below weekly EMA (bearish)
             elif (close[i] < donch_low[i] and volume_filter and 
-                  close[i] < ema_aligned[i]):
+                  close[i] < ema_weekly_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
