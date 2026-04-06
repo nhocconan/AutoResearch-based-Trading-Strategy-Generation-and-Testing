@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Hypothesis: 6h Donchian(20) breakout with daily trend filter and volume confirmation.
 # Long when price breaks above upper Donchian channel during bullish day with volume > 1.3x 20-period average.
 # Short when price breaks below lower Donchian channel during bearish day with volume confirmation.
 # Uses daily trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
 # Target: 75-150 total trades over 4 years (19-38/year) to stay within optimal range.
 
-name = "4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "6h_donchian20_1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
