@@ -1,23 +1,22 @@
 #!/usr/bin/env python3
 """
-12h Donchian breakout + 1d EMA trend + volume confirmation + ATR stoploss.
-Hypothesis: Donchian breakouts on 12h capture intermediate trends with fewer trades than lower timeframes.
-1d EMA filter ensures alignment with daily trend, volume confirmation filters false breakouts.
-ATR stoploss limits drawdown. Designed for 50-150 trades over 4 years (~12-37/year).
-Works in bull markets via breakout momentum and in bear via short breakdowns with trend filter.
+4h Donchian breakout + volume confirmation + ATR stoploss with 1d trend filter.
+Hypothesis: Donchian breakouts capture trend continuation with high win rate. 
+Volume confirmation filters false breakouts. 1d EMA trend filter ensures trades align with higher timeframe trend.
+ATR stoploss limits drawdown. Designed for 15-30 trades per year per symbol.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14312_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_14313_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Load 1d data for trend filter (once before loop)
@@ -28,7 +27,7 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
