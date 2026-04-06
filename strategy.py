@@ -2,9 +2,8 @@
 """
 1d Donchian Breakout + Weekly Trend + Volume Confirmation
 Hypothesis: Weekly trend filters daily Donchian breakouts to reduce false signals.
-Volume confirmation ensures momentum behind breakouts.
-Works in bull via breakouts, bear via breakdowns with trend filter.
-Target: 30-100 total trades over 4 years (7-25/year) on 1d timeframe.
+Volume confirmation ensures momentum behind breakouts. Works in bull via breakouts,
+bear via breakdowns with trend filter. Target: 30-100 total trades over 4 years.
 """
 
 import numpy as np
@@ -129,4 +128,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</output>
