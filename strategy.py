@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using Donchian(20) breakout on 12h timeframe with volume confirmation and 1d EMA trend filter.
-# Goes long when price breaks above 12h Donchian upper band with above-average volume and price above 1d EMA200,
-# short when breaks below 12h Donchian lower band with volume and price below 1d EMA200.
-# Uses ATR-based stop loss to manage risk.
-# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-# Donchian channels provide clear structure, EMA200 filters trend direction, volume confirms breakout strength.
+# Hypothesis: 4h strategy using Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
+# Goes long when price breaks above 4h Donchian upper band with volume > 1.5x 20-period average and price above 1d EMA200.
+# Goes short when price breaks below 4h Donchian lower band with volume > 1.5x 20-period average and price below 1d EMA200.
+# Exits on opposite Donchian band touch or ATR stop loss (2x ATR).
+# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+# Donchian channels provide clear breakout structure, EMA200 filters trend direction, volume confirms breakout strength.
 
-name = "exp_13828_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13829_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -26,7 +26,7 @@ ATR_STOP_MULTIPLIER = 2.0
 def calculate_donchian(high, low, period):
     """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(high).rolling(window=period, min_periods=period).min().values  # Note: This was a bug, should be low
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
 def calculate_ema(close, period):
@@ -55,18 +55,17 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     ema_1d = calculate_ema(close_1d, EMA_PERIOD)
     
-    # Align 1d EMA to 12h timeframe
+    # Align 1d EMA to 4h timeframe
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h data for Donchian channels, ATR, and volume
+    # 4h data for Donchian channels, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels on 12h data (FIXED: use low for lower band)
-    upper = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lower = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Donchian channels on 4h data
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
