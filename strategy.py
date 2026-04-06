@@ -5,18 +5,18 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 1-day Donchian(20) breakout with 1-week EMA(50) trend filter and volume confirmation (1.5x volume).
 # Uses 1w trend for direction, 1d Donchian breakouts for entries, volume for confirmation.
-# Designed for ~30-100 total trades over 4 years (7-25/year) to avoid fee drain.
+# Designed for ~40 total trades over 4 years (10/year) to avoid fee drain.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
-# Target: 75-200 total trades, 0.25 position size, max DD < -50%.
+# Target: 30-100 total trades, 0.25 position size, max DD < -50%.
 
 name = "exp_13710_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
-# Parameters - tuned for moderate trade frequency
+# Parameters - tuned for low trade frequency
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
-VOLUME_MA_PERIOD = 8
+VOLUME_MA_PERIOD = 10
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
