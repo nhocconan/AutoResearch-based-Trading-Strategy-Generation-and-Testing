@@ -3,21 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-# Uses 1d EMA(50) for trend direction to filter trades in trending markets only.
-# Volume > 1.6x MA(20) confirms institutional participation.
-# Targets 60-150 total trades over 4 years (15-38/year) for optimal trade frequency.
-# Works in bull/bear by following 1d trend. ATR(14) stop at 2.5x.
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Uses 1d EMA(100) for trend direction to filter trades in both bull/bear markets.
+# Volume > 2.0x MA(30) confirms institutional participation.
+# Tight entries target 100-250 total trades over 4 years (25-62/year).
+# ATR(14) stop at 2.5x with trailing stop for risk management.
 
-name = "exp_13665_12h_donchian20_1d_trend_vol_v1"
-timeframe = "12h"
+name = "exp_13666_4h_donchian20_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 50
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.6
+TREND_EMA_PERIOD = 100
+VOLUME_MA_PERIOD = 30
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -49,7 +49,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
