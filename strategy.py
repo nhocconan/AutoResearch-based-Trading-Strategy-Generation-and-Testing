@@ -58,7 +58,7 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(ema_50_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -120,3 +120,4 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
+</script>
