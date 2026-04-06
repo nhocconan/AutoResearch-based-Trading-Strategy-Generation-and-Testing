@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1d volume confirmation and 1w trend filter
-Hypothesis: Donchian breakouts on 12h capture institutional momentum, filtered by weekly trend for bias and daily volume for conviction. Works in bull (buy breakouts above weekly EMA) and bear (sell breakdowns below weekly EMA). Target: 50-150 total trades over 4 years (12-37/year).
+4h Donchian(20) breakout with volume confirmation and volatility filter
+Hypothesis: Donchian breakouts capture momentum bursts. Volume filter ensures institutional participation. Volatility filter avoids choppy markets. Works in bull (buy breakouts) and bear (sell breakdowns). Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1w_trend_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_volatility_filter_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,36 +36,7 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 1w data for trend filter (EMA21)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    
-    # EMA21 on weekly close
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 21:
-        ema_1w[20] = np.mean(close_1w[:21])
-        for i in range(21, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 19) / 21
-    
-    # Weekly trend: above EMA21 = bullish, below = bearish
-    weekly_trend = np.where(close_1w > ema_1w, 1, -1)
-    
-    # Align weekly trend to 12h timeframe
-    weekly_trend_aligned = align_htf_to_ltf(prices, df_1w, weekly_trend)
-    
-    # Get 1d data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    
-    # 20-period average volume on daily
-    vol_ma_1d = np.full(len(volume_1d), np.nan)
-    for i in range(20, len(volume_1d)):
-        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
-    
-    # Align volume MA to 12h timeframe
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Donchian channels (20-period) from 12h data
+    # Donchian channels (20-period)
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
     
@@ -73,19 +44,26 @@ def generate_signals(prices):
         upper[i] = np.max(high[i-20:i])
         lower[i] = np.min(low[i-20:i])
     
+    # Volatility filter: ATR(14) / ATR(50) < 0.8 (avoid high volatility chop)
+    atr50 = np.full(n, np.nan)
+    if n >= 50:
+        tr_sum = np.sum(tr[:49])  # First 49 TR values
+        atr50[49] = tr_sum / 49
+        for i in range(50, n):
+            atr50[i] = (atr50[i-1] * 49 + tr[i-1]) / 50
+    vol_filter = atr / atr50 < 0.8
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 40  # Need enough data for Donchian and alignments
+    start = 50  # Need ATR50 and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(weekly_trend_aligned[i]) or 
-            np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(vol_ma_1d_aligned[i])):
+        if np.isnan(atr[i]) or np.isnan(atr50[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -93,17 +71,12 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 12h volume > 1.5x daily average volume (scaled)
-        # Scale daily volume to 12h: approx 1/2 of daily volume (since 2x 12h in 1d)
-        vol_threshold = vol_ma_1d_aligned[i] / 2.0 * 1.5
-        volume_filter = volume[i] > vol_threshold
-        
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian OR against weekly trend
+            # Exit: price breaks below lower Donchian OR volatility filter fails
             # Stoploss: price drops 2*ATR below entry
             if (close[i] < lower[i] or
-                weekly_trend_aligned[i] == -1 or
+                not vol_filter[i] or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -112,10 +85,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian OR against weekly trend
+            # Exit: price breaks above upper Donchian OR volatility filter fails
             # Stoploss: price rises 2*ATR above entry
             if (close[i] > upper[i] or
-                weekly_trend_aligned[i] == 1 or
+                not vol_filter[i] or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -127,18 +100,18 @@ def generate_signals(prices):
             # Look for entries
             # Minimum holding period: only allow new entry after 12 bars flat
             if bars_since_entry >= 12:
-                # Breakout entries: upper/lower with weekly trend
+                # Breakout entries: upper/lower with volatility filter
                 bull_breakout = close[i] > upper[i]
                 bear_breakout = close[i] < lower[i]
                 
-                # Long: breakout above upper with bullish weekly trend + volume
-                if bull_breakout and weekly_trend_aligned[i] == 1 and volume_filter:
+                # Long: breakout above upper with volatility filter
+                if bull_breakout and vol_filter[i]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: breakdown below lower with bearish weekly trend + volume
-                elif bear_breakout and weekly_trend_aligned[i] == -1 and volume_filter:
+                # Short: breakdown below lower with volatility filter
+                elif bear_breakout and vol_filter[i]:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
