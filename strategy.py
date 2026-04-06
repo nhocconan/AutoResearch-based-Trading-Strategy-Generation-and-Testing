@@ -4,14 +4,13 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 1h momentum with 4h EMA filter and volume confirmation
-# Long when price > 4h EMA20 + RSI(14) > 50 + volume > 1.3x average
-# Short when price < 4h EMA20 + RSI(14) < 50 + volume > 1.3x average
+# Long when price > 4h EMA20 + RSI(14) > 50 + volume > 1.2x average
+# Short when price < 4h EMA20 + RSI(14) < 50 + volume > 1.2x average
 # Uses 4h EMA20 for trend filter to avoid counter-trend trades
 # Target: 60-150 total trades over 4 years with controlled risk
-# RSI prevents entries in extreme overbought/oversold conditions
-# Volume confirmation ensures institutional participation
+# RSI prevents entries in weak momentum, volume filter avoids low-liquidity noise
 
-name = "1h_momentum_4h_ema_rsi_volume_v1"
+name = "1h_momentum_4h_ema_volume_v3"
 timeframe = "1h"
 leverage = 1.0
 
@@ -33,7 +32,7 @@ def generate_signals(prices):
     
     close_4h = df_4h['close'].values
     
-    # EMA20 calculation on 4h
+    # EMA20 calculation
     ema20_4h = pd.Series(close_4h).ewm(span=20, min_periods=20, adjust=False).mean().values
     
     # Align 4h EMA20 to 1h timeframe
@@ -72,7 +71,7 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price crosses below 4h EMA20 or RSI < 40
+            # Exit: price below 4h EMA20 or RSI < 40
             if close[i] < ema20_4h_aligned[i] or rsi[i] < 40:
                 signals[i] = 0.0
                 position = 0
@@ -80,7 +79,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.20
         elif position == -1:  # short position
-            # Exit: price crosses above 4h EMA20 or RSI > 60
+            # Exit: price above 4h EMA20 or RSI > 60
             if close[i] > ema20_4h_aligned[i] or rsi[i] > 60:
                 signals[i] = 0.0
                 position = 0
@@ -92,14 +91,14 @@ def generate_signals(prices):
             # Long: price > 4h EMA20 + RSI > 50 + volume spike
             if (close[i] > ema20_4h_aligned[i] and 
                 rsi[i] > 50 and
-                volume[i] > 1.3 * volume_ma[i]):
+                volume[i] > 1.2 * volume_ma[i]):
                 signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
             # Short: price < 4h EMA20 + RSI < 50 + volume spike
             elif (close[i] < ema20_4h_aligned[i] and 
                   rsi[i] < 50 and
-                  volume[i] > 1.3 * volume_ma[i]):
+                  volume[i] > 1.2 * volume_ma[i]):
                 signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
