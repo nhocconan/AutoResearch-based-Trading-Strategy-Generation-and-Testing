@@ -17,7 +17,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price and volume data
@@ -85,7 +85,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20)
+    start = max(60, 20)
     
     for i in range(start, n):
         # Skip if required data not available
@@ -170,7 +170,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price and volume data
@@ -238,7 +238,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20)
+    start = max(60, 20)
     
     for i in range(start, n):
         # Skip if required data not available
@@ -303,7 +303,6 @@ def generate_signals(prices):
     
     return signals
 
-</think>
 #!/usr/bin/env python3
 """
 12h Donchian(20) Breakout with 1d Trend Filter and Volume Confirmation
@@ -323,7 +322,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price and volume data
@@ -391,7 +390,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20)
+    start = max(60, 20)
     
     for i in range(start, n):
         # Skip if required data not available
@@ -456,7 +455,6 @@ def generate_signals(prices):
     
     return signals
 
-=======
 #!/usr/bin/env python3
 """
 12h Donchian(20) Breakout with 1d Trend Filter and Volume Confirmation
@@ -476,7 +474,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price and volume data
@@ -544,7 +542,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20)
+    start = max(60, 20)
     
     for i in range(start, n):
         # Skip if required data not available
@@ -609,8 +607,6 @@ def generate_signals(prices):
     
     return signals
 
->>>>>>> 12h_donchian20_1d_trend_vol_v1:12h_donchian20_1d_trend_vol_v1.py
-=======
 #!/usr/bin/env python3
 """
 12h Donchian(20) Breakout with 1d Trend Filter and Volume Confirmation
@@ -630,7 +626,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price and volume data
@@ -698,7 +694,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20)
+    start = max(60, 20)
     
     for i in range(start, n):
         # Skip if required data not available
@@ -759,3 +755,11 @@ def generate_signals(prices):
                 position = -1
                 entry_price = close[i]
             else:
+                signals[i] = 0.0
+    
+    return signals
+
+#!/usr/bin/env python3
+"""
+12h Donchian(20) Breakout with 1d Trend Filter and Volume Confirmation
+Hypothesis:
