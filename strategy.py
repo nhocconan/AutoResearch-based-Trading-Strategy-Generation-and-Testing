@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout + 1d EMA trend + volume confirmation
-# Long when price breaks above 12h Donchian high(20) AND 1d EMA(50) rising AND volume > 1.5x average
-# Short when price breaks below 12h Donchian low(20) AND 1d EMA(50) falling AND volume > 1.5x average
-# Exit when price crosses 12h EMA(20) or volume drops below threshold
+# Hypothesis: 12h Williams %R + 1d EMA + Volume Filter
+# Long when Williams %R < -80 (oversold) AND price > 1d EMA50 AND volume > 1.5x average
+# Short when Williams %R > -20 (overbought) AND price < 1d EMA50 AND volume > 1.5x average
+# Exit when Williams %R returns to -50 level or volume drops below threshold
 # Uses 12h timeframe to reduce trade frequency, targets 50-150 total trades over 4 years
-# Works in both bull/bear markets by following trend with volume confirmation
+# Williams %R is effective in ranging markets; EMA filter ensures trend alignment
 
-name = "12h_donchian_ema_vol_v1"
+name = "12h_williamsr_1d_ema_vol_v8"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,20 +25,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_high = highest_high.values
-    donchian_low = lowest_low.values
+    # Williams %R (14-period) - momentum oscillator
+    # Values: -100 to 0, readings below -80 = oversold, above -20 = overbought
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
+    williams_r = williams_r.values
     
-    # 12h EMA(20) for exit
-    ema_20 = pd.Series(close).ewm(span=20, min_periods=20, adjust=False).mean().values
-    
-    # 1d EMA(50) for trend filter
+    # EMA (50-period) from 1d timeframe for trend filter
     df_1d = get_htf_data(prices, '1d')
     daily_close = df_1d['close'].values
-    daily_ema_50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, daily_ema_50)
+    
+    # Calculate EMA on daily close
+    ema = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean()
+    ema = ema.values
+    
+    # Align daily EMA to 12h timeframe
+    ema_aligned = align_htf_to_ltf(prices, df_1d, ema)
     
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -49,39 +52,34 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if required data not available
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i]):
+        if np.isnan(williams_r[i]) or np.isnan(ema_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Exit conditions
+        # Exit conditions: Williams %R returns to -50 level OR volume drops below threshold
         if position == 1:  # long position
-            if close[i] <= ema_20[i] or volume[i] <= volume_threshold[i]:
+            if williams_r[i] > -50 or volume[i] <= volume_threshold[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] >= ema_20[i] or volume[i] <= volume_threshold[i]:
+            if williams_r[i] < -50 or volume[i] <= volume_threshold[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with trend and volume confirmation
-            # Long: break above Donchian high + rising EMA(50) + volume confirmation
-            if (close[i] > donchian_high[i] and 
-                ema_50_aligned[i] > ema_50_aligned[i-1] and 
-                volume[i] > volume_threshold[i]):
+            # Look for entries with Williams %R extremes + EMA filter + volume confirmation
+            # Long: Williams %R oversold (<-80) AND price above 1d EMA50 AND volume confirmation
+            if (williams_r[i] < -80 and close[i] > ema_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: break below Donchian low + falling EMA(50) + volume confirmation
-            elif (close[i] < donchian_low[i] and 
-                  ema_50_aligned[i] < ema_50_aligned[i-1] and 
-                  volume[i] > volume_threshold[i]):
+            # Short: Williams %R overbought (>-20) AND price below 1d EMA50 AND volume confirmation
+            elif (williams_r[i] > -20 and close[i] < ema_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
     
