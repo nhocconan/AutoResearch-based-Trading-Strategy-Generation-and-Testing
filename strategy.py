@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-6H Weekly Pivot Breakout with Volume Confirmation and RSI Filter
-Hypothesis: Weekly pivot levels (R4/S4) act as strong support/resistance. Breakouts beyond these levels with volume confirmation and RSI momentum capture strong directional moves. Weekly context avoids whipsaw, suitable for both bull and bear markets.
+12h Camarilla Pivot Reversal with Volume Spike and Choppiness Filter
+Hypothesis: Camarilla pivot levels from 1-day provide strong intraday support/resistance.
+Price rejecting these levels with volume spikes indicates reversal. Choppiness filter ensures
+we only trade in trending markets (CHOP < 38.2) to avoid false signals in ranging markets.
+Designed for 50-150 trades over 4 years on 12h timeframe to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_breakout_volume_rsi_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_reversal_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,56 +20,75 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for pivot calculation (once before loop)
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1d data for Camarilla pivots and Choppiness (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly OHLC for pivot calculation
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
+    # Calculate Camarilla pivot levels for 1d
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points and support/resistance levels
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3
-    weekly_r1 = 2 * weekly_pivot - weekly_low
-    weekly_s1 = 2 * weekly_pivot - weekly_high
-    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
-    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
-    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
-    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
-    weekly_r4 = weekly_r3 + (weekly_high - weekly_low)
-    weekly_s4 = weekly_s3 - (weekly_high - weekly_low)
+    # Camarilla levels (based on previous day)
+    pivot = (high_1d[:-1] + low_1d[:-1] + close_1d[:-1]) / 3
+    range_ = high_1d[:-1] - low_1d[:-1]
     
-    # Align weekly pivot levels to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
-    r4_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s4)
+    # Resistance levels
+    r1 = close_1d[:-1] + range_ * 1.1 / 12
+    r2 = close_1d[:-1] + range_ * 1.1 / 6
+    r3 = close_1d[:-1] + range_ * 1.1 / 4
+    r4 = close_1d[:-1] + range_ * 1.1 / 2
     
-    # 6h data
+    # Support levels
+    s1 = close_1d[:-1] - range_ * 1.1 / 12
+    s2 = close_1d[:-1] - range_ * 1.1 / 6
+    s3 = close_1d[:-1] - range_ * 1.1 / 4
+    s4 = close_1d[:-1] - range_ * 1.1 / 2
+    
+    # Align Camarilla levels to 12h timeframe (using previous day's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Choppiness Index on 1d (using high/low/close)
+    def calculate_chop(high, low, close, period=14):
+        """Calculate Choppiness Index"""
+        atr = np.zeros_like(high)
+        for i in range(1, len(high)):
+            tr = max(high[i] - low[i], abs(high[i] - close[i-1]), abs(low[i] - close[i-1]))
+            atr[i] = tr
+        
+        # Sum of true ranges over period
+        tr_sum = np.zeros_like(close)
+        for i in range(period, len(high)):
+            tr_sum[i] = np.sum(atr[i-period+1:i+1])
+        
+        # Highest high and lowest low over period
+        hh = np.zeros_like(high)
+        ll = np.zeros_like(high)
+        for i in range(period-1, len(high)):
+            hh[i] = np.max(high[i-period+1:i+1])
+            ll[i] = np.min(low[i-period+1:i+1])
+        
+        # Choppiness formula
+        chop = np.full_like(close, 50.0)  # Default to neutral
+        for i in range(period, len(high)):
+            if hh[i] > ll[i]:  # Avoid division by zero
+                chop[i] = 100 * np.log10(tr_sum[i] / (hh[i] - ll[i])) / np.log10(period)
+        return chop
+    
+    chop = calculate_chop(high_1d, low_1d, close_1d, 14)
+    chop_aligned = align_htf_to_ltf(prices, df_1d, chop)
+    
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # RSI (14-period) on 6h
-    delta = np.diff(close)
-    delta = np.concatenate([[np.nan], delta])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing for RSI
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nansum(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
-    
-    rsi_period = 14
-    avg_gain = wilder_smooth(gain, rsi_period)
-    avg_loss = wilder_smooth(loss, rsi_period)
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
     
     # Volume moving average (20-period)
     vol_ma = np.full(n, np.nan)
@@ -78,46 +100,53 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(20 + rsi_period, 20)  # For RSI and volume MA
+    start = max(20, 14)  # For volume MA and chop
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s4_aligned[i]) or np.isnan(rsi[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(chop_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: price returns to weekly pivot or RSI extreme reversal
+        # Check exits: price moves against position beyond pivot or chop increases
         if position == 1:  # long position
-            # Exit: price crosses below weekly pivot OR RSI > 70 (overbought)
-            if close[i] < pivot_aligned[i] or rsi[i] > 70:
+            # Exit: price drops below S1 or chop > 61.8 (ranging market)
+            if close[i] < s1_aligned[i] or chop_aligned[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price crosses above weekly pivot OR RSI < 30 (oversold)
-            if close[i] > pivot_aligned[i] or rsi[i] < 30:
+            # Exit: price rises above R1 or chop > 61.8
+            if close[i] > r1_aligned[i] or chop_aligned[i] > 61.8:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: breakout beyond R4/S4 + volume + RSI momentum
-            bull_breakout = close[i] > r4_aligned[i]
-            bear_breakout = close[i] < s4_aligned[i]
-            volume_filter = volume[i] > vol_ma[i] * 1.5
-            rsi_momentum = (rsi[i] > 50 and rsi[i] < 70) for long, (rsi[i] < 50 and rsi[i] > 30) for short
+            # Look for entries: price rejection at Camarilla levels + volume + trending market
+            # Long setup: price near S3/S4 and bouncing up
+            near_s3 = abs(close[i] - s3_aligned[i]) < (r1_aligned[i] - s1_aligned[i]) * 0.15
+            near_s4 = abs(close[i] - s4_aligned[i]) < (r1_aligned[i] - s1_aligned[i]) * 0.15
+            bullish_rejection = close[i] > open[i] and close[i] > s1_aligned[i]
             
-            if bull_breakout and volume_filter and (rsi[i] > 50 and rsi[i] < 70):
+            # Short setup: price near R3/R4 and bouncing down
+            near_r3 = abs(close[i] - r3_aligned[i]) < (r1_aligned[i] - s1_aligned[i]) * 0.15
+            near_r4 = abs(close[i] - r4_aligned[i]) < (r1_aligned[i] - s1_aligned[i]) * 0.15
+            bearish_rejection = close[i] < open[i] and close[i] < r1_aligned[i]
+            
+            volume_filter = volume[i] > vol_ma[i] * 1.8
+            trending_filter = chop_aligned[i] < 38.2  # Trending market
+            
+            if (near_s3 or near_s4) and bullish_rejection and volume_filter and trending_filter:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_breakout and volume_filter and (rsi[i] < 50 and rsi[i] > 30):
+            elif (near_r3 or near_r4) and bearish_rejection and volume_filter and trending_filter:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
