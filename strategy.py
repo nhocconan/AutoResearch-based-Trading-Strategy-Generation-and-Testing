@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(20) trend filter and volume confirmation.
-# Uses daily trend to filter counter-trend trades, volume to reduce false breakouts.
-# Designed for fewer trades (target 50-150 over 4 years) to minimize fee drift.
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA(20) trend filter and volume confirmation.
+# Uses 12-hour trend to filter counter-trend trades, volume to reduce false breakouts.
+# Designed for fewer trades (target 75-200 over 4 years) to minimize fee drift.
 # Works in bull/bear by only trading with higher timeframe trend.
 
-name = "12h_donchian20_1d_ema20_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_12h_ema20_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,19 +36,19 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # 20-period EMA on 1-day timeframe
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # 20-period EMA on 12-hour timeframe
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        ema_1d[19] = np.mean(close_1d[:20])
-        for i in range(20, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
+    ema_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 20:
+        ema_12h[19] = np.mean(close_12h[:20])
+        for i in range(20, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * 2 + ema_12h[i-1] * 18) / 20
     
-    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    ema_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # 20-period Donchian channels on 12h
+    # 20-period Donchian channels on 4h
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     for i in range(20, n):
