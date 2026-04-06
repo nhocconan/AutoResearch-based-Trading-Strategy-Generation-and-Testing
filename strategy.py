@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot reversal from 1d levels with volume confirmation.
-# Uses 1d Camarilla levels (H4/L4 for breakouts, H3/L3 for reversals) as key support/resistance.
-# Long when price pulls back to L3 with volume spike and closes above it.
-# Short when price pulls back to H3 with volume spike and closes below it.
-# Works in both bull and bear markets by fading extremes at proven institutional levels.
-# Target: 50-150 total trades over 4 years (12-37/year) with strict entry filters.
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
+# Goes long when price breaks above 20-period high with 1d EMA uptrend and volume > average.
+# Goes short when price breaks below 20-period low with 1d EMA downtrend and volume > average.
+# Uses ATR-based stoploss to limit downside. Designed to work in both bull and bear markets
+# by following the trend on higher timeframe while capturing breakouts on lower timeframe.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "6h_camarilla1d_vol_v3"
-timeframe = "6h"
+name = "12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,35 +25,31 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla levels
+    # 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 2:
         return np.zeros(n)
     
-    # Calculate 1d Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate EMA(50) on 1d close
     close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Camarilla calculations (based on previous day)
-    rng = high_1d - low_1d
-    # H4 = close + 1.5 * rng * 1.1
-    # L4 = close - 1.5 * rng * 1.1
-    # H3 = close + 1.1 * rng * 1.1
-    # L3 = close - 1.1 * rng * 1.1
-    H4 = close_1d + 1.5 * rng * 1.1
-    L4 = close_1d - 1.5 * rng * 1.1
-    H3 = close_1d + 1.1 * rng * 1.1
-    L3 = close_1d - 1.1 * rng * 1.1
+    # Donchian channels (20-period) on 12h
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Align levels to 6h timeframe
-    H4_6h = align_htf_to_ltf(prices, df_1d, H4)
-    L4_6h = align_htf_to_ltf(prices, df_1d, L4)
-    H3_6h = align_htf_to_ltf(prices, df_1d, H3)
-    L3_6h = align_htf_to_ltf(prices, df_1d, L3)
-    
-    # Volume filter: 20-period average
+    # Volume moving average for filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    
+    # ATR for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -61,8 +57,9 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(H3_6h[i]) or np.isnan(L3_6h[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -73,31 +70,41 @@ def generate_signals(prices):
         vol_filter = volume[i] > vol_ma[i]
         
         if position == 1:  # long position
-            # Exit: price breaks below L3 or reaches H3 (take profit)
-            if close[i] < L3_6h[i] or close[i] > H3_6h[i]:
+            # Stoploss: 2 * ATR below entry
+            if close[i] < entry_price - 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+            # Exit: price breaks below Donchian low or 1d EMA turns down
+            elif close[i] < low_min[i] or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above H3 or reaches L3 (take profit)
-            if close[i] > H3_6h[i] or close[i] < L3_6h[i]:
+            # Stoploss: 2 * ATR above entry
+            if close[i] > entry_price + 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+            # Exit: price breaks above Donchian high or 1d EMA turns up
+            elif close[i] > high_max[i] or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for reversal entries with volume filter
+            # Look for entries with volume filter
             if vol_filter:
-                # Long entry: price closes above L3 after touching or going below it
-                if close[i] > L3_6h[i] and low[i] <= L3_6h[i]:
+                # Long entry: price breaks above Donchian high with 1d EMA uptrend
+                if close[i] > high_max[i] and close[i] > ema_1d_aligned[i]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short entry: price closes below H3 after touching or going above it
-                elif close[i] < H3_6h[i] and high[i] >= H3_6h[i]:
+                # Short entry: price breaks below Donchian low with 1d EMA downtrend
+                elif close[i] < low_min[i] and close[i] < ema_1d_aligned[i]:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
