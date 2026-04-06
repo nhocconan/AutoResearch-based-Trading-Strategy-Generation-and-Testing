@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
 12h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stop
-Hypothesis: Uses daily trend bias with 12h price channel breakouts and volume confirmation.
-Works in bull markets (breakouts with uptrend) and bear markets (breakdowns with downtrend).
-Designed for low trade frequency (~15-25/year) to minimize fee drag and avoid overtrading.
+Hypothesis: Combines 12h price channel breakouts with 1d EMA trend bias and volume
+confirmation to capture momentum while minimizing trades. Works in bull (breakouts
+with trend) and bear (short breakdowns with trend). Designed for low trade
+frequency (~20-30/year) to reduce fee drag and improve generalization.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_ata, align_htf_to_ltf
 
-name = "12h_donchian20_1dtrend_vol_v2"
+name = "12h_donchian20_1dtrend_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -38,7 +39,7 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1d EMA20 for trend bias
+    # 1d EMA20 for trend bias (HTF)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema_1d = np.full(len(close_1d), np.nan)
@@ -106,8 +107,8 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries: Donchian breakout + 1d trend + volume spike
-            # Minimum holding period: only allow new entry after 20 bars flat
-            if bars_since_entry >= 20:
+            # Minimum holding period: only allow new entry after 15 bars flat
+            if bars_since_entry >= 15:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
@@ -131,3 +132,4 @@ def generate_signals(prices):
                 bars_since_entry += 1
     
     return signals
+</lyzx>
