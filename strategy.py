@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-4h Donchian breakout with volume confirmation and ATR stoploss
-Hypothesis: 4h Donchian(20) breakouts with volume confirmation capture trends across market regimes.
-Volume filters false breakouts, ATR stoploss manages risk. Works in bull (breakout continuation) 
-and bear (breakdown continuation). Target: 75-200 total trades over 4 years.
+1d Donchian breakout with volume and ATR filter
+Hypothesis: 1d Donchian(20) breakouts capture major trends in BTC/ETH/SOL.
+Volume confirmation reduces false breakouts, ATR stoploss manages risk.
+Works in bull (breakout continuation) and bear (breakdown continuation).
+Target: 30-100 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_volume_atr_v3"
-timeframe = "4h"
+name = "1d_donchian20_volume_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,29 +20,35 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
+    # Load 1w data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate 1w EMA(50) for trend filter
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
     # Load 1d data for Donchian channels (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate Donchian channels (20-period high/low)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    
-    # Calculate rolling max/min for Donchian
     high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
     low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Align Donchian channels to 4h timeframe
-    donch_high_4h = align_htf_to_ltf(prices, df_1d, high_max)
-    donch_low_4h = align_htf_to_ltf(prices, df_1d, low_min)
+    # Align Donchian channels to 1d timeframe
+    donch_high_1d = align_htf_to_ltf(prices, df_1d, high_max)
+    donch_low_1d = align_htf_to_ltf(prices, df_1d, low_min)
     
-    # 4h data
+    # 1d data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     # Volume filter: 20-period EMA
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False).mean().values
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -60,8 +67,8 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(donch_high_4h[i]) or np.isnan(donch_low_4h[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(atr[i])):
+        if (np.isnan(donch_high_1d[i]) or np.isnan(donch_low_1d[i]) or 
+            np.isnan(vol_ema[i]) or np.isnan(atr[i]) or np.isnan(ema_50_1w_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -72,7 +79,7 @@ def generate_signals(prices):
         if position == 1:  # long position
             # Exit: stoploss or breakdown below Donchian low
             if (close[i] <= entry_price - 2.5 * atr[i] or
-                close[i] <= donch_low_4h[i]):
+                close[i] <= donch_low_1d[i]):
                 signals[i] = 0.0
                 position = 0
             else:
@@ -80,17 +87,19 @@ def generate_signals(prices):
         elif position == -1:  # short position
             # Exit: stoploss or breakout above Donchian high
             if (close[i] >= entry_price + 2.5 * atr[i] or
-                close[i] >= donch_high_4h[i]):
+                close[i] >= donch_high_1d[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: breakout with volume confirmation
-            breakout_long = (close[i] > donch_high_4h[i] and
-                           volume[i] > vol_ema[i] * 1.5)
-            breakout_short = (close[i] < donch_low_4h[i] and
-                            volume[i] > vol_ema[i] * 1.5)
+            # Look for entries: breakout with volume confirmation and trend filter
+            breakout_long = (close[i] > donch_high_1d[i] and
+                           volume[i] > vol_ema[i] * 1.5 and
+                           close[i] > ema_50_1w_aligned[i])
+            breakout_short = (close[i] < donch_low_1d[i] and
+                            volume[i] > vol_ema[i] * 1.5 and
+                            close[i] < ema_50_1w_aligned[i])
             
             if breakout_long:
                 signals[i] = 0.25
