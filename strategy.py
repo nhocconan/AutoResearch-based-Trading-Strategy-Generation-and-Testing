@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h EMA(25) trend filter and volume confirmation
-# Enter long when: price breaks above Donchian(20) high, price > 12h EMA(25), volume > 1.8x avg
-# Enter short when: price breaks below Donchian(20) low, price < 12h EMA(25), volume > 1.8x avg
-# Exit when: price retraces to Donchian midpoint OR opposite breakout occurs
-# Uses 12h trend filter to avoid counter-trend trades, targeting 80-150 trades over 4 years
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation
+# Enter long when: price breaks above Donchian(20) high, price > 1d EMA(50), volume > 1.5x avg
+# Enter short when: price breaks below Donchian(20) low, price < 1d EMA(50), volume > 1.5x avg
+# Exit when: price retraces to midpoint of Donchian channel OR opposite breakout occurs
+# Uses daily trend filter to avoid counter-trend trades, targeting 50-150 trades over 4 years
 # This structure has proven effective on SOLUSDT (test Sharpe 1.10-1.38) and adapts to bear markets via trend filter
 
-name = "4h_donchian20_12hema25_vol_v1"
+name = "4h_donchian20_1dema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -30,15 +30,15 @@ def generate_signals(prices):
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donchian_mid = (high_20 + low_20) / 2
     
-    # 12h EMA(25) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_25 = pd.Series(close_12h).ewm(span=25, adjust=False).mean().values
-    ema_25_aligned = align_htf_to_ltf(prices, df_12h, ema_25)
+    # 1d EMA(50) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Volume confirmation: volume > 1.8x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    volume_threshold = 1.8 * volume_ma
+    volume_threshold = 1.5 * volume_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -46,7 +46,7 @@ def generate_signals(prices):
     for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
-            np.isnan(ema_25_aligned[i]) or np.isnan(volume_threshold[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -70,12 +70,12 @@ def generate_signals(prices):
         else:
             # Look for entries: Donchian breakout + trend filter + volume
             if volume[i] > volume_threshold[i]:
-                if close[i] > high_20[i] and close[i] > ema_25_aligned[i]:
-                    # Bullish breakout above Donchian high with 12h uptrend
+                if close[i] > high_20[i] and close[i] > ema_50_aligned[i]:
+                    # Bullish breakout above Donchian high with daily uptrend
                     signals[i] = 0.25
                     position = 1
-                elif close[i] < low_20[i] and close[i] < ema_25_aligned[i]:
-                    # Bearish breakdown below Donchian low with 12h downtrend
+                elif close[i] < low_20[i] and close[i] < ema_50_aligned[i]:
+                    # Bearish breakdown below Donchian low with daily downtrend
                     signals[i] = -0.25
                     position = -1
     
