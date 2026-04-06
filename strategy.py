@@ -4,19 +4,19 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 12-hour strategy using 1-week Donchian channel breakouts with volume confirmation.
-# Goes long when price breaks above 1-week Donchian high with volume, short when breaks below with volume.
-# Uses 1-week trend (EMA50) as filter to avoid counter-trend trades.
+# Goes long when price breaks above weekly Donchian high with volume, short when breaks below weekly low with volume.
+# Uses 1-day trend (EMA200) as filter to avoid counter-trend trades.
 # Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
 # Volatility filter: only trade when ATR ratio indicates expanding volatility.
 
-name = "exp_13768_12h_donchian20_1w_ema_vol_volat"
+name = "exp_13768_12h_donchian120_1d_ema_vol_volat"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20  # 20 * 12h = 10 days (~1.5 weeks, adjusted for practical breakouts)
-TREND_EMA_PERIOD = 50
+DONCHIAN_PERIOD = 120  # 1-week = 120 * 12h bars (10 days)
+TREND_EMA_PERIOD = 200
 VOLUME_MA_PERIOD = 8
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -50,22 +50,23 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1w data for Donchian channels and trend filter ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for EMA trend filter ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, TREND_EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 1w Donchian channels (using 20-period = ~10 days)
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    donchian_upper, donchian_lower = calculate_donchian(high_1w, low_1w, DONCHIAN_PERIOD)
-    
-    # Align Donchian levels to 12h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower)
+    # Load 1d data for Donchian channels ONCE before loop (using 1d data for weekly Donchian)
+    # We need to calculate weekly Donchian from daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    # Calculate 5-day Donchian on daily data (5 days = 1 week)
+    donchian_upper_daily, donchian_lower_daily = calculate_donchian(high_1d, low_1d, 5)
+    # Align to 12h timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_daily)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_daily)
     
     # 12h data for entry timing and ATR
     high = prices['high'].values
@@ -87,11 +88,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(TREND_EMA_PERIOD, VOLUME_MA_PERIOD, VOLATILITY_PERIOD, DONCHIAN_PERIOD) + 1
+    start = max(TREND_EMA_PERIOD, VOLUME_MA_PERIOD, VOLATILITY_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(volatility_ratio[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(volatility_ratio[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -119,11 +120,11 @@ def generate_signals(prices):
         # Volatility filter: only trade when volatility is expanding
         volatility_ok = volatility_ratio[i] > VOLATILITY_THRESHOLD
         
-        # Trend direction from 1w EMA
-        above_ema = close[i] > ema_1w_aligned[i]
-        below_ema = close[i] < ema_1w_aligned[i]
+        # Trend direction from 1d EMA
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
         
-        # Donchian breakout signals
+        # Donchian breakout signals (using weekly Donchian from daily data)
         long_signal = volume_ok and volatility_ok and above_ema and close[i] > donchian_upper_aligned[i]
         short_signal = volume_ok and volatility_ok and below_ema and close[i] < donchian_lower_aligned[i]
         
@@ -142,14 +143,14 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on close below Donchian lower (mean reversion or trend change)
+            # Exit long on close below weekly Donchian lower
             if close[i] < donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on close above Donchian upper (mean reversion or trend change)
+            # Exit short on close above weekly Donchian upper
             if close[i] > donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
