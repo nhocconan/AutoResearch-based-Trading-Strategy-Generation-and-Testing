@@ -3,23 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly Keltner Channel breakout with volume confirmation on 1d timeframe
-# Keltner Channels (ATR-based) adapt to volatility, working in both trending and ranging markets.
-# Breakouts above upper/lower bands with volume confirmation capture strong moves.
-# Weekly timeframe provides structural context, reducing false signals.
-# Target: 40-80 trades over 4 years (10-20/year) to minimize fee drag.
+# Hypothesis: Weekly Donchian breakout with volume confirmation on 1d timeframe
+# Uses weekly Donchian channels (20-period) for structural support/resistance,
+# volume confirmation to filter weak breakouts, and ATR-based stoploss for risk management.
+# Works in both bull and bear markets as breakouts capture strong moves in any direction.
+# Target: 40-100 trades over 4 years (10-25/year) to minimize fee drag.
 
-name = "exp_12904_1d_weekly_keltner_breakout_v1"
+name = "exp_12904_1d_weekly_donchian_breakout_v1"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-EMA_PERIOD = 20
-ATR_PERIOD = 10
-KC_MULTIPLIER = 1.5
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
@@ -31,13 +30,11 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_keltner_channels(high, low, close, ema_period, atr_period, multiplier):
-    """Calculate Keltner Channels"""
-    ema = pd.Series(close).ewm(span=ema_period, adjust=False, min_periods=ema_period).mean().values
-    atr = calculate_atr(high, low, close, atr_period)
-    upper = ema + (multiplier * atr)
-    lower = ema - (multiplier * atr)
-    return ema, upper, lower
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
@@ -47,17 +44,14 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate weekly Keltner Channels
+    # Calculate weekly Donchian channels
     high_w = df_weekly['high'].values
     low_w = df_weekly['low'].values
     close_w = df_weekly['close'].values
     
-    ema_w, upper_w, lower_w = calculate_keltner_channels(
-        high_w, low_w, close_w, EMA_PERIOD, ATR_PERIOD, KC_MULTIPLIER
-    )
+    upper_w, lower_w = calculate_donchian(high_w, low_w, DONCHIAN_PERIOD)
     
     # Align to daily timeframe
-    ema_aligned = align_htf_to_ltf(prices, df_weekly, ema_w)
     upper_aligned = align_htf_to_ltf(prices, df_weekly, upper_w)
     lower_aligned = align_htf_to_ltf(prices, df_weekly, lower_w)
     
@@ -76,11 +70,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, ATR_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if Keltner levels not available
-        if np.isnan(ema_aligned[i]) or np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
+        # Skip if Donchian levels not available
+        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -102,7 +96,7 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above upper band or below lower band
+        # Breakout above upper or below lower Donchian
         breakout_long = volume_ok and close[i] >= upper_aligned[i]
         breakout_short = volume_ok and close[i] <= lower_aligned[i]
         
