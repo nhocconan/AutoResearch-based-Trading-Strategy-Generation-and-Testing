@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Experiment #11806: 4h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: 4h Donchian(20) breakouts capture medium-term trends with lower noise than lower timeframes.
-1d EMA provides trend bias to filter false breakouts. Volume confirmation ensures institutional participation.
-Target: 75-200 total trades over 4 years (19-50/year) with reasonable win rate.
+Hypothesis: 4h Donchian(20) breakouts capture medium-term trends. 1d EMA provides trend bias,
+and volume filter ensures institutional participation. Works in bull (breakouts continue) and
+bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
