@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12512_12h_donchian20_1d_vol_trend_v1"
+name = "exp_12512_12h_donchian20_1d_trend_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
