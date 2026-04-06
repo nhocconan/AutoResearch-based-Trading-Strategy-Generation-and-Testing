@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-4h Donchian breakout + volume confirmation + ADX trend filter.
-Hypothesis: Donchian breakouts capture strong momentum moves, volume confirms institutional participation,
-and ADX ensures we only trade in trending markets, avoiding whipsaws in ranging conditions.
-Works in both bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend).
+4h Bollinger Band Squeeze + Mean Reversion.
+Hypothesis: In low volatility regimes (BB squeeze), price tends to revert to the mean.
+Long when price touches lower BB in squeeze, short when touches upper BB.
+Exit when price returns to middle band or volatility expands.
+Works in both bull (buy dips) and bear (sell rallies) markets.
 Target: 75-200 total trades over 4 years (19-50/year).
 """
 
@@ -11,7 +12,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14317_4h_donchian20_volume_adx_v1"
+name = "exp_14317_4h_bb_squeeze_meanrev_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -20,59 +21,49 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for ADX trend filter (once before loop)
+    # Load 1d data for trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate ADX (14-period) on daily data
-    def calculate_adx(high, low, close, period=14):
-        # True Range
-        tr1 = high - low
-        tr2 = np.abs(high - np.roll(close, 1))
-        tr3 = np.abs(low - np.roll(close, 1))
-        tr = np.maximum(tr1, np.maximum(tr2, tr3))
-        tr[0] = tr1[0]
-        
-        # Directional Movement
-        dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                           np.maximum(high - np.roll(high, 1), 0), 0)
-        dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                            np.maximum(np.roll(low, 1) - low, 0), 0)
-        
-        # Smooth TR, DM+
-        tr_period = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
-        dm_plus_period = pd.Series(dm_plus).rolling(window=period, min_periods=period).sum().values
-        dm_minus_period = pd.Series(dm_minus).rolling(window=period, min_periods=period).sum().values
-        
-        # Directional Indicators
-        plus_di = 100 * dm_plus_period / tr_period
-        minus_di = 100 * dm_minus_period / tr_period
-        
-        # DX and ADX
-        dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-        adx = pd.Series(dx).rolling(window=period, min_periods=period).mean().values
-        return adx
+    # Calculate 50-period EMA for daily trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, 14)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    
-    # Calculate 4h indicators
+    # 4h data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    donch_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2.0
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = sma + (bb_std * std)
+    lower_band = sma - (bb_std * std)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Bollinger Band Width for squeeze detection
+    bb_width = (upper_band - lower_band) / sma
+    # Squeeze when BBW is below 20-period average (low volatility)
+    bbw_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < bbw_ma
+    
+    # RSI for mean reversion confirmation
+    rsi_period = 14
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/rsi_period, adjust=False, min_periods=rsi_period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # Volume confirmation: volume > 1.2x average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ma)
+    vol_confirm = volume > (1.2 * vol_ma)
     
-    # ATR for stoploss (14-period)
+    # ATR for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -84,38 +75,38 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR)
-    start = max(20, 20) + 1
+    # Start from warmup period
+    start = max(bb_period, 20, rsi_period) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
-           np.isnan(adx_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(sma[i]) or np.isnan(upper_band[i]) or \
+           np.isnan(lower_band[i]) or np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: stoploss (2*ATR) or ADX weakening (trend ending)
+        # Check exits
         if position == 1:  # long position
-            if close[i] <= entry_price - 2.0 * atr[i] or adx_1d_aligned[i] < 20:
+            # Exit: price returns to middle band OR stoploss
+            if close[i] >= sma[i] or close[i] <= entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] >= entry_price + 2.0 * atr[i] or adx_1d_aligned[i] < 20:
+            # Exit: price returns to middle band OR stoploss
+            if close[i] <= sma[i] or close[i] >= entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout with ADX trend and volume confirmation
-            # Long when price breaks above Donchian high in strong uptrend with volume
-            # Short when price breaks below Donchian low in strong downtrend with volume
-            long_setup = (close[i] > donch_high[i-1]) and (adx_1d_aligned[i] > 25) and vol_confirm[i]
-            short_setup = (close[i] < donch_low[i-1]) and (adx_1d_aligned[i] > 25) and vol_confirm[i]
+            # Look for entries: BB squeeze + price at band + RSI extreme + volume
+            long_setup = squeeze[i] and (close[i] <= lower_band[i]) and (rsi[i] < 30) and vol_confirm[i]
+            short_setup = squeeze[i] and (close[i] >= upper_band[i]) and (rsi[i] > 70) and vol_confirm[i]
             
             if long_setup:
                 signals[i] = 0.25
