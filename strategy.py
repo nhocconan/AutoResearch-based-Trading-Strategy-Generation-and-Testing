@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
-1h Volume Spike with 4h/1d Trend Filter
-Hypothesis: Volume spikes on 1h confirm momentum, filtered by 4h trend and 1d regime.
-Trades only in direction of 4h trend, avoids counter-trend whipsaws. 1d filter avoids
-extreme volatility periods. Volume spike ensures institutional participation.
-Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+6h Weekly Pivot Breakout with 1d Trend Filter
+Hypothesis: Price breaking above weekly R4 or below S4 with 1d trend continuation captures strong momentum moves.
+Weekly pivots act as significant support/resistance levels. Breakouts beyond R4/S4 indicate institutional interest.
+1d trend filter ensures we only trade in direction of higher timeframe momentum, reducing false breakouts.
+Volume confirmation validates breakout strength. Works in both bull (buy R4 breaks) and bear (sell S4 breaks).
+Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_volume_spike_4h_1d_trend_v1"
-timeframe = "1h"
+name = "6h_weekly_pivot_breakout_1d_trend"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,7 +27,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR for stops and filters
+    # 14-period ATR for stops
     atr = np.full(n, np.nan)
     if n >= 14:
         tr = np.maximum(
@@ -39,65 +40,43 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # Get 4h data for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Get weekly data for pivot calculation
+    df_weekly = get_htf_data(prices, '1w')
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # 50-period EMA on 4h for trend
-    ema_4h = np.full(len(close_4h), np.nan)
-    if len(close_4h) >= 50:
-        ema_4h[49] = np.mean(close_4h[:50])
-        for i in range(50, len(close_4h)):
-            ema_4h[i] = (close_4h[i] * 2 + ema_4h[i-1] * 49) / 51
+    # Calculate weekly pivot points (standard formula)
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_range = weekly_high - weekly_low
+    
+    # R4 = PP + 3*(H - L), S4 = PP - 3*(H - L)
+    weekly_r4 = weekly_pivot + 3.0 * weekly_range
+    weekly_s4 = weekly_pivot - 3.0 * weekly_range
+    
+    # Align weekly levels to 6s timeframe (shifted by 1 for completed weekly bar)
+    r4_6h = align_htf_to_ltf(prices, df_weekly, weekly_r4)
+    s4_6h = align_htf_to_ltf(prices, df_weekly, weekly_s4)
+    
+    # Get daily data for trend filter
+    df_daily = get_htf_data(prices, '1d')
+    close_daily = df_daily['close'].values
+    
+    # 50-period EMA on daily for trend
+    ema_daily = np.full(len(close_daily), np.nan)
+    if len(close_daily) >= 50:
+        ema_daily[49] = np.mean(close_daily[:50])
+        for i in range(50, len(close_daily)):
+            ema_daily[i] = (close_daily[i] * 2 + ema_daily[i-1] * 49) / 51
     
     # Trend: 1 if close > EMA (uptrend), -1 if close < EMA (downtrend)
-    trend_4h = np.where(close_4h > ema_4h, 1, -1)
-    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
+    trend_daily = np.where(close_daily > ema_daily, 1, -1)
+    trend_daily_6h = align_htf_to_ltf(prices, df_daily, trend_daily)
     
-    # Get 1d data for regime filter (avoid high volatility)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    
-    # 20-period ATR on 1d for volatility regime
-    atr_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        tr_1d = np.maximum(
-            high_1d[1:] - low_1d[1:],
-            np.abs(high_1d[1:] - close_1d[:-1]),
-            np.abs(low_1d[1:] - close_1d[:-1])
-        )
-        if len(tr_1d) > 0:
-            atr_1d[20] = np.mean(tr_1d[:20])
-            for i in range(21, len(close_1d)):
-                atr_1d[i] = (atr_1d[i-1] * 19 + tr_1d[i-1]) / 20
-    
-    # 50-period SMA on 1d for trend filter
-    sma_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        for i in range(49, len(close_1d)):
-            sma_1d[i] = np.mean(close_1d[i-49:i+1])
-    
-    # Volatility regime: 1 = low vol (good for trend), 0 = high vol (avoid)
-    vol_regime = np.ones(len(close_1d))
-    if len(close_1d) >= 50 and len(atr_1d) >= 50:
-        atr_ratio = atr_1d / sma_1d  # ATR as % of price
-        atr_ratio_ma = np.full(len(close_1d), np.nan)
-        for i in range(49, len(close_1d)):
-            atr_ratio_ma[i] = np.mean(atr_ratio[i-49:i+1])
-        # Low volatility when ATR ratio below its 50-day average
-        vol_regime = (atr_ratio < atr_ratio_ma).astype(float)
-    
-    vol_regime_aligned = align_htf_to_ltf(prices, df_1d, vol_regime)
-    
-    # Volume spike: current volume > 2.0x average over last 20 periods
+    # Volume filter: current volume > 1.8x average over last 20 periods
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
-    
-    # Session filter: 08-20 UTC (reduce noise trades)
-    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -108,58 +87,54 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(trend_4h_aligned[i]) or np.isnan(vol_ma[i]) or \
-           np.isnan(vol_regime_aligned[i]):
+        if np.isnan(atr[i]) or np.isnan(r4_6h[i]) or np.isnan(s4_6h[i]) or \
+           np.isnan(trend_daily_6h[i]) or np.isnan(vol_ma[i]):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
         # Volume condition
-        volume_spike = volume[i] > vol_ma[i] * 2.0
+        volume_filter = volume[i] > vol_ma[i] * 1.8
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: 4h trend turns down OR volatility regime shifts to high vol
+            # Exit: price drops below weekly pivot OR trend turns down
             # Stoploss: price drops 2.0*ATR below entry
-            if (trend_4h_aligned[i] == -1 or
-                vol_regime_aligned[i] == 0 or
+            if (close[i] <= weekly_pivot[i] or
+                trend_daily_6h[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: 4h trend turns up OR volatility regime shifts to high vol
+            # Exit: price rises above weekly pivot OR trend turns up
             # Stoploss: price rises 2.0*ATR above entry
-            if (trend_4h_aligned[i] == 1 or
-                vol_regime_aligned[i] == 0 or
+            if (close[i] >= weekly_pivot[i] or
+                trend_daily_6h[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for volume spike entries in direction of 4h trend
-            # Only trade in session and low volatility regime
-            if in_session and vol_regime_aligned[i] == 1:
-                # Long: volume spike in uptrend
-                if volume_spike and trend_4h_aligned[i] == 1:
-                    signals[i] = 0.20
-                    position = 1
-                    entry_price = close[i]
-                # Short: volume spike in downtrend
-                elif volume_spike and trend_4h_aligned[i] == -1:
-                    signals[i] = -0.20
-                    position = -1
-                    entry_price = close[i]
-                else:
-                    signals[i] = 0.0
+            # Look for breakout entries
+            # Long: price breaks above weekly R4 in uptrend with volume
+            if (close[i] > r4_6h[i] and
+                trend_daily_6h[i] == 1 and
+                volume_filter):
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+            # Short: price breaks below weekly S4 in downtrend with volume
+            elif (close[i] < s4_6h[i] and
+                  trend_daily_6h[i] == -1 and
+                  volume_filter):
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
             else:
                 signals[i] = 0.0
     
