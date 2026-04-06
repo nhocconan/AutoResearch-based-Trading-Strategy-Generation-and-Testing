@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with 1d trend filter and volume confirmation
-Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d EMA trend for bias and volume confirmation for conviction. Works in bull (buy breakouts above 1d EMA) and bear (sell breakdowns below 1d EMA). Target: 75-200 total trades over 4 years (19-50/year).
+6h Donchian(20) breakout with 1d trend filter and volume confirmation
+Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d EMA50 trend for bias and volume confirmation for conviction. Works in bull (buy breakouts above 1d EMA50) and bear (sell breakdowns below 1d EMA50). Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_trend_vol_v3"
-timeframe = "4h"
+name = "6h_donchian20_1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,7 +50,7 @@ def generate_signals(prices):
     # 1d trend: above EMA50 = bullish, below = bearish
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align 1d trend to 4h timeframe
+    # Align 1d trend to 6h timeframe
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     # Get 1d data for volume confirmation
@@ -61,10 +61,10 @@ def generate_signals(prices):
     for i in range(20, len(volume_1d)):
         vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
     
-    # Align volume MA to 4h timeframe
+    # Align volume MA to 6h timeframe
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Donchian channels (20-period) from 4h data
+    # Donchian channels (20-period) from 6h data
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
     
@@ -92,9 +92,9 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 4h volume > 1.5x 1d average volume (scaled)
-        # Scale 1d volume to 4h: approx 1/6 of 1d volume (since 6x 4h in 1d)
-        vol_threshold = vol_ma_1d_aligned[i] / 6.0 * 1.5
+        # Volume filter: current 6h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d volume to 6h: approx 1/4 of 1d volume (since 4x 6h in 1d)
+        vol_threshold = vol_ma_1d_aligned[i] / 4.0 * 1.5
         volume_filter = volume[i] > vol_threshold
         
         # Check exits and stoploss
