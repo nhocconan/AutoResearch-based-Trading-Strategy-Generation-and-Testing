@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 1d Trend + Volume Spike
+4h Donchian(20) Breakout + 1d Trend + Volume Confirmation
 Hypothesis: 4h timeframe with Donchian breakouts aligned to 1d EMA trend 
 and volume confirmation captures momentum while avoiding chop. 
 1d EMA provides trend bias, volume spike confirms institutional participation.
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1dtrend_vol_v1"
+name = "4h_donchian20_1dtrend_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -39,13 +39,13 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1d EMA20 for trend bias
+    # 1d EMA50 for trend bias
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        ema_1d[19] = np.mean(close_1d[:20])
-        for i in range(20, len(close_1d)):
+    if len(close_1d) >= 50:
+        ema_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
             ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
     
     # Trend bias: above EMA = bullish, below = bearish
@@ -60,7 +60,7 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 20  # For Donchian
+    start = 50  # For EMA50 and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
@@ -107,8 +107,8 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries: Donchian breakout + 1d trend + volume spike
-            # Minimum holding period: only allow new entry after 15 bars flat
-            if bars_since_entry >= 15:
+            # Minimum holding period: only allow new entry after 10 bars flat
+            if bars_since_entry >= 10:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
