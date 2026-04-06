@@ -3,33 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour VWAP mean reversion with weekly trend filter and volatility filter.
-# In ranging markets (common in 2025), price reverts to VWAP with high probability.
-# Weekly EMA ensures we only trade in direction of higher timeframe trend.
-# Volume spike confirms institutional participation at mean reversion points.
-# Target: 50-150 total trades over 4 years by using tight entry conditions.
+# Hypothesis: 12-hour Donchian channel breakout with volume confirmation and weekly trend filter.
+# Uses actual Donchian high/low (20-period) for breakout signals, volume spike for confirmation,
+# and weekly EMA to ensure alignment with higher timeframe momentum. Designed to capture
+# institutional breakouts in both bull and bear markets while minimizing false signals.
+# Target: 50-150 total trades over 4 years.
 
-name = "exp_13368_12h_vwap_mean_reversion_trend_vol"
+name = "exp_13368_12h_donchian20_vol_weekly_ema_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-VWAP_PERIOD = 24  # 2 periods for VWAP (24h = 2*12h)
-EMA_WEEKLY = 20   # Weekly EMA
-VOLUME_MA = 20    # Volume moving average
-VOLUME_THRESHOLD = 1.8  # High volume threshold
-DEV_THRESHOLD = 0.015   # 1.5% deviation from VWAP for entry
+DONCHIAN_PERIOD = 20
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
+EMA_PERIOD = 20  # Weekly EMA
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_vwap(high, low, close, volume, period):
-    """Calculate VWAP"""
-    typical_price = (high + low + close) / 3
-    vwap_num = np.convolve(typical_price * volume, np.ones(period), 'full')[:len(typical_price)]
-    vwap_den = np.convolve(volume, np.ones(period), 'full')[:len(typical_price)]
-    vwap = np.divide(vwap_num, vwap_den, out=np.full_like(typical_price, np.nan), where=vwap_den!=0)
-    return vwap
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -44,6 +35,12 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channel"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -54,7 +51,7 @@ def generate_signals(prices):
     
     # Calculate weekly EMA for trend filter
     close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_WEEKLY)
+    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate 12h indicators
@@ -63,11 +60,11 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # VWAP
-    vwap = calculate_vwap(high, low, close, volume, VWAP_PERIOD)
+    # Donchian channel
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # Volume MA
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA, min_periods=VOLUME_MA).mean().values
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -78,11 +75,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_WEEKLY, VWAP_PERIOD, VOLUME_MA, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, EMA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(vwap[i]) or np.isnan(volume_ma[i]):
+        # Skip if indicators not available
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -108,24 +105,18 @@ def generate_signals(prices):
         uptrend = close[i] > ema_1w_aligned[i]
         downtrend = close[i] < ema_1w_aligned[i]
         
-        # Deviation from VWAP
-        if not np.isnan(vwap[i]) and vwap[i] != 0:
-            dev_pct = (close[i] - vwap[i]) / vwap[i]
-        else:
-            dev_pct = 0
-        
-        # Mean reversion signals
-        oversold = dev_pct < -DEV_THRESHOLD  # Price significantly below VWAP
-        overbought = dev_pct > DEV_THRESHOLD  # Price significantly above VWAP
+        # Breakout signals using Donchian channels
+        breakout_up = volume_ok and uptrend and (high[i] > donchian_upper[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < donchian_lower[i-1])
         
         # Generate signals
         if position == 0:
-            if oversold and volume_ok and uptrend:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif overbought and volume_ok and downtrend:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
