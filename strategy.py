@@ -4,10 +4,10 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA trend filter and volume confirmation.
-# The strategy captures breakouts in trending markets while avoiding choppy conditions.
-# Uses 12-hour EMA for trend filter (aligned to 4h) and volume spike for confirmation.
-# Designed to work in both bull and bear markets by going long on upward breakouts
-# and short on downward breakouts. Target: 75-200 total trades over 4 years.
+# Breakouts capture strong directional moves; the 12-hour EMA ensures alignment with medium-term momentum.
+# Volume confirmation filters out false breakouts by requiring above-average participation.
+# Works in bull markets (captures uptrends) and bear markets (captures downtrends).
+# Target: 100-200 total trades over 4 years (25-50/year) to balance opportunity and fee drag.
 
 name = "exp_13243_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
