@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""
-4h Donchian Breakout + Daily Trend + Volume Confirmation
-Hypothesis: Daily trend filters 4h Donchian breakouts to reduce false signals.
-Volume confirmation ensures momentum behind breakouts.
-Works in bull via breakouts, bear via breakdowns with trend filter.
-Target: 75-200 total trades over 4 years (19-50/year).
-"""
+# 4h Donchian Breakout + Daily Trend + Volume Confirmation
+# Hypothesis: Daily trend filters 4h Donchian breakouts to reduce false signals.
+# Volume confirmation ensures momentum behind breakouts.
+# Works in bull via breakouts, bear via breakdowns with trend filter.
+# Target: 75-200 total trades over 4 years (19-50/year).
 
 import numpy as np
 import pandas as pd
