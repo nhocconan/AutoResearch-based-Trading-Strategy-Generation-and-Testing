@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel during bullish week with volume > 1.5x 20-day average.
-# Short when price breaks below lower Donchian channel during bearish week with volume confirmation.
+# Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel during bullish week (price above 50-day SMA) with volume > 1.5x 20-day average.
+# Short when price breaks below lower Donchian channel during bearish week (price below 50-day SMA) with volume confirmation.
 # Uses weekly trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
 # Target: 30-100 total trades over 4 years (7-25/year) to stay within optimal range.
 
@@ -30,12 +30,12 @@ def generate_signals(prices):
     upper = high_series.rolling(window=20, min_periods=20).max().values
     lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Weekly trend filter: bullish/bearish week based on close vs open
+    # Weekly trend filter: bullish/bearish week based on price vs 50-week SMA
     df_1w = get_htf_data(prices, '1w')
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open  # True for bullish week
-    weekly_bearish = weekly_close < weekly_open   # True for bearish week
+    close_1w = df_1w['close'].values
+    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
+    weekly_bullish = close_1w > sma_50_1w  # True for bullish week
+    weekly_bearish = close_1w < sma_50_1w   # True for bearish week
     weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
     weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
     
