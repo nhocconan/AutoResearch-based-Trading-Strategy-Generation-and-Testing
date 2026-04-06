@@ -1,10 +1,19 @@
 #!/usr/bin/env python3
+"""
+4h Donchian breakout with 1d EMA trend filter and volume capture.
+- Long: break above upper Donchian + above 1d EMA + volume > 1.5x average
+- Short: break below lower Donchian + below 1d EMA + volume > 1.5x average
+- Exit: stop loss (2*ATR) or reversal signal
+- Position size: 0.25 (25%)
+- Target: 75-200 trades over 4 years (19-50/year)
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14185_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_14186_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period):
@@ -29,10 +38,10 @@ def generate_signals(prices):
     # Calculate EMA(20) on 1d close
     ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align EMA to 12h timeframe
+    # Align EMA to 4h timeframe
     ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
