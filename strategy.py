@@ -3,28 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot reversal strategy with 1d trend filter.
-# Camarilla levels from prior day: long near S3/S4 (strong support), short near R3/R4 (strong resistance).
-# Uses 1d EMA200 for trend filter to avoid counter-trend trades.
-# Works in bull/bear because reversals at strong levels occur in all regimes.
-# Target: 80-180 trades over 4 years (20-45/year) to balance opportunity and cost.
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation.
+# Targets 50-150 trades over 4 years by requiring strong breakouts with volume surge.
+# Trend filter ensures we trade with daily momentum, reducing whipsaws in sideways markets.
+# Works in bull/bear as breakouts capture strong moves, filters suppress noise.
 
-name = "exp_13051_6h_camarilla_reversal_1d_ema_v1"
-timeframe = "6h"
+name = "exp_13052_12h_donchian20_1d_vol_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_MULT = 1.1  # Standard multiplier for Camarilla
-EMA_TREND_PERIOD = 200
-VOLUME_MA_PERIOD = 24
-VOLUME_THRESHOLD = 1.3
+DONCHIAN_PERIOD = 20
+EMA_TREND_PERIOD = 50
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -34,6 +29,10 @@ def calculate_atr(high, low, close, period):
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -48,36 +47,15 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, EMA_TREND_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate prior day's Camarilla levels (using prior day's OHLC)
-    # We need to shift OHLC by 1 to get *completed* day's levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Prior day's range
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels for prior day
-    # R4 = close + range * 1.1/2
-    # R3 = close + range * 1.1/4
-    # S3 = close - range * 1.1/4
-    # S4 = close - range * 1.1/2
-    camarilla_r4 = close_1d + range_1d * CAMARILLA_MULT / 2
-    camarilla_r3 = close_1d + range_1d * CAMARILLA_MULT / 4
-    camarilla_s3 = close_1d - range_1d * CAMARILLA_MULT / 4
-    camarilla_s4 = close_1d - range_1d * CAMARILLA_MULT / 2
-    
-    # Align Camarilla levels to 6h timeframe (using prior day's levels)
-    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    camarilla_r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    camarilla_s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
-    
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -91,7 +69,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if EMA not available
@@ -114,32 +92,25 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
+        # Volume confirmation - require strong volume surge
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below daily EMA200
+        # Trend filter: price above/below daily EMA
         uptrend = close[i] > ema_1d_aligned[i]
         downtrend = close[i] < ema_1d_aligned[i]
         
-        # Reversal signals at Camarilla levels
-        # Long near S3/S4 in uptrend
-        long_signal = (volume_ok and uptrend and 
-                      (low[i] <= camarilla_s3_aligned[i] or low[i] <= camarilla_s4_aligned[i]) and
-                      close[i] > camarilla_s3_aligned[i])  # Confirm reversal
-        
-        # Short near R3/R4 in downtrend
-        short_signal = (volume_ok and downtrend and 
-                       (high[i] >= camarilla_r3_aligned[i] or high[i] >= camarilla_r4_aligned[i]) and
-                       close[i] < camarilla_r3_aligned[i])  # Confirm reversal
+        # Breakout signals - only on new highs/lows
+        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
-            if long_signal:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_signal:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
