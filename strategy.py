@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with volume confirmation and 1w EMA trend filter.
-# Designed to capture strong momentum moves in both bull and bear markets.
-# Volume filters out weak breakouts, weekly EMA ensures trading with higher timeframe trend.
-# Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag while capturing sufficient opportunities.
+# Hypothesis: 1d Donchian channel breakout with 1w EMA trend filter and volume confirmation.
+# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
+# and weekly EMA trend filter ensures we trade with higher timeframe momentum.
+# Target: 75-250 trades over 4 years (19-62/year) to balance opportunity and cost.
 
-name = "exp_13068_12h_donchian20_1w_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13070_1d_weekly_donchian_vol"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
@@ -47,7 +47,7 @@ def generate_signals(prices):
     ema_1w = calculate_ema(close_1w, EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -72,7 +72,7 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
+        # Skip if weekly EMA not available
         if np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
