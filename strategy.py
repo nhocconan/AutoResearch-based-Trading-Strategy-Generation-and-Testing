@@ -3,25 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12776_12h_donchian20_1d_vol_v1"
-timeframe = "12h"
+name = "exp_12777_4h_donchian20_1d_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
-# Parameters - optimized for 12h timeframe
+# Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR using EMA"""
+    """Calculate ATR"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = tr1[0]  # First TR is just high-low
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
@@ -42,11 +41,11 @@ def generate_signals(prices):
     # Lower band: lowest low over period
     lower_band = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
     lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
