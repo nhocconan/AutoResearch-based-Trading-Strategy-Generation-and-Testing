@@ -3,27 +3,34 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with daily EMA trend filter and volume confirmation.
-# Captures strong trending moves aligned with daily momentum. Volume ensures institutional participation.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: Weekly RSI mean reversion with daily price action confirmation.
+# In bear markets, weekly RSI >70 signals exhaustion for short entries; RSI <30 signals bounce for longs.
+# Daily inside day pattern (lower high and higher low) confirms rejection of extreme levels.
+# Works in both bull (buy dips in uptrend) and bear (sell rallies in downtrend) markets.
+# Target: 50-150 total trades over 4 years (12-38/year).
 
-name = "exp_13563_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13564_1w_rsi_meanrev_1d_inside_day_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 21
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+WEEKLY_RSI_PERIOD = 14
+WEEKLY_RSI_OVERBOUGHT = 70
+WEEKLY_RSI_OVERSOLD = 30
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_rsi(close, period):
+    """Calculate RSI using Wilder's smoothing"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -39,28 +46,20 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly RSI for mean reversion signals
+    close_1w = df_1w['close'].values
+    rsi_1w = calculate_rsi(close_1w, WEEKLY_RSI_PERIOD)
+    rsi_1w_aligned = align_htf_to_ltf(prices, df_1w, rsi_1w)
     
-    # Calculate 4h indicators
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Volume MA
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # ATR
+    # ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -69,11 +68,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(WEEKLY_RSI_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        # Skip if weekly RSI not available
+        if np.isnan(rsi_1w_aligned[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -92,25 +91,23 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Daily inside day pattern: lower high AND higher low
+        inside_day = (high[i] < high[i-1]) and (low[i] > low[i-1])
         
-        # Trend filter: price above/below daily EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
-        
-        # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
+        # Mean reversion signals from weekly RSI extremes
+        rsi_overbought = rsi_1w_aligned[i] >= WEEKLY_RSI_OVERBOUGHT
+        rsi_oversold = rsi_1w_aligned[i] <= WEEKLY_RSI_OVERSOLD
         
         # Generate signals
         if position == 0:
-            if breakout_up:
+            if rsi_oversold and inside_day:
+                # Bullish reversal: oversold weekly RSI + daily rejection of lower prices
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            elif rsi_overbought and inside_day:
+                # Bearish reversal: overbought weekly RSI + daily rejection of higher prices
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
