@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour ADX-based trend strength with volume confirmation and daily trend filter.
-# Uses ADX (14) to identify trending markets (ADX > 25) and avoids ranging markets.
-# Daily EMA50 provides higher timeframe trend bias for directional filtering.
-# Volume confirmation (current volume > 1.3x 20-period average) ensures institutional participation.
-# Designed for 6h timeframe to target 50-150 trades over 4 years.
-# Works in bull/bear markets via ADX trend filter and daily EMA bias - avoids false signals in ranging markets.
+# Hypothesis: 12-hour Donchian Channel Breakout with Volume Confirmation and ATR Stoploss.
+# Uses weekly trend filter (EMA50) to align with long-term direction and avoid counter-trend trades.
+# Entry: Price breaks above/below 20-period Donchian channel on 12h timeframe with volume > 1.5x 20-period average.
+# Exit: Opposite Donchian band touch or ATR-based stoploss (2x ATR).
+# Works in bull/bear markets via trend filter and volatility-based stops.
+# Target: 50-150 trades over 4 years (12-37/year).
 
-name = "6h_adx_volume_daily_trend_v1"
-timeframe = "6h"
+name = "12h_donchian20_weekly_ema50_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,137 +25,82 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily EMA50 for trend bias
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Weekly EMA50 for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50 = np.full(len(close_1w), np.nan)
+    for i in range(49, len(close_1w)):
+        ema_50[i] = np.mean(close_1w[i-49:i+1])  # Simple MA for efficiency
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # Calculate EMA50 on daily closes
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2 / 51) + (ema_50_1d[i-1] * 49 / 51)
+    # Donchian channels (20-period) on 12h
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(19, n):
+        highest_high[i] = np.max(high[i-19:i+1])
+        lowest_low[i] = np.min(low[i-19:i+1])
     
-    # Align EMA50 to 6h timeframe (shifted by 1 daily bar for no look-ahead)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # ADX calculation (14 periods)
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]  # First period has no previous close
-    
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    
-    # Smoothed values using Wilder's smoothing (equivalent to EMA with alpha=1/period)
-    def wilders_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            # First value is simple average
-            result[period-1] = np.mean(data[:period])
-            # Subsequent values: smoothed = (prev_smooth * (period-1) + current) / period
-            for i in range(period, len(data)):
-                result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    period = 14
-    tr_smoothed = wilders_smooth(tr, period)
-    plus_dm_smoothed = wilders_smooth(plus_dm, period)
-    minus_dm_smoothed = wilders_smooth(minus_dm, period)
-    
-    # Directional Indicators
-    plus_di = np.full(n, np.nan)
-    minus_di = np.full(n, np.nan)
-    dx = np.full(n, np.nan)
-    
-    for i in range(period, n):
-        if not np.isnan(tr_smoothed[i]) and tr_smoothed[i] != 0:
-            plus_di[i] = (plus_dm_smoothed[i] / tr_smoothed[i]) * 100
-            minus_di[i] = (minus_dm_smoothed[i] / tr_smoothed[i]) * 100
-            dx[i] = (np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])) * 100
-    
-    # ADX (smoothed DX)
-    adx = wilders_smooth(dx, period)
-    
-    # Align ADX to 6h timeframe (no additional shift needed as Wilder's smoothing already uses past data)
-    adx_aligned = align_htf_to_ltf(prices, pd.DataFrame({'index': range(len(adx))}), adx)
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(30, n):  # Start after ADX is available (2*period for smoothing)
-        # Skip if required data not available
-        if (np.isnan(ema_50_aligned[i]) or np.isnan(adx_aligned[i])):
+    for i in range(50, n):
+        # Skip if data not available
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.3x 20-period average
-        vol_ma = np.mean(volume[max(0, i-19):i+1]) if i >= 19 else np.nan
-        if np.isnan(vol_ma):
-            volume_filter = False
-        else:
-            volume_filter = volume[i] > vol_ma * 1.3
+        # Trend filter: only trade in direction of weekly EMA50
+        trend_up = close[i] > ema_50_aligned[i]
+        trend_down = close[i] < ema_50_aligned[i]
         
-        # Trend strength: ADX > 25 indicates trending market
-        trending = adx_aligned[i] > 25
-        
-        # Directional bias from DI crossover
-        bullish_momentum = plus_di[i] > minus_di[i]
-        bearish_momentum = minus_di[i] > plus_di[i]
-        
-        # Trend bias: daily EMA50
-        bullish_bias = close[i] > ema_50_aligned[i]
-        bearish_bias = close[i] < ema_50_aligned[i]
+        # Volume condition
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: loss of trend strength or stoploss (2x ATR approximation)
+            # Exit: price touches lower Donchian band or stoploss
             atr_approx = max(high[i] - low[i], 0.001)
             stop_loss_level = entry_price - 2.0 * atr_approx
             
-            if (not trending or 
-                not bullish_momentum or
+            if (close[i] <= lowest_low[i] or 
                 close[i] < stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: loss of trend strength or stoploss
+            # Exit: price touches upper Donchian band or stoploss
             atr_approx = max(high[i] - low[i], 0.001)
             stop_loss_level = entry_price + 2.0 * atr_approx
             
-            if (not trending or 
-                not bearish_momentum or
+            if (close[i] >= highest_high[i] or 
                 close[i] > stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries in direction of daily trend with volume confirmation
-            if volume_filter and trending:
-                # Long: bullish momentum in uptrend
-                if bullish_momentum and bullish_bias:
+            # Look for entries with volume and trend confirmation
+            if volume_filter:
+                # Buy breakout above upper Donchian band in uptrend
+                if (close[i] > highest_high[i] and close[i-1] <= highest_high[i] and trend_up):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: bearish momentum in downtrend
-                elif bearish_momentum and bearish_bias:
+                # Sell breakdown below lower Donchian band in downtrend
+                elif (close[i] < lowest_low[i] and close[i-1] >= lowest_low[i] and trend_down):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
-            else:
-                signals[i] = 0.0
     
     return signals
