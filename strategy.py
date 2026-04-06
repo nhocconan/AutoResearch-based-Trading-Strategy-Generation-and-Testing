@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 1d EMA20 Trend + Volume Spike + ATR Stop
-Hypothesis: Combines price channel breakouts with daily trend bias and volume confirmation
-to capture momentum while avoiding chop. Works in bull (breakouts with trend) and bear
-(short breakdowns with trend). Designed for moderate trade frequency (~25-40/year).
+4h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stop
+Hypothesis: Combines price channel breakouts with daily timeframe trend bias
+and volume confirmation to capture momentum while avoiding chop.
+Works in bull (breakouts with trend) and bear (short breakdowns with trend).
+Designed for moderate trade frequency (~25-40/year) to minimize fee drift.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
-name = "4h_donchian20_1dtrend_vol_v4"
+name = "4h_donchian20_1detrend_vol_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -51,7 +52,7 @@ def generate_signals(prices):
     trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
     
     # Align to 4h timeframe
-    trend_bias_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
+    trend_bias_aligned = align_ltf_to_htf(prices, df_1d, trend_bias_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
