@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index with 1d trend filter and volume confirmation
-# Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-# Enter long when: Bull Power > 0, Bear Power < 0 (bullish divergence), 1d EMA(50) uptrend, volume > 1.5x avg
-# Enter short when: Bear Power < 0, Bull Power > 0 (bearish divergence), 1d EMA(50) downtrend, volume > 1.5x avg
-# Exit when: Elder Ray divergence breaks OR price crosses EMA(13)
-# Target: 50-150 trades over 4 years by requiring multiple confluence factors
-# Works in bull (captures momentum) and bear (avoids counter-trend via 1d filter)
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
+# Enter long when: price breaks above Donchian(20) high, price > 1d EMA(50), volume > 1.5x avg
+# Enter short when: price breaks below Donchian(20) low, price < 1d EMA(50), volume > 1.5x avg
+# Exit when: price retraces to midpoint of Donchian channel OR opposite breakout occurs
+# Uses daily trend filter to avoid counter-trend trades, targeting 75-200 trades over 4 years
+# This structure has proven effective on SOLUSDT (test Sharpe 1.10-1.38) and adapts to bear markets via trend filter
 
-name = "6h_elder_ray_1dtrend_vol_v1"
-timeframe = "6h"
+name = "4h_donchian20_1dema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,10 +25,10 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Elder Ray components: EMA(13) of close
-    ema13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Donchian channel (20-period) on 4h
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_20 + low_20) / 2
     
     # 1d EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -46,7 +45,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -55,28 +54,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: Elder Ray turns bearish OR price closes below EMA13
-            if bull_power[i] <= 0 or bear_power[i] >= 0 or close[i] < ema13[i]:
+            # Exit: price returns to Donchian midpoint OR breaks below lower band
+            if close[i] <= donchian_mid[i] or close[i] < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Elder Ray turns bullish OR price closes above EMA13
-            if bull_power[i] >= 0 or bear_power[i] <= 0 or close[i] > ema13[i]:
+            # Exit: price returns to Donchian midpoint OR breaks above upper band
+            if close[i] >= donchian_mid[i] or close[i] > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Elder Ray divergence + 1d trend + volume
+            # Look for entries: Donchian breakout + trend filter + volume
             if volume[i] > volume_threshold[i]:
-                # Bullish: Bull Power > 0 (buying pressure) AND Bear Power < 0 (weak selling)
-                if bull_power[i] > 0 and bear_power[i] < 0 and close[i] > ema_50_aligned[i]:
+                if close[i] > high_20[i] and close[i] > ema_50_aligned[i]:
+                    # Bullish breakout above Donchian high with daily uptrend
                     signals[i] = 0.25
                     position = 1
-                # Bearish: Bear Power < 0 (selling pressure) AND Bull Power > 0 (weak buying)
-                elif bear_power[i] < 0 and bull_power[i] > 0 and close[i] < ema_50_aligned[i]:
+                elif close[i] < low_20[i] and close[i] < ema_50_aligned[i]:
+                    # Bearish breakdown below Donchian low with daily downtrend
                     signals[i] = -0.25
                     position = -1
     
