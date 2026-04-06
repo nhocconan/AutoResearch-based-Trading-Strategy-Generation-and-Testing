@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Donchian breakout with 4h trend filter and volume confirmation.
-# Goes long when price breaks above 4h Donchian(20) high with 1h volume > 1.5x average.
-# Goes short when price breaks below 4h Donchian(20) low with 1h volume > 1.5x average.
-# Uses 1d EMA trend filter to align with higher timeframe trend.
-# Target: 60-150 total trades over 4 years (15-37/year) with controlled risk.
-# Session filter: 08-20 UTC to avoid low-volume Asian session.
+# Hypothesis: 6s price action combined with weekly pivot structure and volume confirmation.
+# Uses weekly pivot points as key support/resistance levels for mean reversion and breakout signals.
+# Long when price rejects weekly S1/S2 with volume confirmation.
+# Short when price rejects weekly R1/R2 with volume confirmation.
+# Uses 6s EMA for trend filter to avoid counter-trend trades.
+# Target: 50-150 total trades over 4 years (12-37/year) with controlled risk.
 
-name = "1h_donchian20_4h_trend_vol_v1"
-timeframe = "1h"
+name = "6s_weeklypivot_volume_meanrev_v1"
+timeframe = "6s"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,34 +25,43 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h data for Donchian channels
-    df_4h = get_htf_data(prices, '4h')
-    if len(df_4h) < 20:
+    # Weekly data for pivot points
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
         return np.zeros(n)
     
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
+    # Calculate weekly pivot points from previous week
+    # Standard pivot: P = (H + L + C) / 3
+    # Support 1: S1 = (2*P) - H
+    # Resistance 1: R1 = (2*P) - L
+    # Support 2: S2 = P - (H - L)
+    # Resistance 2: R2 = P + (H - L)
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate Donchian channels (20-period high/low)
-    high_roll = pd.Series(high_4h).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low_4h).rolling(window=20, min_periods=20).min().values
+    # Weekly pivot calculations
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    range_hl_1w = high_1w - low_1w
     
-    # Align to 1h timeframe (shifted by 1 bar for completed 4h bars)
-    donch_high = align_htf_to_ltf(prices, df_4h, high_roll)
-    donch_low = align_htf_to_ltf(prices, df_4h, low_roll)
+    r1_1w = (2 * pivot_1w) - high_1w
+    s1_1w = (2 * pivot_1w) - low_1w
+    r2_1w = pivot_1w + range_hl_1w
+    s2_1w = pivot_1w - range_hl_1w
     
-    # 1d EMA for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 50:
-        return np.zeros(n)
+    # Align to 6s timeframe (shifted by 1 week for prior week's levels)
+    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    r2_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    s2_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
     
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # 6s EMA for trend filter
+    ema_fast = pd.Series(close).ewm(span=9, min_periods=9, adjust=False).mean().values
+    ema_slow = pd.Series(close).ewm(span=21, min_periods=21, adjust=False).mean().values
     
     # Volume filters
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_strong = volume > (vol_ma * 1.5)  # Strong volume for breakouts
+    vol_filter = volume > vol_ma  # Volume above average
     
     # ATR for stoploss
     tr1 = high - low
@@ -67,21 +76,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(21, n):
         # Skip if required data not available
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(ema_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or 
+            np.isnan(ema_fast[i]) or np.isnan(ema_slow[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
-                signals[i] = position * 0.20
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Session filter: 08-20 UTC
-        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
@@ -92,38 +94,53 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks below 4h Donchian low or 1d EMA turns down
-            elif close[i] < donch_low[i] or close[i] < ema_1d_aligned[i]:
+            # Exit: price breaks above R1 or trend turns down
+            elif close[i] > r1_aligned[i] or ema_fast[i] < ema_slow[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
             # Stoploss: 2 * ATR above entry
             if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks above 4h Donchian high or 1d EMA turns up
-            elif close[i] > donch_high[i] or close[i] > ema_1d_aligned[i]:
+            # Exit: price breaks below S1 or trend turns up
+            elif close[i] < s1_aligned[i] or ema_fast[i] > ema_slow[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation
-            if vol_strong[i]:
-                # Long breakout: price breaks above 4h Donchian high with strong volume
-                if close[i] > donch_high[i]:
-                    signals[i] = 0.20
-                    position = 1
-                    entry_price = close[i]
-                # Short breakdown: price breaks below 4h Donchian low with strong volume
-                elif close[i] < donch_low[i]:
-                    signals[i] = -0.20
-                    position = -1
-                    entry_price = close[i]
+            # Look for mean reversion entries at weekly support/resistance
+            if vol_filter[i]:
+                # Long setup: price near S1 or S2 with bullish rejection
+                near_s1 = abs(close[i] - s1_aligned[i]) / s1_aligned[i] < 0.002  # Within 0.2%
+                near_s2 = abs(close[i] - s2_aligned[i]) / s2_aligned[i] < 0.002
+                
+                # Short setup: price near R1 or R2 with bearish rejection
+                near_r1 = abs(close[i] - r1_aligned[i]) / r1_aligned[i] < 0.002
+                near_r2 = abs(close[i] - r2_aligned[i]) / r2_aligned[i] < 0.002
+                
+                # Rejection signals: price moving away from level after touching it
+                if i > 1:
+                    # Long rejection: was at/below support, now moving up
+                    long_rejection = ((close[i-1] <= s1_aligned[i-1] * 1.002 or close[i-1] <= s2_aligned[i-1] * 1.002) and 
+                                    close[i] > close[i-1])
+                    # Short rejection: was at/above resistance, now moving down
+                    short_rejection = ((close[i-1] >= r1_aligned[i-1] * 0.998 or close[i-1] >= r2_aligned[i-1] * 0.998) and 
+                                     close[i] < close[i-1])
+                    
+                    if long_rejection and (near_s1 or near_s2):
+                        signals[i] = 0.25
+                        position = 1
+                        entry_price = close[i]
+                    elif short_rejection and (near_r1 or near_r2):
+                        signals[i] = -0.25
+                        position = -1
+                        entry_price = close[i]
     
     return signals
