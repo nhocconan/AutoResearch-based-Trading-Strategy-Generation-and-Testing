@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian breakout with weekly EMA trend filter and volume confirmation.
+# Hypothesis: 4-hour Donchian breakout with daily EMA trend filter and volume confirmation.
 # Donchian(20) breakout captures momentum in trending markets.
-# Weekly EMA20 provides trend bias: only long when price > EMA20, short when price < EMA20.
+# EMA50 on daily provides trend bias: only long when price > EMA50, short when price < EMA50.
 # Volume confirmation (current volume > 1.5x 20-period average) ensures institutional participation.
-# Designed for 12h timeframe to target 50-150 trades over 4 years.
+# Designed for 4h timeframe to target 75-200 trades over 4 years.
 # Works in bull/bear markets via EMA-based directional bias and breakout entries.
 
-name = "12h_donchian20_1w_ema20_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema50_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,21 +25,21 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly EMA20 for trend bias
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Daily EMA50 for trend bias
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA20 on weekly closes
-    ema_20_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 20:
-        ema_20_1w[19] = np.mean(close_1w[:20])
-        for i in range(20, len(close_1w)):
-            ema_20_1w[i] = (close_1w[i] * 2 / 21) + (ema_20_1w[i-1] * 19 / 21)
+    # Calculate EMA50 on daily closes
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 / 51) + (ema_50_1d[i-1] * 49 / 51)
     
-    # Align EMA20 to 12h timeframe (shifted by 1 weekly bar for no look-ahead)
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    # Align EMA50 to 4h timeframe (shifted by 1 daily bar for no look-ahead)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Donchian Channel (20-period) on 12h data
+    # Donchian Channel (20-period) on 4h data
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     
@@ -58,7 +58,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_20_aligned[i]) or np.isnan(donchian_high[i]) or 
+        if (np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or 
             np.isnan(donchian_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -69,9 +69,9 @@ def generate_signals(prices):
         # Volume condition: current volume > 1.5x 20-period average
         volume_filter = volume[i] > vol_ma[i] * 1.5
         
-        # Trend bias: long above EMA20, short below EMA20
-        bullish_bias = close[i] > ema_20_aligned[i]
-        bearish_bias = close[i] < ema_20_aligned[i]
+        # Trend bias: long above EMA50, short below EMA50
+        bullish_bias = close[i] > ema_50_aligned[i]
+        bearish_bias = close[i] < ema_50_aligned[i]
         
         # Donchian breakout conditions
         breakout_high = close[i] > donchian_high[i-1]  # break above previous high
