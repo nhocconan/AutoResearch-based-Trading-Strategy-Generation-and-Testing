@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly EMA(20) trend filter and volume confirmation.
-# Uses weekly trend to filter counter-trend trades, volume to reduce false breakouts.
-# Designed for fewer trades (target 30-100 over 4 years) to minimize fee drag.
+# Hypothesis: Daily Donchian(10) breakout with weekly EMA(34) trend filter and volume confirmation.
+# Shorter Donchian period for more signals, weekly EMA for trend filter, volume to filter false breakouts.
+# Designed for 50-150 trades over 4 years (12-38/year) to balance opportunity and fee drag.
 # Works in bull/bear by only trading with higher timeframe trend.
 
-name = "1d_donchian20_weekly_ema20_vol_v1"
+name = "1d_donchian10_weekly_ema34_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -36,26 +36,26 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # 20-period EMA on weekly timeframe
+    # 34-period EMA on weekly timeframe (slower trend filter)
     df_weekly = get_htf_data(prices, '1w')
     close_weekly = df_weekly['close'].values
     
     ema_weekly = np.full(len(close_weekly), np.nan)
-    if len(close_weekly) >= 20:
-        ema_weekly[19] = np.mean(close_weekly[:20])
-        for i in range(20, len(close_weekly)):
-            ema_weekly[i] = (close_weekly[i] * 2 + ema_weekly[i-1] * 18) / 20
+    if len(close_weekly) >= 34:
+        ema_weekly[33] = np.mean(close_weekly[:34])
+        for i in range(34, len(close_weekly)):
+            ema_weekly[i] = (close_weekly[i] * 2 + ema_weekly[i-1] * 32) / 34
     
     ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
-    # 20-period Donchian channels on daily
+    # 10-period Donchian channels on daily (shorter for more signals)
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
-    for i in range(20, n):
-        donch_high[i] = np.max(high[i-20:i])
-        donch_low[i] = np.min(low[i-20:i])
+    for i in range(10, n):
+        donch_high[i] = np.max(high[i-10:i])
+        donch_low[i] = np.min(low[i-10:i])
     
-    # Volume filter: current volume > 1.5x average over last 20 periods
+    # Volume filter: current volume > 1.3x average over last 20 periods
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -65,7 +65,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(30, 20, 20)
+    start = max(50, 34, 20, 10)
     
     for i in range(start, n):
         # Skip if required data not available
@@ -79,7 +79,7 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        volume_filter = volume[i] > vol_ma[i] * 1.3
         
         # Check exits and stoploss
         if position == 1:  # long position
