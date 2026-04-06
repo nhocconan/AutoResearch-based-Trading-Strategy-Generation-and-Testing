@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
 """
-Experiment #12274: 1h Momentum with 4h Trend and Volume Confirmation
-Hypothesis: 1h momentum captures short-term swings while 4h EMA provides trend bias to avoid counter-trend trades. Volume filter ensures institutional participation. Session filter (08-20 UTC) reduces noise. Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+Experiment #12274: 1h Price Action with 4h Trend and Volume Confirmation
+Hypothesis: Use 4h EMA for trend direction, volume surge for confirmation, and 1h price action
+(entry near VWAP or pullback to EMA) for precise entries. This reduces false breakouts and
+captures trends in both bull and bear markets. Target: 60-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12274_1h_momentum_4h_trend_vol_v1"
+name = "exp_12274_1h_price_action_4h_trend_vol_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-MOMENTUM_PERIOD = 10
-TREND_EMA_PERIOD = 21
+TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_momentum(close, period):
-    """Calculate price momentum"""
-    return pd.Series(close).diff(period).values
+ATR_STOP_MULTIPLIER = 2.0
+SESSION_START_HOUR = 8
+SESSION_END_HOUR = 20
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -37,6 +36,14 @@ def calculate_atr(high, low, close, period):
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
+
+def calculate_vwap(high, low, close, volume):
+    """Calculate VWAP"""
+    typical_price = (high + low + close) / 3.0
+    vwap_num = np.cumsum(typical_price * volume)
+    vwap_den = np.cumsum(volume)
+    vwap = np.where(vwap_den != 0, vwap_num / vwap_den, 0.0)
+    return vwap
 
 def generate_signals(prices):
     n = len(prices)
@@ -56,9 +63,12 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    momentum = calculate_momentum(close, MOMENTUM_PERIOD)
+    vwap = calculate_vwap(high, low, close, volume)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Precompute session hours
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,9 +76,13 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(MOMENTUM_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
+        # Session filter: 8-20 UTC
+        hour = hours[i]
+        in_session = SESSION_START_HOUR <= hour <= SESSION_END_HOUR
+        
         # Skip if 4h EMA not available
         if np.isnan(ema_4h_aligned[i]):
             if position != 0:
@@ -89,10 +103,6 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Momentum conditions
-        mom_up = momentum[i] > 0
-        mom_down = momentum[i] < 0
-        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
@@ -100,9 +110,15 @@ def generate_signals(prices):
         uptrend_4h = close[i] > ema_4h_aligned[i]
         downtrend_4h = close[i] < ema_4h_aligned[i]
         
+        # Entry conditions: price near VWAP or pullback to EMA(20)
+        ema_20 = calculate_ema(close, 20)[i] if i >= 20 else np.nan
+        near_vwap = abs(close[i] - vwap[i]) < (0.5 * atr[i]) if not np.isnan(vwap[i]) else False
+        pullback_to_ema = (close[i] > ema_20 and close[i] < ema_20 + atr[i]) if not np.isnan(ema_20) else False
+        price_condition = near_vwap or pullback_to_ema
+        
         # Entry conditions
-        long_entry = mom_up and volume_ok and uptrend_4h
-        short_entry = mom_down and volume_ok and downtrend_4h
+        long_entry = in_session and volume_ok and uptrend_4h and price_condition
+        short_entry = in_session and volume_ok and downtrend_4h and price_condition
         
         # Generate signals
         if position == 0:
