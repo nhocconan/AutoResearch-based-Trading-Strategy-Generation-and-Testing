@@ -3,46 +3,67 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1d trend filter and volume confirmation
-# Williams %R identifies overbought/oversold conditions, 1d EMA provides trend filter,
-# volume spike confirms momentum. Works in bull/bear by fading extremes in trend direction.
-# Target: 80-160 trades over 4 years (20-40/year) to balance opportunity and cost.
+# Hypothesis: 6h Elder Ray Index (Bull/Bear Power) with daily ADX regime filter
+# Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+# ADX > 25 = trending (follow Elder Ray), ADX < 20 = ranging (fade Elder Ray extremes)
+# Works in bull/bear because it adapts to regime: trend following in trends, mean reversion in ranges.
+# Target: 80-180 trades over 4 years (20-45/year) to balance signal quality and frequency.
 
-name = "exp_12991_6h_williamsr_1d_trend_vol_v1"
+name = "exp_12991_6h_elder_ray_adx_regime_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-WILLIAMS_PERIOD = 14
-EMA_FAST_PERIOD = 9
-EMA_SLOW_PERIOD = 21
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-WILLIAMS_OVERBOUGHT = -20
-WILLIAMS_OVERSOLD = -80
+EMA_PERIOD = 13
+ADX_PERIOD = 14
+ADX_TREND_THRESHOLD = 25
+ADX_RANGE_THRESHOLD = 20
+BULL_BEAR_THRESHOLD = 0.0  # Zero line for Elder Ray
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_williams_r(high, low, close, period):
-    """Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    return williams_r.fillna(0).values
-
-def calculate_ema(values, period):
-    """EMA calculation"""
-    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_ema(close, period):
+    """Calculate EMA with proper Wilder's smoothing"""
+    return pd.Series(close).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
-    """ATR using Wilder's smoothing"""
+    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
+
+def calculate_adx(high, low, close, period):
+    """Calculate ADX (Average Directional Index)"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    # Smooth TR, DM+, DM-
+    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    return adx
 
 def generate_signals(prices):
     n = len(prices)
@@ -52,25 +73,30 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily EMAs for trend filter
+    # Calculate daily indicators
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
     close_d = df_daily['close'].values
-    ema_fast_d = calculate_ema(close_d, EMA_FAST_PERIOD)
-    ema_slow_d = calculate_ema(close_d, EMA_SLOW_PERIOD)
     
-    # Trend: 1 = uptrend (fast > slow), -1 = downtrend (fast < slow)
-    trend_d = np.where(ema_fast_d > ema_slow_d, 1, -1)
+    # Daily EMA for Elder Ray
+    ema_d = calculate_ema(close_d, EMA_PERIOD)
     
-    # Align trend to 6h timeframe
-    trend_aligned = align_htf_to_ltf(prices, df_daily, trend_d)
+    # Daily Bull Power and Bear Power
+    bull_power = high_d - ema_d
+    bear_power = ema_d - low_d
     
-    # Calculate 6h indicators
+    # Daily ADX
+    adx_d = calculate_adx(high_d, low_d, close_d, ADX_PERIOD)
+    
+    # Align to 6h timeframe
+    bull_power_aligned = align_htf_to_ltf(prices, df_daily, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_daily, bear_power)
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx_d)
+    
+    # Calculate 6h ATR for stoploss
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
-    
-    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -79,11 +105,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WILLIAMS_PERIOD, EMA_SLOW_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_PERIOD, ADX_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if trend not available
-        if np.isnan(trend_aligned[i]):
+        # Skip if indicators not available
+        if np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(adx_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -102,35 +128,49 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Determine regime and signal
+        adx = adx_aligned[i]
+        bull = bull_power_aligned[i]
+        bear = bear_power_aligned[i]
         
-        # Williams %R signals with trend filter
-        williams_oversold = williams_r[i] <= WILLIAMS_OVERSOLD
-        williams_overbought = williams_r[i] >= WILLIAMS_OVERBOUGHT
+        if adx > ADX_TREND_THRESHOLD:  # Trending regime
+            # Follow Elder Ray: long when bull power positive, short when bear power positive
+            if bull > BULL_BEAR_THRESHOLD and bear <= BULL_BEAR_THRESHOLD:
+                signal_val = SIGNAL_SIZE
+            elif bear > BULL_BEAR_THRESHOLD and bull <= BULL_BEAR_THRESHOLD:
+                signal_val = -SIGNAL_SIZE
+            else:
+                signal_val = 0.0
+        elif adx < ADX_RANGE_THRESHOLD:  # Ranging regime
+            # Fade Elder Ray extremes: short when bull power too high, long when bear power too high
+            if bull > 0 and bear <= 0:  # Overbought - fade
+                signal_val = -SIGNAL_SIZE
+            elif bear > 0 and bull <= 0:  # Oversold - fade
+                signal_val = SIGNAL_SIZE
+            else:
+                signal_val = 0.0
+        else:  # Transition zone (20 <= ADX <= 25)
+            signal_val = 0.0
         
-        # Long: oversold in uptrend
-        long_signal = williams_oversold and (trend_aligned[i] == 1) and volume_ok
-        # Short: overbought in downtrend
-        short_signal = williams_overbought and (trend_aligned[i] == -1) and volume_ok
-        
-        # Generate signals
-        if position == 0:
-            if long_signal:
+        # Handle position changes
+        if signal_val == 0.0:
+            signals[i] = 0.0
+            position = 0
+        elif signal_val > 0:  # Long signal
+            if position != 1:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_signal:
+            else:
+                signals[i] = SIGNAL_SIZE
+        else:  # Short signal
+            if position != -1:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
-                signals[i] = 0.0
-        elif position == 1:
-            signals[i] = SIGNAL_SIZE
-        elif position == -1:
-            signals[i] = -SIGNAL_SIZE
+                signals[i] = -SIGNAL_SIZE
     
     return signals
