@@ -3,26 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13967_6d_1d_pivot_breakout_v1"
-timeframe = "6h"
+name = "exp_13968_12h_donchian20_1w_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
-# Hypothesis: 6h breakout in direction of 1d pivot levels (R4/S4) with volume confirmation.
-# Uses 1d Camarilla pivot levels: R4/S4 as strong breakout levels, R3/S3 as fade levels.
-# Long when price breaks above R4 with volume > 1.5x average, short when breaks below S4.
-# Exit when price returns to R3/S3 or opposite pivot level is touched.
+# Hypothesis: 12h Donchian(20) breakout with weekly trend filter and volume confirmation.
+# Long when price breaks above 20-period high with volume > 1.5x average and weekly close > weekly open.
+# Short when price breaks below 20-period low with volume > 1.5x average and weekly close < weekly open.
+# Exit when price returns to the opposite Donchian band or volatility drops.
 # Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-# Works in bull (breaks above R4 with volume) and bear (breaks below S4 with volume).
-
-def calculate_pivots(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    pivot = (high + low + close) / 3
-    range_ = high - low
-    r4 = close + range_ * 1.1 / 2
-    r3 = close + range_ * 1.1 / 4
-    s3 = close - range_ * 1.1 / 4
-    s4 = close - range_ * 1.1 / 2
-    return r4, r3, s3, s4
+# Works in bull (breaks above with volume) and bear (breaks below with volume).
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -39,27 +29,27 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for pivot calculation ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for trend filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate weekly trend: bullish if weekly close > weekly open
+    weekly_open = df_1w['open'].values
+    weekly_close = df_1w['close'].values
+    weekly_bullish = weekly_close > weekly_open
     
-    r4_1d, r3_1d, s3_1d, s4_1d = calculate_pivots(high_1d, low_1d, close_1d)
+    # Align weekly trend to 12h timeframe
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish.astype(float))
     
-    # Align pivot levels to 6h timeframe
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
-    
-    # 6h data for breakout detection, ATR, and volume
+    # 12h data for Donchian channels, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Donchian channels (20-period)
+    lookback = 20
+    donchian_high = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    donchian_low = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, 14)
@@ -73,12 +63,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20) + 1
+    start = max(lookback, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(r4_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or \
-           np.isnan(s4_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(volume_ma[i]) or np.isnan(atr[i]) or np.isnan(weekly_bullish_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -103,21 +93,17 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * 1.5)
         
-        # Breakout signals from pivot levels
-        breakout_r4 = close[i] > r4_aligned[i-1]  # break above R4
-        breakdown_s4 = close[i] < s4_aligned[i-1]  # break below S4
+        # Breakout signals from Donchian channels
+        breakout_high = close[i] > donchian_high[i-1]  # break above upper band
+        breakdown_low = close[i] < donchian_low[i-1]   # break below lower band
         
-        # Mean reversion signals (fade at R3/S3)
-        fade_r3 = close[i] < r3_aligned[i] and close[i-1] >= r3_aligned[i-1]  # cross below R3
-        fade_s3 = close[i] > s3_aligned[i] and close[i-1] <= s3_aligned[i-1]  # cross above S3
+        # Exit signals (return to opposite band)
+        exit_long = close[i] < donchian_low[i]
+        exit_short = close[i] > donchian_high[i]
         
-        # Entry signals
-        long_signal = breakout_r4 and volume_ok
-        short_signal = breakdown_s4 and volume_ok
-        
-        # Exit signals (mean reversion or opposite breakout)
-        exit_long = fade_r3 or breakdown_s4
-        exit_short = fade_s3 or breakout_r4
+        # Entry signals with weekly trend filter and volume
+        long_signal = breakout_high and weekly_bullish_aligned[i] and volume_ok
+        short_signal = breakdown_low and (not weekly_bullish_aligned[i]) and volume_ok
         
         # Generate signals
         if position == 0:
@@ -134,14 +120,14 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on mean reversion or opposite breakout
+            # Exit long on return to lower band or opposite breakout
             if exit_long:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short on mean reversion or opposite breakout
+            # Exit short on return to upper band or opposite breakout
             if exit_short:
                 signals[i] = 0.0
                 position = 0
