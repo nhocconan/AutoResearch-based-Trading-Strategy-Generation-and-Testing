@@ -1,61 +1,49 @@
 #!/usr/bin/env python3
 """
-1d Donchian breakout with weekly trend filter and volume confirmation
-Hypothesis: Daily Donchian(20) breakouts capture significant momentum moves.
-Weekly EMA20 filters trend direction to avoid counter-trend trades.
-Volume confirms institutional participation. Works in both bull (breakout above upper band)
-and bear (breakdown below lower band) markets.
-Target: 30-100 total trades over 4 years (7-25/year).
+1d Donchian(20) breakout + 1w EMA50 trend filter + volume confirmation
+Hypothesis: Donchian breakouts capture trend continuation with institutional participation.
+In bull markets: buy when price breaks above 20-day high and weekly trend is up.
+In bear markets: sell when price breaks below 20-day low and weekly trend is down.
+1w EMA50 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength.
+Works in both bull (buy strength) and bear (sell weakness). Target: 50-100 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_weekly_trend_volume_v1"
+name = "1d_donchian20_weekly_trend_volume_v2"
 timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for trend filter (once before loop)
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1w data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Weekly EMA20 for trend filter
-    close_weekly = df_weekly['close'].values
-    ema20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False, min_periods=20).mean().values
-    ema20_weekly_prev = np.roll(ema20_weekly, 1)
-    ema20_weekly_prev[0] = ema20_weekly[0]
-    ema20_rising = ema20_weekly > ema20_weekly_prev
-    ema20_falling = ema20_weekly < ema20_weekly_prev
-    ema20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
-    ema20_rising_aligned = align_htf_to_ltf(prices, df_weekly, ema20_rising)
-    ema20_falling_aligned = align_htf_to_ltf(prices, df_weekly, ema20_falling)
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_prev = np.roll(ema50_1w, 1)
+    ema50_1w_prev[0] = ema50_1w[0]
+    ema50_rising = ema50_1w > ema50_1w_prev
+    ema50_falling = ema50_1w < ema50_1w_prev
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ema50_rising_aligned = align_htf_to_ltf(prices, df_1w, ema50_rising)
+    ema50_falling_aligned = align_htf_to_ltf(prices, df_1w, ema50_falling)
     
-    # Daily data
+    # 1d data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     # Donchian channels (20-period)
-    def rolling_max(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.max(arr[i-window+1:i+1])
-        return res
-    
-    def rolling_min(arr, window):
-        res = np.full_like(arr, np.nan)
-        for i in range(window-1, len(arr)):
-            res[i] = np.min(arr[i-window+1:i+1])
-        return res
-    
-    upper_channel = rolling_max(high, 20)
-    lower_channel = rolling_min(low, 20)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -65,47 +53,50 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 50  # For Donchian and weekly EMA
+    start = 50  # For Donchian and EMA50
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(ema20_weekly_aligned[i]) or 
-            np.isnan(ema20_rising_aligned[i]) or np.isnan(ema20_falling_aligned[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(vol_ema[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(ema50_rising_aligned[i]) or np.isnan(ema50_falling_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: opposite breakout or stoploss
+        # Check exits: reverse signal or stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower channel OR stoploss
-            if (close[i] <= lower_channel[i] or 
-                close[i] <= entry_price - 2.5 * (high[i] - low[i])):
+            # Exit: price breaks below 20-day low OR stoploss
+            if (close[i] <= low_20[i] or 
+                close[i] <= entry_price - 2.0 * (high[i] - low[i])):  # ATR proxy
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above upper channel OR stoploss
-            if (close[i] >= upper_channel[i] or 
-                close[i] >= entry_price + 2.5 * (high[i] - low[i])):
+            # Exit: price breaks above 20-day high OR stoploss
+            if (close[i] >= high_20[i] or 
+                close[i] >= entry_price + 2.0 * (high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
             # Look for entries: Donchian breakout + trend + volume
-            breakout_up = close[i] > upper_channel[i-1]  # Break above previous upper channel
-            breakout_down = close[i] < lower_channel[i-1]  # Break below previous lower channel
-            volume_filter = volume[i] > vol_ema[i] * 1.5
+            bull_entry = (close[i] > high_20[i] and 
+                         ema50_rising_aligned[i] and 
+                         volume[i] > vol_ema[i] * 1.5)
+            bear_entry = (close[i] < low_20[i] and 
+                         ema50_falling_aligned[i] and 
+                         volume[i] > vol_ema[i] * 1.5)
             
-            if breakout_up and ema20_rising_aligned[i] and volume_filter:
+            if bull_entry:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif breakout_down and ema20_falling_aligned[i] and volume_filter:
+            elif bear_entry:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
