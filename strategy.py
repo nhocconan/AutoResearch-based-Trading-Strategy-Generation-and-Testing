@@ -3,90 +3,89 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel during bullish 12h period with volume > 1.5x 20-period average.
-# Short when price breaks below lower Donchian channel during bearish 12h period with volume confirmation.
-# Uses 12h trend filter to avoid counter-trend trades and increase trade frequency vs daily.
-# Target: 100-200 total trades over 4 years (25-50/year) to stay within optimal range.
+# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation.
+# Long when RSI < 30 and price > 4h EMA50 with volume > 1.5x average.
+# Short when RSI > 70 and price < 4h EMA50 with volume > 1.5x average.
+# Uses 4h EMA50 for trend direction to avoid counter-trend trades.
+# Target: 75-150 total trades over 4 years (19-38/year) to stay within optimal range.
 
-name = "4h_donchian20_12h_trend_vol_v1"
-timeframe = "4h"
+name = "1h_rsi30_70_4h_ema50_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price and volume data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
+    # RSI(14)
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean()
+    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean()
+    rs = gain_ma / loss_ma.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.fillna(50).values
     
-    # 12h trend filter: bullish/bearish 12h period based on close vs open
-    df_12h = get_htf_data(prices, '12h')
-    twelve_h_open = df_12h['open'].values
-    twelve_h_close = df_12h['close'].values
-    twelve_h_bullish = twelve_h_close > twelve_h_open  # True for bullish 12h period
-    twelve_h_bearish = twelve_h_close < twelve_h_open   # True for bearish 12h period
-    twelve_h_bullish_aligned = align_htf_to_ltf(prices, df_12h, twelve_h_bullish)
-    twelve_h_bearish_aligned = align_htf_to_ltf(prices, df_12h, twelve_h_bearish)
+    # 4h EMA50 trend filter
+    df_4h = get_htf_data(prices, '4h')
+    ema_4h = pd.Series(df_4h['close'].values).ewm(span=50, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
     # Volume filter: current volume > 1.5x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Skip if 12h trend data not available
-        if np.isnan(twelve_h_bullish_aligned[i]) or np.isnan(twelve_h_bearish_aligned[i]):
+    for i in range(50, n):
+        # Skip if 4h EMA data not available
+        if np.isnan(ema_4h_aligned[i]):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        volume_filter = volume[i] > volume_ma[i] * 1.5
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price drops below lower Donchian or 12h turns bearish
-            if (low[i] <= lower[i] or 
-                twelve_h_bearish_aligned[i]):
+            # Exit: RSI > 50 or price crosses below 4h EMA50
+            if (rsi[i] > 50 or 
+                close[i] < ema_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # short position
-            # Exit: price rises above upper Donchian or 12h turns bullish
-            if (high[i] >= upper[i] or 
-                twelve_h_bullish_aligned[i]):
+            # Exit: RSI < 50 or price crosses above 4h EMA50
+            if (rsi[i] < 50 or 
+                close[i] > ema_4h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:
-            # Look for entries with volume confirmation and 12h trend filter
+            # Look for entries with volume confirmation and RSI extremes
             if volume_filter:
-                # Long: break above upper Donchian during bullish 12h period
-                if (high[i] > upper[i] and 
-                    twelve_h_bullish_aligned[i]):
-                    signals[i] = 0.25
+                # Long: RSI < 30 and price > 4h EMA50
+                if (rsi[i] < 30 and 
+                    close[i] > ema_4h_aligned[i]):
+                    signals[i] = 0.20
                     position = 1
-                # Short: break below lower Donchian during bearish 12h period
-                elif (low[i] < lower[i] and 
-                      twelve_h_bearish_aligned[i]):
-                    signals[i] = -0.25
+                # Short: RSI > 70 and price < 4h EMA50
+                elif (rsi[i] > 70 and 
+                      close[i] < ema_4h_aligned[i]):
+                    signals[i] = -0.20
                     position = -1
     
     return signals
