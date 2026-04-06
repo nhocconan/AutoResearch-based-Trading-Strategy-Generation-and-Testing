@@ -3,43 +3,25 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams Alligator + Elder Ray combination
-# Uses Alligator (jaw/teeth/lips) for trend direction and Elder Ray (bull/bear power) for momentum confirmation.
-# Works in both bull/bear: Alligator filters sideways markets, Elder Ray captures strength in trending moves.
-# Target: 60-120 trades over 4 years (15-30/year) with 6h timeframe to balance frequency and reliability.
+# Hypothesis: 12-hour Donchian breakout with volume confirmation and ATR stoploss
+# Donchian(20) provides clear breakout levels that work in both trending and ranging markets.
+# Volume confirmation filters false breakouts. ATR-based stoploss manages risk.
+# Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag and ensure statistical validity.
 
-name = "exp_12911_6h_alligator_elderay_v1"
-timeframe = "6h"
+name = "exp_12912_12h_donchian20_1d_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-ALLIGATOR_PERIOD_JAW = 13
-ALLIGATOR_PERIOD_TEETH = 8
-ALLIGATOR_PERIOD_LIPS = 5
-ELDER_RAY_PERIOD = 13
+DONCHIAN_PERIOD = 20
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_alligator(median_price, period_jaw, period_teeth, period_lips):
-    """Williams Alligator: smoothed medians with future shift"""
-    jaw = pd.Series(median_price).rolling(window=period_jaw*2, min_periods=period_jaw*2).mean()
-    jaw = jaw.shift(period_jaw//2)  # shift by half period
-    teeth = pd.Series(median_price).rolling(window=period_teeth*2, min_periods=period_teeth*2).mean()
-    teeth = teeth.shift(period_teeth//2)
-    lips = pd.Series(median_price).rolling(window=period_lips*2, min_periods=period_lips*2).mean()
-    lips = lips.shift(period_lips//2)
-    return jaw.values, teeth.values, lips.values
-
-def calculate_elderray(high, low, close, period):
-    """Elder Ray: Bull Power = High - EMA, Bear Power = Low - EMA"""
-    ema = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean()
-    bull_power = high - ema.values
-    bear_power = low - ema.values
-    return bull_power, bear_power
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
-    """ATR using Wilder's smoothing"""
+    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -47,38 +29,46 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load daily data ONCE before loop for higher timeframe context
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate 1d indicators for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate daily indicators for trend filter
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    close_d = df_daily['close'].values
+    volume_d = df_daily['volume'].values
     
-    # 1d Elder Ray for trend bias
-    bull_power_1d, bear_power_1d = calculate_elderray(high_1d, low_1d, close_1d, ELDER_RAY_PERIOD)
-    trend_bias = bull_power_1d - bear_power_1d  # Positive = bullish bias
-    trend_bias_aligned = align_htf_to_ltf(prices, df_1d, trend_bias)
+    # Daily Donchian for trend filter
+    donchian_upper_d, donchian_lower_d = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
     
-    # Calculate 6h indicators
+    # Align daily indicators to 12h timeframe
+    donchian_upper_d_aligned = align_htf_to_ltf(prices, df_daily, donchian_upper_d)
+    donchian_lower_d_aligned = align_htf_to_ltf(prices, df_daily, donchian_lower_d)
+    
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Median price for Alligator
-    median_price = (high + low) / 2.0
-    jaw, teeth, lips = calculate_alligator(median_price, ALLIGATOR_PERIOD_JAW, ALLIGATOR_PERIOD_TEETH, ALLIGATOR_PERIOD_LIPS)
+    # 12h Donchian for entry signals
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
-    # 6h Elder Ray for entry timing
-    bull_power, bear_power = calculate_elderray(high, low, close, ELDER_RAY_PERIOD)
+    # 12h volume confirmation
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # ATR for stoploss
+    # 12h ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -87,11 +77,19 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ALLIGATOR_PERIOD_JAW*2, ELDER_RAY_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if Alligator not ready
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
+        # Skip if daily Donchian not available
+        if np.isnan(donchian_upper_d_aligned[i]) or np.isnan(donchian_lower_d_aligned[i]):
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Skip if 12h indicators not available
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -110,27 +108,25 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Alligator condition: aligned jaws (trending market)
-        # Jaw > Teeth > Lips = uptrend, Jaw < Teeth < Lips = downtrend
-        alligator_long = jaw[i] > teeth[i] and teeth[i] > lips[i]
-        alligator_short = jaw[i] < teeth[i] and teeth[i] < lips[i]
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Elder Ray condition: momentum confirmation
-        elder_long = bull_power[i] > 0 and bear_power[i] < 0  # Strong bull power, weak bear power
-        elder_short = bull_power[i] < 0 and bear_power[i] > 0  # Strong bear power, weak bull power
+        # Trend filter: price above/below daily Donchian middle
+        price_above_daily_mid = close[i] > (donchian_upper_d_aligned[i] + donchian_lower_d_aligned[i]) / 2
+        price_below_daily_mid = close[i] < (donchian_upper_d_aligned[i] + donchian_lower_d_aligned[i]) / 2
         
-        # Trend filter from 1d: only trade in direction of higher timeframe bias
-        trend_filter_long = trend_bias_aligned[i] > 0
-        trend_filter_short = trend_bias_aligned[i] < 0
+        # Breakout signals with volume confirmation and trend filter
+        breakout_long = volume_ok and close[i] >= donchian_upper[i] and price_above_daily_mid
+        breakout_short = volume_ok and close[i] <= donchian_lower[i] and price_below_daily_mid
         
         # Generate signals
         if position == 0:
-            if alligator_long and elder_long and trend_filter_long:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif alligator_short and elder_short and trend_filter_short:
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
