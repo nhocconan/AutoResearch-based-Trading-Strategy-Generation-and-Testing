@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian breakout with 1-day trend filter and volume confirmation
-# Long when price breaks above 20-period high AND 1-day EMA(20) rising AND volume above 20-period average
-# Short when price breaks below 20-period low AND 1-day EMA(20) falling AND volume above 20-period average
-# Uses daily trend filter to avoid counter-trend trades and volume confirmation to reduce false breakouts.
-# Target: 50-150 total trades over 4 years (12-37/year) to stay within optimal range.
+# Hypothesis: 4h Donchian(20) breakout with 1d volume confirmation and 1w trend filter
+# Long when price breaks above 4h 20-bar high AND daily volume > 1.5x 20-bar avg AND weekly close > weekly EMA(20)
+# Short when price breaks below 4h 20-bar low AND daily volume > 1.5x 20-bar avg AND weekly close < weekly EMA(20)
+# Uses volume to confirm breakout strength and weekly trend to avoid counter-trend trades.
+# Target: 100-200 total trades over 4 years (25-50/year) to stay within optimal range.
 
-name = "12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_vol_1w_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,63 +24,80 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
+    # Donchian Channel (20-period) on 4h
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    vol_series = pd.Series(volume)
     
     donchian_high = high_series.rolling(window=20, min_periods=20).max()
     donchian_low = low_series.rolling(window=20, min_periods=20).min()
-    vol_ma = vol_series.rolling(window=20, min_periods=20).mean()
     
-    # Daily trend filter: EMA(20) on daily close
+    # Volume confirmation: 20-period average volume
+    volume_series = pd.Series(volume)
+    vol_avg = volume_series.rolling(window=20, min_periods=20).mean()
+    
+    # Weekly trend filter: EMA(20) on weekly close
+    df_1w = get_htf_data(prices, '1w')
+    weekly_close = df_1w['close'].values
+    weekly_close_series = pd.Series(weekly_close)
+    weekly_ema = weekly_close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    
+    # Daily volume filter (for confirmation)
     df_1d = get_htf_data(prices, '1d')
-    daily_close = df_1d['close'].values
-    daily_close_series = pd.Series(daily_close)
-    daily_ema = daily_close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
-    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
+    daily_volume = df_1d['volume'].values
+    daily_volume_series = pd.Series(daily_volume)
+    daily_vol_avg = daily_volume_series.rolling(window=20, min_periods=20).mean()
+    daily_vol_avg_aligned = align_htf_to_ltf(prices, df_1d, daily_vol_avg.values)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        # Skip if daily EMA data not available
-        if np.isnan(daily_ema_aligned[i]):
+        # Skip if required data not available
+        if (np.isnan(weekly_ema_aligned[i]) or 
+            np.isnan(daily_vol_avg_aligned[i]) or
+            np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or
+            np.isnan(vol_avg[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: reverse position
+        # Volume confirmation: current volume > 1.5x average
+        vol_confirm = volume[i] > 1.5 * vol_avg[i]
+        daily_vol_confirm = daily_volume[i] > 1.5 * daily_vol_avg_aligned[i]
+        
+        # Check exits
         if position == 1:  # long position
-            # Exit: price breaks below 20-period low or daily EMA turns bearish
+            # Exit: price breaks below 20-bar low or weekly trend turns bearish
             if (close[i] <= donchian_low[i] or 
-                daily_close[i] < daily_ema_aligned[i]):
+                weekly_close[i] < weekly_ema_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above 20-period high or daily EMA turns bullish
+            # Exit: price breaks above 20-bar high or weekly trend turns bullish
             if (close[i] >= donchian_high[i] or 
-                daily_close[i] > daily_ema_aligned[i]):
+                weekly_close[i] > weekly_ema_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with daily trend filter and volume confirmation
-            # Long: price breaks above 20-period high AND daily close above daily EMA AND volume above average
+            # Look for entries with volume confirmation and weekly trend filter
+            # Long: price breaks above 20-bar high AND volume confirms AND weekly close above weekly EMA
             if (close[i] > donchian_high[i] and 
-                daily_close[i] > daily_ema_aligned[i] and
-                volume[i] > vol_ma[i]):
+                vol_confirm and daily_vol_confirm and
+                weekly_close[i] > weekly_ema_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 20-period low AND daily close below daily EMA AND volume above average
+            # Short: price breaks below 20-bar low AND volume confirms AND weekly close below weekly EMA
             elif (close[i] < donchian_low[i] and 
-                  daily_close[i] < daily_ema_aligned[i] and
-                  volume[i] > vol_ma[i]):
+                  vol_confirm and daily_vol_confirm and
+                  weekly_close[i] < weekly_ema_aligned[i]):
                 signals[i] = -0.25
                 position = -1
     
