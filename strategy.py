@@ -9,13 +9,12 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 20
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 30  # Max 30 bars (5 days)
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -38,7 +37,7 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend filter
+    # Calculate daily EMA
     close_daily = df_daily['close'].values
     ema_daily = calculate_ema(close_daily, EMA_PERIOD)
     ema_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
@@ -50,11 +49,13 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Donchian channels
-    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -69,7 +70,7 @@ def generate_signals(prices):
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if EMA not available
+        # Skip if daily EMA not available
         if np.isnan(ema_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
@@ -91,23 +92,12 @@ def generate_signals(prices):
                 bars_since_entry = 0
                 continue
         
-        # Time-based exit to prevent overtrading
-        if bars_since_entry >= MAX_HOLD_BARS:
-            signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
-            continue
-        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below daily EMA
-        uptrend = close[i] > ema_aligned[i]
-        downtrend = close[i] < ema_aligned[i]
-        
-        # Donchian breakout with volume and trend confirmation
-        breakout_long = volume_ok and uptrend and close[i] >= donchian_high[i]
-        breakout_short = volume_ok and downtrend and close[i] <= donchian_low[i]
+        # Donchian breakout with daily EMA filter
+        breakout_long = volume_ok and (high[i] >= highest_high[i]) and (close[i] > ema_aligned[i])
+        breakout_short = volume_ok and (low[i] <= lowest_low[i]) and (close[i] < ema_aligned[i])
         
         # Generate signals
         if position == 0:
