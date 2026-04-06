@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h Donchian breakout with 1d EMA filter and volume concentration.
+12h Donchian breakout with 1d EMA filter and volume concentration.
 Hypothesis: Breakouts aligned with daily trend (EMA50) and volume concentration
 capture medium-term trends while avoiding false breakouts. Works in bull (breakouts)
 and bear (breakdowns) with proper filtering. Target: 75-150 trades over 4 years.
@@ -10,8 +10,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14280_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_14282_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period):
@@ -41,7 +41,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, 50)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 4h data
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -127,4 +127,3 @@ def generate_signals(prices):
                 signals[i] = -0.30
     
     return signals
-</>
