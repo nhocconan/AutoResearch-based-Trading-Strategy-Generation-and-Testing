@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour weekly Donchian(20) breakout with daily volume confirmation.
-# Uses weekly Donchian channels to capture long-term trends, with daily volume spikes to filter.
-# Designed for 12h timeframe to target 50-150 trades over 4 years with minimal false signals.
-# Works in bull/bear markets via trend-following breakouts and volume confirmation.
+# Hypothesis: 1-day Donchian(20) breakout with 1-week EMA200 trend and volume confirmation.
+# Uses 1-week EMA200 to establish trend bias (long above EMA200, short below EMA200).
+# Breakouts in direction of EMA trend with volume capture institutional moves.
+# Designed for 1d timeframe to target 30-100 trades over 4 years with proven structure.
+# Works in bull/bear markets via EMA-based directional bias and volume confirmation.
 
-name = "12h_weekly_donchian20_1d_vol_v1"
-timeframe = "12h"
+name = "1d_donchian20_1w_ema200_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:  # Need sufficient data for weekly calculation
+    if n < 100:
         return np.zeros(n)
     
     # Price and volume data
@@ -23,222 +24,95 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly Donchian channel (20-period)
+    # 1-week EMA200 for trend bias
     df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate weekly Donchian channels
-    highest_high_1w = np.full(len(high_1w), np.nan)
-    lowest_low_1w = np.full(len(low_1w), np.nan)
+    # Calculate EMA200 on weekly closes
+    ema_200_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 200:
+        ema_200_1w[199] = np.mean(close_1w[:200])
+        for i in range(200, len(close_1w)):
+            ema_200_1w[i] = (close_1w[i] * 2 / 201) + (ema_200_1w[i-1] * 199 / 201)
     
-    for i in range(19, len(high_1w)):
-        highest_high_1w[i] = np.max(high_1w[i-19:i+1])
-        lowest_low_1w[i] = np.min(low_1w[i-19:i+1])
+    # Align EMA200 to 1d timeframe (shifted by 1 week for no look-ahead)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
-    # Align weekly Donchian to 12h timeframe (shifted by 1 week for no look-ahead)
-    highest_high_1w_aligned = align_htf_to_ltf(prices, df_1w, highest_high_1w)
-    lowest_low_1w_aligned = align_htf_to_ltf(prices, df_1w, lowest_low_1w)
+    # 1-day Donchian channel (20-period)
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     
-    # Daily volume confirmation: volume > 2x 20-day average
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
+    for i in range(19, n):
+        highest_high[i] = np.max(high[i-19:i+1])
+        lowest_low[i] = np.min(low[i-19:i+1])
     
-    # Calculate 20-day volume average
-    vol_avg_20d = np.full(len(volume_1d), np.nan)
-    for i in range(19, len(volume_1d)):
-        vol_avg_20d[i] = np.mean(volume_1d[i-19:i+1])
-    
-    # Align daily volume average to 12h timeframe (shifted by 1 day)
-    vol_avg_20d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20d)
+    # Volume confirmation: 1d volume > 1.5x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(200, n):  # Start after sufficient warmup
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(highest_high_1w_aligned[i]) or 
-            np.isnan(lowest_low_1w_aligned[i]) or 
-            np.isnan(vol_avg_20d_aligned[i])):
+        if (np.isnan(ema_200_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition: current daily volume > 2x 20-day average
-        # Get current daily volume (need to align current day's volume)
-        current_day_volume = volume_1d[np.searchsorted(df_1d.index, prices.index[i])] if i < len(prices) else volume_1d[-1]
-        # Simplified: use current 12h volume scaled to daily approximation
-        volume_filter = volume[i] > (vol_avg_20d_aligned[i] * 2) if not np.isnan(vol_avg_20d_aligned[i]) else False
+        # Volume condition: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > vol_ma[i] * 1.5
+        
+        # Trend bias: long above EMA200, short below EMA200
+        bullish_bias = close[i] > ema_200_aligned[i]
+        bearish_bias = close[i] < ema_200_aligned[i]
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price below weekly support or stoploss (2x ATR approximation)
-            donch_width = highest_high_1w_aligned[i] - lowest_low_1w_aligned[i]
+            # Exit: price below EMA200 or stoploss (2x ATR approximation using Donchian width)
+            donch_width = highest_high[i] - lowest_low[i]
             if donch_width > 0:
                 stop_loss_level = entry_price - 2.0 * donch_width
             else:
-                stop_loss_level = entry_price - 2.0 * (highest_high_1w_aligned[i] - lowest_low_1w_aligned[i] + 0.001)
+                stop_loss_level = entry_price - 2.0 * (highest_high[i] - lowest_low[i] + 0.001)
             
-            if (close[i] < lowest_low_1w_aligned[i] or 
+            if (close[i] < ema_200_aligned[i] or 
                 close[i] < stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price above weekly resistance or stoploss
-            donch_width = highest_high_1w_aligned[i] - lowest_low_1w_aligned[i]
+            # Exit: price above EMA200 or stoploss
+            donch_width = highest_high[i] - lowest_low[i]
             if donch_width > 0:
                 stop_loss_level = entry_price + 2.0 * donch_width
             else:
-                stop_loss_level = entry_price + 2.0 * (highest_high_1w_aligned[i] - lowest_low_1w_aligned[i] + 0.001)
+                stop_loss_level = entry_price + 2.0 * (highest_high[i] - lowest_low[i] + 0.001)
             
-            if (close[i] > highest_high_1w_aligned[i] or 
+            if (close[i] > ema_200_aligned[i] or 
                 close[i] > stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation
+            # Look for entries in direction of EMA trend
             if volume_filter:
-                # Long: breakout above weekly resistance
-                if (highest_high_1w_aligned[i] > highest_high_1w_aligned[i-1] and 
-                    close[i] > highest_high_1w_aligned[i-1]):
+                # Long: breakout above resistance with bullish bias
+                if (highest_high[i] > highest_high[i-1] and 
+                    close[i] > highest_high[i-1] and bullish_bias):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: breakdown below weekly support
-                elif (lowest_low_1w_aligned[i] < lowest_low_1w_aligned[i-1] and 
-                      close[i] < lowest_low_1w_aligned[i-1]):
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
-            else:
-                signals[i] = 0.0
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 12-hour weekly Donchian(20) breakout with daily volume confirmation.
-# Uses weekly Donchian channels to capture long-term trends, with daily volume spikes to filter.
-# Designed for 12h timeframe to target 50-150 trades over 4 years with minimal false signals.
-# Works in bull/bear markets via trend-following breakouts and volume confirmation.
-
-name = "12h_weekly_donchian20_1d_vol_v1"
-timeframe = "12h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 200:  # Need sufficient data for weekly calculation
-        return np.zeros(n)
-    
-    # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Weekly Donchian channel (20-period)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    
-    # Calculate weekly Donchian channels
-    highest_high_1w = np.full(len(high_1w), np.nan)
-    lowest_low_1w = np.full(len(low_1w), np.nan)
-    
-    for i in range(19, len(high_1w)):
-        highest_high_1w[i] = np.max(high_1w[i-19:i+1])
-        lowest_low_1w[i] = np.min(low_1w[i-19:i+1])
-    
-    # Align weekly Donchian to 12h timeframe (shifted by 1 week for no look-ahead)
-    highest_high_1w_aligned = align_htf_to_ltf(prices, df_1w, highest_high_1w)
-    lowest_low_1w_aligned = align_htf_to_ltf(prices, df_1w, lowest_low_1w)
-    
-    # Daily volume confirmation: volume > 2x 20-day average
-    df_1d = get_htf_data(prices, '1d')
-    volume_1d = df_1d['volume'].values
-    
-    # Calculate 20-day volume average
-    vol_avg_20d = np.full(len(volume_1d), np.nan)
-    for i in range(19, len(volume_1d)):
-        vol_avg_20d[i] = np.mean(volume_1d[i-19:i+1])
-    
-    # Align daily volume average to 12h timeframe (shifted by 1 day)
-    vol_avg_20d_aligned = align_htf_to_ltf(prices, df_1d, vol_avg_20d)
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    for i in range(200, n):  # Start after sufficient warmup
-        # Skip if required data not available
-        if (np.isnan(highest_high_1w_aligned[i]) or 
-            np.isnan(lowest_low_1w_aligned[i]) or 
-            np.isnan(vol_avg_20d_aligned[i])):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume condition: current daily volume > 2x 20-day average
-        # Get current daily volume (need to align current day's volume)
-        current_day_volume = volume_1d[np.searchsorted(df_1d.index, prices.index[i])] if i < len(prices) else volume_1d[-1]
-        # Simplified: use current 12h volume scaled to daily approximation
-        volume_filter = volume[i] > (vol_avg_20d_aligned[i] * 2) if not np.isnan(vol_avg_20d_aligned[i]) else False
-        
-        # Check exits and stoploss
-        if position == 1:  # long position
-            # Exit: price below weekly support or stoploss (2x ATR approximation)
-            donch_width = highest_high_1w_aligned[i] - lowest_low_1w_aligned[i]
-            if donch_width > 0:
-                stop_loss_level = entry_price - 2.0 * donch_width
-            else:
-                stop_loss_level = entry_price - 2.0 * (highest_high_1w_aligned[i] - lowest_low_1w_aligned[i] + 0.001)
-            
-            if (close[i] < lowest_low_1w_aligned[i] or 
-                close[i] < stop_loss_level):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Exit: price above weekly resistance or stoploss
-            donch_width = highest_high_1w_aligned[i] - lowest_low_1w_aligned[i]
-            if donch_width > 0:
-                stop_loss_level = entry_price + 2.0 * donch_width
-            else:
-                stop_loss_level = entry_price + 2.0 * (highest_high_1w_aligned[i] - lowest_low_1w_aligned[i] + 0.001)
-            
-            if (close[i] > highest_high_1w_aligned[i] or 
-                close[i] > stop_loss_level):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with volume confirmation
-            if volume_filter:
-                # Long: breakout above weekly resistance
-                if (highest_high_1w_aligned[i] > highest_high_1w_aligned[i-1] and 
-                    close[i] > highest_high_1w_aligned[i-1]):
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                # Short: breakdown below weekly support
-                elif (lowest_low_1w_aligned[i] < lowest_low_1w_aligned[i-1] and 
-                      close[i] < lowest_low_1w_aligned[i-1]):
+                # Short: breakdown below support with bearish bias
+                elif (lowest_low[i] < lowest_low[i-1] and 
+                      close[i] < lowest_low[i-1] and bearish_bias):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
