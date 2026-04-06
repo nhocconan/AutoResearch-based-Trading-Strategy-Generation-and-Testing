@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation (1.8x volume).
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation (2.0x volume).
 # Uses 1d trend for direction, 12h Donchian breakouts for entries, volume for confirmation.
 # Designed for ~100 total trades over 4 years (25/year) to avoid excessive fees.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
-# Target: 80-150 total trades, 0.25 position size, max DD < -50%.
+# Target: 100-150 total trades, 0.25 position size, max DD < -50%.
 
 name = "exp_13722_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
@@ -17,7 +17,7 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 8
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
