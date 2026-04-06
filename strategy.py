@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h price action relative to 1-day pivot points + volume confirmation.
-# Uses daily pivot points (PP, R1/S1, R2/S2) to identify key support/resistance levels.
-# Long when price bounces above S1 with volume, short when rejected at R1 with volume.
-# Works in both bull/bear markets by trading mean reversion at key daily levels.
-# Targets 15-25 trades/year (60-100 over 4 years) to minimize fee drag.
+# Hypothesis: 6h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+# Uses 1d trend to avoid counter-trend trades, volume to filter false breakouts.
+# Targets 15-30 trades/year (60-120 over 4 years) to minimize fee drag.
+# Works in bull/bear by only trading with higher timeframe trend.
 
-name = "6h_pivot1d_volume_v1"
+name = "6h_donchian20_1d_ema50_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -37,27 +36,26 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # Get 1-day data for pivot points (calculate once before loop)
+    # 50-period EMA on 1d timeframe
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate daily pivot points: PP, R1, S1, R2, S2
-    pp = (high_1d + low_1d + close_1d) / 3
-    r1 = 2 * pp - low_1d
-    s1 = 2 * pp - high_1d
-    r2 = pp + (high_1d - low_1d)
-    s2 = pp - (high_1d - low_1d)
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 48) / 50
     
-    # Align pivot points to 6h timeframe (shifted by 1 day to avoid look-ahead)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Volume filter: current volume > 1.3x average over last 20 periods
+    # 20-period Donchian channels on 6h
+    donch_high = np.full(n, np.nan)
+    donch_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donch_high[i] = np.max(high[i-20:i])
+        donch_low[i] = np.min(low[i-20:i])
+    
+    # Volume filter: current volume > 1.5x average over last 20 periods
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -67,12 +65,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(30, 20)
+    start = max(30, 20, 20)
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(pp_aligned[i]) or 
-            np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
+        if (np.isnan(atr[i]) or np.isnan(ema_aligned[i]) or 
+            np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -81,20 +79,20 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.3
+        volume_filter = volume[i] > vol_ma[i] * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below S1 or stoploss hit
-            if (close[i] < s1_aligned[i] or
+            # Exit: price closes below EMA or stoploss hit
+            if (close[i] < ema_aligned[i] or
                 close[i] < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above R1 or stoploss hit
-            if (close[i] > r1_aligned[i] or
+            # Exit: price closes above EMA or stoploss hit
+            if (close[i] > ema_aligned[i] or
                 close[i] > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -102,17 +100,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries
-            # Long: price bounces above S1 with volume (support hold)
-            if (close[i] > s1_aligned[i] and 
-                close[i-1] <= s1_aligned[i-1] and  # Just crossed above
-                volume_filter):
+            # Long: price breaks above Donchian high with volume and above EMA (bullish)
+            if (close[i] > donch_high[i] and volume_filter and 
+                close[i] > ema_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price rejected at R1 with volume (resistance hold)
-            elif (close[i] < r1_aligned[i] and 
-                  close[i-1] >= r1_aligned[i-1] and  # Just crossed below
-                  volume_filter):
+            # Short: price breaks below Donchian low with volume and below EMA (bearish)
+            elif (close[i] < donch_low[i] and volume_filter and 
+                  close[i] < ema_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
