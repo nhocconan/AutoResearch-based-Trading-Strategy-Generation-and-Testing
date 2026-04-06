@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout + Volume + 1d EMA Trend Filter.
-Hypothesis: Breakouts of the 20-period Donchian channel, confirmed by volume and 1d EMA trend,
-provide directional edges. Works in bull (breakouts up) and bear (breakouts down) markets.
+4h Chaikin Money Flow + Trend Filter
+Hypothesis: CMF measures buying/selling pressure. In trending markets, price follows CMF direction.
+Long when CMF > 0 and price above 1d EMA50, short when CMF < 0 and price below 1d EMA50.
+Exit when CMF crosses zero or stoploss hits. Works in bull (buy strength) and bear (sell weakness).
 Target: 75-200 total trades over 4 years (19-50/year).
 """
 
@@ -10,13 +11,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14320_4h_donchian20_volume_ema_trend_v1"
+name = "exp_14320_4h_cmf_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load 1d data for trend filter (once before loop)
@@ -28,19 +29,22 @@ def generate_signals(prices):
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # 4h data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    donchian_period = 20
-    upper_channel = pd.Series(high).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    lower_channel = pd.Series(low).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Chaikin Money Flow (20)
+    cmf_period = 20
+    mf_multiplier = np.where((high - low) != 0, ((close - low) - (high - close)) / (high - low), 0)
+    mf_volume = mf_multiplier * volume
+    mf_volume_sum = pd.Series(mf_volume).rolling(window=cmf_period, min_periods=cmf_period).sum().values
+    volume_sum = pd.Series(volume).rolling(window=cmf_period, min_periods=cmf_period).sum().values
+    cmf = mf_volume_sum / (volume_sum + 1e-10)
     
-    # Volume confirmation: volume > 1.5x average
+    # Volume filter: avoid low volume periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_confirm = volume > (1.5 * vol_ma)
+    vol_filter = volume > (0.8 * vol_ma)  # Require at least 80% of average volume
     
     # ATR for stoploss
     tr1 = high - low
@@ -55,12 +59,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = donchian_period + 1
+    start = max(cmf_period, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(upper_channel[i]) or np.isnan(lower_channel[i]) or \
-           np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(cmf[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -69,31 +72,29 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price returns to lower channel OR stoploss
-            if close[i] <= lower_channel[i] or close[i] <= entry_price - 2.5 * atr[i]:
+            # Exit: CMF turns negative OR stoploss
+            if cmf[i] <= 0 or close[i] <= entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price returns to upper channel OR stoploss
-            if close[i] >= upper_channel[i] or close[i] >= entry_price + 2.5 * atr[i]:
+            # Exit: CMF turns positive OR stoploss
+            if cmf[i] >= 0 or close[i] >= entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + 1d EMA trend filter
-            long_breakout = close[i] > upper_channel[i-1]  # Break above previous high
-            short_breakout = close[i] < lower_channel[i-1]  # Break below previous low
-            trend_up = ema_1d_aligned[i] > ema_1d_aligned[i-1]  # Daily EMA rising
-            trend_down = ema_1d_aligned[i] < ema_1d_aligned[i-1]  # Daily EMA falling
+            # Look for entries: CMF extreme + trend alignment + volume
+            long_setup = (cmf[i] > 0.05) and (close[i] > ema_1d_aligned[i]) and vol_filter[i]
+            short_setup = (cmf[i] < -0.05) and (close[i] < ema_1d_aligned[i]) and vol_filter[i]
             
-            if long_breakout and vol_confirm[i] and trend_up:
+            if long_setup:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_breakout and vol_confirm[i] and trend_down:
+            elif short_setup:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
