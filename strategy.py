@@ -3,16 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian breakout with daily trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high AND price > daily EMA(50) AND volume > 1.5x 20-period avg
-# Short when price breaks below Donchian(20) low AND price < daily EMA(50) AND volume > 1.5x 20-period avg
+# Hypothesis: 4-hour Donchian breakout with 1-day EMA trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high AND price > 1d EMA(50) AND volume > 1.5x 20-period avg
+# Short when price breaks below Donchian(20) low AND price < 1d EMA(50) AND volume > 1.5x 20-period avg
 # Exit on opposite Donchian break or when price crosses below/above EMA(50)
 # Uses volume confirmation to avoid false breakouts and EMA for trend filter
 # Target: 75-200 trades over 4 years (19-50/year) to balance opportunity and cost
-# Works in bull/bear by following daily trend direction
+# Works in bull/bear by following 1d trend direction
 
-name = "12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -26,18 +26,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Daily data for EMA trend filter
+    # 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # Daily EMA(50) for trend filter
+    # 1d EMA(50) for trend filter
     ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h Donchian channels (20-period)
+    # 4h Donchian channels (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
