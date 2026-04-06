@@ -3,17 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12697_4h_donchian20_1d_volume_v1"
-timeframe = "4h"
+name = "exp_12698_1d_1w_donchian20_volume_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -25,7 +29,7 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian channel"""
+    """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -35,19 +39,19 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily Donchian channels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donchian_upper_1d, donchian_lower_1d = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
+    # Calculate weekly Donchian channels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_upper_1w, donchian_lower_1w = calculate_donchian(high_1w, low_1w, DONCHIAN_PERIOD)
     
-    # Align Donchian levels to 4h timeframe
-    donchian_upper_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper_1d)
-    donchian_lower_1d_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower_1d)
+    # Align weekly Donchian to daily timeframe
+    donchian_upper_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_upper_1w)
+    donchian_lower_1w_aligned = align_htf_to_ltf(prices, df_1w, donchian_lower_1w)
     
-    # Calculate 4h indicators
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -65,8 +69,8 @@ def generate_signals(prices):
     start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily Donchian levels not available
-        if np.isnan(donchian_upper_1d_aligned[i]) or np.isnan(donchian_lower_1d_aligned[i]):
+        # Skip if weekly Donchian levels not available
+        if np.isnan(donchian_upper_1w_aligned[i]) or np.isnan(donchian_lower_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -88,18 +92,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions
-        breakout_long = volume_ok and close[i] >= donchian_upper_1d_aligned[i]
-        breakout_short = volume_ok and close[i] <= donchian_lower_1d_aligned[i]
+        # Breakout signals
+        breakout_long = volume_ok and close[i] >= donchian_upper_1w_aligned[i]
+        breakdown_short = volume_ok and close[i] <= donchian_lower_1w_aligned[i]
+        
+        # Entry conditions
+        long_entry = breakout_long
+        short_entry = breakdown_short
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_short:
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
