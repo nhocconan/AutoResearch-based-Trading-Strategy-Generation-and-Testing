@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation.
-# Long when RSI < 30 and 4h EMA(50) slope > 0 and volume > 1.5x 20-period average.
-# Short when RSI > 70 and 4h EMA(50) slope < 0 and volume > 1.5x 20-period average.
-# Uses 4h trend to avoid counter-trend trades. Targets 80-160 total trades over 4 years.
-# Session filter: 08-20 UTC to avoid low-volume periods.
+# Hypothesis: 6h Donchian(20) breakout with 1w trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel during bullish week with volume > 1.3x 20-period average.
+# Short when price breaks below lower Donchian channel during bearish week with volume confirmation.
+# Uses weekly trend filter to avoid counter-trend trades in both bull and bear markets.
+# Target: 75-150 total trades over 4 years (19-38/year) to stay within optimal range.
 
-name = "1h_rsi_meanrev_4h_trend_vol_v1"
-timeframe = "1h"
+name = "6h_donchian20_1w_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,87 +19,74 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price and volume data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI (14-period)
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ma = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
-    loss_ma = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
-    rs = gain_ma / (loss_ma + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
+    # Donchian channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=20, min_periods=20).max().values
+    lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # 4h EMA(50) for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False).mean().values
-    ema_4h_slope = np.diff(ema_4h, prepend=ema_4h[0])
-    ema_4h_slope_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_slope)
+    # Weekly trend filter: bullish/bearish week based on close vs open
+    df_1w = get_htf_data(prices, '1w')
+    weekly_open = df_1w['open'].values
+    weekly_close = df_1w['close'].values
+    weekly_bullish = weekly_close > weekly_open  # True for bullish week
+    weekly_bearish = weekly_close < weekly_open   # True for bearish week
+    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
+    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.3x 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        # Skip if not in session
-        if not in_session[i]:
+        # Skip if weekly trend data not available
+        if np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]):
             if position != 0:
-                signals[i] = position * 0.20
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Skip if 4h trend data not available
-        if np.isnan(ema_4h_slope_aligned[i]):
-            if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        volume_filter = volume[i] > vol_ma[i] * 1.3
         
         # Check exits
         if position == 1:  # long position
-            # Exit: RSI > 50 or 4h trend turns bearish
-            if (rsi[i] > 50 or 
-                ema_4h_slope_aligned[i] < 0):
+            # Exit: price drops below lower Donchian or weekly turn bearish
+            if (low[i] <= lower[i] or 
+                weekly_bearish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: RSI < 50 or 4h trend turns bullish
-            if (rsi[i] < 50 or 
-                ema_4h_slope_aligned[i] > 0):
+            # Exit: price rises above upper Donchian or weekly turn bullish
+            if (high[i] >= upper[i] or 
+                weekly_bullish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and 4h trend filter
+            # Look for entries with volume confirmation and weekly trend filter
             if volume_filter:
-                # Long: RSI < 30 and 4h trend bullish
-                if (rsi[i] < 30 and 
-                    ema_4h_slope_aligned[i] > 0):
-                    signals[i] = 0.20
+                # Long: break above upper Donchian during bullish week
+                if (high[i] > upper[i] and 
+                    weekly_bullish_aligned[i]):
+                    signals[i] = 0.25
                     position = 1
-                # Short: RSI > 70 and 4h trend bearish
-                elif (rsi[i] > 70 and 
-                      ema_4h_slope_aligned[i] < 0):
-                    signals[i] = -0.20
+                # Short: break below lower Donchian during bearish week
+                elif (low[i] < lower[i] and 
+                      weekly_bearish_aligned[i]):
+                    signals[i] = -0.25
                     position = -1
     
     return signals
