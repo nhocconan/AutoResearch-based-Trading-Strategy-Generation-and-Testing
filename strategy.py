@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian breakout with volume confirmation and 1-day EMA trend filter.
-# Breakouts capture strong directional moves, volume filters false signals, and EMA ensures
-# alignment with higher timeframe momentum. Works in bull/bear by participating in strong
-# moves while avoiding chop. Target: 100-200 trades over 4 years (25-50/year) to balance
-# opportunity and cost.
+# Hypothesis: 12h Donchian channel breakout with 1d EMA trend filter and volume confirmation.
+# 12h timeframe balances trade frequency and capture of medium-term trends. Breakouts capture
+# strong directional moves, volume filters weak signals, and EMA trend filter ensures we trade
+# with higher timeframe momentum. Works in bull/bear because breakouts capture strong moves
+# regardless of direction, and volume confirmation avoids false breakouts.
+# Target: 75-150 total trades over 4 years (19-38/year) to stay within limits.
 
-name = "exp_13121_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13122_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -48,7 +49,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -101,8 +102,8 @@ def generate_signals(prices):
         downtrend = close[i] < ema_1d_aligned[i]
         
         # Breakout signals
-        breakout_up = volume_ok and uptrend and (i == 0 or high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (i == 0 or low[i] < lowest_low[i-1])
+        breakout_up = volume_ok and uptrend and (i > 0 and high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (i > 0 and low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
