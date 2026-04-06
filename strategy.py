@@ -3,24 +3,51 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h ATR breakout with 12h mean reversion filter
-# Works in bull/bear because breakouts capture strong moves, while 12h RSI mean reversion
-# filters out false breakouts in choppy markets. Uses volatility expansion (ATR) to
-# detect genuine breakouts and RSI to avoid overextended moves. Target: 75-150 total trades.
+# Hypothesis: 6h Williams %R + 12h RSI mean reversion with volume confirmation
+# Works in bull/bear because Williams %R identifies overbought/oversold conditions,
+# RSI filters for momentum strength, and volume confirms genuine moves.
+# Target: 50-120 trades over 4 years (12-30/year) to balance opportunity and cost.
 
-name = "exp_13019_6h_atr_breakout_12h_rsi_v1"
+name = "exp_13019_6h_williamsr_12h_rsi_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-ATR_PERIOD = 14
-ATR_MULTIPLIER = 1.5
+WILLIAMS_R_PERIOD = 14
+WILLIAMS_R_OVERBOUGHT = -20
+WILLIAMS_R_OVERSOLD = -80
 RSI_PERIOD = 14
 RSI_OVERBOUGHT = 70
 RSI_OVERSOLD = 30
-SIGNAL_SIZE = 0.25
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.5
+
+def calculate_williams_r(high, low, close, period):
+    """Calculate Williams %R"""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero
+    williams_r = williams_r.fillna(-50)
+    return williams_r.values
+
+def calculate_rsi(close, period):
+    """Calculate RSI using Wilder's smoothing"""
+    delta = pd.Series(close).diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    
+    avg_gain = gain.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    avg_loss = loss.ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    # Handle division by zero
+    rsi = rsi.fillna(50)
+    return rsi.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -30,19 +57,6 @@ def calculate_atr(high, low, close, period):
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
-
-def calculate_rsi(close, period):
-    """Calculate RSI"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
 
 def generate_signals(prices):
     n = len(prices)
@@ -63,8 +77,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    williams_r = calculate_williams_r(high, low, close, WILLIAMS_R_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -72,10 +87,10 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ATR_PERIOD, VOLUME_MA_PERIOD, RSI_PERIOD) + 1
+    start = max(WILLIAMS_R_PERIOD, RSI_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if RSI not available
+        # Skip if 12h RSI not available
         if np.isnan(rsi_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
@@ -98,29 +113,28 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # ATR breakout conditions
-        breakout_up = volume_ok and (high[i] > close[i-1] + ATR_MULTIPLIER * atr[i-1])
-        breakout_down = volume_ok and (low[i] < close[i-1] - ATR_MULTIPLIER * atr[i-1])
+        # Mean reversion signals from Williams %R
+        williams_oversold = williams_r[i] <= WILLIAMS_R_OVERSOLD
+        williams_overbought = williams_r[i] >= WILLIAMS_R_OVERBOUGHT
         
-        # 12h RSI mean reversion filter
-        rsi_not_extreme = (rsi_12h_aligned[i] > RSI_OVERSOLD) and (rsi_12h_aligned[i] < RSI_OVERBOUGHT)
-        rsi_oversold = rsi_12h_aligned[i] < RSI_OVERSOLD
-        rsi_overbought = rsi_12h_aligned[i] > RSI_OVERBOUGHT
+        # RSI momentum filter from 12h
+        rsi_momentum_up = rsi_12h_aligned[i] > RSI_OVERBOUGHT
+        rsi_momentum_down = rsi_12h_aligned[i] < RSI_OVERSOLD
         
         # Generate signals
         if position == 0:
-            # Long: breakout up with RSI not overbought (or oversold for mean reversion)
-            if breakout_up and (rsi_not_extreme or rsi_oversold):
+            # Long: Williams %R oversold + 12h RSI not overbought + volume
+            if williams_oversold and not rsi_momentum_up and volume_ok:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_MULTIPLIER * atr[i])
-            # Short: breakout down with RSI not oversold (or overbought for mean reversion)
-            elif breakout_down and (rsi_not_extreme or rsi_overbought):
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            # Short: Williams %R overbought + 12h RSI not oversold + volume
+            elif williams_overbought and not rsi_momentum_down and volume_ok:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_MULTIPLIER * atr[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
