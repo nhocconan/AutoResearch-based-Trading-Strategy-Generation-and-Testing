@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h trend filter and volume confirmation
-# Enter long when: RSI(14) > 55, price > 4h EMA(50), volume > 1.5x avg, during active session (08-20 UTC)
-# Enter short when: RSI(14) < 45, price < 4h EMA(50), volume > 1.5x avg, during active session
-# Exit when RSI crosses back below 50 (long) or above 50 (short)
-# Uses 4h trend to filter counter-trend trades, targeting 80-150 trades over 4 years
+# Hypothesis: 6h Donchian(20) breakout with weekly trend filter and volume confirmation
+# Long: Price breaks above Donchian upper(20) + weekly EMA(20) rising + volume > 1.5x avg
+# Short: Price breaks below Donchian lower(20) + weekly EMA(20) falling + volume > 1.5x avg
+# Exit: Opposite Donchian break or trailing stop at 2*ATR
+# Uses weekly trend to filter breakouts, targeting 50-150 trades over 4 years
 
-name = "1h_rsi_momentum_4h_ema_vol_session_v1"
-timeframe = "1h"
+name = "6h_donchian20_weekly_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,69 +24,75 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # RSI(14) on 1h
-    delta = pd.Series(close).diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
+    # Donchian channels (20-period)
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 4h EMA(50) for trend filter
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_50 = pd.Series(close_4h).ewm(span=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_4h, ema_50)
+    # Weekly EMA(20) for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_20_1w = pd.Series(close_1w).ewm(span=20, adjust=False).mean().values
+    ema_20_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_20_1w)
+    
+    # Weekly EMA slope (rising/falling)
+    ema_slope = np.diff(ema_20_1w_aligned, prepend=ema_20_1w_aligned[0])
+    ema_rising = ema_slope > 0
+    ema_falling = ema_slope < 0
     
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_threshold = 1.5 * volume_ma
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
-    for i in range(50, n):  # Wait for EMA to stabilize
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(rsi[i]) or np.isnan(ema_50_aligned[i]) or 
-            np.isnan(volume_threshold[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
+            np.isnan(ema_20_1w_aligned[i]) or np.isnan(volume_threshold[i]) or
+            np.isnan(atr[i])):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
-        
         if position == 1:  # long position
-            # Exit: RSI < 50 (momentum fading)
-            if rsi[i] < 50:
+            # Exit: price breaks below Donchian lower OR 2*ATR trailing stop
+            if close[i] < low_20[i] or close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: RSI > 50 (momentum fading)
-            if rsi[i] > 50:
+            # Exit: price breaks above Donchian upper OR 2*ATR trailing stop
+            if close[i] > high_20[i] or close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries: RSI momentum + trend filter + volume + session
-            if in_session and volume[i] > volume_threshold[i]:
-                if rsi[i] > 55 and close[i] > ema_50_aligned[i]:
-                    # Bullish momentum above 4h EMA
-                    signals[i] = 0.20
+            # Look for breakout entries: Donchian break + weekly trend + volume
+            if volume[i] > volume_threshold[i]:
+                if close[i] > high_20[i] and ema_rising[i]:
+                    # Bullish breakout with rising weekly trend
+                    signals[i] = 0.25
                     position = 1
-                elif rsi[i] < 45 and close[i] < ema_50_aligned[i]:
-                    # Bearish momentum below 4h EMA
-                    signals[i] = -0.20
+                    entry_price = close[i]
+                elif close[i] < low_20[i] and ema_falling[i]:
+                    # Bearish breakout with falling weekly trend
+                    signals[i] = -0.25
                     position = -1
+                    entry_price = close[i]
     
     return signals
