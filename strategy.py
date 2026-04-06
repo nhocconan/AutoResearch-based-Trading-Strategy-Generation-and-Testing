@@ -3,47 +3,57 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using Camarilla pivot levels from 1d timeframe with volume confirmation and 6h momentum filter.
-# Long when price breaks above Camarilla R4 level with above-average volume and RSI(14) > 50.
-# Short when price breaks below Camarilla S4 level with above-average volume and RSI(14) < 50.
+# Hypothesis: 12h strategy using Donchian channel breakout from 1d timeframe with volume confirmation and ADX trend filter.
+# Long when price breaks above 1d Donchian upper band with above-average volume and ADX > 25.
+# Short when price breaks below 1d Donchian lower band with above-average volume and ADX > 25.
 # Uses ATR-based stop loss to manage risk.
 # Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-# Camarilla levels provide clear support/resistance, RSI filters momentum direction, volume confirms breakout strength.
+# Donchian channels provide clear breakout levels, volume confirms breakout strength, ADX ensures trending environment.
 
-name = "exp_13871_6h_camarilla1d_rsi_vol_v1"
-timeframe = "6h"
+name = "exp_13872_12h_donchian1d_vol_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_MULTIPLIER = 1.1 / 12  # Standard Camarilla multiplier
-RSI_PERIOD = 14
+DONCHIAN_PERIOD = 20
+ADX_PERIOD = 14
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+ADX_THRESHOLD = 25
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for the day"""
-    # Daily range
-    daily_range = high - low
-    # Camarilla levels
-    r4 = close + daily_range * CAMARILLA_MULTIPLIER * 4
-    r3 = close + daily_range * CAMARILLA_MULTIPLIER * 3
-    s3 = close - daily_range * CAMARILLA_MULTIPLIER * 3
-    s4 = close - daily_range * CAMARILLA_MULTIPLIER * 4
-    return r4, r3, s3, s4
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channel upper and lower bands"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
-def calculate_rsi(close, period):
-    """Calculate RSI"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def calculate_adx(high, low, close, period):
+    """Calculate ADX (Average Directional Index)"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = tr1[0]
+    
+    # Directional Movement
+    up_move = high - np.roll(high, 1)
+    down_move = np.roll(low, 1) - low
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # Smoothed values
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / (atr + 1e-10)
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / (atr + 1e-10)
+    
+    # DX and ADX
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -60,29 +70,28 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for Camarilla pivot levels ONCE before loop
+    # Load 1d data for Donchian channels and ADX ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d Camarilla levels
+    # Calculate 1d Donchian channels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    r4_1d, r3_1d, s3_1d, s4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    upper_1d, lower_1d = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
     
-    # Align 1d Camarilla levels to 6h timeframe
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    # Calculate 1d ADX
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, ADX_PERIOD)
     
-    # 6h data for RSI, ATR, and volume
+    # Align 1d indicators to 12h timeframe
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    
+    # 12h data for ATR and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # RSI for momentum filter
-    rsi = calculate_rsi(close, RSI_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -96,11 +105,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, ADX_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(r4_1d_aligned[i]) or np.isnan(s4_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or np.isnan(adx_1d_aligned[i]) or np.isnan(atr[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -125,13 +134,12 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Momentum filter from RSI
-        rsi_bullish = rsi[i] > 50
-        rsi_bearish = rsi[i] < 50
+        # Trend filter from ADX
+        trending = adx_1d_aligned[i] > ADX_THRESHOLD
         
-        # Camarilla breakout signals
-        long_signal = volume_ok and rsi_bullish and close[i] > r4_1d_aligned[i]
-        short_signal = volume_ok and rsi_bearish and close[i] < s4_1d_aligned[i]
+        # Donchian breakout signals
+        long_signal = volume_ok and trending and close[i] > upper_1d_aligned[i]
+        short_signal = volume_ok and trending and close[i] < lower_1d_aligned[i]
         
         # Generate signals
         if position == 0:
@@ -148,15 +156,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on close below Camarilla S3 level
-            if close[i] < s3_1d_aligned[i]:
+            # Exit long on close below 1d Donchian lower band
+            if close[i] < lower_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on close above Camarilla R3 level
-            if close[i] > r3_1d_aligned[i]:
+            # Exit short on close above 1d Donchian upper band
+            if close[i] > upper_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
