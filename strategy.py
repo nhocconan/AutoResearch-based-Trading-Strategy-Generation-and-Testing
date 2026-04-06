@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
-# In uptrend (1d EMA slope > 0): buy when price breaks above Donchian upper band (20-period high).
-# In downtrend (1d EMA slope < 0): sell when price breaks below Donchian lower band (20-period low).
-# Volume confirmation ensures institutional participation. Works in both bull and bear markets.
-# Uses ATR-based stop loss to manage risk.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+# Donchian breakouts capture trend continuation; 1d EMA ensures alignment with higher timeframe trend.
+# Volume confirmation filters false breakouts. Works in bull markets (buy breakouts) and bear markets (sell breakdowns).
+# Limited trades via strict breakout conditions + volume filter.
 
-name = "exp_13600_4h_donchian20_1d_trend_vol_v1"
+name = "exp_13601_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -23,7 +22,7 @@ ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
+    """Calculate Donchian upper and lower bands"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max()
     lower = pd.Series(low).rolling(window=period, min_periods=period).min()
     return upper.values, lower.values
@@ -106,7 +105,7 @@ def generate_signals(prices):
         uptrend = ema_1d_slope_aligned[i] > 0
         downtrend = ema_1d_slope_aligned[i] < 0
         
-        # Donchian breakout signals
+        # Breakout signals
         breakout_up = close[i] > donchian_upper[i]
         breakout_down = close[i] < donchian_lower[i]
         
