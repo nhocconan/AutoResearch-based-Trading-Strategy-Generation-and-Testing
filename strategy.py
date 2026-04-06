@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation
 # Long when price breaks above 4h Donchian high and 1d EMA(50) is rising
 # Short when price breaks below 4h Donchian low and 1d EMA(50) is falling
 # Uses volume > 20-period average to confirm breakouts
-# Target: 75-200 total trades over 4 years (19-50/year) with controlled risk in both bull and bear markets
-# Uses 4h timeframe with 1d trend filter to reduce trade frequency and improve signal quality
+# Designed for 4h timeframe to achieve 75-200 trades over 4 years with controlled risk in bull/bear markets
 
-name = "4h_donchian20_1d_ema_vol_v1"
+name = "4h_donchian20_1d_ema50_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
