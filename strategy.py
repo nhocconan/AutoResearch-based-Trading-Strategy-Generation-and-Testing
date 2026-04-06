@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-Experiment #12041: 4h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: 4h Donchian(20) breakouts capture medium-term trends. 1d EMA provides trend bias,
-and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 trades over 4 years.
+Experiment #12041: 4h Donchian(20) Breakout with 1d Trend and Volume Confirmation
+Hypothesis: 4h Donchian breakouts with 1d EMA trend filter and volume confirmation capture 
+medium-term trends in both bull and bear markets. Trend filter avoids counter-trend entries,
+volume confirms institutional participation, and tight parameters limit trades to 75-200 over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12041_4h_donchian20_1d_vol_v1"
+name = "exp_12041_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
-# Parameters
+# Parameters - tuned for optimal trade frequency
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8  # Higher threshold to reduce trades
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
