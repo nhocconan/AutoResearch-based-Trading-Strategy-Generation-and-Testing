@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts on 12h timeframe capture multi-day momentum, volume confirms breakout strength, ATR stoploss limits drawdown. Designed for low trade frequency (target 50-150 total over 4 years) to minimize fee decay.
+12h Donchian(20) Breakout + Daily Trend Filter + Volume Confirmation + ATR Stoploss
+Hypothesis: On 12h timeframe, Donchian breakouts in direction of daily trend with volume confirmation capture strong moves while avoiding whipsaws. Daily trend filter reduces false signals, keeping trade frequency low (target 50-150 total over 4 years) to minimize fee decay in ranging/bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_vol_atr_v1"
+name = "12h_donchian20_1dtrend_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -37,6 +37,18 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
+    # Get daily trend data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    # Daily EMA(50) for trend filter
+    close_1d = df_1d['close'].values
+    ema_50_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 49) / 50
+    # Align to 12h timeframe (with shift(1) for no look-ahead)
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -46,7 +58,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]):
+        if np.isnan(atr[i]) or np.isnan(ema_50_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -81,19 +93,19 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + price direction filter
+            # Look for entries: Donchian breakout + volume + daily trend filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # Price direction filter: only trade in direction of recent momentum
-            price_up = close[i] > close[i-1]
-            price_down = close[i] < close[i-1]
+            # Daily trend filter: only go long if price above daily EMA50, short if below
+            trend_up = close[i] > ema_50_1d_aligned[i]
+            trend_down = close[i] < ema_50_1d_aligned[i]
             
-            if bull_breakout and volume_filter and price_up:
+            if bull_breakout and volume_filter and trend_up:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_breakout and volume_filter and price_down:
+            elif bear_breakout and volume_filter and trend_down:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
