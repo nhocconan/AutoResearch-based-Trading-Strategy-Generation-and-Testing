@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + Volume Filter + ATR Stoploss (v4)
-Hypothesis: Donchian breakouts capture momentum, volume confirms breakout strength, ATR stoploss limits drawdown.
-Trades only in direction of price relative to prior 4h bar's close to avoid whipsaw. Designed for low trade frequency (target 75-200 total over 4 years) to minimize fee decay.
+1d Donchian(20) Breakout + 1w EMA Trend + Volume Filter + ATR Stoploss
+Hypothesis: Donchian breakouts on daily timeframe capture major trends, weekly EMA filters for trend direction,
+volume confirms breakout strength, and ATR stoploss limits drawdown. Designed for low trade frequency
+(30-100 total over 4 years) to minimize fee decay and work in both bull and bear markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_vol_atr_v4"
-timeframe = "4h"
+name = "1d_donchian20_1wema_volume_atr_v5"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -38,16 +39,29 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    weekly_close = df_1w['close'].values
+    # Calculate 50-period EMA on weekly closes
+    weekly_ema = np.full(len(weekly_close), np.nan)
+    if len(weekly_close) >= 50:
+        alpha = 2.0 / (50 + 1)
+        weekly_ema[49] = np.mean(weekly_close[:50])
+        for i in range(50, len(weekly_close)):
+            weekly_ema[i] = alpha * weekly_close[i] + (1 - alpha) * weekly_ema[i-1]
+    # Align weekly EMA to daily timeframe (with shift(1) for no look-ahead)
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = 20  # For Donchian
+    start = 50  # For Donchian and weekly EMA
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]):
+        if np.isnan(atr[i]) or np.isnan(weekly_ema_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -82,19 +96,19 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + price direction filter
+            # Look for entries: Donchian breakout + volume + weekly EMA trend filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # Price direction filter: only trade in direction of recent momentum
-            price_up = close[i] > close[i-1]
-            price_down = close[i] < close[i-1]
+            # Weekly EMA trend filter: only long if price above weekly EMA, short if below
+            price_above_weekly_ema = close[i] > weekly_ema_aligned[i]
+            price_below_weekly_ema = close[i] < weekly_ema_aligned[i]
             
-            if bull_breakout and volume_filter and price_up:
+            if bull_breakout and volume_filter and price_above_weekly_ema:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_breakout and volume_filter and price_down:
+            elif bear_breakout and volume_filter and price_below_weekly_ema:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
