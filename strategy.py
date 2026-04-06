@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-4h Donchian(40) breakout with volume confirmation and ATR stoploss
-Hypothesis: Longer Donchian period (40) reduces false breakouts while capturing major trends. Volume filter ensures institutional participation. Works in bull (long) and bear (short) by trading breakouts in direction of prevailing trend. Target: 80-180 trades over 4 years.
+1d Donchian(20) breakout with 1w EMA(50) trend and volume confirmation
+Hypothesis: Daily breakouts with weekly trend alignment capture multi-day moves in both bull and bear markets.
+Target: 30-100 trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian40_volume_atr_v1"
-timeframe = "4h"
+name = "1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,19 +18,27 @@ def generate_signals(prices):
     if n < 250:
         return np.zeros(n)
     
-    # 4h data
+    # Load 1w data for EMA(50) trend (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    
+    # 1w EMA(50) for trend direction
+    close_1w = df_1w['close'].values
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Daily data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian(40) channels
-    highest_high = pd.Series(high).rolling(window=40, min_periods=40).max().values
-    lowest_low = pd.Series(low).rolling(window=40, min_periods=40).min().values
+    # Donchian(20) channels
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: 2.0x 20-period average
+    # Volume filter (20-day average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (2.0 * vol_ma)
+    vol_filter = volume > (1.5 * vol_ma)  # Require volume surge
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -44,12 +53,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 40
+    start = 200  # For EMA50 and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_50_1w_aligned[i]) or np.isnan(highest_high[i]) or 
+            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -74,15 +83,18 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume
+            # Look for entries: Donchian breakout + trend alignment + volume
             long_breakout = close[i] > highest_high[i-1]  # Break above previous upper
             short_breakout = close[i] < lowest_low[i-1]   # Break below previous lower
             
-            if long_breakout and vol_filter[i]:
+            uptrend = ema_50_1w_aligned[i] > close[i]  # Price above weekly EMA50
+            downtrend = ema_50_1w_aligned[i] < close[i]  # Price below weekly EMA50
+            
+            if long_breakout and uptrend and vol_filter[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_breakout and vol_filter[i]:
+            elif short_breakout and downtrend and vol_filter[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
