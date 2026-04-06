@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + Daily Pivot Direction + Volume Spike
-Hypothesis: 6h timeframe with Donchian breakouts aligned to daily pivot direction 
+12h Donchian(20) Breakout + Daily Pivot Direction + Volume Spike
+Hypothesis: 12h timeframe with Donchian breakouts aligned to daily pivot direction 
 and volume confirmation captures institutional flow while avoiding chop. 
 Daily pivot provides structural bias (above/below pivot = bull/bear bias). 
 Volume spike (>2x average) confirms institutional participation. 
 Works in bull/bear by following pivot-defined trend with momentum confirmation.
-Target: 75-150 total trades over 4 years.
+Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_dailypivot_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_dailypivot_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -57,7 +57,7 @@ def generate_signals(prices):
     # Pivot bias: above pivot = bullish bias, below = bearish bias
     pivot_bias_1d = np.where(close_1d > pivot_1d, 1, -1)
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
     pivot_bias_aligned = align_htf_to_ltf(prices, df_1d, pivot_bias_1d)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
