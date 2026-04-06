@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation
-# Long when price breaks above Donchian upper (20-period) AND price > 1w EMA(50) AND volume > 2x 20-period average
-# Short when price breaks below Donchian lower (20-period) AND price < 1w EMA(50) AND volume > 2x 20-period average
+# Hypothesis: 1-day Donchian breakout with 1-week EMA trend filter and volume confirmation
+# Long when price breaks above Donchian upper (20-period) AND price > 1w EMA(50) AND volume > 1.5x 20-period average
+# Short when price breaks below Donchian lower (20-period) AND price < 1w EMA(50) AND volume > 1.5x 20-period average
 # Exit when price crosses Donchian midline (10-period average of upper/lower)
-# Uses 1d timeframe to reduce trade frequency, 1w EMA for trend filter, Donchian for breakout signals
+# Uses 1d timeframe to limit trade frequency, 1w EMA for trend filter, Donchian for breakout signals
 # Target: 30-100 total trades over 4 years (7-25/year) for optimal 1d performance
 
 name = "1d_donchian20_1w_ema_vol_v1"
@@ -43,9 +43,9 @@ def generate_signals(prices):
     # Align weekly EMA to 1d timeframe
     weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
     
-    # Volume confirmation: volume > 2x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 2.0 * volume_ma.values
+    volume_threshold = 1.5 * volume_ma.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
