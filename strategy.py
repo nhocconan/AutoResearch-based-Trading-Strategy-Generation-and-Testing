@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d trend for direction bias and volume for conviction. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend). Target: 50-150 trades over 4 years (12-37/year).
+12h Donchian(15) breakout with 1d EMA trend filter and volume confirmation
+Hypothesis: Donchian breakouts on 12h capture sustained directional moves, filtered by 1d EMA trend for bias and volume for conviction. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend). Target: 50-120 trades over 4 years (12-30/year) to balance opportunity and cost.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dtrend_vol_v1"
+name = "12h_donchian15_1dtrend_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
     # Price and volume data
@@ -36,14 +36,14 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1d EMA50 for trend bias
+    # 1d EMA34 for trend bias
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
+    if len(close_1d) >= 34:
+        ema_1d[33] = np.mean(close_1d[:34])
+        for i in range(34, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 17) / 19
     
     # Trend bias: above EMA = bullish, below = bearish
     trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
@@ -51,7 +51,7 @@ def generate_signals(prices):
     # Align to 12h timeframe
     trend_bias_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
     
-    # Donchian channels (20-period) from 1d data
+    # Donchian channels (15-period) from 1d data
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     
@@ -59,9 +59,9 @@ def generate_signals(prices):
     upper_1d = np.full_like(high_1d, np.nan)
     lower_1d = np.full_like(low_1d, np.nan)
     
-    for i in range(20, len(high_1d)):
-        upper_1d[i] = np.max(high_1d[i-20:i])
-        lower_1d[i] = np.min(low_1d[i-20:i])
+    for i in range(15, len(high_1d)):
+        upper_1d[i] = np.max(high_1d[i-15:i])
+        lower_1d[i] = np.min(low_1d[i-15:i])
     
     # Align to 12h timeframe
     upper_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
@@ -73,7 +73,7 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 30  # Need enough data for Donchian
+    start = 25  # Need enough data for Donchian
     
     for i in range(start, n):
         # Skip if required data not available
@@ -143,3 +143,4 @@ def generate_signals(prices):
                 bars_since_entry += 1
     
     return signals
+</lyz>
