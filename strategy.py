@@ -1,48 +1,53 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with Volume Confirmation and 12h Trend Alignment
-Hypothesis: Price breakouts above/below 4h Donchian channels with volume confirmation
-and alignment to 12h trend capture strong moves. Works in bull (long breakouts) and 
-bear (short breakdowns). Volume filters false breakouts. Trend alignment avoids 
-counter-trend trades. Target: 80-180 total trades over 4 years (20-45/year).
+6h Elder Ray with Weekly Trend Filter and Volume Confirmation
+Hypothesis: Elder Ray (bull/bear power) identifies institutional buying/selling pressure.
+In bull markets: buy when bull power > 0 and EMA13 > 0. In bear markets: short when bear power < 0 and EMA13 < 0.
+Weekly trend filter ensures we trade with the dominant trend. Volume confirms institutional participation.
+Works in both bull and bear by switching between long and short based on weekly trend.
+Target: 75-150 total trades over 4 years (19-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian_breakout_vol_12h_trend"
-timeframe = "4h"
+name = "6h_elder_ray_weekly_trend_volume"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 12h data for trend alignment (once before loop)
-    df_12h = get_htf_data(prices, '12h')
+    # Load weekly data for trend filter (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
     
-    # 12h EMA(50) for trend direction
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Weekly EMA(20) for long-term trend
+    close_weekly = df_weekly['close'].values
+    ema20_weekly = pd.Series(close_weekly).ewm(span=20, adjust=False).mean().values
+    ema20_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema20_weekly)
     
-    # 4h data
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # 4h Donchian channels (20-period)
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # 6h EMA(13) - Elder Ray uses EMA13 as reference
+    ema13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
     
-    # 4h volume filter (20-period average)
+    # Elder Ray components
+    bull_power = high - ema13  # Bull power: high - EMA13
+    bear_power = low - ema13   # Bear power: low - EMA13
+    
+    # 6h volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)  # Require high volume
+    vol_filter = volume > (1.5 * vol_ma)  # Require above-average volume
     
-    # 4h ATR(14) for stoploss
+    # 6h ATR(14) for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -55,46 +60,44 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 100  # For Donchian20 and EMA50
+    start = 50  # For EMA13 and ATR14
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema20_weekly_aligned[i]) or np.isnan(ema13[i]) or
+            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Determine trend alignment: 12h EMA50
-        uptrend = ema_12h_aligned[i] > close[i]  # Price above 12h EMA = uptrend
-        downtrend = ema_12h_aligned[i] < close[i]  # Price below 12h EMA = downtrend
+        # Determine weekly trend
+        weekly_uptrend = ema20_weekly_aligned[i] > 0  # Price above weekly EMA20
+        weekly_downtrend = ema20_weekly_aligned[i] < 0  # Price below weekly EMA20
         
         # Check exits
         if position == 1:  # long position
-            # Exit: breakdown below Donchian low OR stoploss
-            if (close[i] <= donchian_low[i] or
+            # Exit: bear power turns negative OR stoploss
+            if (bear_power[i] < 0 or
                 close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: breakout above Donchian high OR stoploss
-            if (close[i] >= donchian_high[i] or
+            # Exit: bull power turns positive OR stoploss
+            if (bull_power[i] > 0 or
                 close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + trend alignment
-            long_breakout = close[i] > donchian_high[i]
-            short_breakout = close[i] < donchian_low[i]
-            
-            long_setup = long_breakout and vol_filter[i] and uptrend
-            short_setup = short_breakout and vol_filter[i] and downtrend
+            # Look for entries: Elder Ray + weekly trend + volume
+            long_setup = (bull_power[i] > 0 and weekly_uptrend and vol_filter[i])
+            short_setup = (bear_power[i] < 0 and weekly_downtrend and vol_filter[i])
             
             if long_setup:
                 signals[i] = 0.25
