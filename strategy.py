@@ -23,13 +23,13 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_ema(arr, span):
+def calculate_ema(values, period):
     """Calculate EMA"""
-    return pd.Series(arr).ewm(span=span, adjust=False, min_periods=span).mean().values
+    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 60:
         return np.zeros(n)
     
     # Load weekly data for trend filter (once before loop)
@@ -88,8 +88,8 @@ def generate_signals(prices):
                 continue
         
         # Determine trend bias from weekly EMA (50)
-        bullish_trend = close[i] > ema_1w_aligned[i]  # price above weekly EMA50 = bullish
-        bearish_trend = close[i] < ema_1w_aligned[i]  # price below weekly EMA50 = bearish
+        bullish_trend = close[i] > ema_1w_aligned[i]  # price above 1w EMA50 = bullish
+        bearish_trend = close[i] < ema_1w_aligned[i]  # price below 1w EMA50 = bearish
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * 1.5)
@@ -98,7 +98,7 @@ def generate_signals(prices):
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
         breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
-        # Entry signals with trend filter and volume confirmation
+        # Combined entry signals
         long_signal = bullish_trend and volume_ok and breakout_up
         short_signal = bearish_trend and volume_ok and breakout_down
         
