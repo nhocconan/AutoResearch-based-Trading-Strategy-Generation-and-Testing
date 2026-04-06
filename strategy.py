@@ -1,22 +1,24 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + Volume Spike + ADX Trend Filter + ATR Stoploss
-Hypothesis: Daily timeframe reduces trade frequency to avoid fee drag while capturing major trends.
-Donchian breakouts with volume spike (>2x average) and strong trend (ADX>25) capture high-probability moves.
-ADX filter prevents whipsaws in ranging markets. Target: 75-200 total trades over 4 years.
+6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
+Hypothesis: Weekly pivot levels provide structural support/resistance that works in both bull and bear markets.
+Breakouts above weekly R1 or below weekly S1 with volume confirmation capture institutional interest.
+Using 6h timeframe reduces trade frequency to avoid fee drag while capturing multi-day moves.
+Weekly pivot filter ensures we only trade in direction of higher timeframe bias.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_vol_adx_v1"
-timeframe = "1d"
+name = "6h_donchian20_weekly_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -25,7 +27,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR
+    # 14-period ATR for stoploss
     atr = np.full(n, np.nan)
     if n >= 14:
         tr = np.maximum(
@@ -38,77 +40,50 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 14-period ADX
-    adx = np.full(n, np.nan)
-    if n >= 14:
-        # +DM and -DM
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        # True Range (same as ATR calculation)
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-        
-        # Smoothed values
-        tr14 = np.full(n, np.nan)
-        plus_dm14 = np.full(n, np.nan)
-        minus_dm14 = np.full(n, np.nan)
-        
-        if len(tr) >= 14:
-            tr14[14] = np.sum(tr[:14])
-            plus_dm14[14] = np.sum(plus_dm[:14])
-            minus_dm14[14] = np.sum(minus_dm[:14])
-            
-            for i in range(15, n):
-                tr14[i] = tr14[i-1] - (tr14[i-1] / 14) + tr[i-1]
-                plus_dm14[i] = plus_dm14[i-1] - (plus_dm14[i-1] / 14) + plus_dm[i-1]
-                minus_dm14[i] = minus_dm14[i-1] - (minus_dm14[i-1] / 14) + minus_dm[i-1]
-        
-        # Directional Indicators
-        plus_di = np.full(n, np.nan)
-        minus_di = np.full(n, np.nan)
-        dx = np.full(n, np.nan)
-        
-        valid = ~np.isnan(tr14) & (tr14 != 0)
-        if np.any(valid):
-            plus_di[valid] = 100 * plus_dm14[valid] / tr14[valid]
-            minus_di[valid] = 100 * minus_dm14[valid] / tr14[valid]
-            dx[valid] = 100 * np.abs(plus_di[valid] - minus_di[valid]) / (plus_di[valid] + minus_di[valid])
-        
-        # ADX (smoothed DX)
-        adx_smooth = np.full(n, np.nan)
-        valid_dx = ~np.isnan(dx)
-        if np.sum(valid_dx) >= 14:
-            # First ADX value is average of first 14 DX
-            first_idx = np.where(valid_dx)[0][13] if np.sum(valid_dx) >= 14 else -1
-            if first_idx != -1:
-                adx_smooth[first_idx] = np.mean(dx[valid_dx][:14])
-                for i in range(first_idx + 1, n):
-                    if valid_dx[i]:
-                        adx_smooth[i] = (adx_smooth[i-1] * 13 + dx[i]) / 14
-                adx = adx_smooth
+    # === WEEKLY PIVOT DATA (MTF) - CALCULATE ONCE BEFORE LOOP ===
+    df_weekly = get_htf_data(prices, '1w')  # Weekly data for pivot calculation
+    if len(df_weekly) < 1:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
+    
+    # Weekly pivot and support/resistance levels
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
+    
+    # Align weekly levels to 6h timeframe (shifted by 1 week for no look-ahead)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s2)
+    weekly_r3_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r3)
+    weekly_s3_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_entry = 0
+    bars_since_exit = 0  # Bars since last exit to prevent overtrading
     
     # Start from warmup period
-    start = 20  # For Donchian and ADX
+    start = 20  # For Donchian channel
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(adx[i]):
+        if np.isnan(atr[i]) or np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
-            bars_since_entry += 1
+            bars_since_exit += 1
             continue
         
         # Donchian channel (20-period)
@@ -117,80 +92,86 @@ def generate_signals(prices):
         
         # Volume filter (20-period average)
         vol_ma = np.mean(volume[i-20:i])
-        volume_filter = volume[i] > vol_ma * 2.0  # Increased threshold for fewer trades
-        
-        # ADX trend filter (strong trend)
-        trend_filter = adx[i] > 25
+        volume_filter = volume[i] > vol_ma * 1.5  # Volume above 1.5x average
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower
+            # Exit: price closes below Donchian lower OR below weekly S1
             # Stoploss: price drops 2*ATR below entry
             if (close[i] < lowest_low or
+                close[i] < weekly_s1_aligned[i] or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
                 signals[i] = 0.25
-            bars_since_entry += 1
+            bars_since_exit += 1
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper
+            # Exit: price closes above Donchian upper OR above weekly R1
             # Stoploss: price rises 2*ATR above entry
             if (close[i] > highest_high or
+                close[i] > weekly_r1_aligned[i] or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
                 signals[i] = -0.25
-            bars_since_entry += 1
+            bars_since_exit += 1
         else:
-            # Look for entries: Donchian breakout + volume + ADX trend filter
-            # Minimum holding period: only allow new entry after 20 bars flat
-            if bars_since_entry >= 20:
+            # Look for entries: Donchian breakout + volume + weekly pivot direction
+            # Minimum 10 bars between trades to prevent overtrading
+            if bars_since_exit >= 10:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
-                if bull_breakout and volume_filter and trend_filter:
+                # Weekly pivot direction filter: only long above weekly pivot, short below
+                above_pivot = close[i] > weekly_pivot_aligned[i]
+                below_pivot = close[i] < weekly_pivot_aligned[i]
+                
+                if bull_breakout and volume_filter and above_pivot:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                    bars_since_entry = 0
-                elif bear_breakout and volume_filter and trend_filter:
+                    bars_since_exit = 0
+                elif bear_breakout and volume_filter and below_pivot:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
-                    bars_since_entry = 0
+                    bars_since_exit = 0
                 else:
                     signals[i] = 0.0
-                    bars_since_entry += 1
+                    bars_since_exit += 1
             else:
                 signals[i] = 0.0
-                bars_since_entry += 1
+                bars_since_exit += 1
     
     return signals
 
 </think>
+
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + Volume Spike + ADX Trend Filter + ATR Stoploss
-Hypothesis: Daily timeframe reduces trade frequency to avoid fee drag while capturing major trends.
-Donchian breakouts with volume spike (>2x average) and strong trend (ADX>25) capture high-probability moves.
-ADX filter prevents whipsaws in ranging markets. Target: 75-200 total trades over 4 years.
+6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
+Hypothesis: Weekly pivot levels provide structural support/resistance that works in both bull and bear markets.
+Breakouts above weekly R1 or below weekly S1 with volume confirmation capture institutional interest.
+Using 6h timeframe reduces trade frequency to avoid fee drag while capturing multi-day moves.
+Weekly pivot filter ensures we only trade in direction of higher timeframe bias.
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_vol_adx_v1"
-timeframe = "1d"
+name = "6h_donchian20_weekly_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -199,7 +180,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR
+    # 14-period ATR for stoploss
     atr = np.full(n, np.nan)
     if n >= 14:
         tr = np.maximum(
@@ -212,77 +193,50 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 14-period ADX
-    adx = np.full(n, np.nan)
-    if n >= 14:
-        # +DM and -DM
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        # True Range (same as ATR calculation)
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-        
-        # Smoothed values
-        tr14 = np.full(n, np.nan)
-        plus_dm14 = np.full(n, np.nan)
-        minus_dm14 = np.full(n, np.nan)
-        
-        if len(tr) >= 14:
-            tr14[14] = np.sum(tr[:14])
-            plus_dm14[14] = np.sum(plus_dm[:14])
-            minus_dm14[14] = np.sum(minus_dm[:14])
-            
-            for i in range(15, n):
-                tr14[i] = tr14[i-1] - (tr14[i-1] / 14) + tr[i-1]
-                plus_dm14[i] = plus_dm14[i-1] - (plus_dm14[i-1] / 14) + plus_dm[i-1]
-                minus_dm14[i] = minus_dm14[i-1] - (minus_dm14[i-1] / 14) + minus_dm[i-1]
-        
-        # Directional Indicators
-        plus_di = np.full(n, np.nan)
-        minus_di = np.full(n, np.nan)
-        dx = np.full(n, np.nan)
-        
-        valid = ~np.isnan(tr14) & (tr14 != 0)
-        if np.any(valid):
-            plus_di[valid] = 100 * plus_dm14[valid] / tr14[valid]
-            minus_di[valid] = 100 * minus_dm14[valid] / tr14[valid]
-            dx[valid] = 100 * np.abs(plus_di[valid] - minus_di[valid]) / (plus_di[valid] + minus_di[valid])
-        
-        # ADX (smoothed DX)
-        adx_smooth = np.full(n, np.nan)
-        valid_dx = ~np.isnan(dx)
-        if np.sum(valid_dx) >= 14:
-            # First ADX value is average of first 14 DX
-            first_idx = np.where(valid_dx)[0][13] if np.sum(valid_dx) >= 14 else -1
-            if first_idx != -1:
-                adx_smooth[first_idx] = np.mean(dx[valid_dx][:14])
-                for i in range(first_idx + 1, n):
-                    if valid_dx[i]:
-                        adx_smooth[i] = (adx_smooth[i-1] * 13 + dx[i]) / 14
-                adx = adx_smooth
+    # === WEEKLY PIVOT DATA (MTF) - CALCULATE ONCE BEFORE LOOP ===
+    df_weekly = get_htf_data(prices, '1w')  # Weekly data for pivot calculation
+    if len(df_weekly) < 1:
+        return np.zeros(n)
+    
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
+    
+    # Weekly pivot and support/resistance levels
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_r1 = 2 * weekly_pivot - weekly_low
+    weekly_s1 = 2 * weekly_pivot - weekly_high
+    weekly_r2 = weekly_pivot + (weekly_high - weekly_low)
+    weekly_s2 = weekly_pivot - (weekly_high - weekly_low)
+    weekly_r3 = weekly_high + 2 * (weekly_pivot - weekly_low)
+    weekly_s3 = weekly_low - 2 * (weekly_high - weekly_pivot)
+    
+    # Align weekly levels to 6h timeframe (shifted by 1 week for no look-ahead)
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+    weekly_r2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r2)
+    weekly_s2_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s2)
+    weekly_r3_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r3)
+    weekly_s3_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s3)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_entry = 0
+    bars_since_exit = 0  # Bars since last exit to prevent overtrading
     
     # Start from warmup period
-    start = 20  # For Donchian and ADX
+    start = 20  # For Donchian channel
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(adx[i]):
+        if np.isnan(atr[i]) or np.isnan(weekly_r1_aligned[i]) or np.isnan(weekly_s1_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
-            bars_since_entry += 1
+            bars_since_exit += 1
             continue
         
         # Donchian channel (20-period)
@@ -291,465 +245,59 @@ def generate_signals(prices):
         
         # Volume filter (20-period average)
         vol_ma = np.mean(volume[i-20:i])
-        volume_filter = volume[i] > vol_ma * 2.0  # Increased threshold for fewer trades
-        
-        # ADX trend filter (strong trend)
-        trend_filter = adx[i] > 25
+        volume_filter = volume[i] > vol_ma * 1.5  # Volume above 1.5x average
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower
+            # Exit: price closes below Donchian lower OR below weekly S1
             # Stoploss: price drops 2*ATR below entry
             if (close[i] < lowest_low or
+                close[i] < weekly_s1_aligned[i] or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
                 signals[i] = 0.25
-            bars_since_entry += 1
+            bars_since_exit += 1
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper
+            # Exit: price closes above Donchian upper OR above weekly R1
             # Stoploss: price rises 2*ATR above entry
             if (close[i] > highest_high or
+                close[i] > weekly_r1_aligned[i] or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
                 signals[i] = -0.25
-            bars_since_entry += 1
+            bars_since_exit += 1
         else:
-            # Look for entries: Donchian breakout + volume + ADX trend filter
-            # Minimum holding period: only allow new entry after 20 bars flat
-            if bars_since_entry >= 20:
+            # Look for entries: Donchian breakout + volume + weekly pivot direction
+            # Minimum 10 bars between trades to prevent overtrading
+            if bars_since_exit >= 10:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
-                if bull_breakout and volume_filter and trend_filter:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                elif bear_breakout and volume_filter and trend_filter:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                else:
-                    signals[i] = 0.0
-                    bars_since_entry += 1
-            else:
-                signals[i] = 0.0
-                bars_since_entry += 1
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-"""
-1d Donchian(20) Breakout + Volume Spike + ADX Trend Filter + ATR Stoploss
-Hypothesis: Daily timeframe reduces trade frequency to avoid fee drag while capturing major trends.
-Donchian breakouts with volume spike (>2x average) and strong trend (ADX>25) capture high-probability moves.
-ADX filter prevents whipsaws in ranging markets. Target: 75-200 total trades over 4 years.
-"""
-
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "1d_donchian20_vol_adx_v1"
-timeframe = "1d"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 30:
-        return np.zeros(n)
-    
-    # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # 14-period ATR
-    atr = np.full(n, np.nan)
-    if n >= 14:
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-        if len(tr) > 0:
-            atr[1] = tr[0]
-            for i in range(2, n):
-                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
-    
-    # 14-period ADX
-    adx = np.full(n, np.nan)
-    if n >= 14:
-        # +DM and -DM
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        # True Range (same as ATR calculation)
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-        
-        # Smoothed values
-        tr14 = np.full(n, np.nan)
-        plus_dm14 = np.full(n, np.nan)
-        minus_dm14 = np.full(n, np.nan)
-        
-        if len(tr) >= 14:
-            tr14[14] = np.sum(tr[:14])
-            plus_dm14[14] = np.sum(plus_dm[:14])
-            minus_dm14[14] = np.sum(minus_dm[:14])
-            
-            for i in range(15, n):
-                tr14[i] = tr14[i-1] - (tr14[i-1] / 14) + tr[i-1]
-                plus_dm14[i] = plus_dm14[i-1] - (plus_dm14[i-1] / 14) + plus_dm[i-1]
-                minus_dm14[i] = minus_dm14[i-1] - (minus_dm14[i-1] / 14) + minus_dm[i-1]
-        
-        # Directional Indicators
-        plus_di = np.full(n, np.nan)
-        minus_di = np.full(n, np.nan)
-        dx = np.full(n, np.nan)
-        
-        valid = ~np.isnan(tr14) & (tr14 != 0)
-        if np.any(valid):
-            plus_di[valid] = 100 * plus_dm14[valid] / tr14[valid]
-            minus_di[valid] = 100 * minus_dm14[valid] / tr14[valid]
-            dx[valid] = 100 * np.abs(plus_di[valid] - minus_di[valid]) / (plus_di[valid] + minus_di[valid])
-        
-        # ADX (smoothed DX)
-        adx_smooth = np.full(n, np.nan)
-        valid_dx = ~np.isnan(dx)
-        if np.sum(valid_dx) >= 14:
-            # First ADX value is average of first 14 DX
-            first_idx = np.where(valid_dx)[0][13] if np.sum(valid_dx) >= 14 else -1
-            if first_idx != -1:
-                adx_smooth[first_idx] = np.mean(dx[valid_dx][:14])
-                for i in range(first_idx + 1, n):
-                    if valid_dx[i]:
-                        adx_smooth[i] = (adx_smooth[i-1] * 13 + dx[i]) / 14
-                adx = adx_smooth
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    bars_since_entry = 0
-    
-    # Start from warmup period
-    start = 20  # For Donchian and ADX
-    
-    for i in range(start, n):
-        # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(adx[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            bars_since_entry += 1
-            continue
-        
-        # Donchian channel (20-period)
-        highest_high = np.max(high[i-20:i])
-        lowest_low = np.min(low[i-20:i])
-        
-        # Volume filter (20-period average)
-        vol_ma = np.mean(volume[i-20:i])
-        volume_filter = volume[i] > vol_ma * 2.0  # Increased threshold for fewer trades
-        
-        # ADX trend filter (strong trend)
-        trend_filter = adx[i] > 25
-        
-        # Check exits and stoploss
-        if position == 1:  # long position
-            # Exit: price closes below Donchian lower
-            # Stoploss: price drops 2*ATR below entry
-            if (close[i] < lowest_low or
-                close[i] < entry_price - 2.0 * atr[i]):
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-            else:
-                signals[i] = 0.25
-            bars_since_entry += 1
-        elif position == -1:  # short position
-            # Exit: price closes above Donchian upper
-            # Stoploss: price rises 2*ATR above entry
-            if (close[i] > highest_high or
-                close[i] > entry_price + 2.0 * atr[i]):
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-            else:
-                signals[i] = -0.25
-            bars_since_entry += 1
-        else:
-            # Look for entries: Donchian breakout + volume + ADX trend filter
-            # Minimum holding period: only allow new entry after 20 bars flat
-            if bars_since_entry >= 20:
-                bull_breakout = close[i] > highest_high
-                bear_breakout = close[i] < lowest_low
+                # Weekly pivot direction filter: only long above weekly pivot, short below
+                above_pivot = close[i] > weekly_pivot_aligned[i]
+                below_pivot = close[i] < weekly_pivot_aligned[i]
                 
-                if bull_breakout and volume_filter and trend_filter:
+                if bull_breakout and volume_filter and above_pivot:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                    bars_since_entry = 0
-                elif bear_breakout and volume_filter and trend_filter:
+                    bars_since_exit = 0
+                elif bear_breakout and volume_filter and below_pivot:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
-                    bars_since_entry = 0
+                    bars_since_exit = 0
                 else:
                     signals[i] = 0.0
-                    bars_since_entry += 1
+                    bars_since_exit += 1
             else:
                 signals[i] = 0.0
-                bars_since_entry += 1
+                bars_since_exit += 1
     
     return signals
-
-</think>
-#!/usr/bin/env python3
-"""
-1d Donchian(20) Breakout + Volume Spike + ADX Trend Filter + ATR Stoploss
-Hypothesis: Daily timeframe reduces trade frequency to avoid fee drag while capturing major trends.
-Donchian breakouts with volume spike (>2x average) and strong trend (ADX>25) capture high-probability moves.
-ADX filter prevents whipsaws in ranging markets. Target: 75-200 total trades over 4 years.
-"""
-
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "1d_donchian20_vol_adx_v1"
-timeframe = "1d"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 30:
-        return np.zeros(n)
-    
-    # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # 14-period ATR
-    atr = np.full(n, np.nan)
-    if n >= 14:
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-        if len(tr) > 0:
-            atr[1] = tr[0]
-            for i in range(2, n):
-                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
-    
-    # 14-period ADX
-    adx = np.full(n, np.nan)
-    if n >= 14:
-        # +DM and -DM
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        # True Range (same as ATR calculation)
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-        
-        # Smoothed values
-        tr14 = np.full(n, np.nan)
-        plus_dm14 = np.full(n, np.nan)
-        minus_dm14 = np.full(n, np.nan)
-        
-        if len(tr) >= 14:
-            tr14[14] = np.sum(tr[:14])
-            plus_dm14[14] = np.sum(plus_dm[:14])
-            minus_dm14[14] = np.sum(minus_dm[:14])
-            
-            for i in range(15, n):
-                tr14[i] = tr14[i-1] - (tr14[i-1] / 14) + tr[i-1]
-                plus_dm14[i] = plus_dm14[i-1] - (plus_dm14[i-1] / 14) + plus_dm[i-1]
-                minus_dm14[i] = minus_dm14[i-1] - (minus_dm14[i-1] / 14) + minus_dm[i-1]
-        
-        # Directional Indicators
-        plus_di = np.full(n, np.nan)
-        minus_di = np.full(n, np.nan)
-        dx = np.full(n, np.nan)
-        
-        valid = ~np.isnan(tr14) & (tr14 != 0)
-        if np.any(valid):
-            plus_di[valid] = 100 * plus_dm14[valid] / tr14[valid]
-            minus_di[valid] = 100 * minus_dm14[valid] / tr14[valid]
-            dx[valid] = 100 * np.abs(plus_di[valid] - minus_di[valid]) / (plus_di[valid] + minus_di[valid])
-        
-        # ADX (smoothed DX)
-        adx_smooth = np.full(n, np.nan)
-        valid_dx = ~np.isnan(dx)
-        if np.sum(valid_dx) >= 14:
-            # First ADX value is average of first 14 DX
-            first_idx = np.where(valid_dx)[0][13] if np.sum(valid_dx) >= 14 else -1
-            if first_idx != -1:
-                adx_smooth[first_idx] = np.mean(dx[valid_dx][:14])
-                for i in range(first_idx + 1, n):
-                    if valid_dx[i]:
-                        adx_smooth[i] = (adx_smooth[i-1] * 13 + dx[i]) / 14
-                adx = adx_smooth
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    bars_since_entry = 0
-    
-    # Start from warmup period
-    start = 20  # For Donchian and ADX
-    
-    for i in range(start, n):
-        # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(adx[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            bars_since_entry += 1
-            continue
-        
-        # Donchian channel (20-period)
-        highest_high = np.max(high[i-20:i])
-        lowest_low = np.min(low[i-20:i])
-        
-        # Volume filter (20-period average)
-        vol_ma = np.mean(volume[i-20:i])
-        volume_filter = volume[i] > vol_ma * 2.0  # Increased threshold for fewer trades
-        
-        # ADX trend filter (strong trend)
-        trend_filter = adx[i] > 25
-        
-        # Check exits and stoploss
-        if position == 1:  # long position
-            # Exit: price closes below Donchian lower
-            # Stoploss: price drops 2*ATR below entry
-            if (close[i] < lowest_low or
-                close[i] < entry_price - 2.0 * atr[i]):
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-            else:
-                signals[i] = 0.25
-            bars_since_entry += 1
-        elif position == -1:  # short position
-            # Exit: price closes above Donchian upper
-            # Stoploss: price rises 2*ATR above entry
-            if (close[i] > highest_high or
-                close[i] > entry_price + 2.0 * atr[i]):
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-            else:
-                signals[i] = -0.25
-            bars_since_entry += 1
-        else:
-            # Look for entries: Donchian breakout + volume + ADX trend filter
-            # Minimum holding period: only allow new entry after 20 bars flat
-            if bars_since_entry >= 20:
-                bull_breakout = close[i] > highest_high
-                bear_breakout = close[i] < lowest_low
-                
-                if bull_breakout and volume_filter and trend_filter:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                elif bear_breakout and volume_filter and trend_filter:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
-                    bars_since_entry = 0
-                else:
-                    signals[i] = 0.0
-                    bars_since_entry += 1
-            else:
-                signals[i] = 0.0
-                bars_since_entry += 1
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-"""
-1d Donchian(20) Breakout + Volume Spike + ADX Trend Filter + ATR Stoploss
-Hypothesis: Daily timeframe reduces trade frequency to avoid fee drag while capturing major trends.
-Donchian breakouts with volume spike (>2x average) and strong trend (ADX>25) capture high-probability moves.
-ADX filter prevents whipsaws in ranging markets. Target: 75-200 total trades over 4 years.
-"""
-
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "1d_donchian20_vol_adx_v1"
-timeframe = "1d"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 30:
-        return np.zeros(n)
-    
-    # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # 14-period ATR
-    atr = np.full(n, np.nan)
-    if n >= 14:
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-        if len(tr) > 0:
-            atr[1] = tr[0]
-            for i in range(2, n):
-                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
-    
-    # 14-period ADX
-    adx = np.full(n, np.nan)
-    if n >= 14:
-        # +DM and -DM
-        up_move = high[1:] - high[:-1]
-        down_move = low[:-1] - low[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        # True Range (same as ATR calculation)
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-        
-        # Smoothed values
-        tr14 = np.full(n, np.nan)
-        plus_dm1
