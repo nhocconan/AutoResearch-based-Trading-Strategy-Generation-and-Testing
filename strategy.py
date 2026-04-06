@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h trend filter and volume confirmation.
-# Uses 4h Donchian channel breakouts for entry, filtered by 12h EMA trend direction.
-# Volume confirmation (current volume > 1.5x 20-period average) avoids false breakouts.
-# ATR-based stop loss (2.5x ATR) limits downside. Works in bull markets via upward breakouts
-# and in bear markets via downward breakdowns. Target: 100-200 trades over 4 years (25-50/year).
+# Hypothesis: 1d Donchian breakout with weekly trend filter and volume confirmation.
+# Uses daily Donchian channel (20-day) breakouts for trend continuation.
+# Weekly trend filter (price above/below 20-week EMA) ensures alignment with higher timeframe trend.
+# Volume confirmation (current volume > 1.5x 20-day average) filters low-quality breakouts.
+# Works in bull markets via upward breakouts and in bear markets via downward breakdowns.
+# Target: 30-100 trades over 4 years (7-25/year).
 
-name = "4h_donchian20_12h_trend_vol_v1"
-timeframe = "4h"
+name = "1d_donchian20_weekly_trend_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,25 +25,25 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channel (20-period)
+    # Daily Donchian channel (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(19, n):
         donchian_high[i] = np.max(high[i-19:i+1])
         donchian_low[i] = np.min(low[i-19:i+1])
     
-    # 12h trend filter: 20-period EMA on 12h closes
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_20_12h = np.full(len(close_12h), np.nan)
-    for i in range(19, len(close_12h)):
+    # Weekly trend filter: 20-week EMA on weekly closes
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_20w = np.full(len(close_1w), np.nan)
+    for i in range(19, len(close_1w)):
         if i == 19:
-            ema_20_12h[i] = np.mean(close_12h[0:20])
+            ema_20w[i] = np.mean(close_1w[0:20])
         else:
-            ema_20_12h[i] = close_12h[i] * 2/(20+1) + ema_20_12h[i-1] * (1 - 2/(20+1))
-    ema_20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_20_12h)
+            ema_20w[i] = close_1w[i] * 2/(20+1) + ema_20w[i-1] * (1 - 2/(20+1))
+    ema_20w_aligned = align_htf_to_ltf(prices, df_1w, ema_20w)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.5x 20-day average
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volume[i-19:i+1])
@@ -52,8 +53,8 @@ def generate_signals(prices):
     entry_price = 0.0
     
     for i in range(20, n):
-        # Skip if 12h trend data not available
-        if np.isnan(ema_20_12h_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
+        # Skip if weekly trend data not available
+        if np.isnan(ema_20w_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -87,17 +88,17 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and 12h trend filter
+            # Look for entries with volume confirmation and weekly trend filter
             if volume_filter:
-                # Breakout above Donchian high with 12h uptrend
+                # Breakout above Donchian high with weekly uptrend
                 if (close[i] > donchian_high[i] and close[i-1] <= donchian_high[i] and 
-                    close[i] > ema_20_12h_aligned[i]):
+                    close[i] > ema_20w_aligned[i]):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Breakdown below Donchian low with 12h downtrend
+                # Breakdown below Donchian low with weekly downtrend
                 elif (close[i] < donchian_low[i] and close[i-1] >= donchian_low[i] and 
-                      close[i] < ema_20_12h_aligned[i]):
+                      close[i] < ema_20w_aligned[i]):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
