@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 12h EMA trend filter + volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > 12h EMA(50) AND volume > 1.5x avg
-# Short when Williams %R > -20 (overbought) AND price < 12h EMA(50) AND volume > 1.5x avg
-# Exit when Williams %R crosses back to -50 or volume drops
-# Targets 50-150 trades over 4 years by using Williams %R extremes with trend filter
-# Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend)
+# Hypothesis: 4h Donchian(20) breakout + 1d EMA50 trend filter + volume confirmation
+# Long when price breaks above Donchian high(20) AND price > 1d EMA50 AND volume > 1.5x average
+# Short when price breaks below Donchian low(20) AND price < 1d EMA50 AND volume > 1.5x average
+# Exit when price crosses back inside Donchian channel OR trend filter fails
+# Uses 4h timeframe to balance trade frequency and signal quality
+# Volume and EMA filters reduce false breakouts in choppy markets
+# Target: 100-200 total trades over 4 years (25-50/year)
 
-name = "6h_williamsr_12h_ema_vol_v1"
-timeframe = "6h"
+name = "4h_donchian20_1d_ema_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,16 +26,18 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-    williams_r = williams_r.values
+    # Donchian Channel (20-period) on 4h
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_high = highest_high.values
+    donchian_low = lowest_low.values
     
-    # 12h EMA(50) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False).mean()
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h.values)
+    # 1d EMA50 for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    daily_close = df_1d['close'].values
+    ema_50 = pd.Series(daily_close).ewm(span=50, min_periods=50, adjust=False).mean()
+    ema_50_values = ema_50.values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50_values)
     
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -45,594 +48,36 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if required data not available
-        if np.isnan(williams_r[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(volume_threshold[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
+           np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Exit conditions: Williams %R returns to -50 or volume drops below threshold
+        # Exit conditions: price crosses back inside Donchian channel OR trend filter fails
         if position == 1:  # long position
-            if williams_r[i] > -50 or volume[i] <= volume_threshold[i]:
+            if close[i] <= donchian_high[i] or close[i] < ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if williams_r[i] < -50 or volume[i] <= volume_threshold[i]:
+            if close[i] >= donchian_low[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with trend filter and volume confirmation
-            # Long: Williams %R oversold (<-80) in uptrend (price > EMA) + volume
-            if (williams_r[i] < -80 and close[i] > ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
+            # Look for entries: Donchian breakout with trend and volume confirmation
+            # Long: price breaks above Donchian high AND above 1d EMA50 AND volume confirmation
+            if close[i] > donchian_high[i] and close[i] > ema_50_aligned[i] and volume[i] > volume_threshold[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: Williams %R overbought (>-20) in downtrend (price < EMA) + volume
-            elif (williams_r[i] > -20 and close[i] < ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
+            # Short: price breaks below Donchian low AND below 1d EMA50 AND volume confirmation
+            elif close[i] < donchian_low[i] and close[i] < ema_50_aligned[i] and volume[i] > volume_threshold[i]:
                 signals[i] = -0.25
                 position = -1
     
     return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams %R + 12h EMA trend filter + volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > 12h EMA(50) AND volume > 1.5x avg
-# Short when Williams %R > -20 (overbought) AND price < 12h EMA(50) AND volume > 1.5x avg
-# Exit when Williams %R crosses back to -50 or volume drops
-# Targets 50-150 trades over 4 years by using Williams %R extremes with trend filter
-# Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend)
-
-name = "6h_williamsr_12h_ema_vol_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-    williams_r = williams_r.values
-    
-    # 12h EMA(50) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False).mean()
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h.values)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(50, n):
-        # Skip if required data not available
-        if np.isnan(williams_r[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(volume_threshold[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Exit conditions: Williams %R returns to -50 or volume drops below threshold
-        if position == 1:  # long position
-            if williams_r[i] > -50 or volume[i] <= volume_threshold[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            if williams_r[i] < -50 or volume[i] <= volume_threshold[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with trend filter and volume confirmation
-            # Long: Williams %R oversold (<-80) in uptrend (price > EMA) + volume
-            if (williams_r[i] < -80 and close[i] > ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: Williams %R overbought (>-20) in downtrend (price < EMA) + volume
-            elif (williams_r[i] > -20 and close[i] < ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
-                signals[i] = -0.25
-                position = -1
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams %R + 12h EMA trend filter + volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > 12h EMA(50) AND volume > 1.5x avg
-# Short when Williams %R > -20 (overbought) AND price < 12h EMA(50) AND volume > 1.5x avg
-# Exit when Williams %R crosses back to -50 or volume drops
-# Targets 50-150 trades over 4 years by using Williams %R extremes with trend filter
-# Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend)
-
-name = "6h_williamsr_12h_ema_vol_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-    williams_r = williams_r.values
-    
-    # 12h EMA(50) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False).mean()
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h.values)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(50, n):
-        # Skip if required data not available
-        if np.isnan(williams_r[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(volume_threshold[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Exit conditions: Williams %R returns to -50 or volume drops below threshold
-        if position == 1:  # long position
-            if williams_r[i] > -50 or volume[i] <= volume_threshold[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            if williams_r[i] < -50 or volume[i] <= volume_threshold[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with trend filter and volume confirmation
-            # Long: Williams %R oversold (<-80) in uptrend (price > EMA) + volume
-            if (williams_r[i] < -80 and close[i] > ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: Williams %R overbought (>-20) in downtrend (price < EMA) + volume
-            elif (williams_r[i] > -20 and close[i] < ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
-                signals[i] = -0.25
-                position = -1
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams %R + 12h EMA trend filter + volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > 12h EMA(50) AND volume > 1.5x avg
-# Short when Williams %R > -20 (overbought) AND price < 12h EMA(50) AND volume > 1.5x avg
-# Exit when Williams %R crosses back to -50 or volume drops
-# Targets 50-150 trades over 4 years by using Williams %R extremes with trend filter
-# Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend)
-
-name = "6h_williamsr_12h_ema_vol_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-    williams_r = williams_r.values
-    
-    # 12h EMA(50) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False).mean()
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h.values)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(50, n):
-        # Skip if required data not available
-        if np.isnan(williams_r[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(volume_threshold[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Exit conditions: Williams %R returns to -50 or volume drops below threshold
-        if position == 1:  # long position
-            if williams_r[i] > -50 or volume[i] <= volume_threshold[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            if williams_r[i] < -50 or volume[i] <= volume_threshold[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with trend filter and volume confirmation
-            # Long: Williams %R oversold (<-80) in uptrend (price > EMA) + volume
-            if (williams_r[i] < -80 and close[i] > ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: Williams %R overbought (>-20) in downtrend (price < EMA) + volume
-            elif (williams_r[i] > -20 and close[i] < ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
-                signals[i] = -0.25
-                position = -1
-    
-    return signals
-
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams %R + 12h EMA trend filter + volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > 12h EMA(50) AND volume > 1.5x avg
-# Short when Williams %R > -20 (overbought) AND price < 12h EMA(50) AND volume > 1.5x avg
-# Exit when Williams %R crosses back to -50 or volume drops
-# Targets 50-150 trades over 4 years by using Williams %R extremes with trend filter
-# Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend)
-
-name = "6h_williamsr_12h_ema_vol_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-    williams_r = williams_r.values
-    
-    # 12h EMA(50) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False).mean()
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h.values)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(50, n):
-        # Skip if required data not available
-        if np.isnan(williams_r[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(volume_threshold[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Exit conditions: Williams %R returns to -50 or volume drops below threshold
-        if position == 1:  # long position
-            if williams_r[i] > -50 or volume[i] <= volume_threshold[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            if williams_r[i] < -50 or volume[i] <= volume_threshold[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with trend filter and volume confirmation
-            # Long: Williams %R oversold (<-80) in uptrend (price > EMA) + volume
-            if (williams_r[i] < -80 and close[i] > ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: Williams %R overbought (>-20) in downtrend (price < EMA) + volume
-            elif (williams_r[i] > -20 and close[i] < ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
-                signals[i] = -0.25
-                position = -1
-    
-    return signals
-
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams %R + 12h EMA trend filter + volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > 12h EMA(50) AND volume > 1.5x avg
-# Short when Williams %R > -20 (overbought) AND price < 12h EMA(50) AND volume > 1.5x avg
-# Exit when Williams %R crosses back to -50 or volume drops
-# Targets 50-150 trades over 4 years by using Williams %R extremes with trend filter
-# Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend)
-
-name = "6h_williamsr_12h_ema_vol_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-    williams_r = williams_r.values
-    
-    # 12h EMA(50) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False).mean()
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h.values)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(50, n):
-        # Skip if required data not available
-        if np.isnan(williams_r[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(volume_threshold[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Exit conditions: Williams %R returns to -50 or volume drops below threshold
-        if position == 1:  # long position
-            if williams_r[i] > -50 or volume[i] <= volume_threshold[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            if williams_r[i] < -50 or volume[i] <= volume_threshold[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with trend filter and volume confirmation
-            # Long: Williams %R oversold (<-80) in uptrend (price > EMA) + volume
-            if (williams_r[i] < -80 and close[i] > ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: Williams %R overbought (>-20) in downtrend (price < EMA) + volume
-            elif (williams_r[i] > -20 and close[i] < ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
-                signals[i] = -0.25
-                position = -1
-    
-    return signals
-
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams %R + 12h EMA trend filter + volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > 12h EMA(50) AND volume > 1.5x avg
-# Short when Williams %R > -20 (overbought) AND price < 12h EMA(50) AND volume > 1.5x avg
-# Exit when Williams %R crosses back to -50 or volume drops
-# Targets 50-150 trades over 4 years by using Williams %R extremes with trend filter
-# Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend)
-
-name = "6h_williamsr_12h_ema_vol_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-    williams_r = williams_r.values
-    
-    # 12h EMA(50) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False).mean()
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h.values)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(50, n):
-        # Skip if required data not available
-        if np.isnan(williams_r[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(volume_threshold[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Exit conditions: Williams %R returns to -50 or volume drops below threshold
-        if position == 1:  # long position
-            if williams_r[i] > -50 or volume[i] <= volume_threshold[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            if williams_r[i] < -50 or volume[i] <= volume_threshold[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with trend filter and volume confirmation
-            # Long: Williams %R oversold (<-80) in uptrend (price > EMA) + volume
-            if (williams_r[i] < -80 and close[i] > ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: Williams %R overbought (>-20) in downtrend (price < EMA) + volume
-            elif (williams_r[i] > -20 and close[i] < ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
-                signals[i] = -0.25
-                position = -1
-    
-    return signals
-
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams %R + 12h EMA trend filter + volume confirmation
-# Long when Williams %R < -80 (oversold) AND price > 12h EMA(50) AND volume > 1.5x avg
-# Short when Williams %R > -20 (overbought) AND price < 12h EMA(50) AND volume > 1.5x avg
-# Exit when Williams %R crosses back to -50 or volume drops
-# Targets 50-150 trades over 4 years by using Williams %R extremes with trend filter
-# Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend)
-
-name = "6h_williamsr_12h_ema_vol_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Williams %R (14-period)
-    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
-    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low + 1e-10)
-    williams_r = williams_r.values
-    
-    # 12h EMA(50) for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    ema_12h = pd.Series(df_12h['close'].values).ewm(span=50, adjust=False).mean()
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h.values)
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(50, n):
-        # Skip if required data not available
-        if np.isnan(williams_r[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(volume_threshold[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Exit conditions: Williams %R returns to -50 or volume drops below threshold
-        if position == 1:  # long position
-            if williams_r[i] > -50 or volume[i] <= volume_threshold[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            if williams_r[i] < -50 or volume[i] <= volume_threshold[i]:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with trend filter and volume confirmation
-            # Long: Williams %R oversold (<-80) in uptrend (price > EMA) + volume
-            if (williams_r[i] < -80 and close[i] > ema_12h_aligned[i] and volume[i] > volume_threshold[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: Williams %R overbought (>-20) in downtrend (price < EMA) + volume
-            elif (williams_r[i] > -20 and close[i] < ema_12h_aligned[i] and
