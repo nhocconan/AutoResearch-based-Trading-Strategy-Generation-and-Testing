@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 """
-Experiment #11951: 6h Donchian Breakout with 1d Trend and Volume Confirmation v2
-Hypothesis: Reduced signal frequency by tightening conditions - require both 1d trend alignment 
-AND volume spike to enter, with ATR-based stops. Target: 50-150 trades over 4 years.
+Experiment #11952: 12h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: 12h Donchian(20) breakouts capture medium-term trends with lower frequency.
+1d EMA provides trend bias to avoid counter-trend trades, and volume filter ensures
+institutional participation. Target: 50-150 trades over 4 years (12-37/year).
+Works in bull (breakouts continue) and bear (breakouts reverse quickly) by using 1d trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11951_6h_donchian20_1d_ema_vol_v2"
-timeframe = "6h"
+name = "exp_11952_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
-# Parameters - tightened for fewer trades
+# Parameters
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0  # Increased from 1.5
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -53,7 +55,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -96,14 +98,14 @@ def generate_signals(prices):
         breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
         breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        # Volume confirmation - tightened threshold
+        # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter (1d)
         uptrend_1d = close[i] > ema_1d_aligned[i]
         downtrend_1d = close[i] < ema_1d_aligned[i]
         
-        # Entry conditions - require ALL conditions
+        # Entry conditions
         long_entry = breakout_up and volume_ok and uptrend_1d
         short_entry = breakout_down and volume_ok and downtrend_1d
         
@@ -127,3 +129,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</lymph>
