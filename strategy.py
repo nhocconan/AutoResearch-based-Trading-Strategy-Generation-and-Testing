@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-12h Donchian breakout with 1d EMA filter and volume capture - optimized for hypothesis.
-Hypothesis: This strategy captures breakouts aligned with higher timeframe trend (1d EMA) and volume confirmation.
-It should work in bull markets via breakouts and in bear markets via short breakdowns.
-Volume filter ensures momentum, reducing false breakouts. Target: 50-150 trades over 4 years.
+4h Donchian breakout with 1d EMA filter and volume confirmation - optimized for higher trade count.
+Long: price breaks above 4h Donchian(20) + price > 1d EMA(50) + volume > 1.3x average
+Short: price breaks below 4h Donchian(20) + price < 1d EMA(50) + volume > 1.3x average
+Exit: stop loss (2*ATR) or reversal signal
+Position size: 0.25 (25%)
+Target: 100-200 trades over 4 years (25-50/year)
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14245_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_14246_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period):
@@ -41,7 +43,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, 50)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -51,9 +53,9 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume filter: volume > 1.3x 20-period average (reduced from 1.5x to increase trades)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_filter = volume > (1.3 * vol_ma)
     
     # ATR for stop loss (14-period)
     atr = calculate_atr(high, low, close, 14)
