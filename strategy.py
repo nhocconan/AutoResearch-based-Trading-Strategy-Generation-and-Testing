@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
 """
-6h ADX + Williams Alligator combination with 1d trend filter
-Hypothesis: ADX filters trending regimes while Alligator identifies entry points.
-Uses 1d EMA50 for trend bias to work in both bull and bear markets.
-Target: 50-150 total trades over 4 years (12-37/year) with controlled frequency.
+12h Donchian(20) breakout with weekly trend filter and volume confirmation
+Hypothesis: 12h breakouts capture medium-term momentum with lower transaction costs.
+Filter by weekly EMA200 for trend bias and volume confirmation for conviction.
+Works in bull (buy breakouts above weekly EMA200) and bear (sell breakdowns below weekly EMA200).
+Uses weekly to reduce noise vs pure 12h. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_adx_alligator_1d_trend_v1"
-timeframe = "6h"
+name = "12h_donchian20_weekly_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Price data
+    # Price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 14-period ATR for stops
+    # 14-period ATR
     atr = np.full(n, np.nan)
     if n >= 14:
         tr = np.maximum(
@@ -37,80 +39,41 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # ADX components
-    plus_dm = np.zeros(n)
-    minus_dm = np.zeros(n)
-    for i in range(1, n):
-        up = high[i] - high[i-1]
-        down = low[i-1] - low[i]
-        plus_dm[i] = up if up > down and up > 0 else 0
-        minus_dm[i] = down if down > up and down > 0 else 0
+    # Get weekly data for trend filter (EMA200)
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
     
-    # Smoothed values
-    tr14 = np.zeros(n)
-    plus_dm14 = np.zeros(n)
-    minus_dm14 = np.zeros(n)
+    # EMA200 on weekly close
+    ema_weekly = np.full(len(close_weekly), np.nan)
+    if len(close_weekly) >= 200:
+        ema_weekly[199] = np.mean(close_weekly[:200])
+        for i in range(200, len(close_weekly)):
+            ema_weekly[i] = (close_weekly[i] * 2 + ema_weekly[i-1] * 198) / 200
     
-    if n >= 14:
-        tr14[13] = np.sum(tr[1:14])
-        plus_dm14[13] = np.sum(plus_dm[1:14])
-        minus_dm14[13] = np.sum(minus_dm[1:14])
-        
-        for i in range(14, n):
-            tr14[i] = tr14[i-1] - (tr14[i-1] / 14) + tr[i]
-            plus_dm14[i] = plus_dm14[i-1] - (plus_dm14[i-1] / 14) + plus_dm[i]
-            minus_dm14[i] = minus_dm14[i-1] - (minus_dm14[i-1] / 14) + minus_dm[i]
+    # Weekly trend: above EMA200 = bullish, below = bearish
+    trend_weekly = np.where(close_weekly > ema_weekly, 1, -1)
     
-    # DI and DX
-    plus_di = np.full(n, np.nan)
-    minus_di = np.full(n, np.nan)
-    dx = np.full(n, np.nan)
+    # Align trend to 12h timeframe
+    trend_weekly_aligned = align_htf_to_ltf(prices, df_weekly, trend_weekly)
     
-    for i in range(14, n):
-        if tr14[i] != 0:
-            plus_di[i] = 100 * plus_dm14[i] / tr14[i]
-            minus_di[i] = 100 * minus_dm14[i] / tr14[i]
-            if plus_di[i] + minus_di[i] != 0:
-                dx[i] = 100 * np.abs(plus_di[i] - minus_di[i]) / (plus_di[i] + minus_di[i])
+    # Get weekly volume data for confirmation
+    volume_weekly = df_weekly['volume'].values
     
-    # ADX (smoothed DX)
-    adx = np.full(n, np.nan)
-    if n >= 28:  # Need 14 for DX + 14 for smoothing
-        adx[27] = np.nanmean(dx[14:28])
-        for i in range(28, n):
-            adx[i] = (dx[i] * 13 + adx[i-1]) / 14
+    # 20-period average volume on weekly
+    vol_ma_weekly = np.full(len(volume_weekly), np.nan)
+    for i in range(20, len(volume_weekly)):
+        vol_ma_weekly[i] = np.mean(volume_weekly[i-20:i])
     
-    # Williams Alligator (13,8,5 SMAs with future shift)
-    jaw = np.full(n, np.nan)   # 13-period
-    teeth = np.full(n, np.nan) # 8-period
-    lips = np.full(n, np.nan)  # 5-period
+    # Align volume MA to 12h timeframe
+    vol_ma_weekly_aligned = align_htf_to_ltf(prices, df_weekly, vol_ma_weekly)
     
-    if n >= 13:
-        for i in range(13, n):
-            jaw[i] = np.mean(close[i-12:i+1])  # Includes current bar
+    # Donchian channels (20-period) from 12h data
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
     
-    if n >= 8:
-        for i in range(8, n):
-            teeth[i] = np.mean(close[i-7:i+1])
-    
-    if n >= 5:
-        for i in range(5, n):
-            lips[i] = np.mean(close[i-4:i+1])
-    
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # EMA50 on 1d close
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 48) / 50
-    
-    # 1d trend: above EMA50 = bullish, below = bearish
-    trend_1d = np.where(close_1d > ema_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    for i in range(20, n):
+        upper[i] = np.max(high[i-20:i])
+        lower[i] = np.min(low[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -118,12 +81,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 35  # Need enough data for all indicators
+    start = 40  # Need enough data for Donchian and alignments
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(adx[i]) or np.isnan(jaw[i]) or np.isnan(teeth[i]) or 
-            np.isnan(lips[i]) or np.isnan(trend_1d_aligned[i]) or np.isnan(atr[i])):
+        if (np.isnan(atr[i]) or np.isnan(trend_weekly_aligned[i]) or 
+            np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(vol_ma_weekly_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -131,18 +95,21 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Alligator conditions: jaws (slow), teeth (medium), lips (fast)
-        # Alligator sleeping: all lines intertwined
-        # Alligator awake: lips > teeth > jaws (bullish) or lips < teeth < jaws (bearish)
-        alligator_bullish = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        alligator_bearish = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        # Volume filter: current 12h volume > 1.3x average weekly volume (scaled)
+        # Scale weekly volume to 12h: approx 1/14 of weekly volume (since 14x 12h in 1w)
+        vol_threshold = vol_ma_weekly_aligned[i] / 14.0 * 1.3
+        volume_filter = volume[i] > vol_threshold
+        
+        # Session filter: 08-20 UTC
+        hour = pd.Timestamp(prices['open_time'].iloc[i]).hour
+        session_filter = 8 <= hour <= 20
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: Alligator turns bearish OR ADX weakens
+            # Exit: price breaks below lower Donchian OR against trend
             # Stoploss: price drops 2*ATR below entry
-            if (not alligator_bullish or
-                adx[i] < 20 or
+            if (close[i] < lower[i] or
+                trend_weekly_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -151,10 +118,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: Alligator turns bullish OR ADX weakens
+            # Exit: price breaks above upper Donchian OR against trend
             # Stoploss: price rises 2*ATR above entry
-            if (not alligator_bearish or
-                adx[i] < 20 or
+            if (close[i] > upper[i] or
+                trend_weekly_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -166,17 +133,18 @@ def generate_signals(prices):
             # Look for entries
             # Minimum holding period: only allow new entry after 6 bars flat
             if bars_since_entry >= 6:
-                # ADX filter: only trade when trending (ADX > 25)
-                strong_trend = adx[i] > 25
+                # Breakout entries: upper/lower with trend
+                bull_breakout = close[i] > upper[i]
+                bear_breakout = close[i] < lower[i]
                 
-                # Long: Alligator bullish + strong trend + bullish 1d trend
-                if alligator_bullish and strong_trend and trend_1d_aligned[i] == 1:
+                # Long: breakout above upper with bullish trend + volume + session
+                if bull_breakout and trend_weekly_aligned[i] == 1 and volume_filter and session_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: Alligator bearish + strong trend + bearish 1d trend
-                elif alligator_bearish and strong_trend and trend_1d_aligned[i] == -1:
+                # Short: breakdown below lower with bearish trend + volume + session
+                elif bear_breakout and trend_weekly_aligned[i] == -1 and volume_filter and session_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
