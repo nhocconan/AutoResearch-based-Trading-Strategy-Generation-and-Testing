@@ -7,15 +7,14 @@ name = "exp_12666_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
-# Parameters - tuned for ~15-30 trades/year
+# Parameters
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.5
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MIN_HOLD_BARS = 8  # Minimum 2 days holding period
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -62,14 +61,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
-    bars_since_entry = 0
     
     # Start from warmup period
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        bars_since_entry += 1
-        
         # Skip if daily EMA not available
         if np.isnan(ema_1d_aligned[i]):
             if position != 0:
@@ -83,13 +79,11 @@ def generate_signals(prices):
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
                 continue
         
         # Volume confirmation
@@ -109,18 +103,16 @@ def generate_signals(prices):
         
         # Generate signals
         if position == 0:
-            if long_entry and bars_since_entry >= MIN_HOLD_BARS:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            elif short_entry and bars_since_entry >= MIN_HOLD_BARS:
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
