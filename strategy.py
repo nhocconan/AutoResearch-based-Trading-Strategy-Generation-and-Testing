@@ -3,23 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12734_1h_4h1d_donchian_volume_v1"
-timeframe = "1h"
+name = "exp_12735_6h_weekly_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -30,31 +23,37 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_weekly_pivot(high, low, close):
+    """Calculate weekly pivot levels"""
+    pivot = (high + low + close) / 3
+    range_val = high - low
+    r1 = pivot + (range_val * 1.0)
+    s1 = pivot - (range_val * 1.0)
+    r2 = pivot + (range_val * 2.0)
+    s2 = pivot - (range_val * 2.0)
+    return r1, s1, r2, s2
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h Donchian channels
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    donch_4h_upper, donch_4h_lower = calculate_donchian(high_4h, low_4h, DONCHIAN_PERIOD)
+    # Calculate weekly pivot levels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    r1_1w, s1_1w, r2_1w, s2_1w = calculate_weekly_pivot(high_1w, low_1w, close_1w)
     
-    # Align 4h Donchian to 1h
-    donch_4h_upper_aligned = align_htf_to_ltf(prices, df_4h, donch_4h_upper)
-    donch_4h_lower_aligned = align_htf_to_ltf(prices, df_4h, donch_4h_lower)
+    # Align pivot levels to 6h timeframe
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
     
-    # Calculate 1d trend (close vs 50 EMA)
-    close_1d = df_1d['close'].values
-    ema_1d_50 = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_1d = close_1d > ema_1d_50  # True for uptrend
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d.astype(float))
-    
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -69,11 +68,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 4h Donchian not available
-        if np.isnan(donch_4h_upper_aligned[i]) or np.isnan(donch_4h_lower_aligned[i]):
+        # Skip if weekly pivot levels not available
+        if np.isnan(r1_1w_aligned[i]) or np.isnan(s1_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -95,15 +94,15 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Determine trend from 1d
-        uptrend = trend_1d_aligned[i] > 0.5
+        # Fade at S1/R1, breakout at S2/R2
+        fade_long = volume_ok and close[i] <= s1_1w_aligned[i]  # fade at S1 (support)
+        fade_short = volume_ok and close[i] >= r1_1w_aligned[i]  # fade at R1 (resistance)
+        breakout_long = volume_ok and close[i] >= r2_1w_aligned[i]  # breakout above R2
+        breakout_short = volume_ok and close[i] <= s2_1w_aligned[i]  # breakdown below S2
         
-        # Entry conditions: breakout with volume in direction of 1d trend
-        long_breakout = volume_ok and close[i] > donch_4h_upper_aligned[i]
-        short_breakout = volume_ok and close[i] < donch_4h_lower_aligned[i]
-        
-        long_entry = long_breakout and uptrend
-        short_entry = short_breakout and not uptrend
+        # Entry conditions
+        long_entry = fade_long or breakout_long
+        short_entry = fade_short or breakout_short
         
         # Generate signals
         if position == 0:
