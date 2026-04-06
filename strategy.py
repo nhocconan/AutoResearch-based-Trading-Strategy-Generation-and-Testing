@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour strategy using 1-day Donchian channel breakouts with volume confirmation.
-# Goes long when price breaks above 24-period Donchian high with volume, short when breaks below 24-period low with volume.
+# Hypothesis: 4h strategy using 1-day Donchian channel breakouts with volume confirmation.
+# Goes long when price breaks above 20-period Donchian high with volume, short when breaks below 20-period low with volume.
 # Uses 1-day trend (EMA50) as filter to avoid counter-trend trades.
-# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
 # Volatility filter: only trade when ATR ratio indicates expanding volatility.
 
-name = "exp_13765_12h_donchian24_1d_ema_vol_volat"
-timeframe = "12h"
+name = "exp_13766_4h_donchian20_1d_ema_vol_volat"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 24  # 1-day = 24 * 12h bars
+DONCHIAN_PERIOD = 20  # 1-day = 20 * 4h bars
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 8
 VOLUME_THRESHOLD = 1.5
@@ -58,16 +58,16 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 1d Donchian channels (using 24-period = 1 day)
+    # Calculate 1d Donchian channels (using 20-period = 1 day)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     donchian_upper, donchian_lower = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
     
-    # Align Donchian levels to 12h timeframe
+    # Align Donchian levels to 4h timeframe
     donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
     
-    # 12h data for entry timing and ATR
+    # 4h data for entry timing and ATR
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
