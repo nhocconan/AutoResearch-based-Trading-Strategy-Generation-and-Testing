@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 12h trend filter and volume confirmation.
-# Long when Williams %R crosses above -20 from below during bullish 12h trend with volume > 1.2x 20-period average.
-# Short when Williams %R crosses below -80 from above during bearish 12h trend with volume confirmation.
-# Williams %R identifies overbought/oversold conditions; 12h trend filter ensures trades align with higher timeframe momentum.
-# Volume confirmation reduces false signals. Target: 75-150 total trades over 4 years (19-38/year).
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel during bullish day with volume > 1.3x 20-period average.
+# Short when price breaks below lower Donchian channel during bearish day with volume confirmation.
+# Uses daily trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
+# Target: 75-150 total trades over 4 years (19-38/year) to stay within optimal range.
 
-name = "6h_williamsr_12h_trend_vol_v1"
-timeframe = "6h"
+name = "4h_donchian20_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,34 +24,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R (14-period)
+    # Donchian channel (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    highest_high = high_series.rolling(window=14, min_periods=14).max()
-    lowest_low = low_series.rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).values
+    upper = high_series.rolling(window=20, min_periods=20).max().values
+    lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # 12h trend filter: bullish/bearish based on close vs open
-    df_12h = get_htf_data(prices, '12h')
-    open_12h = df_12h['open'].values
-    close_12h = df_12h['close'].values
-    trend_bullish = close_12h > open_12h  # True for bullish 12h bar
-    trend_bearish = close_12h < open_12h   # True for bearish 12h bar
-    trend_bullish_aligned = align_htf_to_ltf(prices, df_12h, trend_bullish)
-    trend_bearish_aligned = align_htf_to_ltf(prices, df_12h, trend_bearish)
+    # Daily trend filter: bullish/bearish day based on close vs open
+    df_1d = get_htf_data(prices, '1d')
+    daily_open = df_1d['open'].values
+    daily_close = df_1d['close'].values
+    daily_bullish = daily_close > daily_open  # True for bullish day
+    daily_bearish = daily_close < daily_open   # True for bearish day
+    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
+    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
     
-    # Volume filter: current volume > 1.2x 20-period average
+    # Volume filter: current volume > 1.3x 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
-        # Skip if Williams %R or trend data not available
-        if np.isnan(williams_r[i]) or np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]):
+    for i in range(20, n):
+        # Skip if daily trend data not available
+        if np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -59,38 +56,36 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.2
-        
-        # Williams %R cross signals
-        wr_above_80 = williams_r[i] > -80 and (i == 14 or williams_r[i-1] <= -80)
-        wr_below_20 = williams_r[i] < -20 and (i == 14 or williams_r[i-1] >= -20)
+        volume_filter = volume[i] > vol_ma[i] * 1.3
         
         # Check exits
         if position == 1:  # long position
-            # Exit: Williams %R drops below -80 or trend turns bearish
-            if (williams_r[i] < -80 or 
-                trend_bearish_aligned[i]):
+            # Exit: price drops below lower Donchian or daily turn bearish
+            if (low[i] <= lower[i] or 
+                daily_bearish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Williams %R rises above -20 or trend turns bullish
-            if (williams_r[i] > -20 or 
-                trend_bullish_aligned[i]):
+            # Exit: price rises above upper Donchian or daily turn bullish
+            if (high[i] >= upper[i] or 
+                daily_bullish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and trend filter
+            # Look for entries with volume confirmation and daily trend filter
             if volume_filter:
-                # Long: Williams %R crosses above -80 from below during bullish trend
-                if wr_above_80 and trend_bullish_aligned[i]:
+                # Long: break above upper Donchian during bullish day
+                if (high[i] > upper[i] and 
+                    daily_bullish_aligned[i]):
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R crosses below -20 from above during bearish trend
-                elif wr_below_20 and trend_bearish_aligned[i]:
+                # Short: break below lower Donchian during bearish day
+                elif (low[i] < lower[i] and 
+                      daily_bearish_aligned[i]):
                     signals[i] = -0.25
                     position = -1
     
