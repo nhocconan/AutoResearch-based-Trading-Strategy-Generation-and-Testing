@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-6h Donchian Breakout + Weekly Pivot + Volume
-Hypothesis: Donchian breakouts capture momentum, weekly pivots provide institutional
-support/resistance, and volume confirms institutional participation. Works in bull
-(breakouts above weekly pivot) and bear (breakdowns below weekly pivot).
-Target: 100-180 total trades over 4 years (25-45/year).
+12h Donchian(20) Breakout + Volume Spike + Choppiness Regime Filter
+Hypothesis: Donchian breakouts capture strong moves; volume spike confirms institutional participation;
+choppiness regime filter avoids whipsaws in ranging markets. Works in bull (buy breakouts) and bear
+(sell breakdowns). Target: 80-150 total trades over 4 years (20-38/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "14407_6h_donchian_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "14408_12h_donchian20_volume_chop_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,44 +19,52 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for pivot points (once before loop)
+    # Load 1w data for choppiness regime (once before loop)
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # Weekly pivot calculation (using prior week's data)
-    # Pivot Point (PP) = (High + Low + Close) / 3
-    # Support 1 (S1) = (2 * PP) - High
-    # Resistance 1 (R1) = (2 * PP) - Low
-    # Support 2 (S2) = PP - (High - Low)
-    # Resistance 2 (R2) = PP + (High - Low)
-    pp = (high_1w + low_1w + close_1w) / 3
-    s1 = (2 * pp) - high_1w
-    r1 = (2 * pp) - low_1w
-    s2 = pp - (high_1w - low_1w)
-    r2 = pp + (high_1w - low_1w)
+    # Choppiness Index (14-period)
+    chop_period = 14
+    tr1 = high_1w - low_1w
+    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
+    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
+    tr_1w = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr_1w[0] = tr1[0]
+    atr_1w = pd.Series(tr_1w).rolling(window=chop_period, min_periods=chop_period).sum().values
+    max_h = pd.Series(high_1w).rolling(window=chop_period, min_periods=chop_period).max().values
+    min_l = pd.Series(low_1w).rolling(window=chop_period, min_periods=chop_period).min().values
+    range_max_min = max_h - min_l
+    chop = 100 * np.log10(atr_1w / range_max_min) / np.log10(chop_period)
+    chop[range_max_min == 0] = 50  # avoid division by zero
     
-    # Align weekly pivots to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
+    # Align choppiness to 12h
+    chop_aligned = align_htf_to_ltf(prices, df_1w, chop)
     
-    # 6h data
+    # Load 1d data for Donchian channels (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    
+    # Donchian channels (20-period)
+    donch_period = 20
+    upper = pd.Series(high_1d).rolling(window=donch_period, min_periods=donch_period).max().values
+    lower = pd.Series(low_1d).rolling(window=donch_period, min_periods=donch_period).min().values
+    
+    # Align Donchian to 12h
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
+    
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period) on 6h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: avoid low volume periods
+    # Volume filter: volume spike (2x 20-period average)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (0.7 * vol_ma)  # Require at least 70% of average volume
+    vol_spike = volume > (2.0 * vol_ma)
     
     # ATR for stoploss
     tr1 = high - low
@@ -72,46 +79,44 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 20  # Donchian period
+    start = max(14, 20, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(chop_aligned[i]) or np.isnan(upper_aligned[i]) or
+            np.isnan(lower_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
+        # Regime filter: chop > 61.8 = ranging (mean revert), chop < 38.2 = trending (trend follow)
+        chop_val = chop_aligned[i]
+        is_ranging = chop_val > 61.8
+        is_trending = chop_val < 38.2
+        
         # Check exits
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low OR stops loss
-            if (close[i] <= donchian_low[i] or
+            # Exit: price breaks below lower Donchian OR chop becomes ranging OR stoploss
+            if (close[i] < lower_aligned[i] or is_ranging or
                 close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high OR stop loss
-            if (close[i] >= donchian_high[i] or
+            # Exit: price breaks above upper Donchian OR chop becomes ranging OR stoploss
+            if (close[i] > upper_aligned[i] or is_ranging or
                 close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + weekly pivot filter + volume
-            # Long: breakout above Donchian high AND price above weekly R1 (bullish bias)
-            long_setup = (close[i] > donchian_high[i] and 
-                         close[i] > r1_aligned[i] and 
-                         vol_filter[i])
-            # Short: breakdown below Donchian low AND price below weekly S1 (bearish bias)
-            short_setup = (close[i] < donchian_low[i] and 
-                          close[i] < s1_aligned[i] and 
-                          vol_filter[i])
+            # Look for entries: Donchian breakout + volume spike + trend regime
+            long_setup = (close[i] > upper_aligned[i] and vol_spike[i] and is_trending)
+            short_setup = (close[i] < lower_aligned[i] and vol_spike[i] and is_trending)
             
             if long_setup:
                 signals[i] = 0.25
@@ -125,135 +130,3 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
-
-</think>
-
-#!/usr/bin/env python3
-"""
-6h Donchian Breakout + Weekly Pivot + Volume
-Hypothesis: Donchian breakouts capture momentum, weekly pivots provide institutional
-support/resistance, and volume confirms institutional participation. Works in bull
-(breakouts above weekly pivot) and bear (breakdowns below weekly pivot).
-Target: 100-180 total trades over 4 years (25-45/year).
-"""
-
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "14407_6h_donchian_weekly_pivot_vol_v1"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 100:
-        return np.zeros(n)
-    
-    # Load weekly data for pivot points (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    
-    # Weekly pivot calculation (using prior week's data)
-    # Pivot Point (PP) = (High + Low + Close) / 3
-    # Support 1 (S1) = (2 * PP) - High
-    # Resistance 1 (R1) = (2 * PP) - Low
-    # Support 2 (S2) = PP - (High - Low)
-    # Resistance 2 (R2) = PP + (High - Low)
-    pp = (high_1w + low_1w + close_1w) / 3
-    s1 = (2 * pp) - high_1w
-    r1 = (2 * pp) - low_1w
-    s2 = pp - (high_1w - low_1w)
-    r2 = pp + (high_1w - low_1w)
-    
-    # Align weekly pivots to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_1w, pp)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1)
-    s2_aligned = align_htf_to_ltf(prices, df_1w, s2)
-    r2_aligned = align_htf_to_ltf(prices, df_1w, r2)
-    
-    # 6h data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Donchian channel (20-period) on 6h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: avoid low volume periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (0.7 * vol_ma)  # Require at least 70% of average volume
-    
-    # ATR for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    
-    # Start from warmup period
-    start = 20  # Donchian period
-    
-    for i in range(start, n):
-        # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Check exits
-        if position == 1:  # long position
-            # Exit: price breaks below Donchian low OR stops loss
-            if (close[i] <= donchian_low[i] or
-                close[i] <= entry_price - 2.5 * atr[i]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Exit: price breaks above Donchian high OR stop loss
-            if (close[i] >= donchian_high[i] or
-                close[i] >= entry_price + 2.5 * atr[i]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries: Donchian breakout + weekly pivot filter + volume
-            # Long: breakout above Donchian high AND price above weekly R1 (bullish bias)
-            long_setup = (close[i] > donchian_high[i] and 
-                         close[i] > r1_aligned[i] and 
-                         vol_filter[i])
-            # Short: breakdown below Donchian low AND price below weekly S1 (bearish bias)
-            short_setup = (close[i] < donchian_low[i] and 
-                          close[i] < s1_aligned[i] and 
-                          vol_filter[i])
-            
-            if long_setup:
-                signals[i] = 0.25
-                position = 1
-                entry_price = close[i]
-            elif short_setup:
-                signals[i] = -0.25
-                position = -1
-                entry_price = close[i]
-            else:
-                signals[i] = 0.0
-    
-    return signals
-
-</think>
