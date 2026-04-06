@@ -3,17 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12758_1d_1w_donchian_breakout_volume_v1"
-timeframe = "1d"
+name = "exp_12759_6d_camarilla_pivot_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+CAMARILLA_PERIOD = 1  # use previous day
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+CAMARILLA_MULT = 1.5  # multiplier for entry/exit levels
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -24,37 +25,64 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_camarilla_pivot(high, low, close):
+    """Calculate Camarilla pivot levels for given OHLC"""
+    pivot = (high + low + close) / 3.0
+    range_ = high - low
+    # Camarilla levels
+    r4 = close + range_ * 1.500
+    r3 = close + range_ * 1.250
+    r2 = close + range_ * 1.166
+    r1 = close + range_ * 1.083
+    s1 = close - range_ * 1.083
+    s2 = close - range_ * 1.166
+    s3 = close - range_ * 1.250
+    s4 = close - range_ * 1.500
+    return r1, r2, r3, r4, s1, s2, s3, s4, pivot
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
-    
-    # Calculate weekly EMA trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Donchian channels
+    # Calculate daily Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Upper band: highest high over period
-    upper_band = pd.Series(high_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    # Lower band: lowest low over period
-    lower_band = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    r1 = np.full_like(close_1d, np.nan)
+    r2 = np.full_like(close_1d, np.nan)
+    r3 = np.full_like(close_1d, np.nan)
+    r4 = np.full_like(close_1d, np.nan)
+    s1 = np.full_like(close_1d, np.nan)
+    s2 = np.full_like(close_1d, np.nan)
+    s3 = np.full_like(close_1d, np.nan)
+    s4 = np.full_like(close_1d, np.nan)
+    pivot = np.full_like(close_1d, np.nan)
     
-    # Align to daily timeframe
-    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
-    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
+    for i in range(len(close_1d)):
+        if i == 0:
+            # Cannot calculate for first day
+            continue
+        r1[i], r2[i], r3[i], r4[i], s1[i], s2[i], s3[i], s4[i], pivot[i] = calculate_camarilla_pivot(
+            high_1d[i-1], low_1d[i-1], close_1d[i-1]
+        )
     
-    # Calculate daily indicators
+    # Align to 6h timeframe (use previous day's levels)
+    r1_6h = align_htf_to_ltf(prices, df_1d, r1)
+    r2_6h = align_htf_to_ltf(prices, df_1d, r2)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    s1_6h = align_htf_to_ltf(prices, df_1d, s1)
+    s2_6h = align_htf_to_ltf(prices, df_1d, s2)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -69,11 +97,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if Donchian bands not available
-        if np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]):
+        # Skip if Camarilla levels not available
+        if np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -95,17 +123,27 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: only take longs above weekly EMA, shorts below
-        trend_filter_long = close[i] > ema_1w_aligned[i]
-        trend_filter_short = close[i] < ema_1w_aligned[i]
+        # Fade at R3/S3 with volume
+        fade_short = volume_ok and close[i] >= r3_6h[i]
+        fade_long = volume_ok and close[i] <= s3_6h[i]
         
-        # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= upper_band_aligned[i] and trend_filter_long
-        breakout_short = volume_ok and close[i] <= lower_band_aligned[i] and trend_filter_short
+        # Breakout continuation at R4/S4 with volume
+        breakout_long = volume_ok and close[i] >= r4_6h[i]
+        breakout_short = volume_ok and close[i] <= s4_6h[i]
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            if fade_short:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            elif fade_long:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
