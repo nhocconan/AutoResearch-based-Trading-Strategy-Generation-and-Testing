@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14103_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_14104_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def calculate_ema(arr, period):
@@ -26,15 +26,15 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for EMA filter (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load 1w data for EMA filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate 12h EMA (21-period) for trend filter
-    ema_12h = calculate_ema(close_12h, 21)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 1w EMA (21-period) for trend filter
+    ema_1w = calculate_ema(close_1w, 21)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 4h data
+    # Daily data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -61,7 +61,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_12h_aligned[i]) or \
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_1w_aligned[i]) or \
            np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -90,10 +90,10 @@ def generate_signals(prices):
         breakout_up = close[i] > high_20[i-1] and vol_filter[i]
         breakout_down = close[i] < low_20[i-1] and vol_filter[i]
         
-        # 12h EMA trend filter
-        # Only take longs when price > 12h EMA, shorts when price < 12h EMA
-        trend_filter_long = close[i] > ema_12h_aligned[i]
-        trend_filter_short = close[i] < ema_12h_aligned[i]
+        # 1w EMA trend filter
+        # Only take longs when price > 1w EMA, shorts when price < 1w EMA
+        trend_filter_long = close[i] > ema_1w_aligned[i]
+        trend_filter_short = close[i] < ema_1w_aligned[i]
         
         # Generate signals
         if position == 0:
