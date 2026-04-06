@@ -3,23 +3,36 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian channel breakout with 12-hour EMA trend filter and volume confirmation.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Uses tight entry conditions to limit trades to 75-200 total over 4 years (19-50/year).
-# Includes ATR-based stop loss to manage risk.
+# Hypothesis: 1-hour RSI divergence with 4h trend filter and volume confirmation.
+# RSI divergence identifies potential reversals; 4h EMA ensures alignment with higher timeframe trend.
+# Volume confirmation filters false signals. Target: 60-150 total trades over 4 years.
+# Works in bull markets (bullish divergence in uptrend) and bear markets (bearish divergence in downtrend).
 
-name = "exp_13393_4h_donchian20_12h_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13394_1h_rsi_divergence_4h_trend_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
+EMA_4H_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_rsi(close, period):
+    """Calculate RSI"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -39,23 +52,22 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h data ONCE before loop
+    df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 12h EMA for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, EMA_PERIOD)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 4h EMA for trend filter
+    close_4h = df_4h['close'].values
+    ema_4h = calculate_ema(close_4h, EMA_4H_PERIOD)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Calculate 4h indicators
+    # Calculate 1h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # RSI
+    rsi = calculate_rsi(close, RSI_PERIOD)
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -63,17 +75,29 @@ def generate_signals(prices):
     # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    session_mask = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(RSI_PERIOD, EMA_4H_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_high[i-1]) or np.isnan(donchian_low[i-1]):
+        # Skip if outside trading session
+        if not session_mask[i]:
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Skip if indicators not available
+        if np.isnan(ema_4h_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,24 +117,27 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter: price above/below 12h EMA
-        uptrend = close[i] > ema_12h_aligned[i]
-        downtrend = close[i] < ema_12h_aligned[i]
+        # Trend filter: price above/below 4h EMA
+        uptrend = close[i] > ema_4h_aligned[i]
+        downtrend = close[i] < ema_4h_aligned[i]
         
-        # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > donchian_high[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < donchian_low[i-1])
+        # RSI divergence detection (simplified: look for RSI extremes with price action)
+        # Bullish divergence: RSI oversold and turning up while price makes lower low
+        # Bearish divergence: RSI overbought and turning down while price makes higher high
+        # We use RSI crossing thresholds with price confirmation
+        rsi_bullish = (rsi[i-1] <= RSI_OVERSOLD) and (rsi[i] > RSI_OVERSOLD) and (close[i] > close[i-1])
+        rsi_bearish = (rsi[i-1] >= RSI_OVERBOUGHT) and (rsi[i] < RSI_OVERBOUGHT) and (close[i] < close[i-1])
         
         # Generate signals
         if position == 0:
-            if breakout_up:
+            if rsi_bullish and uptrend and volume_ok:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            elif rsi_bearish and downtrend and volume_ok:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
