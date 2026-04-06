@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Camarilla pivot levels from 1d with volume confirmation.
-# Strategy fades at R3/S3 levels (mean reversion) and breaks out at R4/S4 (trend continuation).
-# Uses 1d OHLC to calculate Camarilla levels, aligned to 4h bars.
-# Volume filter ensures sufficient participation for reliable signals.
-# Works in both bull (breakout continuation) and bear (mean reversion at extremes) markets.
-# Target: 75-200 total trades over 4 years (19-50/year) with controlled risk.
+# Hypothesis: 12h Donchian channel breakout with 1d EMA trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high AND price > 1d EMA(50) AND volume > MA(20).
+# Short when price breaks below Donchian(20) low AND price < 1d EMA(50) AND volume > MA(20).
+# Uses strict entry conditions to limit trades and avoid overtrading.
+# Works in bull markets via breakout continuation and in bear markets via trend-following shorts.
+# Target: 50-150 total trades over 4 years (12-37/year) with controlled risk.
 
-name = "4h_camarilla1d_vol_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_ema50_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,28 +25,18 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for Camarilla calculation
+    # 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
-    # Previous day's OHLC for Camarilla levels
-    prev_close = df_1d['close'].shift(1).values
-    prev_high = df_1d['high'].shift(1).values
-    prev_low = df_1d['low'].shift(1).values
+    # Calculate 1d EMA(50) for trend filter
+    ema_50 = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # Calculate Camarilla levels for previous day
-    range_ = prev_high - prev_low
-    camarilla_r3 = prev_close + 1.1 * range_ / 6
-    camarilla_s3 = prev_close - 1.1 * range_ / 6
-    camarilla_r4 = prev_close + 1.1 * range_ / 2
-    camarilla_s4 = prev_close - 1.1 * range_ / 2
-    
-    # Align Camarilla levels to 4h bars (shifted by 1 day for prior day's levels)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    # Donchian channel (20-period) on 12h data
+    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume moving average for filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -56,9 +46,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or 
-            np.isnan(vol_ma[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -69,15 +58,15 @@ def generate_signals(prices):
         vol_filter = volume[i] > vol_ma[i]
         
         if position == 1:  # long position
-            # Exit: price reaches S3 (mean reversion target) or breaks below S4 (trend reversal)
-            if close[i] <= s3_aligned[i] or close[i] < s4_aligned[i]:
+            # Exit: price breaks below Donchian low (trend reversal)
+            if close[i] < low_min[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price reaches R3 (mean reversion target) or breaks above R4 (trend reversal)
-            if close[i] >= r3_aligned[i] or close[i] > r4_aligned[i]:
+            # Exit: price breaks above Donchian high (trend reversal)
+            if close[i] > high_max[i]:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -85,18 +74,12 @@ def generate_signals(prices):
         else:
             # Look for entries with volume filter
             if vol_filter:
-                # Fade at R3/S3: sell at R3, buy at S3 (mean reversion)
-                if close[i] >= r3_aligned[i]:
-                    signals[i] = -0.25
-                    position = -1
-                elif close[i] <= s3_aligned[i]:
+                # Long breakout: price above Donchian high AND above 1d EMA(50)
+                if close[i] > high_max[i] and close[i] > ema_50_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Breakout continuation at R4/S4: buy above R4, sell below S4
-                elif close[i] > r4_aligned[i]:
-                    signals[i] = 0.25
-                    position = 1
-                elif close[i] < s4_aligned[i]:
+                # Short breakdown: price below Donchian low AND below 1d EMA(50)
+                elif close[i] < low_min[i] and close[i] < ema_50_aligned[i]:
                     signals[i] = -0.25
                     position = -1
     
