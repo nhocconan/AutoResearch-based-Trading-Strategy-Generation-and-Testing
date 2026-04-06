@@ -3,11 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12738_1d_camarilla_pivot_volume_v1"
+name = "exp_12738_1d_1w_donchian_volume_v1"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
@@ -23,16 +24,6 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_camarilla_pivot(high, low, close):
-    """Calculate Camarilla pivot levels for given period"""
-    pivot = (high + low + close) / 3
-    range_val = high - low
-    r3 = pivot + (range_val * 1.1 / 2)
-    s3 = pivot - (range_val * 1.1 / 2)
-    r4 = pivot + (range_val * 1.1)
-    s4 = pivot - (range_val * 1.1)
-    return r3, s3, r4, s4
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -41,17 +32,15 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly Camarilla pivot levels
+    # Calculate weekly Donchian channels
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    r3_1w, s3_1w, r4_1w, s4_1w = calculate_camarilla_pivot(high_1w, low_1w, close_1w)
+    upper_1w = pd.Series(high_1w).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lower_1w = pd.Series(low_1w).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Align pivot levels to daily timeframe
-    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
-    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
-    r4_1w_aligned = align_htf_to_ltf(prices, df_1w, r4_1w)
-    s4_1w_aligned = align_htf_to_ltf(prices, df_1w, s4_1w)
+    # Align weekly Donchian channels to daily timeframe
+    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
+    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
     
     # Calculate daily indicators
     high = prices['high'].values
@@ -68,11 +57,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly pivot levels not available
-        if np.isnan(r3_1w_aligned[i]) or np.isnan(s3_1w_aligned[i]):
+        # Skip if weekly Donchian levels not available
+        if np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -94,24 +83,19 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Fade at weekly S3/R3, breakout at weekly S4/R4
-        fade_long = volume_ok and close[i] <= s3_1w_aligned[i]  # fade at S3 (support)
-        fade_short = volume_ok and close[i] >= r3_1w_aligned[i]  # fade at R3 (resistance)
-        breakout_long = volume_ok and close[i] >= r4_1w_aligned[i]  # breakout above R4
-        breakout_short = volume_ok and close[i] <= s4_1w_aligned[i]  # breakdown below S4
-        
-        # Entry conditions
-        long_entry = fade_long or breakout_long
-        short_entry = fade_short or breakout_short
+        # Breakout above weekly upper channel
+        breakout_long = volume_ok and close[i] > upper_1w_aligned[i]
+        # Breakdown below weekly lower channel
+        breakout_short = volume_ok and close[i] < lower_1w_aligned[i]
         
         # Generate signals
         if position == 0:
-            if long_entry:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_entry:
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
