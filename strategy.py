@@ -8,7 +8,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # The daily EMA ensures alignment with higher timeframe momentum, while volume filters out false breakouts.
 # Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost.
 
-name = "exp_13180_4h_donchian20_1d_ema_vol_v1"
+name = "exp_13181_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
