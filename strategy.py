@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and 12h trend filter
-# Works in bull/bear by capturing breakouts from established ranges, volume filters false breakouts,
-# and 12h trend filter ensures alignment with higher timeframe momentum.
-# Target: 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA trend filter and volume confirmation
+# Works in bull/bear because breakouts capture strong moves, EMA filter ensures direction alignment,
+# and volume confirms momentum. Target: 75-200 trades over 4 years (19-50/year) to minimize fee drag.
 
-name = "exp_13003_4h_donchian20_12h_trend_volume_v1"
+name = "exp_13003_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-TREND_EMA_PERIOD = 50
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -30,17 +29,27 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_ema(series, period):
+    """Calculate EMA"""
+    return pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load 12h data ONCE before loop
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 12h EMA for trend filter
+    # Calculate 12h EMA
     close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=TREND_EMA_PERIOD, adjust=False, min_periods=TREND_EMA_PERIOD).mean().values
+    ema_12h = calculate_ema(close_12h, EMA_PERIOD)
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Calculate 4h indicators
@@ -49,14 +58,8 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Volume MA
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -65,10 +68,10 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, TREND_EMA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if trend filter not available
+        # Skip if EMA not available
         if np.isnan(ema_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
@@ -91,9 +94,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions with trend filter
-        breakout_long = volume_ok and close[i] >= donchian_high[i] and close[i] > ema_12h_aligned[i]
-        breakout_short = volume_ok and close[i] <= donchian_low[i] and close[i] < ema_12h_aligned[i]
+        # Donchian breakout with EMA filter
+        breakout_long = volume_ok and close[i] >= upper[i] and close[i] > ema_12h_aligned[i]
+        breakout_short = volume_ok and close[i] <= lower[i] and close[i] < ema_12h_aligned[i]
         
         # Generate signals
         if position == 0:
