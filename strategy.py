@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray Power with 1d Trend Filter and Volume Confirmation
-Hypothesis: Elder Ray (Bull Power = High - EMA13, Bear Power = EMA13 - Low) captures institutional buying/selling pressure. 
-Combined with 1d EMA50 trend filter for direction and volume confirmation to avoid false signals. 
-Works in bull (buy when Bull Power > 0 and rising) and bear (sell when Bear Power > 0 and rising).
-Target: 50-150 total trades over 4 years (12-37/year).
+6h Elder Ray + 1d Trend + Volume Filter
+Hypothesis: Elder Ray (bull/bear power) captures institutional buying/selling pressure, filtered by 1d EMA trend for direction and volume for conviction. Works in bull (buy when bear power improves in uptrend) and bear (sell when bull power deteriorates in downtrend). Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
@@ -26,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR for stoploss
+    # 14-period ATR (for stoploss)
     atr = np.full(n, np.nan)
     if n >= 14:
         tr = np.maximum(
@@ -39,7 +36,7 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 1d data for trend filter (EMA50)
+    # Get 1d data for EMA trend (EMA50)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
@@ -67,22 +64,17 @@ def generate_signals(prices):
     # Align volume MA to 6h timeframe
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate EMA13 for Elder Ray (6-period EMA approximation for 6h timeframe)
-    # Using 13-period EMA on 6h close
+    # Elder Ray components (13-period EMA for EMA13)
     ema13 = np.full(n, np.nan)
     if n >= 13:
         ema13[12] = np.mean(close[:13])
         for i in range(13, n):
             ema13[i] = (close[i] * 2 + ema13[i-1] * 11) / 13
     
-    # Elder Ray Power
-    bull_power = np.full(n, np.nan)  # High - EMA13
-    bear_power = np.full(n, np.nan)  # EMA13 - Low
-    
-    for i in range(n):
-        if not np.isnan(ema13[i]):
-            bull_power[i] = high[i] - ema13[i]
-            bear_power[i] = ema13[i] - low[i]
+    # Bull Power = High - EMA13
+    bull_power = high - ema13
+    # Bear Power = Low - EMA13
+    bear_power = low - ema13
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -90,13 +82,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 30  # Need enough data for EMA13 and other indicators
+    start = 50  # Need enough data for EMA13 and EMA50
     
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(atr[i]) or np.isnan(trend_1d_aligned[i]) or 
-            np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or
-            np.isnan(vol_ma_1d_aligned[i])):
+            np.isnan(ema13[i]) or np.isnan(bull_power[i]) or 
+            np.isnan(bear_power[i]) or np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -104,19 +96,18 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 6h volume > 1.3x 1d average volume (scaled)
+        # Volume filter: current 6h volume > 1.5x 1d average volume (scaled)
         # Scale 1d volume to 6h: approx 1/4 of 1d volume (since 4x 6h in 1d)
-        vol_threshold = vol_ma_1d_aligned[i] / 4.0 * 1.3
+        vol_threshold = vol_ma_1d_aligned[i] / 4.0 * 1.5
         volume_filter = volume[i] > vol_threshold
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: Bear Power becomes positive and rising OR against 1d trend
+            # Exit: bear power deteriorates (more negative) OR against 1d trend
             # Stoploss: price drops 2*ATR below entry
-            bear_power_rising = i > start and bear_power[i] > bear_power[i-1]
-            if (bear_power[i] > 0 and bear_power_rising) or \
-               (trend_1d_aligned[i] == -1) or \
-               (close[i] < entry_price - 2.0 * atr[i]):
+            if (bear_power[i] < bear_power[i-1] - 0.1 or  # bear power worsening
+                trend_1d_aligned[i] == -1 or
+                close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
@@ -124,12 +115,11 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: Bull Power becomes positive and rising OR against 1d trend
+            # Exit: bull power improves (less negative) OR against 1d trend
             # Stoploss: price rises 2*ATR above entry
-            bull_power_rising = i > start and bull_power[i] > bull_power[i-1]
-            if (bull_power[i] > 0 and bull_power_rising) or \
-               (trend_1d_aligned[i] == 1) or \
-               (close[i] > entry_price + 2.0 * atr[i]):
+            if (bull_power[i] > bull_power[i-1] + 0.1 or  # bull power improving
+                trend_1d_aligned[i] == 1 or
+                close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
@@ -138,22 +128,24 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 8 bars flat
-            if bars_since_entry >= 8:
-                # Elder Ray signals with trend and volume filter
-                bull_power_rising = i > start and bull_power[i] > bull_power[i-1]
-                bear_power_rising = i > start and bear_power[i] > bear_power[i-1]
+            # Minimum holding period: only allow new entry after 12 bars flat
+            if bars_since_entry >= 12:
+                # Long: bull power improving AND bear power less negative in uptrend + volume
+                bull_improving = bull_power[i] > bull_power[i-1]
+                bear_less_negative = bear_power[i] > bear_power[i-1]  # e.g., -2 > -3
                 
-                # Long: Bull Power > 0 and rising with bullish 1d trend + volume
-                if bull_power[i] > 0 and bull_power_rising and \
-                   trend_1d_aligned[i] == 1 and volume_filter:
+                # Short: bear power worsening AND bull power less positive in downtrend + volume
+                bear_worsening = bear_power[i] < bear_power[i-1]
+                bull_less_positive = bull_power[i] < bull_power[i-1]
+                
+                # Long: improving buying pressure in uptrend
+                if bull_improving and bear_less_negative and trend_1d_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: Bear Power > 0 and rising with bearish 1d trend + volume
-                elif bear_power[i] > 0 and bear_power_rising and \
-                     trend_1d_aligned[i] == -1 and volume_filter:
+                # Short: increasing selling pressure in downtrend
+                elif bear_worsening and bull_less_positive and trend_1d_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
