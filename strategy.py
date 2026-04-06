@@ -3,12 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 12h EMA trend filter + volume confirmation.
-# In bull markets, buy breakouts above upper band with rising 12h EMA.
-# In bear markets, sell breakdowns below lower band with falling 12h EMA.
-# Volume confirmation ensures institutional participation.
-# ATR-based stop loss limits drawdown.
-# Target: 75-200 trades over 4 years (19-50/year).
+# Hypothesis: 4h Donchian(20) breakout + 12h EMA(50) trend filter + volume confirmation
+# Donchian breakouts capture strong directional moves. Trend filter ensures trading with
+# the higher timeframe trend. Volume confirmation adds confirmation of institutional
+# participation. Works in both bull and bear markets by following the 12h trend.
 
 name = "exp_13613_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
@@ -63,7 +61,7 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Donchian channels
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -81,7 +79,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_12h_slope_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_12h_slope_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -108,17 +106,28 @@ def generate_signals(prices):
         downtrend = ema_12h_slope_aligned[i] < 0
         
         # Donchian breakout signals
-        breakout_up = close[i] > upper[i-1]  # break above previous upper band
-        breakdown_down = close[i] < lower[i-1]  # break below previous lower band
+        # Avoid lookback by checking current and previous values
+        if i > 0:
+            prev_close = close[i-1]
+            curr_close = close[i]
+            
+            # Long signal: price breaks above Donchian upper in uptrend with volume
+            long_signal = volume_ok and uptrend and prev_close <= donchian_upper[i-1] and curr_close > donchian_upper[i]
+            
+            # Short signal: price breaks below Donchian lower in downtrend with volume
+            short_signal = volume_ok and downtrend and prev_close >= donchian_lower[i-1] and curr_close < donchian_lower[i]
+        else:
+            long_signal = False
+            short_signal = False
         
         # Generate signals
         if position == 0:
-            if volume_ok and uptrend and breakout_up:
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif volume_ok and downtrend and breakdown_down:
+            elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -126,17 +135,29 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on breakdown or stop loss
-            if breakdown_down:
-                signals[i] = 0.0
-                position = 0
+            # Exit long on opposite Donchian break or stop loss
+            if i > 0:
+                prev_close = close[i-1]
+                curr_close = close[i]
+                # Exit if price breaks below Donchian lower (loss of bullish momentum)
+                if prev_close >= donchian_lower[i-1] and curr_close < donchian_lower[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = SIGNAL_SIZE
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on breakout or stop loss
-            if breakout_up:
-                signals[i] = 0.0
-                position = 0
+            # Exit short on opposite Donchian break or stop loss
+            if i > 0:
+                prev_close = close[i-1]
+                curr_close = close[i]
+                # Exit if price breaks above Donchian upper (loss of bearish momentum)
+                if prev_close <= donchian_upper[i-1] and curr_close > donchian_upper[i]:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -SIGNAL_SIZE
             else:
                 signals[i] = -SIGNAL_SIZE
     
