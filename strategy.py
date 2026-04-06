@@ -8,16 +8,16 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # and pivot levels provide structural support/resistance that works across regimes.
 # Target: 30-80 trades over 4 years (7-20/year) to minimize fee drag.
 
-name = "exp_12870_1d_weekly_pivot_breakout_v1"
+name = "exp_13024_1d_weekly_pivot_breakout_v2"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 2.5  # Increased for fewer trades
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 3.0  # Wider stop to reduce whipsaws
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
