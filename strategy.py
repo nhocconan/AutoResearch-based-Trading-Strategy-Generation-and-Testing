@@ -3,11 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with volume confirmation and 12h EMA trend filter.
-# Uses 12h EMA for stronger trend filter than 1d to increase trade frequency while maintaining trend alignment.
-# Breakouts capture strong moves in both bull and bear markets, volume filters weak signals,
-# and 12h EMA ensures we trade with higher timeframe momentum.
-# Target: 100-200 trades over 4 years (25-50/year) to balance opportunity and cost.
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 12h EMA trend filter.
+# Uses 12h timeframe for trend filter (more responsive than 1d) to capture trends in both bull and bear markets.
+# Volume filter ensures breakouts have conviction. Target: 100-200 trades over 4 years (25-50/year).
 
 name = "exp_13073_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
@@ -15,7 +13,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
+EMA_PERIOD = 34  # Fibonacci number for responsiveness
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -101,8 +99,8 @@ def generate_signals(prices):
         downtrend = close[i] < ema_12h_aligned[i]
         
         # Breakout signals
-        breakout_up = volume_ok and uptrend and (i == 0 or high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (i == 0 or low[i] < lowest_low[i-1])
+        breakout_up = volume_ok and uptrend and (i > 0 and high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (i > 0 and low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
