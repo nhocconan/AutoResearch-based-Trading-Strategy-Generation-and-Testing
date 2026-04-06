@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
 4h Donchian(20) breakout with volume confirmation and ATR stoploss
-Hypothesis: Donchian breakouts on 4h timeframe capture medium-term trends with clear support/resistance levels.
-Volume confirmation filters false breakouts, ATR stoploss manages risk. Works in bull (breakout continuation)
-and bear (breakdown continuation). Target: 75-200 total trades over 4 years.
+Hypothesis: 4h Donchian breakouts capture medium-term trends in BTC/ETH/SOL.
+Volume confirmation reduces false breakouts, ATR stoploss manages risk.
+Works in bull (breakout continuation) and bear (breakdown continuation).
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_volume_atr_v1"
+name = "4h_donchian20_volume_atr_v2"
 timeframe = "4h"
 leverage = 1.0
 
