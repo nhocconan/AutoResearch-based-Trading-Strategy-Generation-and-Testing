@@ -3,27 +3,27 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with daily volume confirmation and ATR stoploss
-# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
-# and ATR stoploss adapts to volatility. Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with 1d trend filter and volume confirmation
+# Elder Ray identifies bull/bear power relative to EMA13, filtered by 1d EMA50 trend
+# Works in bull/bear: trend filter ensures correct direction, Elder Ray captures momentum
+# Volume confirmation reduces false signals. Target: 50-150 trades over 4 years.
 
-name = "exp_12900_4h_donchian20_1d_vol_atr_v1"
-timeframe = "4h"
+name = "exp_12899_6h_elder_ray_1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+EMA13_PERIOD = 13
+EMA50_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_ema(close, period):
+    """Calculate EMA with proper min_periods"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -31,34 +31,37 @@ def calculate_atr(high, low, close, period):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = tr1[0]  # First TR is just high-low
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
+    # Load 1d data ONCE before loop for trend filter
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Donchian channels
-    high_d = df_daily['high'].values
-    low_d = df_daily['low'].values
-    donchian_upper_d, donchian_lower_d = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
+    # Calculate 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = calculate_ema(close_1d, EMA50_PERIOD)
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align to 4h timeframe
-    donchian_upper_aligned = align_htf_to_ltf(prices, df_daily, donchian_upper_d)
-    donchian_lower_aligned = align_htf_to_ltf(prices, df_daily, donchian_lower_d)
-    
-    # Calculate 4h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    ema13 = calculate_ema(close, EMA13_PERIOD)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Elder Ray components
+    bull_power = high - ema13  # High minus EMA13
+    bear_power = low - ema13   # Low minus EMA13
+    
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,11 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA13_PERIOD, EMA50_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if Donchian levels not available
-        if np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]):
+        # Skip if 1d trend not available
+        if np.isnan(ema50_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -92,18 +95,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above upper or below lower Donchian
-        breakout_long = volume_ok and close[i] >= donchian_upper_aligned[i]
-        breakout_short = volume_ok and close[i] <= donchian_lower_aligned[i]
+        # Determine trend from 1d EMA50
+        uptrend = close[i] > ema50_1d_aligned[i]
+        downtrend = close[i] < ema50_1d_aligned[i]
+        
+        # Elder Ray signals with trend filter and volume
+        long_signal = volume_ok and uptrend and (bull_power[i] > 0)
+        short_signal = volume_ok and downtrend and (bear_power[i] < 0)
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_short:
+            elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
