@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-1D Weekly Donchian Breakout + Volume + ADX Trend Filter
-Hypothesis: Weekly Donchian channels on 1D data capture long-term trends. Price breaking above/below weekly high/low with volume confirmation and ADX trend filter captures strong moves. Designed for 30-100 trades over 4 years to minimize fee drag while working in both bull (breakouts) and bear (breakdowns) markets.
+4h Donchian Breakout + Daily EMA + Volume + ADX Filter
+Hypothesis: Donchian(20) breakouts on 4h with daily EMA200 trend filter, volume confirmation, and ADX trend strength filter captures institutional moves. Designed for 75-200 trades over 4 years (19-50/year) to minimize fee drag while working in both bull (breakouts) and bear (reversals at bands) markets. Uses 1d timeframe for EMA200 and ADX filters.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_weekly_donchian_breakout_volume_adx_v1"
-timeframe = "1d"
+name = "4h_donchian20_1d_ema200_volume_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,40 +17,14 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for Donchian channels (once before loop)
-    df_weekly = get_htf_data(prices, '1w')
-    
-    # Weekly Donchian channels (20-period high/low)
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
-    
-    # Calculate 20-period rolling high/low for weekly data
-    def rolling_max(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= window - 1:
-                result[i] = np.max(arr[i-window+1:i+1])
-        return result
-    
-    def rolling_min(arr, window):
-        result = np.full_like(arr, np.nan)
-        for i in range(len(arr)):
-            if i >= window - 1:
-                result[i] = np.min(arr[i-window+1:i+1])
-        return result
-    
-    weekly_high_20 = rolling_max(weekly_high, 20)
-    weekly_low_20 = rolling_min(weekly_low, 20)
-    
-    # Align weekly Donchian levels to 1d timeframe
-    weekly_high_20_aligned = align_htf_to_ltf(prices, df_weekly, weekly_high_20)
-    weekly_low_20_aligned = align_htf_to_ltf(prices, df_weekly, weekly_low_20)
-    
-    # Load 1d data for ADX trend filter
+    # Load 1d data for EMA200 and ADX (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # ADX calculation on 1d
+    # EMA200 on 1d
+    close_1d = df_1d['close'].values
+    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
+    
+    # ADX calculation on 1d (14-period)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -92,14 +66,19 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilder_smooth(dx, period_adx)
     
-    # Align ADX to 1d timeframe
+    # Align 1d indicators to 4h timeframe
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # 1d data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -109,8 +88,8 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(weekly_high_20_aligned[i]) or np.isnan(weekly_low_20_aligned[i]) or
-            np.isnan(adx_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema200_1d_aligned[i]) or np.isnan(adx_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -124,31 +103,33 @@ def generate_signals(prices):
         else:
             volume_filter = False
         
-        # Check exits: price crosses back inside weekly Donchian or ADX weakening
+        # Check exits: price crosses back through Donchian or ADX weakening
         if position == 1:  # long position
-            # Exit: price crosses below weekly low OR ADX < 20
-            if close[i] < weekly_low_20_aligned[i] or adx_aligned[i] < 20:
+            # Exit: price crosses below lower Donchian OR ADX < 20
+            if close[i] < lowest_low[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price crosses above weekly high OR ADX < 20
-            if close[i] > weekly_high_20_aligned[i] or adx_aligned[i] < 20:
+            # Exit: price crosses above upper Donchian OR ADX < 20
+            if close[i] > highest_high[i] or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: price breaks weekly Donchian + volume + ADX trend
-            bull_breakout = close[i] > weekly_high_20_aligned[i]
-            bear_breakout = close[i] < weekly_low_20_aligned[i]
+            # Look for entries: price breaks Donchian + volume + EMA200 trend + ADX trend
+            bull_breakout = close[i] > highest_high[i]
+            bear_breakout = close[i] < lowest_low[i]
+            ema_filter_long = close[i] > ema200_1d_aligned[i]
+            ema_filter_short = close[i] < ema200_1d_aligned[i]
             trend_filter = adx_aligned[i] > 25  # Strong trend
             
-            if i >= 20 and bull_breakout and volume_filter and trend_filter:
+            if i >= 20 and bull_breakout and volume_filter and ema_filter_long and trend_filter:
                 signals[i] = 0.25
                 position = 1
-            elif i >= 20 and bear_breakout and volume_filter and trend_filter:
+            elif i >= 20 and bear_breakout and volume_filter and ema_filter_short and trend_filter:
                 signals[i] = -0.25
                 position = -1
             else:
