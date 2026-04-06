@@ -3,21 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weekly_pivot_v1"
-timeframe = "6h"
+name = "12h_camarilla_pivot_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
+    # Price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR
+    # 14-period ATR for stops
     atr = np.full(n, np.nan)
     if n >= 14:
         tr = np.maximum(
@@ -30,21 +31,42 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # Get weekly data for pivot points
-    df_w = get_htf_data(prices, '1w')
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    # Get 1d data for Camarilla pivot levels
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points and R4/S4 levels
-    pivot_w = (high_w + low_w + close_w) / 3.0
-    r4_w = pivot_w + 3 * (high_w - low_w)
-    s4_w = pivot_w - 3 * (high_w - low_w)
+    # Calculate Camarilla pivot levels for previous day
+    camarilla_h4 = np.full(n, np.nan)  # H4 level
+    camarilla_l4 = np.full(n, np.nan)  # L4 level
+    camarilla_h3 = np.full(n, np.nan)  # H3 level
+    camarilla_l3 = np.full(n, np.nan)  # L3 level
     
-    # Align to 6h timeframe
-    pivot_w_aligned = align_htf_to_ltf(prices, df_w, pivot_w)
-    r4_w_aligned = align_htf_to_ltf(prices, df_w, r4_w)
-    s4_w_aligned = align_htf_to_ltf(prices, df_w, s4_w)
+    # Calculate pivots for each 12h bar based on previous day
+    for i in range(n):
+        if i == 0:
+            continue
+        # Get previous day's OHLC
+        prev_day_idx = i - 1
+        # Simplified: use current day's data as proxy for previous day in 12h context
+        # For proper alignment, we use the 1d data shifted by 1
+        if prev_day_idx < len(high_1d):
+            ph = high_1d[prev_day_idx]
+            pl = low_1d[prev_day_idx]
+            pc = close_1d[prev_day_idx]
+            if not (np.isnan(ph) or np.isnan(pl) or np.isnan(pc)):
+                rang = ph - pl
+                camarilla_h4[i] = pc + 1.1 * rang / 2
+                camarilla_l4[i] = pc - 1.1 * rang / 2
+                camarilla_h3[i] = pc + 1.1 * rang / 4
+                camarilla_l3[i] = pc - 1.1 * rang / 4
+    
+    # Align Camarilla levels to 12h timeframe
+    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
+    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
+    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
+    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
     
     # Volume filter: current volume > 1.5x average over last 20 periods
     vol_ma = np.full(n, np.nan)
@@ -56,11 +78,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(34, 20)  # weekly pivot needs ~34 bars
+    start = max(30, 20)
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(pivot_w_aligned[i]) or np.isnan(r4_w_aligned[i]) or np.isnan(s4_w_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(atr[i]) or np.isnan(camarilla_h4_aligned[i]) or 
+            np.isnan(camarilla_l4_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -72,16 +95,16 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price falls below S4 or stoploss hit
-            if (close[i] < s4_w_aligned[i] or
+            # Exit: price closes below L3 or stoploss hit
+            if (close[i] < camarilla_l3_aligned[i] or
                 close[i] < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price rises above R4 or stoploss hit
-            if (close[i] > r4_w_aligned[i] or
+            # Exit: price closes above H3 or stoploss hit
+            if (close[i] > camarilla_h3_aligned[i] or
                 close[i] > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -89,13 +112,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries
-            # Long: price breaks above R4 with volume (bullish breakout)
-            if (close[i] > r4_w_aligned[i] and volume_filter):
+            # Long: price crosses above H4 with volume
+            if (close[i] > camarilla_h4_aligned[i] and 
+                volume_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below S4 with volume (bearish breakout)
-            elif (close[i] < s4_w_aligned[i] and volume_filter):
+            # Short: price crosses below L4 with volume
+            elif (close[i] < camarilla_l4_aligned[i] and 
+                  volume_filter):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
