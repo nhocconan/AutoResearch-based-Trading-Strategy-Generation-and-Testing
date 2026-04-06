@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 12h trend filter and volume confirmation
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA50 trend filter and volume confirmation
 # Long when price breaks above 20-period high + 12h EMA50 uptrend + volume spike
 # Short when price breaks below 20-period low + 12h EMA50 downtrend + volume spike
 # Uses 12h EMA50 to filter counter-trend trades in bear markets
