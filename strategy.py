@@ -3,40 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI with 4h trend filter and volume confirmation. 
-# Uses 4h EMA for trend direction, 1h RSI for entry timing, and volume filter to avoid false signals.
-# Designed for low trade frequency (15-35/year) to minimize fee drag while capturing strong moves.
-# Works in bull/bear by trading with 4h trend and using RSI extremes for mean-reversion entries within trend.
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
+# Weekly pivot sets the directional bias (long above pivot, short below), while 6h Donchian breakouts
+# capture momentum in that direction. Volume ensures only strong breakouts trigger entries.
+# Works in bull/bear because pivot adapts to longer-term trend, and breakouts catch strong moves.
+# Target: 50-150 total trades over 4 years (12-37/year) to avoid overtrading.
 
-name = "exp_13094_1h_rsi_4h_ema_vol_v1"
-timeframe = "1h"
+name = "exp_13095_6h_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-EMA_4H_PERIOD = 20
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+VOLUME_THRESHOLD = 2.0
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_rsi(close, period):
-    """Calculate RSI using Wilder's smoothing"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    gain_ema = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    loss_ema = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    rs = gain_ema / (loss_ema + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -47,27 +30,44 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_pivot(high, low, close):
+    """Calculate weekly pivot point and support/resistance levels"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = calculate_ema(close_4h, EMA_4H_PERIOD)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate weekly pivot points
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    pivot_1w, r1_1w, r2_1w, r3_1w, s1_1w, s2_1w, s3_1w = calculate_pivot(high_1w, low_1w, close_1w)
     
-    # Calculate 1h indicators
+    # Use pivot as trend filter: above pivot = long bias, below = short bias
+    pivot_bias = pivot_1w  # positive bias = long, negative = short
+    pivot_bias_aligned = align_htf_to_ltf(prices, df_1w, pivot_bias)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI
-    rsi = calculate_rsi(close, RSI_PERIOD)
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -75,29 +75,22 @@ def generate_signals(prices):
     # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, EMA_4H_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 4h EMA not available
-        if np.isnan(ema_4h_aligned[i]):
+        # Skip if pivot bias not available
+        if np.isnan(pivot_bias_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
-        
-        # Check session filter (08-20 UTC)
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
         
         # Check stoploss
         if position == 1:  # long position
@@ -111,41 +104,34 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
+        # Volume confirmation (strict to reduce trades)
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below 4h EMA
-        uptrend = close[i] > ema_4h_aligned[i]
-        downtrend = close[i] < ema_4h_aligned[i]
+        # Determine bias from weekly pivot
+        bullish_bias = close[i] > pivot_bias_aligned[i]
+        bearish_bias = close[i] < pivot_bias_aligned[i]
         
-        # RSI signals
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        # Breakout signals with volume and bias confirmation
+        breakout_up = volume_ok and bullish_bias and (i > 0 and high[i] > highest_high[i-1])
+        breakout_down = volume_ok and bearish_bias and (i > 0 and low[i] < lowest_low[i-1])
         
-        # Generate signals only during session
-        if in_session:
-            if position == 0:
-                if rsi_oversold and uptrend and volume_ok:
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                elif rsi_overbought and downtrend and volume_ok:
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                else:
-                    signals[i] = 0.0
-            elif position == 1:
+        # Generate signals
+        if position == 0:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
-            elif position == -1:
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
-        else:
-            # Outside session: maintain current position or flat
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
+        elif position == 1:
+            signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            signals[i] = -SIGNAL_SIZE
     
     return signals
