@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12811_6d_camarilla_pivot_volume"
-timeframe = "6h"
+name = "exp_12813_4h_donchian20_1d_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_PERIOD = 1
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
-SIGNAL_SIZE = 0.25
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.28
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLD_BARS = 20  # Max 5 days (20 * 6h) to prevent overtrading
+MAX_HOLD_BARS = 48  # Max 8 days (48 * 4h) to prevent overtrading
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -33,38 +33,21 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla pivot levels
+    # Calculate daily Donchian channels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Pivot point
-    pivot = (high_1d + low_1d + close_1d) / 3
+    # Upper band: highest high over period
+    upper_band = pd.Series(high_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    # Lower band: lowest low over period
+    lower_band = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Range
-    range_1d = high_1d - low_1d
+    # Align to 4h timeframe
+    upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
+    lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
     
-    # Camarilla levels (based on previous day's data)
-    # R4 = close + range * 1.1/2
-    # R3 = close + range * 1.1/4
-    # R2 = close + range * 1.1/6
-    # R1 = close + range * 1.1/12
-    # S1 = close - range * 1.1/12
-    # S2 = close - range * 1.1/6
-    # S3 = close - range * 1.1/4
-    # S4 = close - range * 1.1/2
-    r4 = close_1d + range_1d * 1.1 / 2
-    r3 = close_1d + range_1d * 1.1 / 4
-    s3 = close_1d - range_1d * 1.1 / 4
-    s4 = close_1d - range_1d * 1.1 / 2
-    
-    # Align to 6h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -80,13 +63,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if Camarilla levels not available
-        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]):
+        # Skip if Donchian bands not available
+        if np.isnan(upper_band_aligned[i]) or np.isnan(lower_band_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -117,27 +100,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Fade at S3/R3, breakout at S4/R4
-        fade_long = volume_ok and close[i] <= s3_aligned[i]
-        fade_short = volume_ok and close[i] >= r3_aligned[i]
-        breakout_long = volume_ok and close[i] >= r4_aligned[i]
-        breakout_short = volume_ok and close[i] <= s4_aligned[i]
+        # Breakout above upper band or breakdown below lower band
+        breakout_long = volume_ok and close[i] >= upper_band_aligned[i]
+        breakout_short = volume_ok and close[i] <= lower_band_aligned[i]
         
         # Generate signals
         if position == 0:
-            if fade_long:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            elif fade_short:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            elif breakout_long:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
