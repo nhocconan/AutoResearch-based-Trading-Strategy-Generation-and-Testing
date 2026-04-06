@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
 1d Donchian(20) breakout with 1w EMA trend filter and volume confirmation
-Hypothesis: Daily Donchian breakouts capture institutional momentum with lower frequency.
-Filter by weekly EMA for trend bias and volume for conviction. Works in bull (buy breakouts above weekly EMA) 
-and bear (sell breakdowns below weekly EMA). Target: 30-100 total trades over 4 years.
+Hypothesis: Daily Donchian breakouts capture significant momentum. Filter by weekly EMA for trend bias and volume for conviction. Works in bull (buy breakouts above weekly EMA) and bear (sell breakdowns below weekly EMA). Target: 30-100 total trades over 4 years.
 """
 
 import numpy as np
@@ -16,7 +14,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price and volume data
@@ -126,8 +124,8 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 14 bars flat
-            if bars_since_entry >= 14:
+            # Minimum holding period: only allow new entry after 7 bars flat
+            if bars_since_entry >= 7:
                 # Breakout entries: upper/lower with 1w trend
                 bull_breakout = close[i] > upper[i]
                 bear_breakout = close[i] < lower[i]
