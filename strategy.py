@@ -3,48 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour price action strategy combining Bollinger Band squeeze breakout 
-# with RSI momentum and 1-day trend filter. Works in bull/bear markets because 
-# Bollinger squeezes precede explosive moves, RSI filters for momentum strength, 
-# and 1-day EMA ensures alignment with higher timeframe trend. Low trade frequency 
-# (target: 80-150 total over 4 years) minimizes fee drag while capturing explosive moves.
+# Hypothesis: 6h Donchian channel breakout with volume confirmation and 1d EMA trend filter.
+# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
+# and EMA trend filter ensures we trade with higher timeframe momentum.
+# Target: 50-150 total trades over 4 years (12-37/year) to balance opportunity and cost.
 
-name = "exp_13049_4h_bb_squeeze_rsi_1d_ema_v1"
-timeframe = "4h"
+name = "exp_13051_6h_donchian20_1d_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-BB_PERIOD = 20
-BB_STD_DEV = 2.0
-SQUEEZE_THRESHOLD = 0.03  # Bollinger Band width threshold for squeeze
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 65
-RSI_OVERSOLD = 35
+DONCHIAN_PERIOD = 20
 EMA_PERIOD = 50
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-SIGNAL_SIZE = 0.25
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.3
-
-def calculate_rsi(close, period):
-    """Calculate RSI using Wilder's smoothing"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
-def calculate_bbands(close, period, std_dev):
-    """Calculate Bollinger Bands"""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean()
-    std = pd.Series(close).rolling(window=period, min_periods=period).std()
-    upper = sma + (std * std_dev)
-    lower = sma - (std * std_dev)
-    return upper.values, lower.values, sma.values
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -61,7 +36,7 @@ def calculate_ema(close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Load daily data ONCE before loop
@@ -72,24 +47,21 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 4h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands
-    bb_upper, bb_lower, bb_middle = calculate_bbands(close, BB_PERIOD, BB_STD_DEV)
-    bb_width = (bb_upper - bb_lower) / bb_middle
-    
-    # RSI
-    rsi = calculate_rsi(close, RSI_PERIOD)
-    
-    # ATR
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -97,7 +69,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(BB_PERIOD, RSI_PERIOD, EMA_PERIOD, ATR_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if EMA not available
@@ -120,9 +92,6 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Bollinger Band squeeze condition
-        squeeze_active = bb_width[i] < SQUEEZE_THRESHOLD if not np.isnan(bb_width[i]) else False
-        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
@@ -130,13 +99,9 @@ def generate_signals(prices):
         uptrend = close[i] > ema_1d_aligned[i]
         downtrend = close[i] < ema_1d_aligned[i]
         
-        # RSI momentum
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT if not np.isnan(rsi[i]) else False
-        rsi_oversold = rsi[i] < RSI_OVERSOLD if not np.isnan(rsi[i]) else False
-        
-        # Breakout signals from Bollinger Bands
-        breakout_up = squeeze_active and volume_ok and uptrend and rsi_oversold and (close[i] > bb_upper[i])
-        breakout_down = squeeze_active and volume_ok and downtrend and rsi_overbought and (close[i] < bb_lower[i])
+        # Breakout signals
+        breakout_up = volume_ok and uptrend and (i == 0 or high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (i == 0 or low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
