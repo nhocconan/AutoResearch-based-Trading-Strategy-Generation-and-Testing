@@ -3,61 +3,95 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian channel breakout with daily volume confirmation and weekly ATR filter.
-# Donchian breakouts capture momentum shifts; volume confirms institutional participation.
-# Weekly ATR filter avoids trading in excessively volatile conditions.
-# Works in bull markets (upside breakouts) and bear markets (downside breakdowns).
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 12-hour TRIX with volume spike and weekly ADX trend filter.
+# TRIX (triple-smoothed EMA) filters noise and identifies momentum shifts.
+# Volume spike confirms institutional participation.
+# Weekly ADX > 25 ensures we trade only in trending markets, avoiding whipsaws in ranges.
+# Works in bull markets (TRIX up with volume) and bear markets (TRIX down with volume).
+# Target: 80-150 total trades over 4 years (20-38/year).
 
-name = "exp_13392_12h_donchian20_vol_atr_v1"
+name = "exp_13392_12h_trix_volume_adx_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+TRIX_PERIOD = 12
+ADX_PERIOD = 14
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_FILTER_MULTIPLIER = 1.5
+ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
+def ema(series, period):
+    """Calculate EMA"""
+    return pd.Series(series).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+def trix(close, period):
+    """Calculate TRIX: triple EMA then % change"""
+    ema1 = ema(close, period)
+    ema2 = ema(ema1, period)
+    ema3 = ema(ema2, period)
+    # Calculate % change: (current - previous) / previous * 100
+    trix_raw = np.zeros_like(ema3)
+    trix_raw[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
+    # Smooth with 9-period EMA
+    return ema(trix_raw, 9)
+
+def adx(high, low, close, period):
+    """Calculate ADX (Average Directional Index)"""
+    # True Range
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    # Smooth TR, DM+
+    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = np.zeros_like(di_plus)
+    mask = (di_plus + di_minus) != 0
+    dx[mask] = 100 * np.abs(di_plus[mask] - di_minus[mask]) / (di_plus[mask] + di_minus[mask])
+    
+    # ADX is smoothed DX
+    adx_vals = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx_vals
+
+def atr(high, low, close, period):
+    """Calculate ATR"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    return pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for ATR filter
+    # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    # Load daily data ONCE before loop for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly ATR for filter
+    # Calculate weekly ADX for trend filter
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    atr_1w = calculate_atr(high_1w, low_1w, close_1w, ATR_PERIOD)
-    atr_1w_avg = pd.Series(atr_1w).rolling(window=4, min_periods=4).mean().values  # 4-period average
-    atr_1w_filter = atr_1w_avg * ATR_FILTER_MULTIPLIER
-    atr_1w_filter_aligned = align_htf_to_ltf(prices, df_1w, atr_1w_filter)
-    
-    # Calculate daily Donchian channels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Align Donchian levels to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    adx_1w = adx(high_1w, low_1w, close_1w, ADX_PERIOD)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     # Calculate 12h indicators
     high = prices['high'].values
@@ -65,11 +99,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # TRIX
+    trix_val = trix(close, TRIX_PERIOD)
+    
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # ATR for stoploss
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    # ATR
+    atr_val = atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,11 +114,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 4) + 1
+    start = max(TRIX_PERIOD*3, ADX_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if data not available
-        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or np.isnan(atr_1w_filter_aligned[i]):
+        # Skip if ADX not available
+        if np.isnan(adx_1w_aligned[i]) or np.isnan(trix_val[i]) or np.isnan(volume_ma[i]) or np.isnan(atr_val[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -101,27 +138,27 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Volatility filter: avoid excessively volatile conditions
-        vol_filter_ok = atr[i] <= atr_1w_filter_aligned[i] if not np.isnan(atr_1w_filter_aligned[i]) else True
+        # Trend filter: weekly ADX > 25 indicates trending market
+        trending = adx_1w_aligned[i] > 25
         
-        # Breakout signals using Donchian channels
-        breakout_up = volume_ok and vol_filter_ok and (high[i] > donchian_high_aligned[i-1])
-        breakout_down = volume_ok and vol_filter_ok and (low[i] < donchian_low_aligned[i-1])
+        # TRIX signals: rising TRIX = bullish momentum, falling TRIX = bearish momentum
+        trix_rising = trix_val[i] > trix_val[i-1]
+        trix_falling = trix_val[i] < trix_val[i-1]
         
         # Generate signals
         if position == 0:
-            if breakout_up:
+            if volume_ok and trending and trix_rising:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (2.0 * atr[i])  # 2x ATR stoploss
-            elif breakout_down:
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr_val[i])
+            elif volume_ok and trending and trix_falling:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (2.0 * atr[i])  # 2x ATR stoploss
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr_val[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
