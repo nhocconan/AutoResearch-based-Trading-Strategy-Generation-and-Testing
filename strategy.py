@@ -3,34 +3,29 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour 34-period EMA trend filter with 4-hour Donchian channel (20) breakout and volume confirmation.
-# Uses 12-hour EMA for higher timeframe trend confirmation. Trades only in direction of higher timeframe trend
-# to avoid counter-trend whipsaws. Volume requirement ensures breakouts have institutional participation.
-# Stoploss at 2x ATR manages risk. Designed for 40-80 trades per year to minimize fee drag.
+# Hypothesis: 4-hour Bollinger Band squeeze breakout with volume confirmation and 12-hour EMA trend filter.
+# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
+# Bollinger squeeze (low volatility) precedes explosive moves; volume confirms institutional participation.
+# Target: 75-200 total trades over 4 years (19-50/year). Uses discrete position sizing to minimize fee churn.
 
-name = "exp_13313_4h_ema34_donchian20_vol_12hma_v1"
+name = "exp_13313_4h_bb_squeeze_vol_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-EMA_FAST = 34      # Fast EMA for trend
-EMA_SLOW = 12      # Slow EMA for higher timeframe trend (12h EMA on 4h chart)
-DONCHIAN_PERIOD = 20  # Donchian channel period
-VOLUME_MA = 20     # Volume moving average
-VOLUME_THRESHOLD = 1.5  # Volume must be 1.5x average
-SIGNAL_SIZE = 0.25   # Position size (25% of capital)
-ATR_PERIOD = 14    # ATR period for stoploss
-ATR_STOP_MULT = 2.0  # ATR multiplier for stoploss
+BB_PERIOD = 20
+BB_STD = 2.0
+SQUEEZE_THRESHOLD = 0.02  # Bandwidth threshold for squeeze detection
+EMA_PERIOD = 50  # 12h EMA for trend filter
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.8
+SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.2
 
 def calculate_ema(close, period):
     """Calculate EMA with proper min_periods"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -41,15 +36,26 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_bollinger_bands(close, period, std_dev):
+    """Calculate Bollinger Bands and bandwidth"""
+    sma = pd.Series(close).rolling(window=period, min_periods=period).mean().values
+    std = pd.Series(close).rolling(window=period, min_periods=period).std().values
+    upper = sma + (std_dev * std)
+    lower = sma - (std_dev * std)
+    bandwidth = (upper - lower) / sma  # Normalized bandwidth
+    return upper, lower, bandwidth
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop for higher timeframe trend
+    # Load 12h data ONCE before loop for trend filter
     df_12h = get_htf_data(prices, '12h')
+    
+    # Calculate 12h EMA for trend filter
     close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, EMA_SLOW)
+    ema_12h = calculate_ema(close_12h, EMA_PERIOD)
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Calculate 4h indicators
@@ -58,16 +64,16 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA for trend filter (fast)
-    ema_fast = calculate_ema(close, EMA_FAST)
+    # Bollinger Bands
+    bb_upper, bb_lower, bb_bandwidth = calculate_bollinger_bands(close, BB_PERIOD, BB_STD)
     
-    # Donchian channels
-    donch_up, donch_low = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    # Squeeze detection: low bandwidth indicates compression
+    squeeze_active = bb_bandwidth < SQUEEZE_THRESHOLD
     
-    # Volume moving average
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA, min_periods=VOLUME_MA).mean().values
+    # Volume MA
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # ATR for stoploss
+    # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -76,11 +82,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_FAST, EMA_SLOW, DONCHIAN_PERIOD, VOLUME_MA, ATR_PERIOD) + 1
+    start = max(BB_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if indicators not ready
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(ema_fast[i]) or np.isnan(donch_up[i]) or np.isnan(donch_low[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        if (np.isnan(ema_12h_aligned[i]) or np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -99,18 +106,16 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine trend from 12h EMA and 4h EMA
-        uptrend_12h = close[i] > ema_12h_aligned[i]
-        downtrend_12h = close[i] < ema_12h_aligned[i]
-        uptrend_4h = close[i] > ema_fast[i]
-        downtrend_4h = close[i] < ema_fast[i]
-        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Donchian breakout signals
-        breakout_up = volume_ok and uptrend_12h and uptrend_4h and (high[i] > donch_up[i-1])
-        breakout_down = volume_ok and downtrend_12h and downtrend_4h and (low[i] < donch_low[i-1])
+        # Trend filter: price above/below 12h EMA
+        uptrend = close[i] > ema_12h_aligned[i]
+        downtrend = close[i] < ema_12h_aligned[i]
+        
+        # Breakout signals: price breaks Bollinger Bands with volume and trend alignment
+        breakout_up = squeeze_active[i-1] and volume_ok and uptrend and (close[i] > bb_upper[i-1])
+        breakout_down = squeeze_active[i-1] and volume_ok and downtrend and (close[i] < bb_lower[i-1])
         
         # Generate signals
         if position == 0:
@@ -118,12 +123,12 @@ def generate_signals(prices):
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULT * atr[i])
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
             elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULT * atr[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
