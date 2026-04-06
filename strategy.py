@@ -3,18 +3,26 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12834_1h_4h_1d_ema_volume_v1"
-timeframe = "1h"
+name = "exp_12835_6d_1w_vwap_cross_vol"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-EMA_FAST_PERIOD = 12
-EMA_SLOW_PERIOD = 26
+VWAP_PERIOD = 24  # 1 day of 6h bars
 VOLUME_MA_PERIOD = 24
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+VOLUME_THRESHOLD = 1.8
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 48  # Max 12 days
+
+def calculate_vwap(high, low, close, volume, period):
+    """Calculate VWAP using typical price"""
+    typical_price = (high + low + close) / 3.0
+    vwap_numerator = pd.Series(typical_price * volume).rolling(window=period, min_periods=period).sum()
+    vwap_denominator = pd.Series(volume).rolling(window=period, min_periods=period).sum()
+    vwap = vwap_numerator / vwap_denominator
+    return vwap.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -30,27 +38,21 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA trend
-    close_4h = df_4h['close'].values
-    ema_4h_fast = pd.Series(close_4h).ewm(span=EMA_FAST_PERIOD, adjust=False, min_periods=EMA_FAST_PERIOD).mean().values
-    ema_4h_slow = pd.Series(close_4h).ewm(span=EMA_SLOW_PERIOD, adjust=False, min_periods=EMA_SLOW_PERIOD).mean().values
-    ema_4h_trend = ema_4h_fast - ema_4h_slow  # Positive = bullish
+    # Calculate daily VWAP
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    close_d = df_daily['close'].values
+    volume_d = df_daily['volume'].values
     
-    # Calculate 1d EMA trend
-    close_1d = df_1d['close'].values
-    ema_1d_fast = pd.Series(close_1d).ewm(span=EMA_FAST_PERIOD, adjust=False, min_periods=EMA_FAST_PERIOD).mean().values
-    ema_1d_slow = pd.Series(close_1d).ewm(span=EMA_SLOW_PERIOD, adjust=False, min_periods=EMA_SLOW_PERIOD).mean().values
-    ema_1d_trend = ema_1d_fast - ema_1d_slow  # Positive = bullish
+    vwap_daily = calculate_vwap(high_d, low_d, close_d, volume_d, VWAP_PERIOD)
     
-    # Align to 1h timeframe
-    ema_4h_trend_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_trend)
-    ema_1d_trend_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_trend)
+    # Align VWAP to 6h timeframe
+    vwap_aligned = align_htf_to_ltf(prices, df_daily, vwap_daily)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -66,13 +68,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, EMA_SLOW_PERIOD) + 1
+    start = max(VWAP_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if EMA trends not available
-        if np.isnan(ema_4h_trend_aligned[i]) or np.isnan(ema_1d_trend_aligned[i]):
+        # Skip if VWAP not available
+        if np.isnan(vwap_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,22 +95,29 @@ def generate_signals(prices):
                 bars_since_entry = 0
                 continue
         
+        # Time-based exit to prevent overtrading
+        if bars_since_entry >= MAX_HOLD_BARS:
+            signals[i] = 0.0
+            position = 0
+            bars_since_entry = 0
+            continue
+        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Combined trend filter (4h and 1d both agree)
-        trend_bullish = ema_4h_trend_aligned[i] > 0 and ema_1d_trend_aligned[i] > 0
-        trend_bearish = ema_4h_trend_aligned[i] < 0 and ema_1d_trend_aligned[i] < 0
+        # Price crossing above/below daily VWAP
+        vwap_cross_up = volume_ok and close[i] > vwap_aligned[i] and close[i-1] <= vwap_aligned[i-1]
+        vwap_cross_down = volume_ok and close[i] < vwap_aligned[i] and close[i-1] >= vwap_aligned[i-1]
         
         # Generate signals
         if position == 0:
-            if volume_ok and trend_bullish:
+            if vwap_cross_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
                 bars_since_entry = 0
-            elif volume_ok and trend_bearish:
+            elif vwap_cross_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
