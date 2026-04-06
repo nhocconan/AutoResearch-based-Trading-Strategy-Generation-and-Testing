@@ -3,77 +3,35 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Camarilla pivot levels with volume and volatility filters.
-# Goes long at support levels (L3, L4) with volume confirmation in bullish regime,
-# short at resistance levels (H3, H4) with volume confirmation in bearish regime.
-# Uses 1d ADX to filter for trending markets and avoid false breakouts in ranging markets.
-# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
-# Works in bull (breakouts from support/resistance) and bear (mean reversion at extremes) markets.
-# Camarilla levels provide precise institutional support/resistance that work across market regimes.
+# Hypothesis: 1d strategy using weekly Donchian breakout with volume confirmation and ATR stoploss.
+# Goes long when price breaks above weekly Donchian upper channel with above-average volume,
+# short when breaks below lower channel with volume. Uses weekly EMA20 as trend filter.
+# Designed for 30-100 total trades over 4 years (7-25/year) to minimize fee drag.
+# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
+# Weekly timeframe provides significant filtering to avoid overtrading on daily data.
 
-name = "exp_13803_4h_camarilla1d_adx_vol_v1"
-timeframe = "4h"
+name = "exp_13804_1d_weekly_donchian_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_PERIOD = 1
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
+DONCHIAN_PERIOD = 20
+TREND_EMA_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_camarilla(high, low, close):
-    """Calculate Camarilla pivot levels for intraday trading"""
-    pivot = (high + low + close) / 3.0
-    range_val = high - low
-    
-    # Resistance levels
-    H1 = pivot + (range_val * 1.0 / 12)
-    H2 = pivot + (range_val * 2.0 / 12)
-    H3 = pivot + (range_val * 3.0 / 12)
-    H4 = pivot + (range_val * 4.0 / 12)
-    
-    # Support levels
-    L1 = pivot - (range_val * 1.0 / 12)
-    L2 = pivot - (range_val * 2.0 / 12)
-    L3 = pivot - (range_val * 3.0 / 12)
-    L4 = pivot - (range_val * 4.0 / 12)
-    
-    return H1, H2, H3, H4, L1, L2, L3, L4
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels: upper = max(high, period), lower = min(low, period)"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
-def calculate_adx(high, low, close, period):
-    """Calculate ADX (Average Directional Index)"""
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = tr1[0]
-    
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # Smoothed values
-    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    plus_dm_smooth = pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    minus_dm_smooth = pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    
-    # Directional Indicators
-    plus_di = 100 * (plus_dm_smooth / tr_smooth)
-    minus_di = 100 * (minus_dm_smooth / tr_smooth)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    
-    return adx
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -90,30 +48,24 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for Camarilla levels and ADX trend filter ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for Donchian channels and EMA trend filter ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 1d Camarilla levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    H1, H2, H3, H4, L1, L2, L3, L4 = calculate_camarilla(high_1d, low_1d, close_1d)
+    # Calculate weekly Donchian channels
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    donchian_upper, donchian_lower = calculate_donchian(high_weekly, low_weekly, DONCHIAN_PERIOD)
     
-    # Calculate 1d ADX for trend filter
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, ADX_PERIOD)
+    # Calculate weekly EMA for trend filter
+    close_weekly = df_weekly['close'].values
+    ema_weekly = calculate_ema(close_weekly, TREND_EMA_PERIOD)
     
-    # Align 1d indicators to 4h timeframe
-    H1_aligned = align_htf_to_ltf(prices, df_1d, H1)
-    H2_aligned = align_htf_to_ltf(prices, df_1d, H2)
-    H3_aligned = align_htf_to_ltf(prices, df_1d, H3)
-    H4_aligned = align_htf_to_ltf(prices, df_1d, H4)
-    L1_aligned = align_htf_to_ltf(prices, df_1d, L1)
-    L2_aligned = align_htf_to_ltf(prices, df_1d, L2)
-    L3_aligned = align_htf_to_ltf(prices, df_1d, L3)
-    L4_aligned = align_htf_to_ltf(prices, df_1d, L4)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Align weekly indicators to daily timeframe
+    donchian_upper_aligned = align_htf_to_ltf(prices, df_weekly, donchian_upper)
+    donchian_lower_aligned = align_htf_to_ltf(prices, df_weekly, donchian_lower)
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
-    # 4h data for entry timing and ATR
+    # Daily data for entry timing and ATR
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -131,13 +83,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ADX_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(H3_aligned[i]) or np.isnan(H4_aligned[i]) or 
-            np.isnan(L3_aligned[i]) or np.isnan(L4_aligned[i]) or 
-            np.isnan(adx_1d_aligned[i]) or np.isnan(volume_ma[i])):
+        if np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or np.isnan(ema_weekly_aligned[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -162,14 +112,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend strength filter
-        trending = adx_1d_aligned[i] > ADX_THRESHOLD
+        # Trend direction from weekly EMA
+        above_ema = close[i] > ema_weekly_aligned[i]
+        below_ema = close[i] < ema_weekly_aligned[i]
         
-        # Camarilla level signals
-        # Long at L3/L4 with volume in trending market
-        long_signal = volume_ok and trending and (close[i] <= L3_aligned[i] or close[i] <= L4_aligned[i])
-        # Short at H3/H4 with volume in trending market
-        short_signal = volume_ok and trending and (close[i] >= H3_aligned[i] or close[i] >= H4_aligned[i])
+        # Weekly Donchian breakout signals
+        long_signal = volume_ok and above_ema and close[i] > donchian_upper_aligned[i]
+        short_signal = volume_ok and below_ema and close[i] < donchian_lower_aligned[i]
         
         # Generate signals
         if position == 0:
@@ -186,15 +135,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on close above H3 (resistance) or stop loss
-            if close[i] >= H3_aligned[i]:
+            # Exit long on close below weekly Donchian lower (trend reversal)
+            if close[i] < donchian_lower_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on close below L3 (support) or stop loss
-            if close[i] <= L3_aligned[i]:
+            # Exit short on close above weekly Donchian upper (trend reversal)
+            if close[i] > donchian_upper_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
