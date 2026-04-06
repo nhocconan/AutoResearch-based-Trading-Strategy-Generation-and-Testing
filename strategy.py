@@ -3,38 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour momentum with 4-hour trend filter and 1-day volatility regime filter.
-# Uses 4h ADX for trend strength, 1h RSI for momentum entry, and 1d ATR ratio for volatility regime.
-# Works in bull/bear: ADX filters weak trends, RSI captures momentum pulls back in trends,
-# Volatility regime avoids choppy markets. Target: 80-150 trades over 4 years (20-38/year).
+# Hypothesis: 6h Donchian channel breakout with weekly trend filter and volume confirmation.
+# Weekly trend filter ensures we trade with the dominant trend (bull/bear), volume filters weak breakouts.
+# Target: 80-180 trades over 4 years (20-45/year) to balance opportunity and cost.
 
-name = "exp_13114_1h_momentum_4h_adx_1d_volregime_v1"
-timeframe = "1h"
+name = "exp_13115_6h_donchian20_1w_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
-ATR_RATIO_SHORT = 10  # for volatility regime (short-term ATR)
-ATR_RATIO_LONG = 30   # for volatility regime (long-term ATR)
-VOLATILITY_THRESHOLD = 0.5  # ATR(10)/ATR(30) > 0.5 = normal/high vol
-SIGNAL_SIZE = 0.20
+DONCHIAN_PERIOD = 20
+WEEKLY_TREND_PERIOD = 50
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.8
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_rsi(close, period):
-    """Calculate RSI"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -45,66 +29,37 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_adx(high, low, close, period):
-    """Calculate ADX"""
-    # Directional Movement
-    up_move = high - np.roll(high, 1)
-    down_move = np.roll(low, 1) - low
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-    
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    
-    # Smoothed values
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean() / (atr + 1e-10)
-    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean() / (atr + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return adx
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h ADX for trend filter
-    adx_4h = calculate_adx(high_4h, low_4h, close_4h, ADX_PERIOD)
-    adx_4h_aligned = align_htf_to_ltf(prices, df_4h, adx_4h)
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = calculate_ema(close_1w, WEEKLY_TREND_PERIOD)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d ATR for volatility regime (short and long term)
-    atr_1d_short = calculate_atr(high_1d, low_1d, close_1d, ATR_RATIO_SHORT)
-    atr_1d_long = calculate_atr(high_1d, low_1d, close_1d, ATR_RATIO_LONG)
-    atr_ratio_1d = atr_1d_short / (atr_1d_long + 1e-10)
-    atr_ratio_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ratio_1d)
-    
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # 1h RSI for momentum
-    rsi = calculate_rsi(close, RSI_PERIOD)
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # 1h ATR for stoploss
+    # Volume MA
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -113,11 +68,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, ADX_PERIOD, ATR_RATIO_LONG, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, WEEKLY_TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if np.isnan(adx_4h_aligned[i]) or np.isnan(atr_ratio_1d_aligned[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -136,24 +91,25 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volatility regime filter: only trade in normal/high volatility
-        vol_regime = atr_ratio_1d_aligned[i] > VOLATILITY_THRESHOLD
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend strength filter: only trade when ADX > threshold
-        strong_trend = adx_4h_aligned[i] > ADX_THRESHOLD
+        # Trend filter: price above/below weekly EMA
+        uptrend = close[i] > ema_1w_aligned[i]
+        downtrend = close[i] < ema_1w_aligned[i]
         
-        # Momentum signals
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        # Breakout signals
+        breakout_up = volume_ok and uptrend and (i == 0 or high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (i == 0 or low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
-            if vol_regime and strong_trend and rsi_oversold:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif vol_regime and strong_trend and rsi_overbought:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
