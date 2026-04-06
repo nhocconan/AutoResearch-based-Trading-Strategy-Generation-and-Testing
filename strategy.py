@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-6h Weekly Pivot + Volume Confirmation
-Hypothesis: Weekly pivot levels act as strong support/resistance. Price tends to respect these levels,
-especially when combined with volume confirmation. Long when price bounces from S1/S2 with bullish volume,
-short when price rejects R1/R2 with bearish volume. Works in both bull and bear markets as price
-respects key levels regardless of trend. Target: 75-150 total trades over 4 years (19-38/year).
+4h Donchian Breakout + Volume Confirmation
+Hypothesis: Donchian channels provide clear breakout levels with volume confirming institutional interest.
+Works in bull markets by capturing breakouts and in bear markets by catching breakdowns.
+Uses 1d trend filter to align with higher timeframe direction. Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "14367_6h_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "14366_4h_donchian20_1d_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,40 +19,27 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for pivot calculation (once before loop)
-    df_w = get_htf_data(prices, '1w')
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    # Load 1d data for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points (using previous week's data)
-    # Pivot Point (P) = (High + Low + Close) / 3
-    # Support 1 (S1) = (2 * P) - High
-    # Support 2 (S2) = P - (High - Low)
-    # Resistance 1 (R1) = (2 * P) - Low
-    # Resistance 2 (R2) = P + (High - Low)
-    pp = (high_w + low_w + close_w) / 3
-    s1 = (2 * pp) - high_w
-    s2 = pp - (high_w - low_w)
-    r1 = (2 * pp) - low_w
-    r2 = pp + (high_w - low_w)
+    # 1d EMA50 for trend filter
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50).mean().values
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Align weekly pivot levels to 6h timeframe
-    pp_aligned = align_htf_to_ltf(prices, df_w, pp)
-    s1_aligned = align_htf_to_ltf(prices, df_w, s1)
-    s2_aligned = align_htf_to_ltf(prices, df_w, s2)
-    r1_aligned = align_htf_to_ltf(prices, df_w, r1)
-    r2_aligned = align_htf_to_ltf(prices, df_w, r2)
-    
-    # 6h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume filter: require volume above average to confirm interest
+    # Donchian channels (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # Volume filter: require volume above average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (0.7 * vol_ma)  # At least 70% of average volume
+    vol_filter = volume > (0.7 * vol_ma)  # Require at least 70% of average volume
     
     # ATR for stoploss
     tr1 = high - low
@@ -68,12 +54,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 20  # Need enough data for volume MA
+    start = 50  # EMA50 needs 50 periods
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(pp_aligned[i]) or np.isnan(s1_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(r1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -82,33 +68,34 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price breaks below S1 OR stoploss
-            if (close[i] <= s1_aligned[i] or close[i] <= entry_price - 2.5 * atr[i]):
+            # Exit: price breaks below Donchian low OR trend turns bearish OR stoploss
+            if (close[i] <= donchian_low[i] or 
+                close[i] < ema50_1d_aligned[i] or
+                close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above R1 OR stoploss
-            if (close[i] >= r1_aligned[i] or close[i] >= entry_price + 2.5 * atr[i]):
+            # Exit: price breaks above Donchian high OR trend turns bullish OR stoploss
+            if (close[i] >= donchian_high[i] or 
+                close[i] > ema50_1d_aligned[i] or
+                close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: price near pivot levels + volume confirmation
-            # Long: price near S1 or S2 with bullish rejection (close > open) and volume
-            near_s1 = abs(close[i] - s1_aligned[i]) <= (0.5 * atr[i])
-            near_s2 = abs(close[i] - s2_aligned[i]) <= (0.5 * atr[i])
-            bullish_candle = close[i] > prices['open'].values[i]
+            # Look for entries: Donchian breakout + volume + 1d trend filter
+            long_breakout = close[i] > donchian_high[i]
+            short_breakout = close[i] < donchian_low[i]
             
-            # Short: price near R1 or R2 with bearish rejection (close < open) and volume
-            near_r1 = abs(close[i] - r1_aligned[i]) <= (0.5 * atr[i])
-            near_r2 = abs(close[i] - r2_aligned[i]) <= (0.5 * atr[i])
-            bearish_candle = close[i] < prices['open'].values[i]
+            # Only take longs in uptrend (price above 1d EMA50) and shorts in downtrend
+            uptrend = close[i] > ema50_1d_aligned[i]
+            downtrend = close[i] < ema50_1d_aligned[i]
             
-            long_setup = ((near_s1 or near_s2) and bullish_candle and vol_filter[i])
-            short_setup = ((near_r1 or near_r2) and bearish_candle and vol_filter[i])
+            long_setup = long_breakout and uptrend and vol_filter[i]
+            short_setup = short_breakout and downtrend and vol_filter[i]
             
             if long_setup:
                 signals[i] = 0.25
