@@ -3,33 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R mean reversion with 12-hour trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. In ranging markets, mean reversion works.
-# In trending markets, we only take trades in direction of 12h trend (via EMA50) to avoid counter-trend losses.
-# Volume confirmation ensures breakouts have conviction. Target: 75-150 total trades over 4 years.
+# Hypothesis: 6-hour Elder Ray Index with 1-day EMA200 filter and volume confirmation.
+# Elder Ray measures bull/bear power via EMA(13). In bull markets, bull power > 0 + rising;
+# in bear markets, bear power < 0 + falling. EMA200 filter ensures alignment with longer-term trend.
+# Volume confirmation filters false signals. Target: 75-200 total trades over 4 years.
 
-name = "exp_13259_6h_williamsr_meanrev_12h_ema_vol_v1"
+name = "exp_13259_6d_elderray1d_ema200_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-WILLIAMS_PERIOD = 14
-OVERSOLD = -80
-OVERBOUGHT = -20
-EMA_FAST = 34
-EMA_SLOW = 55
+ELDER_RAY_PERIOD = 13
+EMA200_PERIOD = 200
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_williams_r(high, low, close, period):
-    """Calculate Williams %R"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-    return wr.fillna(0).values
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -46,18 +36,16 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 250:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h EMA for trend filter
-    close_12h = df_12h['close'].values
-    ema_fast = calculate_ema(close_12h, EMA_FAST)
-    ema_slow = calculate_ema(close_12h, EMA_SLOW)
-    ema_fast_aligned = align_htf_to_ltf(prices, df_12h, ema_fast)
-    ema_slow_aligned = align_htf_to_ltf(prices, df_12h, ema_slow)
+    # Calculate daily EMA200 for trend filter
+    close_1d = df_1d['close'].values
+    ema200_1d = calculate_ema(close_1d, EMA200_PERIOD)
+    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
     
     # Calculate 6h indicators
     high = prices['high'].values
@@ -65,8 +53,10 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R
-    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
+    # Elder Ray components: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
+    ema13 = calculate_ema(close, ELDER_RAY_PERIOD)
+    bull_power = high - ema13
+    bear_power = low - ema13
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -80,11 +70,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WILLIAMS_PERIOD, EMA_FAST, EMA_SLOW, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(ELDER_RAY_PERIOD, EMA200_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_fast_aligned[i]) or np.isnan(ema_slow_aligned[i]):
+        # Skip if EMA200 not available
+        if np.isnan(ema200_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -106,22 +96,20 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: 12h EMA fast/slow crossover
-        uptrend = ema_fast_aligned[i] > ema_slow_aligned[i]
-        downtrend = ema_fast_aligned[i] < ema_slow_aligned[i]
-        
-        # Mean reversion signals from Williams %R
-        oversold = williams_r[i] <= OVERSOLD
-        overbought = williams_r[i] >= OVERBOUGHT
+        # Elder Ray signals with EMA200 filter
+        # Long: Bull Power > 0 AND price > EMA200 (bullish bias)
+        # Short: Bear Power < 0 AND price < EMA200 (bearish bias)
+        long_signal = volume_ok and (bull_power[i] > 0) and (close[i] > ema200_1d_aligned[i])
+        short_signal = volume_ok and (bear_power[i] < 0) and (close[i] < ema200_1d_aligned[i])
         
         # Generate signals
         if position == 0:
-            if oversold and uptrend and volume_ok:
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif overbought and downtrend and volume_ok:
+            elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
