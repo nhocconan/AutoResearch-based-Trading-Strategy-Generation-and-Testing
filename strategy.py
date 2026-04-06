@@ -1,23 +1,24 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 12h EMA Trend + Volume Spike
-Hypothesis: 4h Donchian breakouts aligned with 12h EMA trend and volume confirmation
-capture institutional momentum. The 12h EMA provides trend filter to avoid counter-trend
-trades, while volume spike (>2x average) confirms participation. Works in bull/bear
-by following higher-timeframe trend with momentum confirmation. Target: 100-200 total trades.
+1h Donchian(20) Breakout + 4h Trend + Volume Spike
+Hypothesis: 1h timeframe with Donchian breakouts aligned to 4h trend direction 
+and volume confirmation captures momentum while avoiding chop. 4h trend provides 
+structural bias (price above/below 4h EMA20 = bull/bear bias). Volume spike 
+(>1.5x average) confirms participation. Works in bull/bear by following 4h trend.
+Target: 75-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_12hema_vol_v1"
-timeframe = "4h"
+name = "1h_donchian20_4htrend_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price and volume data
@@ -39,96 +40,94 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 12h EMA for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    ema_12h = pd.Series(close_12h).ewm(span=21, adjust=False).mean().values
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # 4h EMA20 for trend bias
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
+    ema_4h = np.full(len(close_4h), np.nan)
+    if len(close_4h) >= 20:
+        ema_4h[19] = np.mean(close_4h[:20])
+        for i in range(20, len(close_4h)):
+            ema_4h[i] = (close_4h[i] * 2 + ema_4h[i-1] * 18) / 20
     
-    # 20-period volume average for volume filter
-    vol_ma = np.full(n, np.nan)
-    if n >= 20:
-        for i in range(20, n):
-            vol_ma[i] = np.mean(volume[i-20:i])
+    # Trend bias: above EMA20 = bullish, below = bearish
+    trend_bias_4h = np.where(close_4h > ema_4h, 1, -1)
+    trend_bias_aligned = align_htf_to_ltf(prices, df_4h, trend_bias_4h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_entry = 0
+    bars_since_exit = 0
     
     # Start from warmup period
     start = 20  # For Donchian
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_12h_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(atr[i]) or np.isnan(trend_bias_aligned[i]):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
-            bars_since_entry += 1
+            bars_since_exit += 1
             continue
         
         # Donchian channel (20-period)
         highest_high = np.max(high[i-20:i])
         lowest_low = np.min(low[i-20:i])
         
-        # Volume filter (20-period average > 2x)
-        volume_filter = volume[i] > vol_ma[i] * 2.0
+        # Volume filter (20-period average)
+        vol_ma = np.mean(volume[i-20:i])
+        volume_filter = volume[i] > vol_ma * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR below EMA
+            # Exit: price closes below Donchian lower OR trend flip
             # Stoploss: price drops 2*ATR below entry
             if (close[i] < lowest_low or
-                close[i] < ema_12h_aligned[i] or
+                trend_bias_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
-                signals[i] = 0.25
-            bars_since_entry += 1
+                signals[i] = 0.20
+            bars_since_exit += 1
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR above EMA
+            # Exit: price closes above Donchian upper OR trend flip
             # Stoploss: price rises 2*ATR above entry
             if (close[i] > highest_high or
-                close[i] > ema_12h_aligned[i] or
+                trend_bias_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
-                signals[i] = -0.25
-            bars_since_entry += 1
+                signals[i] = -0.20
+            bars_since_exit += 1
         else:
-            # Look for entries: Donchian breakout + EMA trend + volume spike
-            # Minimum holding period: only allow new entry after 15 bars flat
-            if bars_since_entry >= 15:
+            # Look for entries: Donchian breakout + 4h trend + volume
+            # Minimum bars since exit: only allow new entry after 10 bars flat
+            if bars_since_exit >= 10:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
-                # Trend filter: price above EMA = bullish, below = bearish
-                price_above_ema = close[i] > ema_12h_aligned[i]
-                price_below_ema = close[i] < ema_12h_aligned[i]
-                
-                # Long: bullish breakout with bullish EMA trend and volume
-                if bull_breakout and price_above_ema and volume_filter:
-                    signals[i] = 0.25
+                # Long: bullish breakout with bullish 4h trend and volume
+                if bull_breakout and trend_bias_aligned[i] == 1 and volume_filter:
+                    signals[i] = 0.20
                     position = 1
                     entry_price = close[i]
-                    bars_since_entry = 0
-                # Short: bearish breakout with bearish EMA trend and volume
-                elif bear_breakout and price_below_ema and volume_filter:
-                    signals[i] = -0.25
+                    bars_since_exit = 0
+                # Short: bearish breakout with bearish 4h trend and volume
+                elif bear_breakout and trend_bias_aligned[i] == -1 and volume_filter:
+                    signals[i] = -0.20
                     position = -1
                     entry_price = close[i]
-                    bars_since_entry = 0
+                    bars_since_exit = 0
                 else:
                     signals[i] = 0.0
-                    bars_since_entry += 1
+                    bars_since_exit += 1
             else:
                 signals[i] = 0.0
-                bars_since_entry += 1
+                bars_since_exit += 1
     
     return signals
