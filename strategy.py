@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA(20) trend filter and volume confirmation.
-# Long when price breaks above Donchian high with price above 1d EMA and volume > 1.5x average.
-# Short when price breaks below Donchian low with price below 1d EMA and volume > 1.5x average.
-# Uses tight entry conditions to target 75-200 trades over 4 years with low frequency.
+# Hypothesis: 6-hour Donchian(20) breakout with daily pivot direction and volume confirmation.
+# Donchian breakouts capture trend continuation. Daily pivot provides directional bias from higher timeframe.
+# Volume filter ensures institutional participation. Designed for 6h to target 50-150 trades over 4 years.
+# Works in bull via breakout continuation, in bear via faded reversals at extreme pivot levels.
 
-name = "4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,46 +23,53 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day EMA(20) for trend filter
+    # 1-day data for pivot points and volume
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    # EMA calculation
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        ema_1d[19] = np.mean(close_1d[:20])
-        for i in range(20, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
-    
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # 1-day volume average for confirmation
     vol_1d = df_1d['volume'].values
+    
+    # Daily pivot points: P = (H+L+C)/3, R1 = 2*P-L, S1 = 2*P-H
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    
+    # Align daily data to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # Daily volume average (20-period)
     vol_ma_1d = np.full(len(vol_1d), np.nan)
-    for i in range(19, len(vol_1d)):  # 20-period average
+    for i in range(19, len(vol_1d)):
         vol_ma_1d[i] = np.mean(vol_1d[i-19:i+1])
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
-    # Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
-    
+    # Donchian channels (20-period) on 6h
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
     for i in range(19, n):
-        donchian_high[i] = np.max(high[i-19:i+1])
-        donchian_low[i] = np.min(low[i-19:i+1])
+        highest_high[i] = np.max(high[i-19:i+1])
+        lowest_low[i] = np.min(low[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = 20
+    start = max(19, 19)  # Donchian needs 19, daily MA needs 19
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]) or 
-            np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -70,35 +77,152 @@ def generate_signals(prices):
             continue
         
         # Volume condition: current volume > 1.5x daily average
-        volume_filter = volume[i] > vol_ma_1d_aligned[i] * 1.5
+        volume_filter = volume[i] > vol_ma_aligned[i] * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price below Donchian low or stoploss
-            if (close[i] < donchian_low[i] or 
-                close[i] < entry_price - 2.5 * (high[i] - low[i])):
+            # Exit: price below S1 or stoploss
+            if (close[i] < s1_aligned[i] or 
+                close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price above Donchian high or stoploss
-            if (close[i] > donchian_high[i] or 
-                close[i] > entry_price + 2.5 * (high[i] - low[i])):
+            # Exit: price above R1 or stoploss
+            if (close[i] > r1_aligned[i] or 
+                close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries
+            # Look for entries with volume filter
             if volume_filter:
-                # Long: price breaks above Donchian high with price above EMA
-                if (close[i] > donchian_high[i] and close[i] > ema_1d_aligned[i]):
+                # Long: break above R1 with close above pivot (bullish bias)
+                if (close[i] > r1_aligned[i] and close[i] > pivot_aligned[i]):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: price breaks below Donchian low with price below EMA
-                elif (close[i] < donchian_low[i] and close[i] < ema_1d_aligned[i]):
+                # Short: break below S1 with close below pivot (bearish bias)
+                elif (close[i] < s1_aligned[i] and close[i] < pivot_aligned[i]):
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close[i]
+            else:
+                signals[i] = 0.0
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 6-hour Donchian(20) breakout with daily pivot direction and volume confirmation.
+# Donchian breakouts capture trend continuation. Daily pivot provides directional bias from higher timeframe.
+# Volume filter ensures institutional participation. Designed for 6h to target 50-150 trades over 4 years.
+# Works in bull via breakout continuation, in bear via faded reversals at extreme pivot levels.
+
+name = "6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    # Price and volume data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # 1-day data for pivot points and volume
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    vol_1d = df_1d['volume'].values
+    
+    # Daily pivot points: P = (H+L+C)/3, R1 = 2*P-L, S1 = 2*P-H
+    pivot = (high_1d + low_1d + close_1d) / 3.0
+    r1 = 2 * pivot - low_1d
+    s1 = 2 * pivot - high_1d
+    r2 = pivot + (high_1d - low_1d)
+    s2 = pivot - (high_1d - low_1d)
+    
+    # Align daily data to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
+    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
+    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
+    
+    # Daily volume average (20-period)
+    vol_ma_1d = np.full(len(vol_1d), np.nan)
+    for i in range(19, len(vol_1d)):
+        vol_ma_1d[i] = np.mean(vol_1d[i-19:i+1])
+    vol_ma_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Donchian channels (20-period) on 6h
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(19, n):
+        highest_high[i] = np.max(high[i-19:i+1])
+        lowest_low[i] = np.min(low[i-19:i+1])
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    
+    # Start from warmup period
+    start = max(19, 19)  # Donchian needs 19, daily MA needs 19
+    
+    for i in range(start, n):
+        # Skip if required data not available
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(pivot_aligned[i]) or np.isnan(r1_aligned[i]) or 
+            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or 
+            np.isnan(s2_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Volume condition: current volume > 1.5x daily average
+        volume_filter = volume[i] > vol_ma_aligned[i] * 1.5
+        
+        # Check exits and stoploss
+        if position == 1:  # long position
+            # Exit: price below S1 or stoploss
+            if (close[i] < s1_aligned[i] or 
+                close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:  # short position
+            # Exit: price above R1 or stoploss
+            if (close[i] > r1_aligned[i] or 
+                close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+        else:
+            # Look for entries with volume filter
+            if volume_filter:
+                # Long: break above R1 with close above pivot (bullish bias)
+                if (close[i] > r1_aligned[i] and close[i] > pivot_aligned[i]):
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close[i]
+                # Short: break below S1 with close below pivot (bearish bias)
+                elif (close[i] < s1_aligned[i] and close[i] < pivot_aligned[i]):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
