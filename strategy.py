@@ -1,31 +1,25 @@
-# 2025-06-03: 4h Camarilla pivot + volume confirmation + ATR stop loss
-# Hypothesis: Camarilla pivot levels from daily timeframe act as strong support/resistance
-# in both bull and bear markets. Fading at S3/R3 with volume confirmation provides
-# mean-reversion entries, while breakouts at S4/R4 capture momentum. This combination
-# works across regimes with controlled trade frequency.
-# Target: 75-200 trades over 4 years (19-50/year) to avoid fee drag.
-# Edge: Price respects institutional pivot levels; volume confirms institutional participation.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12720_4h_camarilla_pivot_volume_v1"
+name = "exp_12721_4h_donchian20_1d_vol_trend_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-PIVOT_PERIOD = 1
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_donchian(high, low, period):
+    """Calculate Donchian upper and lower bands"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -36,16 +30,6 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_camarilla_pivot(high, low, close):
-    """Calculate Camarilla pivot levels for given period"""
-    pivot = (high + low + close) / 3
-    range_val = high - low
-    r3 = pivot + (range_val * 1.1 / 2)
-    s3 = pivot - (range_val * 1.1 / 2)
-    r4 = pivot + (range_val * 1.1)
-    s4 = pivot - (range_val * 1.1)
-    return r3, s3, r4, s4
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -54,17 +38,10 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla pivot levels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily close for trend filter
     close_1d = df_1d['close'].values
-    r3_1d, s3_1d, r4_1d, s4_1d = calculate_camarilla_pivot(high_1d, low_1d, close_1d)
-    
-    # Align pivot levels to 4h timeframe
-    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
-    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
-    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
-    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    sma_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
+    sma_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_1d)
     
     # Calculate 4h indicators
     high = prices['high'].values
@@ -72,7 +49,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # Donchian channels
+    donch_upper, donch_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    
+    # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -81,11 +64,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
     
     for i in range(start, n):
-        # Skip if daily pivot levels not available
-        if np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]):
+        # Skip if daily trend not available
+        if np.isnan(sma_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -107,15 +90,17 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Fade at S3/R3, breakout at S4/R4
-        fade_long = volume_ok and close[i] <= s3_1d_aligned[i]  # fade at S3 (support)
-        fade_short = volume_ok and close[i] >= r3_1d_aligned[i]  # fade at R3 (resistance)
-        breakout_long = volume_ok and close[i] >= r4_1d_aligned[i]  # breakout above R4
-        breakout_short = volume_ok and close[i] <= s4_1d_aligned[i]  # breakdown below S4
+        # Trend filter: only long in uptrend, only short in downtrend
+        uptrend = close[i] > sma_1d_aligned[i]
+        downtrend = close[i] < sma_1d_aligned[i]
+        
+        # Breakout conditions with volume and trend filter
+        breakout_long = volume_ok and close[i] >= donch_upper[i] and uptrend
+        breakdown_short = volume_ok and close[i] <= donch_lower[i] and downtrend
         
         # Entry conditions
-        long_entry = fade_long or breakout_long
-        short_entry = fade_short or breakout_short
+        long_entry = breakout_long
+        short_entry = breakdown_short
         
         # Generate signals
         if position == 0:
