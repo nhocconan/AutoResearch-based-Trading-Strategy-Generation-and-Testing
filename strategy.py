@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly trend filter and volume confirmation
-# Enter long when: price breaks above Donchian(20) high, weekly close > weekly open (bullish weekly candle), volume > 1.5x 20-period average
-# Enter short when: price breaks below Donchian(20) low, weekly close < weekly open (bearish weekly candle), volume > 1.5x 20-period average
-# Exit when: price crosses back through Donchian(20) midline OR opposite breakout occurs
-# Uses weekly trend to filter false breakouts, targeting 75-150 trades over 4 years
+# Hypothesis: 1d Donchian breakout with weekly trend filter and volume confirmation
+# Enter long when: price breaks above Donchian(20) high, weekly EMA(20) rising, volume > 1.5x avg
+# Enter short when: price breaks below Donchian(20) low, weekly EMA(20) falling, volume > 1.5x avg
+# Exit when price reverses to Donchian midpoint or opposite breakout occurs
+# Target: 30-100 trades over 4 years with trend filtering to work in both bull and bear markets
 
-name = "6h_donchian20_weeklytrend_vol_v1"
-timeframe = "6h"
+name = "1d_donchian20_1wema_vol_breakout_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -25,16 +25,23 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Donchian(20) channels
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    donchian_mid = (high_roll + low_roll) / 2
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_mid = (donchian_high + donchian_low) / 2
     
-    # Weekly trend filter: bullish if weekly close > weekly open
+    # Weekly EMA(20) for trend filter
     df_1w = get_htf_data(prices, '1w')
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
+    close_1w = df_1w['close'].values
+    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False).mean().values
+    ema_20_prev = np.roll(ema_20, 1)
+    ema_20_prev[0] = ema_20[0]
+    ema_20_rising = ema_20 > ema_20_prev
+    ema_20_falling = ema_20 < ema_20_prev
+    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    ema_20_rising_aligned = align_htf_to_ltf(prices, df_1w, ema_20_rising)
+    ema_20_falling_aligned = align_htf_to_ltf(prices, df_1w, ema_20_falling)
     
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -45,8 +52,10 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
-            np.isnan(volume_threshold[i]) or np.isnan(weekly_bullish_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(donchian_mid[i]) or np.isnan(ema_20_aligned[i]) or
+            np.isnan(ema_20_rising_aligned[i]) or np.isnan(ema_20_falling_aligned[i]) or
+            np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -54,28 +63,28 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price crosses below Donchian midline OR opposite breakout
-            if close[i] < donchian_mid[i] or low[i] < low_roll[i]:
+            # Exit: price returns to midpoint OR opposite breakout with volume
+            if close[i] <= donchian_mid[i] or (close[i] < donchian_low[i] and volume[i] > volume_threshold[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price crosses above Donchian midline OR opposite breakout
-            if close[i] > donchian_mid[i] or high[i] > high_roll[i]:
+            # Exit: price returns to midpoint OR opposite breakout with volume
+            if close[i] >= donchian_mid[i] or (close[i] > donchian_high[i] and volume[i] > volume_threshold[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for breakout entries with weekly trend filter and volume
+            # Look for breakout entries with trend and volume
             if volume[i] > volume_threshold[i]:
-                if high[i] > high_roll[i] and weekly_bullish_aligned[i]:
-                    # Bullish breakout with bullish weekly candle
+                if close[i] > donchian_high[i] and ema_20_rising_aligned[i]:
+                    # Bullish breakout with rising weekly EMA
                     signals[i] = 0.25
                     position = 1
-                elif low[i] < low_roll[i] and not weekly_bullish_aligned[i]:
-                    # Bearish breakout with bearish weekly candle
+                elif close[i] < donchian_low[i] and ema_20_falling_aligned[i]:
+                    # Bearish breakout with falling weekly EMA
                     signals[i] = -0.25
                     position = -1
     
