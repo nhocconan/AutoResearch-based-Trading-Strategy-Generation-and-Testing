@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
-Hypothesis: Daily Donchian breakouts capture longer-term momentum. Filter by weekly EMA50 for trend bias and daily volume confirmation for conviction. Works in bull (buy breakouts above weekly EMA50) and bear (sell breakdowns below weekly EMA50). Target: 30-100 total trades over 4 years.
+6h Ichimoku Cloud with 1d trend filter and volume confirmation
+Hypothesis: Ichimoku cloud acts as dynamic support/resistance. Use 1d trend (price vs EMA200) for bias, cloud for entry/exit, volume for confirmation. Works in bull (price above cloud + bullish 1d) and bear (price below cloud + bearish 1d). Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_1w_ema50_vol_v1"
-timeframe = "1d"
+name = "6h_ichimoku_1d_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Price and volume data
@@ -23,7 +23,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR
+    # 14-period ATR for stoploss
     atr = np.full(n, np.nan)
     if n >= 14:
         tr = np.maximum(
@@ -36,41 +36,64 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 1w data for trend filter (EMA50)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for trend filter (EMA200)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # EMA50 on 1w close
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema_1w[49] = np.mean(close_1w[:50])
-        for i in range(50, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 48) / 50
+    # EMA200 on 1d close
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 200:
+        ema_1d[199] = np.mean(close_1d[:200])
+        for i in range(200, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 198) / 200
     
-    # 1w trend: above EMA50 = bullish, below = bearish
-    trend_1w = np.where(close_1w > ema_1w, 1, -1)
+    # 1d trend: above EMA200 = bullish, below = bearish
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align 1w trend to 1d timeframe
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # Align 1d trend to 6h timeframe
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Get 1w data for volume confirmation
-    volume_1w = df_1w['volume'].values
+    # Ichimoku components (6h timeframe)
+    # Conversion line (Tenkan-sen): (9-period high + low) / 2
+    conv_line = np.full(n, np.nan)
+    # Base line (Kijun-sen): (26-period high + low) / 2
+    base_line = np.full(n, np.nan)
+    # Leading Span A: (Conversion + Base) / 2
+    span_a = np.full(n, np.nan)
+    # Leading Span B: (52-period high + low) / 2
+    span_b = np.full(n, np.nan)
     
-    # 20-period average volume on 1w
-    vol_ma_1w = np.full(len(volume_1w), np.nan)
-    for i in range(20, len(volume_1w)):
-        vol_ma_1w[i] = np.mean(volume_1w[i-20:i])
+    # Calculate Conversion line (9-period)
+    for i in range(9, n):
+        conv_line[i] = (np.max(high[i-9:i]) + np.min(low[i-9:i])) / 2
     
-    # Align volume MA to 1d timeframe
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    # Calculate Base line (26-period)
+    for i in range(26, n):
+        base_line[i] = (np.max(high[i-26:i]) + np.min(low[i-26:i])) / 2
     
-    # Donchian channels (20-period) from 1d data
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
+    # Calculate Span B (52-period)
+    for i in range(52, n):
+        span_b[i] = (np.max(high[i-52:i]) + np.min(low[i-52:i])) / 2
     
-    for i in range(20, n):
-        upper[i] = np.max(high[i-20:i])
-        lower[i] = np.min(low[i-20:i])
+    # Calculate Span A (requires Conversion and Base)
+    for i in range(26, n):
+        if not np.isnan(conv_line[i]) and not np.isnan(base_line[i]):
+            span_a[i] = (conv_line[i] + base_line[i]) / 2
+    
+    # Align Ichimoku components (they are already 6h, but align for consistency)
+    # Actually, these are calculated on 6h data, so no alignment needed
+    # But we'll keep the variables for clarity
+    
+    # Get 1d data for volume confirmation
+    volume_1d = df_1d['volume'].values
+    
+    # 20-period average volume on 1d
+    vol_ma_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    
+    # Align volume MA to 6h timeframe
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,13 +101,14 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 40  # Need enough data for Donchian and alignments
+    start = 52  # Need enough data for Span B
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(trend_1w_aligned[i]) or 
-            np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(vol_ma_1w_aligned[i])):
+        if (np.isnan(atr[i]) or np.isnan(trend_1d_aligned[i]) or 
+            np.isnan(conv_line[i]) or np.isnan(base_line[i]) or
+            np.isnan(span_a[i]) or np.isnan(span_b[i]) or
+            np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -92,17 +116,22 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 1d volume > 1.5x 1w average volume (scaled)
-        # Scale 1w volume to 1d: approx 1/5 of 1w volume (since 5x 1d in 1w)
-        vol_threshold = vol_ma_1w_aligned[i] / 5.0 * 1.5
+        # Volume filter: current 6h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d volume to 6h: approx 1/4 of 1d volume (since 4x 6h in 1d)
+        vol_threshold = vol_ma_1d_aligned[i] / 4.0 * 1.5
         volume_filter = volume[i] > vol_threshold
+        
+        # Determine cloud boundaries (Leading Span A and B)
+        # Cloud top = max(Span A, Span B), Cloud bottom = min(Span A, Span B)
+        cloud_top = max(span_a[i], span_b[i])
+        cloud_bottom = min(span_a[i], span_b[i])
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian OR against 1w trend
+            # Exit: price falls below cloud bottom OR against 1d trend
             # Stoploss: price drops 2*ATR below entry
-            if (close[i] < lower[i] or
-                trend_1w_aligned[i] == -1 or
+            if (close[i] < cloud_bottom or
+                trend_1d_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -111,10 +140,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian OR against 1w trend
+            # Exit: price rises above cloud top OR against 1d trend
             # Stoploss: price rises 2*ATR above entry
-            if (close[i] > upper[i] or
-                trend_1w_aligned[i] == 1 or
+            if (close[i] > cloud_top or
+                trend_1d_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -124,20 +153,20 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 5 bars flat
-            if bars_since_entry >= 5:
-                # Breakout entries: upper/lower with 1w trend
-                bull_breakout = close[i] > upper[i]
-                bear_breakout = close[i] < lower[i]
+            # Minimum holding period: only allow new entry after 4 bars flat
+            if bars_since_entry >= 4:
+                # Ichimoku signals with 1d trend filter
+                price_above_cloud = close[i] > cloud_top
+                price_below_cloud = close[i] < cloud_bottom
                 
-                # Long: breakout above upper with bullish 1w trend + volume
-                if bull_breakout and trend_1w_aligned[i] == 1 and volume_filter:
+                # Long: price above cloud with bullish 1d trend + volume
+                if price_above_cloud and trend_1d_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: breakdown below lower with bearish 1w trend + volume
-                elif bear_breakout and trend_1w_aligned[i] == -1 and volume_filter:
+                # Short: price below cloud with bearish 1d trend + volume
+                elif price_below_cloud and trend_1d_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
