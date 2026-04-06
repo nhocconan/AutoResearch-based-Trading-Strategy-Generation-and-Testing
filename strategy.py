@@ -4,11 +4,12 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 1-day Donchian(20) breakout with 1-week EMA trend filter and volume confirmation.
-# This strategy captures trend continuation on breakouts aligned with weekly momentum.
-# Volume confirmation filters false breakouts. Target: 75-200 total trades over 4 years (19-50/year)
-# to balance signal quality with fee minimization. Works in bull (catch uptrends) and bear (catch downtrends).
+# In bull markets, breakouts capture strong uptrends; in bear markets, they catch sharp downtrends.
+# The weekly EMA ensures alignment with higher timeframe momentum, while volume filters out false breakouts.
+# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag and improve generalization.
+# Key adjustments: Reduced position size to 0.25, increased volume threshold to 1.8, added minimum holding period of 3 days to reduce churn.
 
-name = "exp_13244_1d_donchian20_1w_ema_vol_v1"
+name = "exp_13244_1d_donchian20_1w_ema_vol_v2"
 timeframe = "1d"
 leverage = 1.0
 
@@ -16,10 +17,11 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 20  # Weekly EMA for trend filter
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8  # Increased to reduce false signals
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+MIN_HOLDING_PERIOD = 3  # Minimum days to hold position
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -67,11 +69,16 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
+    holding_period = 0  # Days held in current position
     
     # Start from warmup period
     start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
+        # Increment holding period if in position
+        if position != 0:
+            holding_period += 1
+        
         # Skip if EMA not available
         if np.isnan(ema_1w_aligned[i]):
             if position != 0:
@@ -85,11 +92,13 @@ def generate_signals(prices):
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
+                holding_period = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
+                holding_period = 0
                 continue
         
         # Volume confirmation
@@ -105,21 +114,36 @@ def generate_signals(prices):
         
         # Generate signals
         if position == 0:
+            # Only enter if holding period requirement is satisfied (0 when flat)
             if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                holding_period = 0
             elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                holding_period = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
-            signals[i] = SIGNAL_SIZE
+            # Only allow exit after minimum holding period
+            if holding_period >= MIN_HOLDING_PERIOD:
+                signals[i] = 0.0
+                position = 0
+                holding_period = 0
+            else:
+                signals[i] = SIGNAL_SIZE
         elif position == -1:
-            signals[i] = -SIGNAL_SIZE
+            # Only allow exit after minimum holding period
+            if holding_period >= MIN_HOLDING_PERIOD:
+                signals[i] = 0.0
+                position = 0
+                holding_period = 0
+            else:
+                signals[i] = -SIGNAL_SIZE
     
     return signals
