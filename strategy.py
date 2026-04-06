@@ -3,24 +3,32 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour timeframe with 4-hour and 1-day trend filters.
-# Uses 4-hour Supertrend for trend direction and 1-day Donchian breakouts for entry timing.
-# Volume confirmation ensures institutional participation. Designed to work in both bull and bear markets
-# by filtering trades with higher timeframe trends. Target: 60-150 total trades over 4 years (15-37/year).
+# Hypothesis: 6-hour Williams %R with 1-day Camarilla pivot levels.
+# Williams %R identifies overbought/oversold conditions (below -80 = oversold, above -20 = overbought).
+# Camarilla pivots from 1-day provide S1-S4 and R1-R4 levels for mean reversion:
+#   - Buy near S3/S4 when Williams %R oversold (< -80) with price > S3
+#   - Sell near R3/R4 when Williams %R overbought (> -20) with price < R3
+# Works in ranging markets (mean reversion at extremes) and can capture breaks during trends.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13514_1h_4h_supertrend_1d_donchian_vol_v1"
-timeframe = "1h"
+name = "exp_13515_6h_williamsr_1d_camarilla_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-SUPERTREND_PERIOD = 10
-SUPERTREND_MULTIPLIER = 3.0
-DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+WILLIAMS_PERIOD = 14
+WILLIAMS_OVERBOUGHT = -20
+WILLIAMS_OVERSOLD = -80
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_williams_r(high, low, close, period):
+    """Calculate Williams %R"""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    return williams_r.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -31,65 +39,55 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_supertrend(high, low, close, period, multiplier):
-    """Calculate Supertrend indicator"""
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2
-    upperband = hl2 + (multiplier * atr)
-    lowerband = hl2 - (multiplier * atr)
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for the day"""
+    # Typical price
+    pp = (high + low + close) / 3.0
+    range_ = high - low
     
-    supertrend = np.zeros_like(close)
-    direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
+    # Camarilla levels
+    r4 = pp + (range_ * 1.1 / 2)
+    r3 = pp + (range_ * 1.1 / 4)
+    r2 = pp + (range_ * 1.1 / 6)
+    r1 = pp + (range_ * 1.1 / 12)
+    s1 = pp - (range_ * 1.1 / 12)
+    s2 = pp - (range_ * 1.1 / 6)
+    s3 = pp - (range_ * 1.1 / 4)
+    s4 = pp - (range_ * 1.1 / 2)
     
-    supertrend[0] = upperband[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close)):
-        if close[i] > supertrend[i-1]:
-            supertrend[i] = max(upperband[i], supertrend[i-1])
-            direction[i] = 1
-        else:
-            supertrend[i] = min(lowerband[i], supertrend[i-1])
-            direction[i] = -1
-            
-    return supertrend, direction
+    return r1, r2, r3, r4, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    
-    # Calculate 4h Supertrend for trend filter
-    supertrend_4h, direction_4h = calculate_supertrend(high_4h, low_4h, close_4h, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
-    supertrend_4h_aligned = align_htf_to_ltf(prices, df_4h, supertrend_4h)
-    direction_4h_aligned = align_htf_to_ltf(prices, df_4h, direction_4h)
-    
-    # Load 1d data ONCE before loop
+    # Load daily data ONCE before loop for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate daily Camarilla levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1-day Donchian channels
-    highest_high_1d = pd.Series(high_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low_1d = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    highest_high_1d_aligned = align_htf_to_ltf(prices, df_1d, highest_high_1d)
-    lowest_low_1d_aligned = align_htf_to_ltf(prices, df_1d, lowest_low_1d)
+    r1_1d, r2_1d, r3_1d, r4_1d, s1_1d, s2_1d, s3_1d, s4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
     
-    # Calculate 1-hour indicators
+    # Align Camarilla levels to 6h timeframe
+    r1_1d_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
+    r2_1d_aligned = align_htf_to_ltf(prices, df_1d, r2_1d)
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s1_1d_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    s2_1d_aligned = align_htf_to_ltf(prices, df_1d, s2_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
+    
+    # Calculate 6h Williams %R
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Volume MA
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
     
     # ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -100,12 +98,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(SUPERTREND_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(WILLIAMS_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if (np.isnan(supertrend_4h_aligned[i]) or np.isnan(direction_4h_aligned[i]) or 
-            np.isnan(highest_high_1d_aligned[i]) or np.isnan(lowest_low_1d_aligned[i])):
+        # Skip if Williams %R or Camarilla levels not available
+        if np.isnan(williams_r[i]) or np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -124,25 +121,21 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Mean reversion signals using Williams %R and Camarilla levels
+        # Long setup: Williams %R oversold AND price above S3 (support holding)
+        long_setup = (williams_r[i] < WILLIAMS_OVERSOLD) and (close[i] > s3_1d_aligned[i])
         
-        # Trend filter from 4h Supertrend
-        uptrend_4h = direction_4h_aligned[i] == 1
-        downtrend_4h = direction_4h_aligned[i] == -1
-        
-        # Breakout signals using 1-day Donchian channels
-        breakout_up = volume_ok and uptrend_4h and (high[i] > highest_high_1d_aligned[i-1])
-        breakout_down = volume_ok and downtrend_4h and (low[i] < lowest_low_1d_aligned[i-1])
+        # Short setup: Williams %R overbought AND price below R3 (resistance holding)
+        short_setup = (williams_r[i] > WILLIAMS_OVERBOUGHT) and (close[i] < r3_1d_aligned[i])
         
         # Generate signals
         if position == 0:
-            if breakout_up:
+            if long_setup:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            elif short_setup:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
