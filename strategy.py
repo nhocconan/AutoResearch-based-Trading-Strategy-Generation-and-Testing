@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian Channel Breakout with Daily EMA Trend Filter and Volume Confirmation
-# Uses 20-period Donchian channels on 12h timeframe for breakout signals.
-# Filters: Price must be above/below daily EMA(40) for trend direction.
-# Volume filter: Current volume > 1.3x 20-period average to ensure conviction.
-# Works in bull/bear markets by trading breakouts in direction of higher timeframe trend.
-# Target: 75-150 total trades over 4 years (19-38/year).
+# Hypothesis: 4-hour ATR Breakout with Volume Confirmation and Trend Filter.
+# Uses 4h ATR(14) for volatility-based breakout levels (mean ± 2*ATR).
+# Volume filter (current volume > 1.5x 20-period average) ensures quality signals.
+# Trend filter: EMA(50) direction from 12h timeframe prevents counter-trend entries.
+# Works in bull/bear markets via volatility expansion and trend alignment.
+# Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "12h_donchian20_1d_ema40_vol_v2"
-timeframe = "12h"
+name = "4h_atr_breakout_vol_trend_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,40 +25,43 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily EMA for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # ATR(14) calculation
+    tr1 = high[1:] - low[1:]
+    tr2 = np.abs(high[1:] - close[:-1])
+    tr3 = np.abs(low[1:] - close[:-1])
+    tr = np.concatenate([[np.nan], np.maximum(tr1, np.maximum(tr2, tr3))])
+    atr = np.full(n, np.nan)
+    for i in range(14, n):
+        atr[i] = np.nanmean(tr[i-13:i+1])
     
-    # Calculate EMA(40) on daily close
-    ema_40 = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 40:
-        ema_40[39] = np.mean(close_1d[:40])
-        for i in range(40, len(close_1d)):
-            ema_40[i] = (close_1d[i] * 0.04878) + (ema_40[i-1] * 0.95122)
+    # Mean price for breakout levels
+    mean_price = (high + low) / 2
     
-    # Align daily EMA to 12h timeframe
-    ema_40_aligned = align_htf_to_ltf(prices, df_1d, ema_40)
+    # Breakout levels: mean ± 2*ATR
+    upper_band = mean_price + 2.0 * atr
+    lower_band = mean_price - 2.0 * atr
     
-    # Donchian channels (20-period) on 12h
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    for i in range(19, n):
-        upper[i] = np.max(high[i-19:i+1])
-        lower[i] = np.min(low[i-19:i+1])
-    
-    # Volume filter: current volume > 1.3x 20-period average
+    # Volume filter: current volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volume[i-19:i+1])
+    
+    # Get 12h EMA(50) for trend filter
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = np.full(len(close_12h), np.nan)
+    for i in range(49, len(close_12h)):
+        ema_12h[i] = np.mean(close_12h[i-49:i+1])
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if data not available
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
-            np.isnan(ema_40_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(upper_band[i]) or np.isnan(lower_band[i]) or 
+            np.isnan(vol_ma[i]) or np.isnan(ema_12h_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -66,43 +69,44 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.3
+        volume_filter = volume[i] > vol_ma[i] * 1.5
+        
+        # Trend filter: EMA(50) direction
+        uptrend = ema_12h_aligned[i] > ema_12h_aligned[i-1]
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price reaches lower Donchian or stoploss
-            atr_approx = max(high[i] - low[i], 0.001)
-            stop_loss_level = entry_price - 2.5 * atr_approx
+            # Exit: price reaches lower band or stoploss
+            atr_val = atr[i] if not np.isnan(atr[i]) else 0.001
+            stop_loss_level = entry_price - 2.0 * atr_val
             
-            if (close[i] <= lower[i] or 
+            if (close[i] <= lower_band[i] or 
                 close[i] < stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price reaches upper Donchian or stoploss
-            atr_approx = max(high[i] - low[i], 0.001)
-            stop_loss_level = entry_price + 2.5 * atr_approx
+            # Exit: price reaches upper band or stoploss
+            atr_val = atr[i] if not np.isnan(atr[i]) else 0.001
+            stop_loss_level = entry_price + 2.0 * atr_val
             
-            if (close[i] >= upper[i] or 
+            if (close[i] >= upper_band[i] or 
                 close[i] > stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and trend filter
+            # Look for entries with volume and trend confirmation
             if volume_filter:
-                # Long breakout: price breaks above upper Donchian AND above daily EMA
-                if (close[i] > upper[i] and close[i-1] <= upper[i] and 
-                    close[i] > ema_40_aligned[i]):
+                # Long breakout above upper band in uptrend
+                if (close[i] > upper_band[i] and close[i-1] <= upper_band[i] and uptrend):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short breakdown: price breaks below lower Donchian AND below daily EMA
-                elif (close[i] < lower[i] and close[i-1] >= lower[i] and 
-                      close[i] < ema_40_aligned[i]):
+                # Short breakdown below lower band in downtrend
+                elif (close[i] < lower_band[i] and close[i-1] >= lower_band[i] and not uptrend):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
