@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + 12h Trend + Volume Filter
-Hypothesis: On 6h timeframe, Donchian breakouts combined with 12h EMA trend filter and volume confirmation
-capture significant moves while maintaining low trade frequency. 12h EMA filter ensures we only trade
+4h Donchian(20) Breakout + 1d EMA Trend + Volume Filter
+Hypothesis: On 4h timeframe, Donchian breakouts combined with 1d EMA trend filter and volume confirmation
+capture significant moves while maintaining low trade frequency. 1d EMA filter ensures we only trade
 in the direction of the higher timeframe trend, reducing whipsaws in both bull and bear markets.
-Target: 50-150 total trades over 4 years (12-37/year) with low frequency to minimize fee drag.
+Target: 75-200 total trades over 4 years (19-50/year) with low frequency to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_12hma_volume_v1"
-timeframe = "6h"
+name = "4h_donchian20_1dema_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,20 +20,20 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for EMA (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
+    # Load 1d data for EMA (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # 50-period EMA on 12h
-    ema_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 50:
+    # 50-period EMA on 1d
+    ema_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
         multiplier = 2 / (50 + 1)
-        ema_12h[0] = close_12h[0]
-        for i in range(1, len(close_12h)):
-            ema_12h[i] = (close_12h[i] * multiplier) + (ema_12h[i-1] * (1 - multiplier))
+        ema_1d[0] = close_1d[0]
+        for i in range(1, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # Align EMA to 6h timeframe
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Align EMA to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Price and volume data
     high = prices['high'].values
@@ -49,7 +49,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_12h_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -73,27 +73,27 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR price below 12h EMA
-            if close[i] < lowest_low or close[i] < ema_12h_aligned[i]:
+            # Exit: price closes below Donchian lower OR price below 1d EMA
+            if close[i] < lowest_low or close[i] < ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR price above 12h EMA
-            if close[i] > highest_high or close[i] > ema_12h_aligned[i]:
+            # Exit: price closes above Donchian upper OR price above 1d EMA
+            if close[i] > highest_high or close[i] > ema_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + 12h EMA trend filter
+            # Look for entries: Donchian breakout + volume + 1d EMA trend filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # Only go long if price above 12h EMA, short if below
-            trend_uptrend = close[i] > ema_12h_aligned[i]
-            trend_downtrend = close[i] < ema_12h_aligned[i]
+            # Only go long if price above 1d EMA, short if below
+            trend_uptrend = close[i] > ema_1d_aligned[i]
+            trend_downtrend = close[i] < ema_1d_aligned[i]
             
             if i >= 20 and bull_breakout and volume_filter and trend_uptrend:
                 signals[i] = 0.25
