@@ -3,26 +3,47 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily price action with weekly EMA trend filter and volume confirmation.
-# Uses daily price action filtered by weekly trend to capture sustained moves in both bull and bear markets.
-# Volume confirmation ensures institutional participation. Weekly EMA filter avoids counter-trend trades.
-# Target: 40-100 total trades over 4 years (10-25/year) for daily timeframe.
+# Hypothesis: Daily KAMA (Kaufman Adaptive Moving Average) with RSI filter and volume confirmation.
+# KAMA adapts to market noise - fast in trends, slow in ranges. Combined with RSI for momentum
+# and volume confirmation, it captures strong moves while avoiding chop. Works in bull markets
+# (KAMA up + RSI > 50) and bear markets (KAMA down + RSI < 50). Target: 50-150 total trades over 4 years.
 
-name = "exp_13490_1d_price_action_1w_ema_vol_v1"
+name = "exp_13490_1d_kama_rsi_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-EMA_PERIOD = 21
+KAMA_ER_FAST = 2
+KAMA_ER_SLOW = 30
+RSI_PERIOD = 14
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_kama(close, er_fast, er_slow):
+    """Calculate Kaufman Adaptive Moving Average"""
+    change = np.abs(close - np.roll(close, 10))
+    volatility = np.sum(np.abs(np.diff(close, axis=0)), axis=0) if len(close) > 1 else 0
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(er_fast+1) - 2/(er_slow+1)) + 2/(er_slow+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
+
+def calculate_rsi(close, period):
+    """Calculate Relative Strength Index"""
+    delta = np.diff(close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -43,7 +64,7 @@ def generate_signals(prices):
     
     # Calculate weekly EMA for trend filter
     close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
+    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Calculate daily indicators
@@ -51,6 +72,15 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # KAMA
+    kama = calculate_kama(close, KAMA_ER_FAST, KAMA_ER_SLOW)
+    
+    # RSI
+    rsi = calculate_rsi(close, RSI_PERIOD)
+    
+    # Volume MA
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -61,11 +91,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(30, RSI_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(atr[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(kama[i]) or np.isnan(rsi[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -85,31 +115,28 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ma = np.mean(volume[max(0, i-VOLUME_MA_PERIOD+1):i+1]) if i >= VOLUME_MA_PERIOD-1 else np.nan
-        volume_ok = not np.isnan(volume_ma) and volume[i] > (volume_ma * VOLUME_THRESHOLD)
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        
+        # KAMA direction
+        kama_up = close[i] > kama[i]
+        kama_down = close[i] < kama[i]
+        
+        # RSI filter
+        rsi_bullish = rsi[i] > 50
+        rsi_bearish = rsi[i] < 50
         
         # Trend filter: price above/below weekly EMA
         uptrend = close[i] > ema_1w_aligned[i]
         downtrend = close[i] < ema_1w_aligned[i]
         
-        # Price action signals: strong close relative to range
-        daily_range = high[i] - low[i]
-        if daily_range > 0:
-            close_position = (close[i] - low[i]) / daily_range
-            strong_close_up = close_position > 0.7  # Close in upper 30% of range
-            strong_close_down = close_position < 0.3  # Close in lower 30% of range
-        else:
-            strong_close_up = False
-            strong_close_down = False
-        
-        # Generate signals
+        # Entry signals
         if position == 0:
-            if volume_ok and uptrend and strong_close_up:
+            if kama_up and rsi_bullish and uptrend and volume_ok:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif volume_ok and downtrend and strong_close_down:
+            elif kama_down and rsi_bearish and downtrend and volume_ok:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
