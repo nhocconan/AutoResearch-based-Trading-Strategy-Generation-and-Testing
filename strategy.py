@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-4h Donchian breakout with 1d EMA filter and volume confirmation - optimized for higher trade count.
-Long: price breaks above 4h Donchian(20) + price > 1d EMA(50) + volume > 1.3x average
-Short: price breaks below 4h Donchian(20) + price < 1d EMA(50) + volume > 1.3x average
-Exit: stop loss (2*ATR) or reversal signal
-Position size: 0.25 (25%)
-Target: 100-200 trades over 4 years (25-50/year)
+4h Donchian breakout with 1d EMA filter and volume confirmation - optimized for hypothesis.
+Hypothesis: This strategy captures breakouts aligned with higher timeframe trend (1d EMA) and volume confirmation.
+It should work in bull markets via breakouts and in bear markets via short breakdowns.
+Volume filter ensures momentum, reducing false breakouts. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
@@ -53,9 +51,9 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.3x 20-period average (reduced from 1.5x to increase trades)
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.3 * vol_ma)
+    vol_filter = volume > (1.5 * vol_ma)
     
     # ATR for stop loss (14-period)
     atr = calculate_atr(high, low, close, 14)
