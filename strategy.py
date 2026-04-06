@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with daily trend filter (EMA50) and volume confirmation.
-# Works in bull/bear because breakouts capture strong directional moves, EMA50 filters counter-trend noise,
-# and volume ensures breakouts have conviction. Target: 75-150 total trades over 4 years (19-38/year).
+# Hypothesis: Daily Donchian(20) breakout with volume confirmation on 12h timeframe
+# Works in bull/bear because breakouts capture strong directional moves, volume filters weak signals,
+# and Donchian channels provide structural support/resistance that works across regimes.
+# Target: 50-150 trades over 4 years (12-37/year) to minimize fee drag and maximize edge.
 
-name = "exp_12996_12h_donchian20_1d_ema_vol_v1"
+name = "exp_12996_12h_donchian20_1d_vol_atr_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -29,21 +29,28 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_ema(close, period):
-    """Calculate EMA with proper min_periods"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channel"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA50
-    ema_daily = calculate_ema(df_daily['close'].values, EMA_PERIOD)
-    ema_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
+    # Calculate daily Donchian channels
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    upper_donchian, lower_donchian = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
+    
+    # Align to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_daily, upper_donchian)
+    lower_aligned = align_htf_to_ltf(prices, df_daily, lower_donchian)
     
     # Calculate 12h indicators
     high = prices['high'].values
@@ -51,14 +58,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -67,11 +67,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_aligned[i]):
+        # Skip if Donchian levels not available
+        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,9 +93,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Donchian breakout with daily EMA filter
-        breakout_long = volume_ok and close[i] >= donchian_high[i] and close[i] > ema_aligned[i]
-        breakout_short = volume_ok and close[i] <= donchian_low[i] and close[i] < ema_aligned[i]
+        # Breakout above upper Donchian or breakdown below lower Donchian
+        breakout_long = volume_ok and close[i] >= upper_aligned[i]
+        breakout_short = volume_ok and close[i] <= lower_aligned[i]
         
         # Generate signals
         if position == 0:
