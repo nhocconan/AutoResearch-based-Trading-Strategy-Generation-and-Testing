@@ -5,9 +5,8 @@
 - Short: price breaks below 1h Donchian(20) + price < 4h EMA(50) + volume > 1.5x average
 - Exit: stop loss (2*ATR) or reversal signal
 - Position size: 0.20 (20%)
-- Session filter: 08-20 UTC to reduce noise trades
-Target: 60-150 total trades over 4 years (15-37/year)
-Hypothesis: 4h EMA filter reduces false breakouts in chop; session filter improves quality.
+- Target: 75-200 trades over 4 years (19-50/year)
+Hypothesis: 4h EMA filter reduces false breakouts in chop while maintaining enough trades.
 """
 
 import numpy as np
@@ -45,10 +44,6 @@ def generate_signals(prices):
     ema_4h = calculate_ema(close_4h, 50)
     ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # Pre-compute session filter (08-20 UTC)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_mask = (hours >= 8) & (hours <= 20)
-    
     # 1h data
     high = prices['high'].values
     low = prices['low'].values
@@ -75,9 +70,9 @@ def generate_signals(prices):
     start = max(20, 20, 14, 50) + 1
     
     for i in range(start, n):
-        # Skip if required data not available or outside session
+        # Skip if required data not available
         if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_4h_aligned[i]) or \
-           np.isnan(atr[i]) or np.isnan(vol_ma[i]) or not session_mask[i]:
+           np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.20
             else:
