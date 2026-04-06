@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Spike
-Hypothesis: 6h timeframe with Donchian breakouts aligned to weekly pivot direction 
+4h Donchian(20) Breakout + 1d Pivot Direction + Volume Spike
+Hypothesis: 4h timeframe with Donchian breakouts aligned to daily pivot direction 
 and volume confirmation captures institutional flow while avoiding chop. 
-Weekly pivot provides structural bias (above/below pivot = bull/bear bias). 
+Daily pivot provides structural bias (above/below pivot = bull/bear bias). 
 Volume spike (>2x average) confirms institutional participation. 
 Works in bull/bear by following pivot-defined trend with momentum confirmation.
-Target: 75-150 total trades over 4 years.
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_weeklypivot_vol_v1"
-timeframe = "6h"
+name = "4h_donchian20_dailypivot_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -41,26 +41,26 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Weekly pivot points (using 1w data)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Daily pivot points (using 1d data)
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
     # Calculate pivot: P = (H + L + C) / 3
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     # Support 1: S1 = 2*P - H
-    s1_1w = 2 * pivot_1w - high_1w
+    s1_1d = 2 * pivot_1d - high_1d
     # Resistance 1: R1 = 2*P - L
-    r1_1w = 2 * pivot_1w - low_1w
+    r1_1d = 2 * pivot_1d - low_1d
     
     # Pivot bias: above pivot = bullish bias, below = bearish bias
-    pivot_bias_1w = np.where(close_1w > pivot_1w, 1, -1)
+    pivot_bias_1d = np.where(close_1d > pivot_1d, 1, -1)
     
-    # Align to 6h timeframe
-    pivot_bias_aligned = align_htf_to_ltf(prices, df_1w, pivot_bias_1w)
-    s1_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
-    r1_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    # Align to 4h timeframe
+    pivot_bias_aligned = align_htf_to_ltf(prices, df_1d, pivot_bias_1d)
+    s1_aligned = align_htf_to_ltf(prices, df_1d, s1_1d)
+    r1_aligned = align_htf_to_ltf(prices, df_1d, r1_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
