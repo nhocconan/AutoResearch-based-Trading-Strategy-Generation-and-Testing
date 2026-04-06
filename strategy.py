@@ -3,24 +3,38 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Supertrend (ATR=10, multiplier=3) with 1-day volume confirmation and
-# 1-week trend filter. Supertrend identifies trend direction with dynamic support/resistance.
-# Volume confirms institutional participation. Weekly EMA ensures alignment with higher timeframe
-# momentum to avoid counter-trend trades. Target: 50-150 total trades over 4 years.
-# Works in bull markets (uptrend + buy signal) and bear markets (downtrend + sell signal).
+# Hypothesis: 12-hour Williams %R reversal with weekly trend filter and volume confirmation.
+# Williams %R identifies overbought/oversold conditions; reversals from extreme levels
+# with volume confirmation indicate high-probability turning points. Weekly EMA ensures
+# alignment with higher timeframe momentum to avoid counter-trend trades. Designed to
+# work in both bull and bear markets by capturing mean reversion within the trend.
+# Target: 50-150 total trades over 4 years.
 
-name = "exp_13327_6h_supertrend_1d_vol_1w_ema_v1"
-timeframe = "6h"
+name = "exp_13328_12h_williamsr_reversal_vol_ema_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-SUPERTREND_PERIOD = 10
-SUPERTREND_MULTIPLIER = 3
+WILLIAMS_PERIOD = 14
+EMA_PERIOD = 20  # Weekly EMA
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-EMA_PERIOD = 20
 SIGNAL_SIZE = 0.25
-ATR_PERIOD = 10
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
+OVERSOLD = -80
+OVERBOUGHT = -20
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+def calculate_williams_r(high, low, close, period):
+    """Calculate Williams %R"""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    return williams_r.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -31,63 +45,32 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_supertrend(high, low, close, period, multiplier):
-    """Calculate Supertrend indicator"""
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2
-    upper = hl2 + (multiplier * atr)
-    lower = hl2 - (multiplier * atr)
-    
-    supertrend = np.zeros_like(close)
-    direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
-    
-    supertrend[0] = upper[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close)):
-        if close[i] > supertrend[i-1]:
-            supertrend[i] = max(upper[i], supertrend[i-1])
-            direction[i] = 1
-        else:
-            supertrend[i] = min(lower[i], supertrend[i-1])
-            direction[i] = -1
-    
-    return supertrend, direction
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1-day data ONCE before loop for volume
-    df_1d = get_htf_data(prices, '1d')
-    # Load 1-week data ONCE before loop for trend filter
+    # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1-day volume MA
-    volume_1d = df_1d['volume'].values
-    volume_ma_1d = pd.Series(volume_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
-    
-    # Calculate 1-week EMA for trend filter
+    # Calculate weekly EMA for trend filter
     close_1w = df_1w['close'].values
     ema_1w = calculate_ema(close_1w, EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Supertrend
-    supertrend, direction = calculate_supertrend(high, low, close, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
+    # Williams %R
+    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
     
-    # ATR for stoploss
+    # Volume MA
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -96,11 +79,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(SUPERTREND_PERIOD, VOLUME_MA_PERIOD, EMA_PERIOD, ATR_PERIOD) + 1
+    start = max(WILLIAMS_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if indicators not available
-        if np.isnan(supertrend[i]) or np.isnan(volume_ma_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]):
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -119,31 +102,31 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation: current 6h volume > 1.5x 1-day average volume
-        # Scale 1-day volume to 6h: 1 day = 4 x 6h bars
-        volume_ma_6h_scaled = volume_ma_1d_aligned[i] / 4.0
-        volume_ok = volume[i] > (volume_ma_6h_scaled * VOLUME_THRESHOLD) if not np.isnan(volume_ma_6h_scaled) else False
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
         # Trend filter: price above/below weekly EMA
         uptrend = close[i] > ema_1w_aligned[i]
         downtrend = close[i] < ema_1w_aligned[i]
         
-        # Supertrend signal
-        st_buy = direction[i] == 1 and close[i] > supertrend[i]
-        st_sell = direction[i] == -1 and close[i] < supertrend[i]
+        # Williams %R reversal signals
+        # Long: reversal from oversold in uptrend
+        williams_r_buy = (williams_r[i-1] <= OVERSOLD and williams_r[i] > OVERSOLD)
+        # Short: reversal from overbought in downtrend
+        williams_r_sell = (williams_r[i-1] >= OVERBOUGHT and williams_r[i] < OVERBOUGHT)
         
         # Generate signals
         if position == 0:
-            if st_buy and volume_ok and uptrend:
+            if williams_r_buy and volume_ok and uptrend:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (2.0 * atr[i])
-            elif st_sell and volume_ok and downtrend:
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif williams_r_sell and volume_ok and downtrend:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (2.0 * atr[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
