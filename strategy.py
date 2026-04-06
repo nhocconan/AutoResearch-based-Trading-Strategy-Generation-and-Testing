@@ -3,37 +3,25 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour price action around daily pivot points with volume confirmation
-# and weekly trend filter. Long when price breaks above R3 with volume in uptrend,
-# short when breaks below S3 with volume in downtrend. Uses pivot points as
-# institutional support/resistance levels. Designed for 50-150 total trades over 4 years.
+# Hypothesis: 4-hour Donchian channel (20) breakout with volume confirmation and
+# 12-hour ADX trend filter. Donchian provides clear breakout levels, volume
+# confirms institutional participation, and ADX ensures we only trade in
+# trending markets (avoiding chop). Works in bull markets (breakouts above upper band)
+// and bear markets (breakdowns below lower band). Target: 100-200 total trades over 4 years.
 
-name = "exp_13332_12h_pivot_breakout_vol_trend_v1"
-timeframe = "12h"
+name = "exp_13333_4h_donchian20_vol_adx_12h_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-PIVOT_LOOKBACK = 20  # Lookback for pivot calculation (20 days)
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_pivots(high, low, close):
-    """Calculate standard pivot points and support/resistance levels"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, r2, r3, s1, s2, s3
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -44,51 +32,61 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_dmi(high, low, close, period):
+    """Calculate DMI (+DI, -DI) and ADX"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low),
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)),
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    # Smooth TR, DM+, DM-
+    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    # Calculate DI+
+    di_plus = np.where(tr_smooth != 0, (dm_plus_smooth / tr_smooth) * 100, 0)
+    di_minus = np.where(tr_smooth != 0, (dm_minus_smooth / tr_smooth) * 100, 0)
+    
+    # Calculate DX
+    dx = np.where((di_plus + di_minus) != 0,
+                  np.abs(di_plus - di_minus) / (di_plus + di_minus) * 100, 0)
+    
+    # Calculate ADX
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for pivot calculation
-    df_1d = get_htf_data(prices, '1d')
-    # Load weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop for ADX
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily pivot points (using lookback period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # Calculate 12h ADX for trend filter
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
+    adx_12h = calculate_dmi(high_12h, low_12h, close_12h, ADX_PERIOD)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
-    # Initialize pivot arrays
-    r3 = np.full_like(close_1d, np.nan)
-    s3 = np.full_like(close_1d, np.nan)
-    
-    # Calculate pivots for each day using rolling window
-    for i in range(PIVOT_LOOKBACK - 1, len(close_1d)):
-        idx_start = i - PIVOT_LOOKBACK + 1
-        idx_end = i + 1
-        # Use the last day in the window for pivot calculation
-        h = high_1d[idx_end-1]
-        l = low_1d[idx_end-1]
-        c = close_1d[idx_end-1]
-        _, _, _, r3_val, _, _, s3_val = calculate_pivots(h, l, c)
-        r3[idx_end-1] = r3_val
-        s3[idx_end-1] = s3_val
-    
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, 20)  # 20-period EMA on weekly
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Align daily R3/S3 to 12h timeframe
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -102,11 +100,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(PIVOT_LOOKBACK, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ADX_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if data not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
+        # Skip if ADX not available
+        if np.isnan(adx_12h_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -128,13 +126,12 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Trend filter: ADX > threshold indicates trending market
+        trending = adx_12h_aligned[i] > ADX_THRESHOLD
         
-        # Breakout signals using daily R3/S3
-        breakout_up = volume_ok and uptrend and (high[i] > r3_aligned[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < s3_aligned[i-1])
+        # Breakout signals using Donchian channels
+        breakout_up = volume_ok and trending and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and trending and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
