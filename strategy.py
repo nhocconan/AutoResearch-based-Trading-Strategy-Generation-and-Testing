@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
 1d Donchian Breakout with 1w Trend Filter and Volume Confirmation
-Hypothesis: Breakouts from 20-period Donchian channels on daily timeframe, filtered by 1-week trend direction
-and volume spikes, capture major trend moves while avoiding counter-trend trades. The 1w trend filter ensures
-alignment with the higher timeframe momentum, reducing whipsaws in both bull and bear markets. Volume confirms
-breakout strength, and ATR-based stops manage risk. Target: 50-150 total trades over 4 years.
+Hypothesis: Daily breakouts from Donchian channels, filtered by weekly trend and volume spikes,
+capture sustained momentum while avoiding counter-trend trades. The weekly trend filter
+avoids counter-trend trades in both bull and bear markets, while volume ensures breakout
+legitimacy. ATR-based stops limit drawdown. Target: 30-100 total trades over 4 years.
 """
 
 import numpy as np
@@ -128,3 +128,4 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
+</file>
