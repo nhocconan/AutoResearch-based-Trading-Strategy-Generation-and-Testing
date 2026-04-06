@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian breakout with 1-week volume confirmation and ATR-based stoploss.
-# Uses daily high/low channels to capture multi-day trends, volume filter to ensure
-# institutional participation, and ATR stops for risk management. Designed for low
-# frequency (target 30-100 trades over 4 years) to minimize fee drag in both bull and bear markets.
+# Hypothesis: 6-hour Elder Ray Index with 12-hour trend filter and 1-day volume confirmation.
+# Elder Ray measures bull/bear power relative to EMA13 to detect institutional buying/selling pressure.
+# 12-hour EMA trend filter ensures trades align with intermediate trend.
+# 1-day volume average confirms institutional participation.
+# Designed for 6h timeframe to target 50-150 trades over 4 years with balanced frequency.
 
-name = "1d_donchian20_1w_vol_atr_v1"
-timeframe = "1d"
+name = "6h_elder_ray12h_trend_vol_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -23,92 +24,75 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-week Donchian channels (20-period high/low)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 12-hour EMA(13) for Elder Ray calculation
+    close_s = pd.Series(close)
+    ema_12h = close_s.ewm(span=13, adjust=False).mean().values
     
-    # Calculate 20-period highest high and lowest low
-    highest_high = np.full(len(close_1w), np.nan)
-    lowest_low = np.full(len(close_1w), np.nan)
+    # Elder Ray components: Bull Power = High - EMA, Bear Power = Low - EMA
+    bull_power = high - ema_12h
+    bear_power = low - ema_12h
     
-    for i in range(19, len(close_1w)):
-        highest_high[i] = np.max(high_1w[i-19:i+1])
-        lowest_low[i] = np.min(low_1w[i-19:i+1])
+    # 1-day trend filter: EMA(21) for intermediate trend
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=21, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Align to daily timeframe
-    donchian_high = align_htf_to_ltf(prices, df_1w, highest_high)
-    donchian_low = align_htf_to_ltf(prices, df_1w, lowest_low)
-    
-    # 1-week average volume for confirmation
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = np.full(len(vol_1w), np.nan)
-    for i in range(19, len(vol_1w)):  # 20-period average
-        vol_ma_1w[i] = np.mean(vol_1w[i-19:i+1])
-    
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    
-    # Daily ATR for volatility and stoploss
-    tr = np.zeros(n)
-    tr[0] = high[0] - low[0]
-    for i in range(1, n):
-        tr[i] = max(high[i] - low[i], 
-                   abs(high[i] - close[i-1]), 
-                   abs(low[i] - close[i-1]))
-    
-    atr = np.zeros(n)
-    atr[0] = tr[0]
-    for i in range(1, n):
-        atr[i] = 0.9 * atr[i-1] + 0.1 * tr[i]  # Wilder's smoothing
+    # 1-day volume average for confirmation
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=10, min_periods=10).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = 20  # Need 20 periods for Donchian
+    start = 21  # EMA needs 21 periods
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(vol_ma_aligned[i])):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.5x weekly average
-        volume_filter = volume[i] > vol_ma_aligned[i] * 1.5
+        # Volume condition: current volume > 1.2x daily average
+        volume_filter = volume[i] > vol_ma_1d_aligned[i] * 1.2
+        
+        # Trend filter: price above/below daily EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low or stoploss
-            if (close[i] < donchian_low[i] or 
-                close[i] < entry_price - 2.5 * atr[i]):
+            # Exit: bear power turns negative or stoploss
+            if (bear_power[i] > 0 or 
+                close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high or stoploss
-            if (close[i] > donchian_high[i] or 
-                close[i] > entry_price + 2.5 * atr[i]):
+            # Exit: bull power turns negative or stoploss
+            if (bull_power[i] < 0 or 
+                close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: breakout with volume confirmation
+            # Look for entries with volume confirmation
             if volume_filter:
-                # Long: price breaks above Donchian high
-                if close[i] > donchian_high[i]:
+                # Long: bull power positive in uptrend
+                if bull_power[i] > 0 and uptrend:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: price breaks below Donchian low
-                elif close[i] < donchian_low[i]:
+                # Short: bear power negative in downtrend
+                elif bear_power[i] < 0 and downtrend:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
