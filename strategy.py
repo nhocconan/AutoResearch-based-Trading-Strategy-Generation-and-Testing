@@ -3,24 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA(50) trend filter and volume confirmation.
-# Uses 12h trend to avoid overtrading while capturing breakouts in both bull and bear markets.
-# Volume confirmation ensures institutional participation. Target: 75-200 total trades over 4 years.
+# Hypothesis: 1-day Donchian(20) breakout with 1-week EMA(20) trend filter and volume confirmation.
+# Uses weekly trend to avoid overtrading while capturing breakouts in both bull and bear markets.
+# Volume confirmation ensures institutional participation. Target: 30-100 total trades over 4 years.
 
-name = "exp_13683_4h_donchian20_12h_trend_vol_v1"
-timeframe = "4h"
+name = "exp_13684_1d_donchian20_1w_trend_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 50
-VOLUME_MA_PERIOD = 24
-VOLUME_THRESHOLD = 1.8
+TREND_EMA_PERIOD = 20
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-ATR_BREAKEVEN = 1.5
-ATR_TRAIL_START = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -41,21 +39,21 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for trend filter ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1w data for trend filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 12h EMA for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 1w EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = calculate_ema(close_1w, TREND_EMA_PERIOD)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 4h indicators
+    # Calculate 1d indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ATR for stop loss and trailing
+    # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     # Donchian channels
@@ -69,14 +67,13 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
-    max_favorable = 0.0  # track max favorable excursion for trailing
     
     # Start from warmup period
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -85,59 +82,25 @@ def generate_signals(prices):
         
         # Check stops
         if position == 1:  # long position
-            # Update max favorable
-            max_favorable = max(max_favorable, close[i] - entry_price)
-            
             # Check stop loss
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
-                max_favorable = 0.0
                 continue
-            
-            # Break-even stop
-            if max_favorable >= (ATR_BREAKEVEN * atr[i]):
-                stop_price = max(stop_price, entry_price)
-            
-            # Trailing stop
-            if max_favorable >= (ATR_TRAIL_START * atr[i]):
-                trail_price = entry_price + (max_favorable - (ATR_TRAIL_START * atr[i]))
-                if close[i] <= trail_price:
-                    signals[i] = 0.0
-                    position = 0
-                    max_favorable = 0.0
-                    continue
         
         elif position == -1:  # short position
-            # Update max favorable (positive for shorts)
-            max_favorable = max(max_favorable, entry_price - close[i])
-            
             # Check stop loss
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
-                max_favorable = 0.0
                 continue
-            
-            # Break-even stop
-            if max_favorable >= (ATR_BREAKEVEN * atr[i]):
-                stop_price = min(stop_price, entry_price)
-            
-            # Trailing stop
-            if max_favorable >= (ATR_TRAIL_START * atr[i]):
-                trail_price = entry_price - (max_favorable - (ATR_TRAIL_START * atr[i]))
-                if close[i] >= trail_price:
-                    signals[i] = 0.0
-                    position = 0
-                    max_favorable = 0.0
-                    continue
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 12h EMA
-        above_ema = close[i] > ema_12h_aligned[i]
-        below_ema = close[i] < ema_12h_aligned[i]
+        # Trend direction from 1w EMA
+        above_ema = close[i] > ema_1w_aligned[i]
+        below_ema = close[i] < ema_1w_aligned[i]
         
         # Donchian breakout signals
         if i > 0 and not np.isnan(donchian_high[i-1]) and not np.isnan(donchian_low[i-1]):
@@ -160,13 +123,11 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                max_favorable = 0.0
             elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                max_favorable = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
@@ -176,7 +137,6 @@ def generate_signals(prices):
                 if close[i] < low_prev and close[i-1] >= low_prev:
                     signals[i] = 0.0
                     position = 0
-                    max_favorable = 0.0
                 else:
                     signals[i] = SIGNAL_SIZE
             else:
@@ -188,7 +148,6 @@ def generate_signals(prices):
                 if close[i] > high_prev and close[i-1] <= high_prev:
                     signals[i] = 0.0
                     position = 0
-                    max_favorable = 0.0
                 else:
                     signals[i] = -SIGNAL_SIZE
             else:
