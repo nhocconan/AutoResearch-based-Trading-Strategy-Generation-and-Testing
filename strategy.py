@@ -7,7 +7,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Uses 1d trend for direction, 12h Donchian breakouts for entries, volume for confirmation.
 # Designed for ~100 total trades over 4 years (25/year) to avoid fee drain.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
-# Target: 100-150 total trades, 0.25 position size, max DD < -50%.
+# Target: 50-150 total trades, 0.25 position size, max DD < -50%.
 
 name = "exp_13705_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
