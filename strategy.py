@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_ema50_vol_v5"
+name = "4h_donchian20_1d_ema50_vol_v4"
 timeframe = "4h"
 leverage = 1.0
 
@@ -56,7 +56,7 @@ def generate_signals(prices):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Volume filter: current volume > 1.5x average over last 20 periods
+    # Volume filter: current volume > 2.0x average over last 20 periods (stricter)
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -77,8 +77,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume condition (moderate)
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        # Volume condition (more restrictive)
+        volume_filter = volume[i] > vol_ma[i] * 2.0
         
         # Check exits and stoploss
         if position == 1:  # long position
