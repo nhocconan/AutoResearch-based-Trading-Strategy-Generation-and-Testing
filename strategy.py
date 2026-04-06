@@ -4,9 +4,9 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: Daily Donchian breakout with weekly EMA trend filter and volume confirmation.
-# In bull markets, breakouts capture strong uptrends; in bear markets, they catch sharp downtrends.
-# The weekly EMA ensures alignment with higher timeframe momentum, while volume filters out false breakouts.
-# Target: 50-100 total trades over 4 years (12-25/year) to balance opportunity and cost.
+# Breakouts capture strong momentum moves in both bull and bear markets.
+# Weekly EMA ensures alignment with higher timeframe momentum.
+# Volume filters false breakouts. Target: 30-100 trades over 4 years (7-25/year).
 
 name = "exp_13170_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
