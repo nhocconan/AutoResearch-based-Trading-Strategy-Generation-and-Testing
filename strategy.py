@@ -3,76 +3,45 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R + 1d ADX trend filter with volume confirmation
-# Williams %R identifies overbought/oversold conditions (mean reversion)
-# ADX > 25 filters for trending markets to avoid whipsaws
-# Volume surge confirms momentum behind moves
-# Works in bull/bear: mean reversion in ranges, trend following in trends
-# Target: 80-150 trades over 4 years (20-38/year) for statistical validity
+# Hypothesis: Daily Camarilla pivot levels with volume confirmation on 12h timeframe
+# Uses 12h bars for entries/exits, with daily Camarilla levels as support/resistance.
+# Volume filter ensures only significant breakouts trigger trades.
+# Works in bull/bear because pivot levels adapt to volatility and volume confirms strength.
+# Target: 50-150 trades over 4 years (12-37/year) to balance opportunity and fee drag.
 
-name = "exp_12915_6h_williamsr_adx_vol_v1"
-timeframe = "6h"
+name = "exp_12916_12h_camarilla_pivot_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-WILLIAMS_PERIOD = 14
-WILLIAMS_OVERBOUGHT = -20
-WILLIAMS_OVERSOLD = -80
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_williams_r(high, low, close, period):
-    """Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    # Handle division by zero
-    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
-    return williams_r.values
-
-def calculate_adx(high, low, close, period):
-    """ADX calculation using Wilder's smoothing"""
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    
-    # Smooth TR, DM+
-    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    dx = np.where((di_plus + di_minus) == 0, 0, dx)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    
-    return adx.values
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
-    """ATR using Wilder's smoothing"""
+    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels"""
+    range_ = high - low
+    pivot = (high + low + close) / 3.0
+    r4 = close + range_ * 1.1 / 2
+    r3 = close + range_ * 1.1 / 4
+    r2 = close + range_ * 1.1 / 6
+    r1 = close + range_ * 1.1 / 12
+    s1 = close - range_ * 1.1 / 12
+    s2 = close - range_ * 1.1 / 6
+    s3 = close - range_ * 1.1 / 4
+    s4 = close - range_ * 1.1 / 2
+    return r1, r2, r3, r4, s1, s2, s3, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -82,20 +51,47 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily ADX
+    # Calculate daily Camarilla levels
     high_d = df_daily['high'].values
     low_d = df_daily['low'].values
     close_d = df_daily['close'].values
-    adx_daily = calculate_adx(high_d, low_d, close_d, ADX_PERIOD)
-    adx_aligned = align_htf_to_ltf(prices, df_daily, adx_daily)
     
-    # Calculate 6h indicators
+    r1_d = np.zeros(len(close_d))
+    r2_d = np.zeros(len(close_d))
+    r3_d = np.zeros(len(close_d))
+    r4_d = np.zeros(len(close_d))
+    s1_d = np.zeros(len(close_d))
+    s2_d = np.zeros(len(close_d))
+    s3_d = np.zeros(len(close_d))
+    s4_d = np.zeros(len(close_d))
+    
+    for i in range(len(close_d)):
+        r1, r2, r3, r4, s1, s2, s3, s4 = calculate_camarilla(high_d[i], low_d[i], close_d[i])
+        r1_d[i] = r1
+        r2_d[i] = r2
+        r3_d[i] = r3
+        r4_d[i] = r4
+        s1_d[i] = s1
+        s2_d[i] = s2
+        s3_d[i] = s3
+        s4_d[i] = s4
+    
+    # Align to 12h timeframe (each daily bar = 2 x 12h bars)
+    r1_12h = align_htf_to_ltf(prices, df_daily, r1_d)
+    r2_12h = align_htf_to_ltf(prices, df_daily, r2_d)
+    r3_12h = align_htf_to_ltf(prices, df_daily, r3_d)
+    r4_12h = align_htf_to_ltf(prices, df_daily, r4_d)
+    s1_12h = align_htf_to_ltf(prices, df_daily, s1_d)
+    s2_12h = align_htf_to_ltf(prices, df_daily, s2_d)
+    s3_12h = align_htf_to_ltf(prices, df_daily, s3_d)
+    s4_12h = align_htf_to_ltf(prices, df_daily, s4_d)
+    
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -105,11 +101,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WILLIAMS_PERIOD, ADX_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if ADX not available
-        if np.isnan(adx_aligned[i]):
+        # Skip if Camarilla levels not available
+        if np.isnan(r4_12h[i]) or np.isnan(s4_12h[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -131,21 +127,18 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Williams %R signals
-        williams_oversold = williams_r[i] <= WILLIAMS_OVERSOLD
-        williams_overbought = williams_r[i] >= WILLIAMS_OVERBOUGHT
-        
-        # ADX trend filter: only trade when ADX > threshold (trending market)
-        strong_trend = adx_aligned[i] > ADX_THRESHOLD
+        # Breakout above R4 or breakdown below S4
+        breakout_long = volume_ok and close[i] >= r4_12h[i]
+        breakout_short = volume_ok and close[i] <= s4_12h[i]
         
         # Generate signals
         if position == 0:
-            if williams_oversold and volume_ok and strong_trend:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif williams_overbought and volume_ok and strong_trend:
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
