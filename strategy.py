@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-# 12h Donchian Breakout + Daily Trend + Volume Confirmation
-# Hypothesis: Daily trend filters 12h Donchian breakouts to reduce false signals.
-# Volume confirmation ensures momentum behind breakouts.
-# Works in bull via breakouts, bear via breakdowns with trend filter.
-# Target: 50-150 total trades over 4 years (12-37/year).
+"""
+12h Donchian Breakout + Daily EMA + Volume Confirmation
+Hypothesis: Daily EMA trend filters 12h Donchian breakouts to reduce false signals.
+Volume confirmation ensures momentum behind breakouts.
+Works in bull via breakouts, bear via breakdowns with trend filter.
+Target: 50-150 total trades over 4 years (12-37/year).
+"""
 
 import numpy as np
 import pandas as pd
@@ -23,20 +25,21 @@ ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_ema(close, period):
-    """Calculate EMA"""
+    """Calculate EMA with proper min_periods"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR"""
+    """Calculate ATR with proper min_periods"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = tr1[0]  # First TR is just high-low
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
+    """Calculate Donchian channels with proper min_periods"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
