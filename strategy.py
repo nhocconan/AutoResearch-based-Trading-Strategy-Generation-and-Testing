@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-6h Ichimoku Cloud + Volume Spike + Trend Filter
-Hypothesis: Ichimoku signals (TK cross + price above/below cloud) filtered by 1d trend and volume spikes capture high-probability trend continuation moves. Works in bull/bear by requiring alignment with higher timeframe trend.
+12h Donchian(20) Breakout + Volume Spike + DMI Trend Filter + ATR Stoploss
+Hypothesis: Donchian breakouts on 12h timeframe with volume confirmation (>2x average) and strong trend (DMI+ > DMI-) capture trends while avoiding whipsaws. DMI is less prone to whipsaw than ADX in choppy markets. Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_ichimoku_1d_trend_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_volume_dmi_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 52:
+    if n < 30:
         return np.zeros(n)
     
     # Price and volume data
@@ -23,52 +23,56 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Ichimoku parameters
-    tenkan_period = 9
-    kijun_period = 26
-    senkou_span_b_period = 52
+    # 14-period ATR
+    atr = np.full(n, np.nan)
+    if n >= 14:
+        tr = np.maximum(
+            high[1:] - low[1:],
+            np.abs(high[1:] - close[:-1]),
+            np.abs(low[1:] - close[:-1])
+        )
+        if len(tr) > 0:
+            atr[1] = tr[0]
+            for i in range(2, n):
+                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Calculate Tenkan-sen (Conversion Line)
-    tenkan_sen = np.full(n, np.nan)
-    for i in range(tenkan_period - 1, n):
-        period_high = np.max(high[i-tenkan_period+1:i+1])
-        period_low = np.min(low[i-tenkan_period+1:i+1])
-        tenkan_sen[i] = (period_high + period_low) / 2
-    
-    # Calculate Kijun-sen (Base Line)
-    kijun_sen = np.full(n, np.nan)
-    for i in range(kijun_period - 1, n):
-        period_high = np.max(high[i-kijun_period+1:i+1])
-        period_low = np.min(low[i-kijun_period+1:i+1])
-        kijun_sen[i] = (period_high + period_low) / 2
-    
-    # Calculate Senkou Span A (Leading Span A)
-    senkou_span_a = np.full(n, np.nan)
-    for i in range(n):
-        if not np.isnan(tenkan_sen[i]) and not np.isnan(kijun_sen[i]):
-            senkou_span_a[i] = (tenkan_sen[i] + kijun_sen[i]) / 2
-    
-    # Calculate Senkou Span B (Leading Span B)
-    senkou_span_b = np.full(n, np.nan)
-    for i in range(senkou_span_b_period - 1, n):
-        period_high = np.max(high[i-senkou_span_b_period+1:i+1])
-        period_low = np.min(low[i-senkou_span_b_period+1:i+1])
-        senkou_span_b[i] = (period_high + period_low) / 2
-    
-    # 1d trend filter using EMA50
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_50_1d[49] = close_1d[49]
-        for i in range(50, len(close_1d)):
-            ema_50_1d[i] = (close_1d[i] * 2 + ema_50_1d[i-1] * 49) / 50
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
-    
-    # Volume filter (24-period average ~ 4 days)
-    vol_ma = np.full(n, np.nan)
-    for i in range(24, n):
-        vol_ma[i] = np.mean(volume[i-24:i])
+    # 14-period DMI (+DI, -DI)
+    plus_di = np.full(n, np.nan)
+    minus_di = np.full(n, np.nan)
+    if n >= 14:
+        # +DM and -DM
+        up_move = high[1:] - high[:-1]
+        down_move = low[:-1] - low[1:]
+        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+        
+        # True Range (same as ATR calculation)
+        tr = np.maximum(
+            high[1:] - low[1:],
+            np.abs(high[1:] - close[:-1]),
+            np.abs(low[1:] - close[:-1])
+        )
+        
+        # Smoothed values
+        tr14 = np.full(n, np.nan)
+        plus_dm14 = np.full(n, np.nan)
+        minus_dm14 = np.full(n, np.nan)
+        
+        if len(tr) >= 14:
+            tr14[14] = np.sum(tr[:14])
+            plus_dm14[14] = np.sum(plus_dm[:14])
+            minus_dm14[14] = np.sum(minus_dm[:14])
+            
+            for i in range(15, n):
+                tr14[i] = tr14[i-1] - (tr14[i-1] / 14) + tr[i-1]
+                plus_dm14[i] = plus_dm14[i-1] - (plus_dm14[i-1] / 14) + plus_dm[i-1]
+                minus_dm14[i] = minus_dm14[i-1] - (minus_dm14[i-1] / 14) + minus_dm[i-1]
+        
+        # Directional Indicators
+        valid = ~np.isnan(tr14) & (tr14 != 0)
+        if np.any(valid):
+            plus_di[valid] = 100 * plus_dm14[valid] / tr14[valid]
+            minus_di[valid] = 100 * minus_dm14[valid] / tr14[valid]
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,13 +80,11 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 52  # For Senkou Span B
+    start = 20  # For Donchian and DMI
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(tenkan_sen[i]) or np.isnan(kijun_sen[i]) or 
-            np.isnan(senkou_span_a[i]) or np.isnan(senkou_span_b[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(vol_ma[i])):
+        if np.isnan(atr[i]) or np.isnan(plus_di[i]) or np.isnan(minus_di[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -90,23 +92,23 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Ichimoku signals
-        price_above_cloud = close[i] > max(senkou_span_a[i], senkou_span_b[i])
-        price_below_cloud = close[i] < min(senkou_span_a[i], senkou_span_b[i])
-        tk_bullish = tenkan_sen[i] > kijun_sen[i]
-        tk_bearish = tenkan_sen[i] < kijun_sen[i]
+        # Donchian channel (20-period)
+        highest_high = np.max(high[i-20:i])
+        lowest_low = np.min(low[i-20:i])
         
-        # Volume filter
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        # Volume filter (20-period average)
+        vol_ma = np.mean(volume[i-20:i])
+        volume_filter = volume[i] > vol_ma * 2.0
         
-        # 1d trend filter
-        trend_up = close[i] > ema_50_1d_aligned[i]
-        trend_down = close[i] < ema_50_1d_aligned[i]
+        # DMI trend filter (+DI > -DI indicates bullish momentum)
+        trend_filter = plus_di[i] > minus_di[i]
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: TK cross bearish OR price below cloud
-            if tk_bearish or price_below_cloud:
+            # Exit: price closes below Donchian lower
+            # Stoploss: price drops 2*ATR below entry
+            if (close[i] < lowest_low or
+                close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
@@ -114,8 +116,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: TK cross bullish OR price above cloud
-            if tk_bullish or price_above_cloud:
+            # Exit: price closes above Donchian upper
+            # Stoploss: price rises 2*ATR above entry
+            if (close[i] > highest_high or
+                close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
@@ -123,18 +127,18 @@ def generate_signals(prices):
                 signals[i] = -0.25
             bars_since_entry += 1
         else:
-            # Look for entries: Ichimoku signal + volume + 1d trend filter
-            # Minimum holding period: only allow new entry after 24 bars flat
-            if bars_since_entry >= 24:
-                bull_setup = price_above_cloud and tk_bullish and volume_filter and trend_up
-                bear_setup = price_below_cloud and tk_bearish and volume_filter and trend_down
+            # Look for entries: Donchian breakout + volume + DMI trend filter
+            # Minimum holding period: only allow new entry after 20 bars flat
+            if bars_since_entry >= 20:
+                bull_breakout = close[i] > highest_high
+                bear_breakout = close[i] < lowest_low
                 
-                if bull_setup:
+                if bull_breakout and volume_filter and trend_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                elif bear_setup:
+                elif bear_breakout and volume_filter and not trend_filter:  # For short, we want -DI > +DI
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
