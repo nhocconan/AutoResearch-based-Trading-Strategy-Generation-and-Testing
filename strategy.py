@@ -3,17 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Camarilla pivot levels from 1d price action.
-# Fade at R3/S3 (mean reversion), breakout continuation at R4/S4 (trend following).
-# Uses 1d price to calculate Camarilla levels: H-L range from previous day.
-# R3 = Close + 1.1*(H-L)/4, S3 = Close - 1.1*(H-L)/4
-# R4 = Close + 1.1*(H-L)/2, S4 = Close - 1.1*(H-L)/2
-# Entry: Long when price crosses above S3 with rejection (close > open), short when crosses below R3 with rejection (close < open).
-# Exit: Opposite signal or stop at R4/S4.
-# Target: 50-150 total trades over 4 years (12-37/year) to stay within optimal range for 6h.
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel during bullish day with volume > 1.3x 20-period average.
+# Short when price breaks below lower Donchian channel during bearish day with volume confirmation.
+# Uses daily trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
+# Target: 75-150 total trades over 4 years (19-38/year) to stay within optimal range.
 
-name = "6h_camarilla_pivot_1d_meanrev_trend_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,81 +18,75 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Price data
+    # Price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    open_ = prices['open'].values
+    volume = prices['volume'].values
     
-    # Get 1d data for Camarilla calculation (previous day's H, L, C)
+    # Donchian channel (20-period)
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    upper = high_series.rolling(window=20, min_periods=20).max().values
+    lower = low_series.rolling(window=20, min_periods=20).min().values
+    
+    # Daily trend filter: bullish/bearish day based on close vs open
     df_1d = get_htf_data(prices, '1d')
-    # Use previous day's values to avoid look-ahead
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    daily_open = df_1d['open'].values
+    daily_close = df_1d['close'].values
+    daily_bullish = daily_close > daily_open  # True for bullish day
+    daily_bearish = daily_close < daily_open   # True for bearish day
+    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
+    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
     
-    # Calculate Camarilla levels using previous day's data
-    # R3 = C + 1.1*(H-L)/4, S3 = C - 1.1*(H-L)/4
-    # R4 = C + 1.1*(H-L)/2, S4 = C - 1.1*(H-L)/2
-    range_1d = high_1d - low_1d
-    r3 = close_1d + 1.1 * range_1d / 4
-    s3 = close_1d - 1.1 * range_1d / 4
-    r4 = close_1d + 1.1 * range_1d / 2
-    s4 = close_1d - 1.1 * range_1d / 2
-    
-    # Align to 6s timeframe (shifted by 1 day for previous day's levels)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    # Volume filter: current volume > 1.3x 20-period average
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(1, n):  # Start from 1 to have previous bar for rejection
-        # Skip if Camarilla data not available
-        if (np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or 
-            np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i])):
+    for i in range(20, n):
+        # Skip if daily trend data not available
+        if np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Rejection conditions: close > open for bullish rejection, close < open for bearish rejection
-        bullish_rejection = close[i] > open_[i]
-        bearish_rejection = close[i] < open_[i]
+        # Volume condition
+        volume_filter = volume[i] > vol_ma[i] * 1.3
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price reaches R4 (take profit) or bearish rejection at R3
-            if (high[i] >= r4_aligned[i] or 
-                (low[i] <= r3_aligned[i] and bearish_rejection)):
+            # Exit: price drops below lower Donchian or daily turn bearish
+            if (low[i] <= lower[i] or 
+                daily_bearish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price reaches S4 (take profit) or bullish rejection at S3
-            if (low[i] <= s4_aligned[i] or 
-                (high[i] >= s3_aligned[i] and bullish_rejection)):
+            # Exit: price rises above upper Donchian or daily turn bullish
+            if (high[i] >= upper[i] or 
+                daily_bullish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for mean reversion entries at S3/R3 with rejection
-            # Long: price crosses above S3 with bullish rejection
-            if (low[i] <= s3_aligned[i] and 
-                close[i] > s3_aligned[i] and 
-                bullish_rejection):
-                signals[i] = 0.25
-                position = 1
-            # Short: price crosses below R3 with bearish rejection
-            elif (high[i] >= r3_aligned[i] and 
-                  close[i] < r3_aligned[i] and 
-                  bearish_rejection):
-                signals[i] = -0.25
-                position = -1
+            # Look for entries with volume confirmation and daily trend filter
+            if volume_filter:
+                # Long: break above upper Donchian during bullish day
+                if (high[i] > upper[i] and 
+                    daily_bullish_aligned[i]):
+                    signals[i] = 0.25
+                    position = 1
+                # Short: break below lower Donchian during bearish day
+                elif (low[i] < lower[i] and 
+                      daily_bearish_aligned[i]):
+                    signals[i] = -0.25
+                    position = -1
     
     return signals
