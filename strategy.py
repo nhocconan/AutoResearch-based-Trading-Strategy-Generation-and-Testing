@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Donchian(20) breakout with 1-day trend filter and volume confirmation.
-# Uses 1-day EMA(50) to determine trend direction: long when price > EMA50, short when price < EMA50.
-# Entry on 6h Donchian breakout in direction of 1d trend, with volume > 1.5x 20-period average.
-# Designed for 6h timeframe to target 50-150 trades over 4 years with moderate frequency.
-# Works in bull markets via trend-following breakouts and in bear via short breakdowns.
+# Hypothesis: 6h Donchian(20) breakout + daily RSI(14) filter + volume confirmation
+# Donchian breakouts capture momentum with defined risk. Daily RSI filters for 
+# overbought/oversold conditions to avoid false breakouts. Volume confirms 
+# institutional participation. Designed for 6h timeframe to target 50-150 trades over 4 years.
+# Works in bull markets via breakout continuation and bear via faded false breaks.
 
-name = "6h_donchian20_1d_trend_vol_v1"
+name = "6h_donchian20_1d_rsi_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -24,78 +24,99 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day EMA(50) for trend filter
+    # 1-day RSI(14) for overbought/oversold filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate EMA(50) on daily data
-    ema_50 = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_50[49] = np.mean(close_1d[:50])  # Simple average for first value
-        for i in range(50, len(close_1d)):
-            ema_50[i] = (close_1d[i] * 2/51) + (ema_50[i-1] * (1 - 2/51))
+    # RSI calculation
+    delta = np.diff(close_1d, prepend=close_1d[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # Wilder's smoothing
+    avg_gain = np.full(len(close_1d), np.nan)
+    avg_loss = np.full(len(close_1d), np.nan)
     
-    # 6-day volume average for confirmation (20 periods on 6h ≈ 5 days)
-    vol_ma = np.full(len(volume), np.nan)
-    for i in range(19, len(volume)):  # 20-period moving average
-        vol_ma[i] = np.mean(volume[i-19:i+1])
+    for i in range(1, len(close_1d)):
+        if i < 14:
+            avg_gain[i] = np.mean(gain[1:i+1]) if i > 0 else 0
+            avg_loss[i] = np.mean(loss[1:i+1]) if i > 0 else 0
+        else:
+            avg_gain[i] = (avg_gain[i-1] * 13 + gain[i]) / 14
+            avg_loss[i] = (avg_loss[i-1] * 13 + loss[i]) / 14
+    
+    rsi = np.full(len(close_1d), np.nan)
+    for i in range(14, len(close_1d)):
+        if avg_loss[i] != 0:
+            rs = avg_gain[i] / avg_loss[i]
+            rsi[i] = 100 - (100 / (1 + rs))
+        else:
+            rsi[i] = 100
+    
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
+    
+    # 6-day volume average for confirmation
+    vol_ma_6d = np.full(n, np.nan)
+    for i in range(5, n):  # 6-period average
+        vol_ma_6d[i] = np.mean(volume[i-5:i+1])
+    
+    # Donchian channels (20-period)
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    
+    for i in range(19, n):
+        highest_high[i] = np.max(high[i-19:i+1])
+        lowest_low[i] = np.min(low[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20)  # EMA needs 50, Donchian needs 20
+    start = max(19, 14, 5)  # Donchian needs 19, RSI needs 14, volume needs 5
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(rsi_aligned[i]) or np.isnan(vol_ma_6d[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Calculate 6h Donchian channels (20-period)
-        highest_high = np.max(high[i-19:i+1])
-        lowest_low = np.min(low[i-19:i+1])
+        # Volume condition: current volume > 1.2x 6-day average
+        volume_filter = volume[i] > vol_ma_6d[i] * 1.2
         
-        # Volume condition: current volume > 1.5x 20-period average
-        volume_filter = volume[i] > vol_ma[i] * 1.5
-        
-        # Trend condition from 1d EMA50
-        uptrend = close > ema_50_aligned[i]
-        downtrend = close < ema_50_aligned[i]
+        # RSI conditions
+        rsi_overbought = rsi_aligned[i] > 70
+        rsi_oversold = rsi_aligned[i] < 30
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below Donchian lower band or stoploss
-            if (close[i] < lowest_low or 
-                close[i] < entry_price - 2.5 * (highest_high - lowest_low)):
+            # Exit: RSI overbought or price breaks below lower Donchian
+            if (rsi_overbought or close[i] < lowest_low[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian upper band or stoploss
-            if (close[i] > highest_high or 
-                close[i] > entry_price + 2.5 * (highest_high - lowest_low)):
+            # Exit: RSI oversold or price breaks above upper Donchian
+            if (rsi_oversold or close[i] > highest_high[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: breakout in direction of 1d trend with volume
+            # Look for entries: breakouts with volume and RSI filter
             if volume_filter:
-                # Long: breakout above upper band in uptrend
-                if close[i] > highest_high and uptrend:
+                # Long: price breaks above upper Donchian and not overbought
+                if close[i] > highest_high[i] and not rsi_overbought:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: breakdown below lower band in downtrend
-                elif close[i] < lowest_low and downtrend:
+                # Short: price breaks below lower Donchian and not oversold
+                elif close[i] < lowest_low[i] and not rsi_oversold:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
