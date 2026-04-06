@@ -3,28 +3,46 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with daily EMA trend filter and volume confirmation.
-# Uses 12h price channel breakouts aligned with daily momentum to capture strong trending moves.
-# Volume confirmation ensures institutional participation. Works in bull markets (breakouts above upper band)
-# and bear markets (breakdowns below lower band). Target: 50-150 total trades over 4 years (12-37/year).
-# Daily EMA filter avoids whipsaw by ensuring alignment with intermediate trend.
+# Hypothesis: 12-hour Camarilla pivot reversal with daily volume confirmation and Choppiness regime filter.
+# Uses Camarilla levels (H3/L3) from daily pivots for mean-reversion entries in ranging markets.
+# Volume confirmation filters weak signals, Choppiness index avoids trending regimes.
+# Works in both bull and bear markets by fading extremes during consolidation.
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13516_12h_donchian20_1d_ema_vol_v1"
+name = "exp_13516_12h_camarilla_1d_volume_chop_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 21
+CAMARILLA_MULTIPLIER = 1.1
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
+CHOPPINESS_PERIOD = 14
+CHOPPINESS_THRESHOLD = 61.8  # >61.8 = ranging (good for mean reversion)
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels"""
+    range_val = high - low
+    H3 = close + (range_val * 1.1 / 6)
+    L3 = close - (range_val * 1.1 / 6)
+    return H3, L3
+
+def calculate_choppiness(high, low, close, period):
+    """Calculate Choppiness Index"""
+    atr1 = np.abs(high - low)
+    atr2 = np.abs(high - np.roll(close, 1))
+    atr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(atr1, atr2), atr3)
+    
+    sum_tr = pd.Series(tr).rolling(window=period, min_periods=period).sum()
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    
+    chop = 100 * np.log10(sum_tr / (highest_high - lowest_low)) / np.log10(period)
+    return chop.fillna(50).values  # fillna with 50 (neutral)
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -43,20 +61,24 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend filter
+    # Calculate daily Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    H3, L3 = calculate_camarilla(high_1d, low_1d, close_1d)
+    H3_12h = align_htf_to_ltf(prices, df_1d, H3)
+    L3_12h = align_htf_to_ltf(prices, df_1d, L3)
+    
+    # Calculate daily Choppiness Index
+    chop = calculate_choppiness(high_1d, low_1d, close_1d, CHOPPINESS_PERIOD)
+    chop_12h = align_htf_to_ltf(prices, df_1d, chop)
     
     # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -70,11 +92,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        # Skip if Camarilla or Choppiness not available
+        if np.isnan(H3_12h[i]) or np.isnan(L3_12h[i]) or np.isnan(chop_12h[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -96,26 +118,25 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below daily EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Choppiness filter: only trade in ranging markets (>61.8 = ranging)
+        ranging_market = chop_12h[i] > CHOPPINESS_THRESHOLD
         
-        # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
+        # Mean reversion signals at Camarilla H3/L3 levels
+        sell_signal = volume_ok and ranging_market and (high[i] >= H3_12h[i])
+        buy_signal = volume_ok and ranging_market and (low[i] <= L3_12h[i])
         
         # Generate signals
         if position == 0:
-            if breakout_up:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            if sell_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            elif buy_signal:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
