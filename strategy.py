@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_vol_atr_v2"
+name = "4h_donchian20_vol_atr_v3"
 timeframe = "4h"
 leverage = 1.0
 
