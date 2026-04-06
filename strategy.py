@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
+"""
+exp_13904_1d_1w_donchian20_ema50_vol_v1
+Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
+Targets major breakouts in both bull and bear markets with low trade frequency.
+Trade target: 30-100 total over 4 years (7-25/year).
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13902_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13904_1d_1w_donchian20_ema50_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
@@ -14,10 +21,10 @@ VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
+    """Calculate Donchian channel upper and lower bands"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -41,15 +48,15 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for trend filter ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data for trend filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA for trend direction
-    close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, EMA_TREND_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 1w EMA for trend direction
+    close_1w = df_1w['close'].values
+    ema_1w = calculate_ema(close_1w, EMA_TREND_PERIOD)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 12h data for Donchian, ATR, and volume
+    # 1d data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -74,7 +81,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -99,17 +106,17 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter from 1d EMA
-        trend_up = close[i] > ema_1d_aligned[i]
-        trend_down = close[i] < ema_1d_aligned[i]
+        # Trend filter from 1w EMA
+        trend_up = close[i] > ema_1w_aligned[i]
+        trend_down = close[i] < ema_1w_aligned[i]
         
-        # Donchian breakout
-        breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper
-        breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower
+        # Donchian breakout signals
+        long_breakout = close[i] > donchian_upper[i-1]  # Previous close above upper band
+        short_breakout = close[i] < donchian_lower[i-1]  # Previous close below lower band
         
         # Entry signals
-        long_signal = volume_ok and trend_up and breakout_up
-        short_signal = volume_ok and trend_down and breakout_down
+        long_signal = volume_ok and trend_up and long_breakout
+        short_signal = volume_ok and trend_down and short_breakout
         
         # Generate signals
         if position == 0:
@@ -126,15 +133,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on Donchian breakdown
-            if close[i] < donchian_lower[i-1]:
+            # Exit long on Donchian lower break (trailing exit)
+            if close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on Donchian breakout
-            if close[i] > donchian_upper[i-1]:
+            # Exit short on Donchian upper break (trailing exit)
+            if close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
