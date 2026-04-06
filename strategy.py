@@ -7,7 +7,7 @@ name = "exp_12602_12h_donchian20_1d_trend_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
-# Parameters
+# Parameters - Balanced for 12h timeframe
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
@@ -17,11 +17,11 @@ ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_ema(close, period):
-    """Calculate EMA"""
+    """Calculate EMA with proper min_periods"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR"""
+    """Calculate ATR with proper min_periods"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -30,7 +30,7 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
+    """Calculate Donchian channels with proper min_periods"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
