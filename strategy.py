@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly Donchian breakout with volume confirmation and ATR stoploss on 1d timeframe
-# Works in bull/bear because breakouts capture strong momentum moves, volume filters weak signals,
-# and ATR stoploss adapts to volatility. Weekly timeframe provides structural context.
-# Target: 50-100 trades over 4 years (12-25/year) to balance opportunity and cost.
+# Hypothesis: Weekly Donchian breakout with volume confirmation on 1d timeframe
+# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
+# and Donchian channels adapt to volatility, working across regimes.
+# Target: 30-80 trades over 4 years (7-20/year) to minimize fee drag.
 
 name = "exp_12998_1d_weekly_donchian_breakout_v1"
 timeframe = "1d"
@@ -15,7 +15,7 @@ leverage = 1.0
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -46,11 +46,13 @@ def generate_signals(prices):
     # Calculate weekly Donchian channels
     high_w = df_weekly['high'].values
     low_w = df_weekly['low'].values
-    upper_w, lower_w = calculate_donchian(high_w, low_w, DONCHIAN_PERIOD)
+    close_w = df_weekly['close'].values
+    
+    upper, lower = calculate_donchian(high_w, low_w, DONCHIAN_PERIOD)
     
     # Align to daily timeframe
-    upper_w_aligned = align_htf_to_ltf(prices, df_weekly, upper_w)
-    lower_w_aligned = align_htf_to_ltf(prices, df_weekly, lower_w)
+    upper_aligned = align_htf_to_ltf(prices, df_weekly, upper)
+    lower_aligned = align_htf_to_ltf(prices, df_weekly, lower)
     
     # Calculate daily indicators
     high = prices['high'].values
@@ -67,11 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if Donchian levels not available
-        if np.isnan(upper_w_aligned[i]) or np.isnan(lower_w_aligned[i]):
+        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,9 +95,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= upper_w_aligned[i]
-        breakout_short = volume_ok and close[i] <= lower_w_aligned[i]
+        # Breakout above upper or breakdown below lower
+        breakout_long = volume_ok and close[i] >= upper_aligned[i]
+        breakout_short = volume_ok and close[i] <= lower_aligned[i]
         
         # Generate signals
         if position == 0:
