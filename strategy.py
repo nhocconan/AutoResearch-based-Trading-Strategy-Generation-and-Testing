@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian Breakout with Weekly EMA Filter and Volume Confirmation
-# Uses daily Donchian(20) breakouts for trend direction, filtered by weekly EMA(50) to avoid counter-trend trades.
-# Volume confirmation (current volume > 1.5x 50-period average) ensures institutional participation.
-# ATR-based stoploss (2.5x ATR) manages risk in volatile markets.
-# Works in bull/bear markets: breakouts capture trends, EMA filter avoids whipsaws.
-# Target: 50-100 trades over 4 years (12-25/year).
+# Hypothesis: 6-hour RSI(2) Extreme Reversion with Volume and Trend Filter.
+# Uses 2-period RSI for extreme oversold/overbought conditions combined with:
+# - Volume filter (current volume > 1.8x 20-period average)
+# - 50-period EMA trend filter (long only above, short only below)
+# - ATR-based stop loss and profit target at 2x ATR
+# Designed to capture mean reversion moves in both bull and bear markets.
+# Target: 75-150 trades over 4 years (19-38/year).
 
-name = "1d_donchian20_weekly_ema_vol_v1"
-timeframe = "1d"
+name = "6h_rsi2_extreme_reversion_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,42 +26,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly EMA for trend filter (50-period)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # RSI(2) calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
     
-    # Calculate EMA(50) on weekly data
-    ema_50 = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema_50[49] = np.mean(close_1w[:50])
-        multiplier = 2 / (50 + 1)
-        for i in range(50, len(close_1w)):
-            ema_50[i] = (close_1w[i] * multiplier) + (ema_50[i-1] * (1 - multiplier))
+    # Wilder smoothing (alpha = 1/period)
+    alpha = 1.0 / 2
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
     
-    # Align weekly EMA to daily timeframe (shifted by 1 weekly bar)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    for i in range(1, n):
+        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
+        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
     
-    # Daily Donchian channels (20-period)
-    donchian_high = np.full(n, np.nan)
-    donchian_low = np.full(n, np.nan)
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
     
-    for i in range(19, n):
-        donchian_high[i] = np.max(high[i-19:i+1])
-        donchian_low[i] = np.min(low[i-19:i+1])
+    # EMA(50) for trend filter
+    ema50 = np.full(n, np.nan)
+    ema50[0] = close[0]
+    alpha_ema = 2.0 / (50 + 1)
+    for i in range(1, n):
+        ema50[i] = alpha_ema * close[i] + (1 - alpha_ema) * ema50[i-1]
     
-    # Volume filter: current volume > 1.5x 50-period average
+    # Volume filter: current volume > 1.8x 20-period average
     vol_ma = np.full(n, np.nan)
-    for i in range(49, n):
-        vol_ma[i] = np.mean(volume[i-49:i+1])
+    for i in range(19, n):
+        vol_ma[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     for i in range(50, n):
-        # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i])):
+        # Skip if data not available
+        if np.isnan(ema50[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -68,41 +71,164 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        volume_filter = volume[i] > vol_ma[i] * 1.8
         
         # Check exits and stoploss
         if position == 1:  # long position
-            atr = max(high[i] - low[i], 0.001)
-            stop_loss_level = entry_price - 2.5 * atr
+            # Exit conditions
+            atr_approx = max(high[i] - low[i], 0.001)
+            stop_loss_level = entry_price - 2.0 * atr_approx
+            profit_target = entry_price + 2.0 * atr_approx
             
-            # Exit: price breaks below Donchian low or stoploss
-            if (close[i] < donchian_low[i] or close[i] < stop_loss_level):
+            if (rsi[i] >= 70 or  # RSI overbought exit
+                close[i] <= stop_loss_level or
+                close[i] >= profit_target):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            atr = max(high[i] - low[i], 0.001)
-            stop_loss_level = entry_price + 2.5 * atr
+            # Exit conditions
+            atr_approx = max(high[i] - low[i], 0.001)
+            stop_loss_level = entry_price + 2.0 * atr_approx
+            profit_target = entry_price - 2.0 * atr_approx
             
-            # Exit: price breaks above Donchian high or stoploss
-            if (close[i] > donchian_high[i] or close[i] > stop_loss_level):
+            if (rsi[i] <= 30 or  # RSI oversold exit
+                close[i] >= stop_loss_level or
+                close[i] <= profit_target):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and EMA filter
+            # Look for entries with all filters
             if volume_filter:
-                # Long: breakout above Donchian high with price above weekly EMA
-                if (close[i] > donchian_high[i] and close[i-1] <= donchian_high[i] and 
-                    close[i] > ema_50_aligned[i]):
+                # Long setup: RSI < 10 (extremely oversold) + price above EMA50
+                if (rsi[i] < 10 and close[i] > ema50[i]):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: breakdown below Donchian low with price below weekly EMA
-                elif (close[i] < donchian_low[i] and close[i-1] >= donchian_low[i] and 
-                      close[i] < ema_50_aligned[i]):
+                # Short setup: RSI > 90 (extremely overbought) + price below EMA50
+                elif (rsi[i] > 90 and close[i] < ema50[i]):
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close[i]
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+# Hypothesis: 6-hour RSI(2) Extreme Reversion with Volume and Trend Filter.
+# Uses 2-period RSI for extreme oversold/overbought conditions combined with:
+# - Volume filter (current volume > 1.8x 20-period average)
+# - 50-period EMA trend filter (long only above, short only below)
+# - ATR-based stop loss and profit target at 2x ATR
+# Designed to capture mean reversion moves in both bull and bear markets.
+# Target: 75-150 trades over 4 years (19-38/year).
+
+name = "6h_rsi2_extreme_reversion_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    # Price and volume data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # RSI(2) calculation
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    # Wilder smoothing (alpha = 1/period)
+    alpha = 1.0 / 2
+    avg_gain = np.zeros(n)
+    avg_loss = np.zeros(n)
+    avg_gain[0] = gain[0]
+    avg_loss[0] = loss[0]
+    
+    for i in range(1, n):
+        avg_gain[i] = alpha * gain[i] + (1 - alpha) * avg_gain[i-1]
+        avg_loss[i] = alpha * loss[i] + (1 - alpha) * avg_loss[i-1]
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # EMA(50) for trend filter
+    ema50 = np.full(n, np.nan)
+    ema50[0] = close[0]
+    alpha_ema = 2.0 / (50 + 1)
+    for i in range(1, n):
+        ema50[i] = alpha_ema * close[i] + (1 - alpha_ema) * ema50[i-1]
+    
+    # Volume filter: current volume > 1.8x 20-period average
+    vol_ma = np.full(n, np.nan)
+    for i in range(19, n):
+        vol_ma[i] = np.mean(volume[i-19:i+1])
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    
+    for i in range(50, n):
+        # Skip if data not available
+        if np.isnan(ema50[i]) or np.isnan(vol_ma[i]):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Volume condition
+        volume_filter = volume[i] > vol_ma[i] * 1.8
+        
+        # Check exits and stoploss
+        if position == 1:  # long position
+            # Exit conditions
+            atr_approx = max(high[i] - low[i], 0.001)
+            stop_loss_level = entry_price - 2.0 * atr_approx
+            profit_target = entry_price + 2.0 * atr_approx
+            
+            if (rsi[i] >= 70 or  # RSI overbought exit
+                close[i] <= stop_loss_level or
+                close[i] >= profit_target):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:  # short position
+            # Exit conditions
+            atr_approx = max(high[i] - low[i], 0.001)
+            stop_loss_level = entry_price + 2.0 * atr_approx
+            profit_target = entry_price - 2.0 * atr_approx
+            
+            if (rsi[i] <= 30 or  # RSI oversold exit
+                close[i] >= stop_loss_level or
+                close[i] <= profit_target):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+        else:
+            # Look for entries with all filters
+            if volume_filter:
+                # Long setup: RSI < 10 (extremely oversold) + price above EMA50
+                if (rsi[i] < 10 and close[i] > ema50[i]):
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close[i]
+                # Short setup: RSI > 90 (extremely overbought) + price below EMA50
+                elif (rsi[i] > 90 and close[i] < ema50[i]):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
