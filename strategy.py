@@ -3,19 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1w EMA(20) trend filter and volume confirmation.
+# Hypothesis: 12h Donchian(10) breakout with 1w EMA(20) trend filter and volume confirmation.
 # Enter long when price breaks above Donchian upper with 1w EMA(20) rising and volume > 1.5x avg.
 # Enter short when price breaks below Donchian lower with 1w EMA(20) falling and volume > 1.5x avg.
 # Exit on opposite Donchian breakout or when price crosses 1w EMA(20).
 # Target: 50-150 total trades over 4 years (12-37/year) with controlled risk.
+# Uses 12h timeframe and 1w HTF to reduce frequency and avoid overtrading.
 
-name = "12h_donchian20_1w_ema20_vol_v1"
+name = "12h_donchian10_1w_ema20_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -30,18 +31,18 @@ def generate_signals(prices):
     ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False).mean().values
     ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
     
-    # Donchian(20) channels
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian(10) channels - shorter period for more sensitivity on 12h
+    donchian_high = pd.Series(high).rolling(window=10, min_periods=10).max().values
+    donchian_low = pd.Series(low).rolling(window=10, min_periods=10).min().values
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    # Volume confirmation: volume > 1.5x 10-period average
+    volume_ma = pd.Series(volume).rolling(window=10, min_periods=10).mean().values
     volume_threshold = 1.5 * volume_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(10, n):
         # Skip if required data not available
         if (np.isnan(ema_20_aligned[i]) or np.isnan(volume_threshold[i]) or 
             np.isnan(donchian_high[i]) or np.isnan(donchian_low[i])):
