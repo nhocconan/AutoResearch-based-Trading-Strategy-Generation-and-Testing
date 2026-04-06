@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d trend for direction bias and volume for conviction. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend). Target: 50-150 trades over 4 years (12-37/year).
+Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d trend for direction bias and volume for conviction. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend). Target: 75-150 trades over 4 years (19-38/year) to balance opportunity and cost.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dtrend_vol_v1"
+name = "12h_donchian20_1dtrend_vol_v2"
 timeframe = "12h"
 leverage = 1.0
 
