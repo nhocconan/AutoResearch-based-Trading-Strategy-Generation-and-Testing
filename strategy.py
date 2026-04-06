@@ -3,60 +3,30 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h strategy using 1d ADX for trend strength, 1d Williams %R for overbought/oversold, and volume confirmation.
-# Goes long when ADX > 25 (strong trend), Williams %R < -80 (oversold), and volume > 1.5x average.
-# Goes short when ADX > 25, Williams %R > -20 (overbought), and volume > 1.5x average.
-# Uses ATR-based stop loss. Designed for 50-150 total trades over 4 years (12-37/year).
-# ADX filters trend strength, Williams %R identifies extremes in trending markets, volume confirms momentum.
+# Hypothesis: 12h strategy combining Donchian(20) breakout with 1d VWAP and volume confirmation.
+# Goes long when price breaks above 12h Donchian upper band with volume > 2x MA and price above 1d VWAP,
+# short when breaks below 12h Donchian lower band with volume and price below 1d VWAP.
+# Uses ATR stop loss and exits on opposite band touch. Designed for 50-150 total trades over 4 years.
+# VWAP provides dynamic support/resistance, Donchian gives clear breakout levels, volume confirms strength.
 
-name = "exp_13831_6h_adx_williamsr_volume_v1"
-timeframe = "6h"
+name = "exp_13832_12h_donchian20_1d_vwap_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-ADX_PERIOD = 14
-WILLIAMS_R_PERIOD = 14
+DONCHIAN_PERIOD = 20
+VWAP_PERIOD = 1  # For daily VWAP, we use typical price over the day
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-ADX_THRESHOLD = 25
-WR_OVERBOUGHT = -20
-WR_OVERSOLD = -80
+VOLUME_THRESHOLD = 2.0  # Higher threshold for fewer, higher quality trades
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_adx(high, low, close, period):
-    """Calculate ADX (Average Directional Index)"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = tr1[0]
-    
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    
-    tr_smoothed = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    plus_dm_smoothed = pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    minus_dm_smoothed = pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    
-    plus_di = 100 * plus_dm_smoothed / tr_smoothed
-    minus_di = 100 * minus_dm_smoothed / tr_smoothed
-    
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    dx = np.where((plus_di + minus_di) == 0, 0, dx)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return adx
-
-def calculate_williams_r(high, low, close, period):
-    """Calculate Williams %R"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-    wr = np.where((highest_high - lowest_low) == 0, -50, wr)
-    return wr
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -68,32 +38,40 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_vwap(high, low, close):
+    """Calculate VWAP for given period (typical price * volume) / volume"""
+    typical_price = (high + low + close) / 3.0
+    vwap = (typical_price * close) / close  # Using close as volume proxy for VWAP calculation
+    # Actually, we need to calculate properly: cumulative(typical_price * volume) / cumulative(volume)
+    # But since we don't have volume in VWAP calculation here, we'll use a simplified version
+    # For daily VWAP on intraday data, we need the actual daily VWAP values
+    # Let's return typical price as placeholder, will be replaced by actual VWAP from 1d data
+    return typical_price
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for ADX and Williams %R ONCE before loop
+    # Load 1d data for VWAP
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d ADX for trend strength
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, ADX_PERIOD)
+    # Calculate 1d VWAP: (sum of typical_price * volume) / (sum of volume) for each day
+    typical_price_1d = (df_1d['high'] + df_1d['low'] + df_1d['close']) / 3.0
+    vwap_1d = (typical_price_1d * df_1d['volume']).cumsum() / df_1d['volume'].cumsum()
+    vwap_1d_values = vwap_1d.values
     
-    # Calculate 1d Williams %R for overbought/oversold
-    williams_r_1d = calculate_williams_r(high_1d, low_1d, close_1d, WILLIAMS_R_PERIOD)
+    # Align 1d VWAP to 12h timeframe
+    vwap_1d_aligned = align_htf_to_ltf(prices, df_1d, vwap_1d_values)
     
-    # Align 1d indicators to 6h timeframe
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
-    williams_r_1d_aligned = align_htf_to_ltf(prices, df_1d, williams_r_1d)
-    
-    # 6h data for entry and ATR
+    # 12h data for Donchian channels, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Donchian channels on 12h data
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -107,11 +85,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ADX_PERIOD, WILLIAMS_R_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(adx_1d_aligned[i]) or np.isnan(williams_r_1d_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(vwap_1d_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -136,16 +114,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend strength from 1d ADX
-        strong_trend = adx_1d_aligned[i] > ADX_THRESHOLD
+        # Price relative to 1d VWAP
+        above_vwap = close[i] > vwap_1d_aligned[i]
+        below_vwap = close[i] < vwap_1d_aligned[i]
         
-        # Overbought/oversold from 1d Williams %R
-        oversold = williams_r_1d_aligned[i] < WR_OVERSOLD
-        overbought = williams_r_1d_aligned[i] > WR_OVERBOUGHT
-        
-        # Entry signals
-        long_signal = strong_trend and oversold and volume_ok
-        short_signal = strong_trend and overbought and volume_ok
+        # Donchian breakout signals
+        long_signal = volume_ok and above_vwap and close[i] > upper[i]
+        short_signal = volume_ok and below_vwap and close[i] < lower[i]
         
         # Generate signals
         if position == 0:
@@ -162,15 +137,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long when trend weakens or overbought
-            if not strong_trend or williams_r_1d_aligned[i] > WR_OVERBOUGHT:
+            # Exit long on close below Donchian lower band
+            if close[i] < lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short when trend weakens or oversold
-            if not strong_trend or williams_r_1d_aligned[i] < WR_OVERSOLD:
+            # Exit short on close above Donchian upper band
+            if close[i] > upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
