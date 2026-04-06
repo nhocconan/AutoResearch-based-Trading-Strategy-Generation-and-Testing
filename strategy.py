@@ -1,14 +1,9 @@
-# -*- coding: utf-8 -*-
 #!/usr/bin/env python3
 """
-Experiment #13982: 12h Donchian Breakout + Daily Trend + Volume + ATR Stop
-Hypothesis: 
-- Primary timeframe: 12h (target 50-150 trades over 4 years)
-- HTF: 1d for trend bias (EMA50) and regime filtering
-- Entry: Donchian(20) breakout in direction of daily EMA50 with volume confirmation
-- Exit: Opposite Donchian break or trend reversal or ATR stop (2x)
-- Risk: Position size 0.25, max 0.40, stop loss at 2*ATR
-- Edge: Captures medium-term trends with filtered breakouts, works in bull/bear via trend filter
+Experiment #13982: 12h Donchian(20) breakout with 1d trend filter and volume confirmation
+Hypothesis: Donchian breakouts capture strong trends, while 1d EMA filter avoids counter-trend trades.
+Volume confirmation ensures breakouts have conviction. Works in both bull/bear markets by
+only trading in direction of higher timeframe trend. Target: 50-150 trades over 4 years.
 """
 
 import numpy as np
@@ -41,7 +36,7 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Load 1d data for daily context (trend filter)
