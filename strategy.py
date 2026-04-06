@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1w EMA(50) filter and volume confirmation.
-Hypothesis: In trending markets, price breaks above/below 12h Donchian channels with 1w EMA trend filter and volume confirmation work on BTC/ETH/SOL. In ranging markets, the 1w EMA filter reduces false breakouts. Volume ensures momentum. Target: 75-150 trades over 4 years.
+12h Donchian(20) breakout with weekly EMA(50) filter and volume confirmation.
+Hypothesis: Breakouts aligned with weekly trend capture major moves in both bull and bear markets.
+Volume filter reduces false breakouts. Weekly EMA ensures directionality. Target: 50-150 trades over 4 years.
 """
 
 import numpy as np
@@ -31,11 +32,11 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for EMA filter (once before loop)
+    # Load weekly data for EMA filter (once before loop)
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate 1w EMA(50)
+    # Calculate weekly EMA(50)
     ema_1w = calculate_ema(close_1w, 50)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
@@ -61,7 +62,7 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 50 for EMA)
+    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 50 for weekly EMA)
     start = max(20, 20, 14, 50) + 1
     
     for i in range(start, n):
@@ -89,9 +90,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout signals with 1w EMA filter and volume
-        # Long: break above upper band + price > 1w EMA + volume
-        # Short: break below lower band + price < 1w EMA + volume
+        # Donchian breakout signals with weekly EMA filter and volume
+        # Long: break above upper band + price > weekly EMA + volume
+        # Short: break below lower band + price < weekly EMA + volume
         breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_1w_aligned[i]) and vol_filter[i]
         breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_1w_aligned[i]) and vol_filter[i]
         
