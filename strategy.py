@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Elder Ray Index with 12h trend filter and volume confirmation
-# Long when Bull Power > 0 AND Bear Power < 0 AND price > 12h EMA(20) AND volume > 1.5x average
-# Short when Bear Power < 0 AND Bull Power > 0 AND price < 12h EMA(20) AND volume > 1.5x average
-# Exit when Bull Power and Bear Power have same sign (both positive or both negative)
-# Uses Elder Ray to measure bull/bear power relative to EMA, with 12h trend filter for higher timeframe bias
-# Target: 75-150 total trades over 4 years (19-38/year) for optimal 6h performance
+# Hypothesis: 12h Donchian breakout with 1w trend filter and volume confirmation
+# Long when price breaks above Donchian upper (20-period) AND price > 1w EMA(50) AND volume > 2x 20-period average
+# Short when price breaks below Donchian lower (20-period) AND price < 1w EMA(50) AND volume > 2x 20-period average
+# Exit when price crosses Donchian midline (10-period average of upper/lower)
+# Uses 12h timeframe to reduce trade frequency, 1w EMA for trend filter, Donchian for breakout signals
+# Target: 50-150 total trades over 4 years (12-37/year) for optimal 12h performance
 
-name = "6h_elder_ray_12h_trend_v1"
-timeframe = "6h"
+name = "12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,67 +25,63 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Elder Ray Index (13-period EMA as base)
-    close_series = pd.Series(close)
-    ema13 = close_series.ewm(span=13, min_periods=13, adjust=False).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Donchian Channel (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
+    donchian_upper = highest_high.values
+    donchian_lower = lowest_low.values
+    donchian_mid = (donchian_upper + donchian_lower) / 2
     
-    # 12-hour EMA(20) trend filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    close_12h_series = pd.Series(close_12h)
-    ema20_12h = close_12h_series.ewm(span=20, min_periods=20, adjust=False).mean().values
-    ema20_12h_aligned = align_htf_to_ltf(prices, df_12h, ema20_12h)
+    # 1-week EMA(50) trend filter
+    df_1w = get_htf_data(prices, '1w')
+    weekly_close = df_1w['close'].values
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Calculate 50-period EMA on weekly close
+    weekly_close_series = pd.Series(weekly_close)
+    weekly_ema = weekly_close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    
+    # Align weekly EMA to 12h timeframe
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    
+    # Volume confirmation: volume > 2x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
+    volume_threshold = 2.0 * volume_ma.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(50, n):
         # Skip if required data not available
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema20_12h_aligned[i]) or np.isnan(volume_threshold[i])):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(weekly_ema_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: Bull and Bear power have same sign (both bullish or both bearish)
+        # Check exits: price crosses Donchian midline
         if position == 1:  # long position
-            if bull_power[i] > 0 and bear_power[i] > 0:  # both bullish - overextended
-                signals[i] = 0.0
-                position = 0
-            elif bull_power[i] < 0 and bear_power[i] < 0:  # both bearish - reversal
+            if close[i] < donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if bull_power[i] > 0 and bear_power[i] > 0:  # both bullish - reversal
-                signals[i] = 0.0
-                position = 0
-            elif bull_power[i] < 0 and bear_power[i] < 0:  # both bearish - overextended
+            if close[i] > donchian_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
             # Look for entries with trend filter and volume confirmation
-            # Long: Bull Power > 0 (bulls in control) AND Bear Power < 0 (bears weak) 
-            #       AND price > 12h EMA (uptrend) AND volume confirmation
-            if (bull_power[i] > 0 and bear_power[i] < 0 and 
-                close[i] > ema20_12h_aligned[i] and volume[i] > volume_threshold[i]):
+            # Long: price breaks above Donchian upper AND price > weekly EMA AND volume confirmation
+            if (close[i] > donchian_upper[i] and close[i-1] <= donchian_upper[i-1] and 
+                close[i] > weekly_ema_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: Bear Power < 0 (bears in control) AND Bull Power > 0 (bulls weak)
-            #        AND price < 12h EMA (downtrend) AND volume confirmation
-            elif (bear_power[i] < 0 and bull_power[i] > 0 and 
-                  close[i] < ema20_12h_aligned[i] and volume[i] > volume_threshold[i]):
+            # Short: price breaks below Donchian lower AND price < weekly EMA AND volume confirmation
+            elif (close[i] < donchian_lower[i] and close[i-1] >= donchian_lower[i-1] and 
+                  close[i] < weekly_ema_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
     
