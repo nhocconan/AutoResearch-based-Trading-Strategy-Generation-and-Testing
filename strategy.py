@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """
-12h Donchian breakout with 1d EMA filter and volume confirmation.
-Long: price breaks above 12h Donchian(20) + price > 1d EMA(50) + volume > 1.5x average
-Short: price breaks below 12h Donchian(20) + price < 1d EMA(50) + volume > 1.5x average
-Exit: stop loss (2*ATR) or reversal signal
-Position size: 0.25 (25%)
-Target: 50-150 trades over 4 years (12-37/year)
-Works in bull/bear: Donchian breakouts capture trends, EMA filter avoids counter-trend trades.
+12h Donchian breakout with 1d EMA filter and volume capture - optimized for hypothesis.
+Hypothesis: This strategy captures breakouts aligned with higher timeframe trend (1d EMA) and volume confirmation.
+It should work in bull markets via breakouts and in bear markets via short breakdowns.
+Volume filter ensures momentum, reducing false breakouts. Target: 50-150 trades over 4 years.
 """
 
 import numpy as np
