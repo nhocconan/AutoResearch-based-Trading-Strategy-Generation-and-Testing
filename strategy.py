@@ -9,7 +9,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Exit on opposite Donchian breakout or when price crosses 1w EMA(50).
 # Target: 30-100 total trades over 4 years (7-25/year) with controlled risk.
 
-name = "1d_donchian20_1w_ema_vol_v1"
+name = "1d_donchian20_1w_ema50_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
