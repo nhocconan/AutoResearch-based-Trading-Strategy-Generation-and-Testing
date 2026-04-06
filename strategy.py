@@ -3,12 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d EMA200 trend filter.
 # Goes long when price breaks above 4h Donchian upper band with volume > 1.5x 20-period average and price above 1d EMA200.
 # Goes short when price breaks below 4h Donchian lower band with volume > 1.5x 20-period average and price below 1d EMA200.
-# Exits on opposite Donchian band touch or ATR stop loss (2x ATR).
-# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
-# Donchian channels provide clear breakout structure, EMA200 filters trend direction, volume confirms breakout strength.
+# Uses ATR(14) stop loss at 2.0x ATR. Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
+# Donchian provides clear structure, EMA200 filters trend direction, volume confirms breakout strength.
 
 name = "exp_13829_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
