@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 12h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
-Hypothesis: Donchian breakouts on 12h timeframe capture medium-term momentum. Filter by 1d EMA50 for trend bias and volume confirmation for conviction. Works in bull (buy breakouts above 1d EMA50) and bear (sell breakdowns below 1d EMA50). Target: 75-150 total trades over 4 years.
+Hypothesis: Donchian breakouts on 12h timeframe capture momentum with lower trade frequency than 4h. 
+Filter by 1d EMA50 for trend bias and volume confirmation for conviction. Works in bull (buy breakouts above 1d EMA50) 
+and bear (sell breakdowns below 1d EMA50). Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
@@ -14,7 +16,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
