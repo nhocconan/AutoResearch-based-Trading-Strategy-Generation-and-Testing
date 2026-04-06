@@ -3,38 +3,28 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-hour RSI(14) with 4-hour Supertrend trend filter and volume confirmation.
-# Supertrend identifies strong trends (ATR-based), RSI provides mean-reversion entries within trend,
-# volume confirms institutional participation. Works in both bull (buy pullbacks in uptrend) and 
-# bear (sell bounces in downtrend) markets. Session filter (08-20 UTC) reduces noise.
+# Hypothesis: 1-hour strategy using 4h Donchian breakouts for direction and 1d momentum filter.
+# Only enter during 08-20 UTC session to avoid low-volume periods.
+# Uses volume confirmation and ATR-based stops. Designed for low trade frequency (15-37/year).
+# Works in bull markets (long breakouts above 4h resistance) and bear markets (short breakdowns below 4h support).
 # Target: 60-150 total trades over 4 years (15-37/year).
 
-name = "exp_13574_1h_rsi14_4h_supertrend_vol_v1"
+name = "exp_13574_1h_4h_donchian20_1d_mom_vol_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-SUPERTREND_PERIOD = 10
-SUPERTREND_MULTIPLIER = 3.0
+DONCHIAN_PERIOD = 20
+MOMENTUM_PERIOD = 10
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_rsi(close, period):
-    """Calculate RSI"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -45,82 +35,44 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_supertrend(high, low, close, period, multiplier):
-    """Calculate Supertrend indicator"""
-    atr = calculate_atr(high, low, close, period)
-    hl2 = (high + low) / 2
-    upper = hl2 + (multiplier * atr)
-    lower = hl2 - (multiplier * atr)
-    
-    upper_band = np.zeros_like(close)
-    lower_band = np.zeros_like(close)
-    upper_band[0] = upper[0]
-    lower_band[0] = lower[0]
-    
-    for i in range(1, len(close)):
-        if close[i-1] <= upper_band[i-1]:
-            upper_band[i] = min(upper[i], upper_band[i-1])
-        else:
-            upper_band[i] = upper[i]
-            
-        if close[i-1] >= lower_band[i-1]:
-            lower_band[i] = max(lower[i], lower_band[i-1])
-        else:
-            lower_band[i] = lower[i]
-    
-    supertrend = np.zeros_like(close)
-    direction = np.ones_like(close, dtype=int)
-    supertrend[0] = upper_band[0]
-    direction[0] = 1
-    
-    for i in range(1, len(close)):
-        if close[i] > upper_band[i-1]:
-            direction[i] = 1
-        elif close[i] < lower_band[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-        
-        if direction[i] == 1:
-            supertrend[i] = lower_band[i]
-        else:
-            supertrend[i] = upper_band[i]
-    
-    return supertrend, direction
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4-hour data ONCE before loop
+    # Load 4h data ONCE before loop
     df_4h = get_htf_data(prices, '4h')
     
-    # Calculate 4-hour Supertrend for trend filter
+    # Calculate 4h Donchian channels
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
-    supertrend_4h, trend_direction_4h = calculate_supertrend(high_4h, low_4h, close_4h, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
-    supertrend_4h_aligned = align_htf_to_ltf(prices, df_4h, supertrend_4h)
-    trend_direction_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_direction_4h)
+    highest_high_4h = pd.Series(high_4h).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low_4h = pd.Series(low_4h).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Calculate 1-hour indicators
+    # Align 4h Donchian to 1h
+    highest_high_4h_aligned = align_htf_to_ltf(prices, df_4h, highest_high_4h)
+    lowest_low_4h_aligned = align_htf_to_ltf(prices, df_4h, lowest_low_4h)
+    
+    # Load 1d data for momentum filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    momentum = pd.Series(close_1d).pct_change(MOMENTUM_PERIOD).values
+    momentum_aligned = align_htf_to_ltf(prices, df_1d, momentum)
+    
+    # Calculate 1h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI
-    rsi = calculate_rsi(close, RSI_PERIOD)
-    
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # ATR for stoploss
+    # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Session filter: 08-20 UTC (pre-compute hours)
-    hours = pd.DatetimeIndex(prices['open_time']).hour
+    # Session filter: 08-20 UTC
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -128,20 +80,20 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, SUPERTREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, MOMENTUM_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if Supertrend not available
-        if np.isnan(supertrend_4h_aligned[i]) or np.isnan(trend_direction_4h_aligned[i]) or np.isnan(rsi[i]):
+        # Session filter
+        if not (8 <= hours[i] <= 20):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
         
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
+        # Skip if data not available
+        if (np.isnan(highest_high_4h_aligned[i]) or np.isnan(lowest_low_4h_aligned[i]) or
+            np.isnan(momentum_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -161,24 +113,24 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter: 4-hour Supertrend direction
-        uptrend = trend_direction_4h_aligned[i] == 1
-        downtrend = trend_direction_4h_aligned[i] == -1
+        # Momentum filter
+        mom_up = momentum_aligned[i] > 0
+        mom_down = momentum_aligned[i] < 0
         
-        # RSI signals: mean reversion within trend
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        # Breakout signals using 4h Donchian channels
+        breakout_up = volume_ok and mom_up and (high[i] > highest_high_4h_aligned[i-1])
+        breakout_down = volume_ok and mom_down and (low[i] < lowest_low_4h_aligned[i-1])
         
         # Generate signals
         if position == 0:
-            if volume_ok and uptrend and rsi_oversold:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif volume_ok and downtrend and rsi_overbought:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
