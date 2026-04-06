@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with volume confirmation and 1d ATR filter
-# Long when price breaks above 12h Donchian(20) high + volume > 1.5x avg + 1d ATR > 10-day median ATR
-# Short when price breaks below 12h Donchian(20) low + volume > 1.5x avg + 1d ATR > 10-day median ATR
-# Exit when price crosses Donchian midline or ATR drops below threshold
-# Targets 50-150 trades over 4 years by requiring volatility expansion + volume confirmation
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation
+# Long when price breaks above 12h Donchian upper band AND 1d EMA(50) > EMA(200) AND volume > 1.5x average
+# Short when price breaks below 12h Donchian lower band AND 1d EMA(50) < EMA(200) AND volume > 1.5x average
+# Exit when price returns to Donchian middle or trend reverses
+# Uses trend filter to avoid whipsaws in ranging markets, targeting 75-200 total trades over 4 years
+# Works in bull markets via trend-following breaks and in bear via short breaks
 
-name = "12h_donchian_vol_atr_v1"
+name = "12h_donchian_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -27,44 +28,35 @@ def generate_signals(prices):
     # 12h Donchian channels (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_high = highest_high.values
-    donchian_low = lowest_low.values
-    donchian_mid = (donchian_high + donchian_low) / 2
+    middle = (highest_high + lowest_low) / 2
+    
+    donchian_upper = highest_high.values
+    donchian_lower = lowest_low.values
+    donchian_middle = middle.values
+    
+    # 1d EMA trend filter (50 and 200)
+    df_1d = get_htf_data(prices, '1d')
+    daily_close = df_1d['close'].values
+    
+    ema_50 = pd.Series(daily_close).ewm(span=50, adjust=False).mean().values
+    ema_200 = pd.Series(daily_close).ewm(span=200, adjust=False).mean().values
+    
+    # Align daily EMA to 12h timeframe
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_200_aligned = align_htf_to_ltf(prices, df_1d, ema_200)
     
     # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
     volume_threshold = 1.5 * volume_ma.values
     
-    # 1d ATR filter - only trade when volatility is elevated
-    df_1d = get_htf_data(prices, '1d')
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    # Calculate True Range for daily
-    tr1 = daily_high - daily_low
-    tr2 = np.abs(daily_high - np.concatenate([[daily_close[0]], daily_close[:-1]]))
-    tr3 = np.abs(daily_low - np.concatenate([[daily_close[0]], daily_close[:-1]]))
-    tr_daily = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # ATR(10) on daily
-    atr_daily = pd.Series(tr_daily).rolling(window=10, min_periods=10).mean().values
-    # Median ATR over 50 days for dynamic threshold
-    median_atr = pd.Series(atr_daily).rolling(window=50, min_periods=50).median().values
-    atr_threshold = median_atr  # Trade only when current ATR >= median ATR
-    
-    # Align daily ATR to 12h timeframe
-    atr_daily_aligned = align_htf_to_ltf(prices, df_1d, atr_daily)
-    median_atr_aligned = align_htf_to_ltf(prices, df_1d, median_atr)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(50, n):  # Start after warmup period
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(volume_threshold[i]) or np.isnan(atr_daily_aligned[i]) or 
-            np.isnan(median_atr_aligned[i])):
+        if (np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or 
+            np.isnan(ema_50_aligned[i]) or np.isnan(ema_200_aligned[i]) or 
+            np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -73,29 +65,29 @@ def generate_signals(prices):
         
         # Exit conditions
         if position == 1:  # long position
-            if close[i] <= donchian_mid[i] or atr_daily_aligned[i] < median_atr_aligned[i]:
+            if (close[i] <= donchian_middle[i] or ema_50_aligned[i] < ema_200_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] >= donchian_mid[i] or atr_daily_aligned[i] < median_atr_aligned[i]:
+            if (close[i] >= donchian_middle[i] or ema_50_aligned[i] > ema_200_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for breakouts with volume confirmation and volatility filter
-            # Long breakout: price above Donchian high + volume spike + elevated volatility
-            if (close[i] > donchian_high[i-1] and 
-                volume[i] > volume_threshold[i] and 
-                atr_daily_aligned[i] >= median_atr_aligned[i]):
+            # Look for entries with trend filter and volume confirmation
+            # Long: price breaks above Donchian upper + uptrend + volume
+            if (close[i] > donchian_upper[i] and 
+                ema_50_aligned[i] > ema_200_aligned[i] and 
+                volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short breakout: price below Donchian low + volume spike + elevated volatility
-            elif (close[i] < donchian_low[i-1] and 
-                  volume[i] > volume_threshold[i] and 
-                  atr_daily_aligned[i] >= median_atr_aligned[i]):
+            # Short: price breaks below Donchian lower + downtrend + volume
+            elif (close[i] < donchian_lower[i] and 
+                  ema_50_aligned[i] < ema_200_aligned[i] and 
+                  volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
     
