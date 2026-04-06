@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + Daily Volume Confirmation + Daily ADX Trend Filter
-Hypothesis: Donchian breakouts on 6h timeframe capture intermediate-term momentum. Volume confirms institutional participation. Daily ADX ensures trades only in trending markets, reducing whipsaws in ranges. Designed for 50-150 trades over 4 years (12-37/year) to minimize fee drag. Works in both bull (breakouts) and bear (breakdowns) markets.
+6h Elder Ray + Volume + 1d Regime Filter
+Hypothesis: Elder Ray (Bull/Bear Power) on 6h identifies momentum shifts, filtered by 1d trend regime (ADX>25) and volume confirmation. Works in bull (buy strength) and bear (sell weakness) markets. Targets 50-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_volume_adx_v1"
+name = "6h_elder_ray_volume_regime_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -17,7 +17,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for ADX and volume (once before loop)
+    # Load 1d data for ADX regime filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
     # ADX calculation on 1d
@@ -65,74 +65,80 @@ def generate_signals(prices):
     # Align ADX to 6h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # Daily volume (for volume filter)
-    volume_1d = df_1d['volume'].values
-    vol_ma_1d = np.full_like(volume_1d, np.nan)
-    for i in range(20, len(volume_1d)):
-        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
-    
     # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # Calculate Elder Ray components on 6h
+    # EMA13 for Elder Ray
+    ema13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
+    
+    # Bull Power = High - EMA13
+    bull_power = high - ema13
+    # Bear Power = Low - EMA13
+    bear_power = low - ema13
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from warmup period
-    start = max(20, 20)  # For Donchian and ADX
+    start = max(13, 14)  # For EMA13 and ADX
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(adx_aligned[i]) or np.isnan(vol_ma_1d_aligned[i]):
+        if np.isnan(adx_aligned[i]) or np.isnan(ema13[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Donchian channel (20-period)
+        # Volume filter (20-period average)
         if i >= 20:
-            highest_high = np.max(high[i-20:i])
-            lowest_low = np.min(low[i-20:i])
+            vol_ma = np.mean(volume[i-20:i])
+            volume_filter = volume[i] > vol_ma * 1.5
         else:
-            highest_high = np.max(high[:i+1]) if i > 0 else high[i]
-            lowest_low = np.min(low[:i+1]) if i > 0 else low[i]
+            volume_filter = False
         
-        # Volume filter: current 6h volume > 1.5x daily average volume (scaled)
-        # Scale daily volume to 6h approximation: daily volume / 4 (since 4x6h in 1d)
-        vol_6h_approx = vol_ma_1d_aligned[i] / 4.0
-        volume_filter = volume[i] > vol_6h_approx * 1.5
+        # Regime filter: only trade when ADX > 25 (trending market)
+        regime_filter = adx_aligned[i] > 25
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR ADX < 20
-            if close[i] < lowest_low or adx_aligned[i] < 20:
+            # Exit: Bear Power becomes positive (weakening bearish pressure) OR regime changes
+            if bear_power[i] > 0 or not regime_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR ADX < 20
-            if close[i] > highest_high or adx_aligned[i] < 20:
+            # Exit: Bull Power becomes negative (weakening bullish pressure) OR regime changes
+            if bull_power[i] < 0 or not regime_filter:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + ADX trend
-            bull_breakout = close[i] > highest_high
-            bear_breakout = close[i] < lowest_low
-            trend_filter = adx_aligned[i] > 25  # Strong trend
-            
-            if i >= 20 and bull_breakout and volume_filter and trend_filter:
-                signals[i] = 0.25
-                position = 1
-            elif i >= 20 and bear_breakout and volume_filter and trend_filter:
-                signals[i] = -0.25
-                position = -1
+            # Look for entries: Elder Ray signals + volume + regime
+            # Long when Bull Power > 0 and rising (strengthening bullish pressure)
+            # Short when Bear Power < 0 and falling (strengthening bearish pressure)
+            if i >= 1:
+                bull_power_rising = bull_power[i] > bull_power[i-1]
+                bear_power_falling = bear_power[i] < bear_power[i-1]
+                
+                long_entry = bull_power[i] > 0 and bull_power_rising and volume_filter and regime_filter
+                short_entry = bear_power[i] < 0 and bear_power_falling and volume_filter and regime_filter
+                
+                if long_entry:
+                    signals[i] = 0.25
+                    position = 1
+                elif short_entry:
+                    signals[i] = -0.25
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
     
