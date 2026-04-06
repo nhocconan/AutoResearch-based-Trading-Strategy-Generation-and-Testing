@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
-# Targets trending moves in both bull and bear markets by combining price channel breakouts with trend alignment.
-# Volume filter ensures institutional participation. Designed for 20-50 trades/year to minimize fee drag.
-# Uses ATR-based stop loss for risk management. Expected 75-200 total trades over 4 years.
+# Hypothesis: 12-hour Donchian breakout with daily trend filter and volume confirmation.
+# Uses daily EMA (200) for trend direction, 12-hour Donchian (20) for breakout signals,
+# and volume confirmation to filter false breakouts. Works in trending markets by
+# capturing momentum bursts. Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "exp_13461_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13462_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 21
+EMA_PERIOD = 200
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -39,15 +39,15 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA for trend filter
+    # Calculate daily EMA for trend filter
     close_1d = df_1d['close'].values
     ema_1d = calculate_ema(close_1d, EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -95,7 +95,7 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below 1d EMA
+        # Trend filter: price above/below daily EMA
         uptrend = close[i] > ema_1d_aligned[i]
         downtrend = close[i] < ema_1d_aligned[i]
         
