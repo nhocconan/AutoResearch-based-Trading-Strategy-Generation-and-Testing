@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout + Daily EMA + Volume + ADX Filter
-Hypothesis: Donchian(20) breakouts on 4h with daily EMA200 trend filter, volume confirmation, and ADX trend strength filter captures institutional moves. Designed for 75-200 trades over 4 years (19-50/year) to minimize fee drag while working in both bull (breakouts) and bear (reversals at bands) markets. Uses 1d timeframe for EMA200 and ADX filters.
+4h Donchian(20) Breakout + Volume + ADX Filter (v5)
+Hypothesis: Donchian breakouts capture momentum. Volume confirms institutional participation. ADX filter ensures trending markets only. Tightened entry: ADX>30 and volume>2x average to reduce trades and improve quality. Target: 75-200 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_ema200_volume_adx_v1"
+name = "4h_donchian20_volume_adx_v5"
 timeframe = "4h"
 leverage = 1.0
 
@@ -17,14 +17,10 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA200 and ADX (once before loop)
+    # Load 1d data for ADX (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # EMA200 on 1d
-    close_1d = df_1d['close'].values
-    ema200_1d = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
-    
-    # ADX calculation on 1d (14-period)
+    # ADX calculation on 1d
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -66,8 +62,7 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilder_smooth(dx, period_adx)
     
-    # Align 1d indicators to 4h timeframe
-    ema200_1d_aligned = align_htf_to_ltf(prices, df_1d, ema200_1d)
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # 4h data
@@ -75,10 +70,6 @@ def generate_signals(prices):
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
-    
-    # Donchian channels (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -88,48 +79,53 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(ema200_1d_aligned[i]) or np.isnan(adx_aligned[i])):
+        if np.isnan(adx_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
+        # Donchian channel (20-period)
+        if i >= 20:
+            highest_high = np.max(high[i-20:i])
+            lowest_low = np.min(low[i-20:i])
+        else:
+            highest_high = np.max(high[:i+1]) if i > 0 else high[i]
+            lowest_low = np.min(low[:i+1]) if i > 0 else low[i]
+        
         # Volume filter (20-period average)
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            volume_filter = volume[i] > vol_ma * 1.5
+            volume_filter = volume[i] > vol_ma * 2.0  # Increased threshold
         else:
             volume_filter = False
         
-        # Check exits: price crosses back through Donchian or ADX weakening
+        # Check exits
         if position == 1:  # long position
-            # Exit: price crosses below lower Donchian OR ADX < 20
-            if close[i] < lowest_low[i] or adx_aligned[i] < 20:
+            # Exit: price closes below Donchian lower OR ADX < 25
+            if close[i] < lowest_low or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price crosses above upper Donchian OR ADX < 20
-            if close[i] > highest_high[i] or adx_aligned[i] < 20:
+            # Exit: price closes above Donchian upper OR ADX < 25
+            if close[i] > highest_high or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: price breaks Donchian + volume + EMA200 trend + ADX trend
-            bull_breakout = close[i] > highest_high[i]
-            bear_breakout = close[i] < lowest_low[i]
-            ema_filter_long = close[i] > ema200_1d_aligned[i]
-            ema_filter_short = close[i] < ema200_1d_aligned[i]
-            trend_filter = adx_aligned[i] > 25  # Strong trend
+            # Look for entries: Donchian breakout + volume + ADX trend
+            bull_breakout = close[i] > highest_high
+            bear_breakout = close[i] < lowest_low
+            trend_filter = adx_aligned[i] > 30  # Increased threshold
             
-            if i >= 20 and bull_breakout and volume_filter and ema_filter_long and trend_filter:
+            if i >= 20 and bull_breakout and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
-            elif i >= 20 and bear_breakout and volume_filter and ema_filter_short and trend_filter:
+            elif i >= 20 and bear_breakout and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
             else:
