@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14098_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_14099_6d_donchian20_1d_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_ema(arr, period):
@@ -23,18 +23,18 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for EMA filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 1d data for EMA filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA (50-period) for trend filter
-    ema_1w = calculate_ema(close_1w, 50)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 1d EMA (50-period) for trend filter
+    ema_1d = calculate_ema(close_1d, 50)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Daily data
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -44,9 +44,9 @@ def generate_signals(prices):
     high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 2.0x 20-period average
+    # Volume filter: volume > 1.8x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (2.0 * vol_ma)
+    vol_filter = volume > (1.8 * vol_ma)
     
     # ATR for stop loss (14-period)
     atr = calculate_atr(high, low, close, 14)
@@ -61,7 +61,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_1w_aligned[i]) or \
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_1d_aligned[i]) or \
            np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -90,10 +90,10 @@ def generate_signals(prices):
         breakout_up = close[i] > high_20[i-1] and vol_filter[i]
         breakout_down = close[i] < low_20[i-1] and vol_filter[i]
         
-        # 1w EMA trend filter
-        # Only take longs when price > 1w EMA, shorts when price < 1w EMA
-        trend_filter_long = close[i] > ema_1w_aligned[i]
-        trend_filter_short = close[i] < ema_1w_aligned[i]
+        # 1d EMA trend filter
+        # Only take longs when price > 1d EMA, shorts when price < 1d EMA
+        trend_filter_long = close[i] > ema_1d_aligned[i]
+        trend_filter_short = close[i] < ema_1d_aligned[i]
         
         # Generate signals
         if position == 0:
