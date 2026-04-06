@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12774_1h_4h_1d_trend_filter"
-timeframe = "1h"
+name = "exp_12775_6d_weekly_pivot_breakout"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-HTF1_TREND_PERIOD = 21   # 4h EMA period for trend
-HTF2_TREND_PERIOD = 50   # 1d EMA period for filter
-ENTRY_CHANNEL_PERIOD = 20  # 1h Donchian for entry timing
-VOLUME_MA_PERIOD = 20      # Volume confirmation
-VOLUME_THRESHOLD = 1.5     # Volume spike multiplier
-SIGNAL_SIZE = 0.20         # Position size (20% of capital)
-ATR_PERIOD = 14            # ATR for stop loss
-ATR_STOP_MULTIPLIER = 2.5  # Stop loss multiplier
+WEEKLY_PIVOT_PERIOD = 1
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 2.5
+SIGNAL_SIZE = 0.30
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.5
+BREAKOUT_BUFFER = 0.001  # 0.1% buffer above/below pivot
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -26,42 +25,68 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_weekly_pivot(high, low, close):
+    """Calculate weekly pivot point and support/resistance levels"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA for trend
-    ema_4h = pd.Series(close_4h).ewm(span=HTF1_TREND_PERIOD, adjust=False, min_periods=HTF1_TREND_PERIOD).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate weekly pivot levels
+    weekly_high = df_weekly['high'].values
+    weekly_low = df_weekly['low'].values
+    weekly_close = df_weekly['close'].values
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Calculate pivot points for each week
+    pivot_vals = np.full(len(weekly_high), np.nan)
+    r1_vals = np.full(len(weekly_high), np.nan)
+    r2_vals = np.full(len(weekly_high), np.nan)
+    r3_vals = np.full(len(weekly_high), np.nan)
+    s1_vals = np.full(len(weekly_high), np.nan)
+    s2_vals = np.full(len(weekly_high), np.nan)
+    s3_vals = np.full(len(weekly_high), np.nan)
     
-    # Calculate 1d EMA for filter
-    ema_1d = pd.Series(close_1d).ewm(span=HTF2_TREND_PERIOD, adjust=False, min_periods=HTF2_TREND_PERIOD).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    for i in range(len(weekly_high)):
+        pivot, r1, r2, r3, s1, s2, s3 = calculate_weekly_pivot(
+            weekly_high[i], weekly_low[i], weekly_close[i]
+        )
+        pivot_vals[i] = pivot
+        r1_vals[i] = r1
+        r2_vals[i] = r2
+        r3_vals[i] = r3
+        s1_vals[i] = s1
+        s2_vals[i] = s2
+        s3_vals[i] = s3
     
-    # Calculate 1h indicators
+    # Align weekly pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot_vals)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1_vals)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2_vals)
+    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3_vals)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1_vals)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2_vals)
+    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3_vals)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # 1h Donchian channels for entry timing
-    high_1h = pd.Series(high).rolling(window=ENTRY_CHANNEL_PERIOD, min_periods=ENTRY_CHANNEL_PERIOD).max().values
-    low_1h = pd.Series(low).rolling(window=ENTRY_CHANNEL_PERIOD, min_periods=ENTRY_CHANNEL_PERIOD).min().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,11 +94,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(HTF1_TREND_PERIOD, HTF2_TREND_PERIOD, ENTRY_CHANNEL_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if data not ready
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(high_1h[i]) or np.isnan(low_1h[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        # Skip if weekly data not available
+        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -92,18 +117,12 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Determine trend from higher timeframes
-        # Long trend: 4h price > 4h EMA AND 1d price > 1d EMA
-        long_trend = close[i] > ema_4h_aligned[i] and close[i] > ema_1d_aligned[i]
-        # Short trend: 4h price < 4h EMA AND 1d price < 1d EMA
-        short_trend = close[i] < ema_4h_aligned[i] and close[i] < ema_1d_aligned[i]
-        
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry signals based on 1h Donchian breakout in direction of trend
-        breakout_long = volume_ok and long_trend and close[i] >= high_1h[i]
-        breakout_short = volume_ok and short_trend and close[i] <= low_1h[i]
+        # Breakout above R3 or below S3 with volume
+        breakout_long = volume_ok and close[i] > (r3_aligned[i] * (1 + BREAKOUT_BUFFER))
+        breakout_short = volume_ok and close[i] < (s3_aligned[i] * (1 - BREAKOUT_BUFFER))
         
         # Generate signals
         if position == 0:
