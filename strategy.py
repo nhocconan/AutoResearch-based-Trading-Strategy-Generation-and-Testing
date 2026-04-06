@@ -3,19 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12534_1h_4h_1d_trend_vol_v1"
-timeframe = "1h"
+name = "exp_12535_6d_weekly_pivot_breakout_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+PIVOT_PERIOD = 1
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-SESSION_START = 8   # 08:00 UTC
-SESSION_END = 20    # 20:00 UTC
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -30,43 +28,47 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_pivot_points(high, low, close):
+    """Calculate pivot points"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily EMA for trend
-    ema_1d = calculate_ema(df_1d['close'].values, 50)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly pivot points
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
     
-    # Calculate 4h ATR for regime filter
-    atr_4h = calculate_atr(df_4h['high'].values, df_4h['low'].values, df_4h['close'].values, 14)
-    atr_4h_aligned = align_htf_to_ltf(prices, df_4h, atr_4h)
+    # Align weekly levels to 6h
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r3 + (r3 - s3))  # R4 = R3 + (R3 - S3)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s3 - (r3 - s3))  # S4 = S3 - (R3 - S3)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    atr_1h = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Session filter
-    hours = prices.index.hour
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -74,20 +76,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Session filter: only trade 08:00-20:00 UTC
-        hour = hours[i]
-        if hour < SESSION_START or hour > SESSION_END:
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Skip if daily EMA not available
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if weekly data not available
+        if np.isnan(pivot_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -109,21 +102,15 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (daily)
-        uptrend_1d = close[i] > ema_1d_aligned[i]
-        downtrend_1d = close[i] < ema_1d_aligned[i]
+        # Price relative to weekly pivot levels
+        above_r3 = close[i] > r3_aligned[i]
+        below_s3 = close[i] < s3_aligned[i]
+        above_r4 = close[i] > r4_aligned[i]
+        below_s4 = close[i] < s4_aligned[i]
         
-        # Regime filter: only trade when 4h ATR is above its 50-period MA (avoid low volatility)
-        atr_ma_4h = pd.Series(atr_4h_aligned).rolling(window=50, min_periods=50).mean().values
-        high_volatility = not np.isnan(atr_ma_4h[i]) and atr_4h_aligned[i] > atr_ma_4h[i]
-        
-        # Donchian breakout conditions
-        long_breakout = close[i] > upper[i-1]  # break above previous upper band
-        short_breakout = close[i] < lower[i-1]  # break below previous lower band
-        
-        # Entry conditions
-        long_entry = volume_ok and uptrend_1d and long_breakout and high_volatility
-        short_entry = volume_ok and downtrend_1d and short_breakout and high_volatility
+        # Entry conditions: fade at R3/S3, breakout at R4/S4
+        long_entry = volume_ok and (below_s3 or above_r4)  # Oversold bounce or bullish breakout
+        short_entry = volume_ok and (above_r3 or below_s4)  # Overbought rejection or bearish breakdown
         
         # Generate signals
         if position == 0:
@@ -131,12 +118,12 @@ def generate_signals(prices):
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr_1h[i])
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr_1h[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
