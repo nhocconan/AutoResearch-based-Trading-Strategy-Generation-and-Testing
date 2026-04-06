@@ -7,8 +7,8 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Long when price breaks above 20-period Donchian high and 1d EMA(50) is rising
 # Short when price breaks below 20-period Donchian low and 1d EMA(50) is falling
 # Uses volume > 20-period average to confirm breakouts
-# Target: 50-150 total trades over 4 years with controlled risk in both bull and bear markets
-# Uses 12h timeframe with 1d trend filter to reduce trade frequency and improve signal quality
+# Designed for 12h timeframe to capture medium-term trends with controlled trade frequency
+# Target: 50-150 total trades over 4 years (12-37/year) with ATR-based stoploss
 
 name = "12h_donchian20_1d_ema50_vol_v1"
 timeframe = "12h"
@@ -46,7 +46,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(high_max[i]) or 
             np.isnan(low_min[i]) or np.isnan(vol_ma[i])):
