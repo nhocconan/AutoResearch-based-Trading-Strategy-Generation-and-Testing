@@ -3,16 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14026_4h_donchian20_1d_pivot_vol_v1"
-timeframe = "4h"
+name = "exp_14027_6h_donchian20_1d_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_donchian(high, low, period):
+    """Calculate Donchian upper and lower bands"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
 def calculate_atr(high, low, close, period):
+    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -22,9 +24,11 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def calculate_ema(values, span):
+    """Calculate EMA"""
     return pd.Series(values).ewm(span=span, adjust=False, min_periods=span).mean().values
 
 def calculate_pivot_points(high, low, close):
+    """Calculate classic pivot points (daily)"""
     pivot = (high + low + close) / 3.0
     r1 = 2 * pivot - low
     s1 = 2 * pivot - high
@@ -45,7 +49,7 @@ def generate_signals(prices):
         df_1d['high'].values, df_1d['low'].values, df_1d['close'].values
     )
     
-    # Align pivot levels to 4h timeframe
+    # Align pivot levels to 6h timeframe
     pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
     r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
     s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
@@ -54,7 +58,7 @@ def generate_signals(prices):
     r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
     s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
     
-    # 4h data for Donchian, ATR, and volume
+    # 6h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
