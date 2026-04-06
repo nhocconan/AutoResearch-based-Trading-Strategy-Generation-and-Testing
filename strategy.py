@@ -4,7 +4,7 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation (1.8x volume).
-# Uses 1d trend for direction, 12h Donchian breakouts for entries, volume for confirmation.
+# Uses 1-day trend for direction, 12h Donchian breakouts for entries, volume for confirmation.
 # Designed for ~100 total trades over 4 years (25/year) to avoid excessive fees.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
 # Target: 75-200 total trades, 0.25 position size, max DD < -50%.
