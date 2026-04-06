@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel during bullish week (price above 50-day SMA) with volume > 1.5x 20-day average.
-# Short when price breaks below lower Donchian channel during bearish week (price below 50-day SMA) with volume confirmation.
-# Uses weekly trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
-# Target: 30-100 total trades over 4 years (7-25/year) to stay within optimal range.
+# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel during bullish day with volume > 1.3x 20-period average.
+# Short when price breaks below lower Donchian channel during bearish day with volume confirmation.
+# Uses daily trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
+# Target: 75-150 total trades over 4 years (19-38/year) to stay within optimal range.
 
-name = "1d_donchian20_1w_trend_vol_v1"
-timeframe = "1d"
+name = "12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -30,16 +30,16 @@ def generate_signals(prices):
     upper = high_series.rolling(window=20, min_periods=20).max().values
     lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Weekly trend filter: bullish/bearish week based on price vs 50-week SMA
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    sma_50_1w = pd.Series(close_1w).rolling(window=50, min_periods=50).mean().values
-    weekly_bullish = close_1w > sma_50_1w  # True for bullish week
-    weekly_bearish = close_1w < sma_50_1w   # True for bearish week
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
+    # Daily trend filter: bullish/bearish day based on close vs open
+    df_1d = get_htf_data(prices, '1d')
+    daily_open = df_1d['open'].values
+    daily_close = df_1d['close'].values
+    daily_bullish = daily_close > daily_open  # True for bullish day
+    daily_bearish = daily_close < daily_open   # True for bearish day
+    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
+    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.3x 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -47,8 +47,8 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        # Skip if weekly trend data not available
-        if np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]):
+        # Skip if daily trend data not available
+        if np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -56,36 +56,36 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        volume_filter = volume[i] > vol_ma[i] * 1.3
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price drops below lower Donchian or weekly turn bearish
+            # Exit: price drops below lower Donchian or daily turn bearish
             if (low[i] <= lower[i] or 
-                weekly_bearish_aligned[i]):
+                daily_bearish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price rises above upper Donchian or weekly turn bullish
+            # Exit: price rises above upper Donchian or daily turn bullish
             if (high[i] >= upper[i] or 
-                weekly_bullish_aligned[i]):
+                daily_bullish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and weekly trend filter
+            # Look for entries with volume confirmation and daily trend filter
             if volume_filter:
-                # Long: break above upper Donchian during bullish week
+                # Long: break above upper Donchian during bullish day
                 if (high[i] > upper[i] and 
-                    weekly_bullish_aligned[i]):
+                    daily_bullish_aligned[i]):
                     signals[i] = 0.25
                     position = 1
-                # Short: break below lower Donchian during bearish week
+                # Short: break below lower Donchian during bearish day
                 elif (low[i] < lower[i] and 
-                      weekly_bearish_aligned[i]):
+                      daily_bearish_aligned[i]):
                     signals[i] = -0.25
                     position = -1
     
