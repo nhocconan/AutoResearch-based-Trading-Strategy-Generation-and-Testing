@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + 1w EMA Trend + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts capture momentum, weekly EMA confirms trend direction,
-volume confirms breakout strength, ATR stoploss limits drawdown. Designed for low trade frequency (target 30-100 total over 4 years) to minimize fee decay.
+12h Donchian(20) Breakout + Volume Filter + ATR Stoploss + Daily Trend Filter
+Hypothesis: Donchian breakouts capture momentum with lower frequency on 12h, volume confirms breakout strength, 
+daily EMA50 filter ensures trend alignment to reduce whipsaw, ATR stoploss limits drawdown. 
+Designed for 50-150 total trades over 4 years (~12-37/year) to minimize fee decay.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_1wema_volume_atr_v1"
-timeframe = "1d"
+name = "12h_donchian20_vol_atr_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -38,17 +39,13 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1-week EMA (10-period) - calculated once before loop
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) >= 10:
-        close_1w = df_1w['close'].values
-        ema_1w = np.full(len(close_1w), np.nan)
-        ema_1w[9] = np.mean(close_1w[:10])
-        for i in range(10, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 9) / 10
-        ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Daily EMA50 for trend filter (using 1d data)
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) >= 50:
+        ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False).mean().values
+        ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     else:
-        ema_1w_aligned = np.full(n, np.nan)
+        ema_1d_aligned = np.full(n, np.nan)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -59,7 +56,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_1w_aligned[i]):
+        if np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -94,19 +91,19 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + weekly EMA trend filter
+            # Look for entries: Donchian breakout + volume + daily trend filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # Weekly EMA trend filter: only long when above EMA, short when below EMA
-            price_above_ema = close[i] > ema_1w_aligned[i]
-            price_below_ema = close[i] < ema_1w_aligned[i]
+            # Daily trend filter: only long in uptrend, short in downtrend
+            trend_up = close[i] > ema_1d_aligned[i]
+            trend_down = close[i] < ema_1d_aligned[i]
             
-            if bull_breakout and volume_filter and price_above_ema:
+            if bull_breakout and volume_filter and trend_up:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_breakout and volume_filter and price_below_ema:
+            elif bear_breakout and volume_filter and trend_down:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
