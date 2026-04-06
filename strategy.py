@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13918_1d_donchian20_1w_ema_vol_v1"
+name = "exp_13918_1d_1w_donchian20_ema50_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
-# Hypothesis: 1d Donchian breakout with 1w EMA trend filter and volume confirmation
-# Works in bull (breaks out to new highs) and bear (breaks down to new lows)
-# Target: 30-100 trades over 4 years by using daily timeframe and strict volume threshold (2.5x)
-# Weekly trend filter prevents counter-trend whipsaws in ranging markets
+# Hypothesis: 1d Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
+# Works in bull markets by catching upward breakouts and in bear markets by catching downward breakdowns.
+# Uses weekly trend to avoid counter-trend whipsaws. Volume confirmation ensures breakouts are strong.
+# Target: 50-100 trades over 4 years (12.5-25/year) by requiring volume > 2x average and alignment with weekly trend.
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian upper and lower bands"""
@@ -93,7 +93,7 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation - higher threshold to reduce trades
-        volume_ok = volume[i] > (volume_ma[i] * 2.5)
+        volume_ok = volume[i] > (volume_ma[i] * 2.0)
         
         # Trend filter from 1w EMA
         trend_up = close[i] > ema_1w_aligned[i]
