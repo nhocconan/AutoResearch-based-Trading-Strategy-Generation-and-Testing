@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12H Daily Donchian Breakout with Volume & ADX Filter
-Hypothesis: Daily Donchian channel breakouts capture trend continuations. Volume confirms institutional participation, ADX filters weak trends. Designed for 50-150 trades over 4 years (12-37/year) to minimize fee drag. Works in bull (breakouts) and bear (reversions from channels) via symmetrical long/short logic.
+4h Donchian(20) Breakout + Volume + ADX Filter
+Hypothesis: Donchian channel breakouts capture momentum. Volume confirms institutional participation. ADX filter ensures we only trade in trending markets, reducing whipsaws in ranges. Designed for 75-200 trades over 4 years (19-50/year) to minimize fee drag. Works in both bull (breakouts) and bear (breakdowns) markets.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_volume_adx_v1"
-timeframe = "12h"
+name = "4h_donchian20_volume_adx_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,16 +17,10 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data for Donchian channels and ADX (once before loop)
+    # Load 1d data for ADX (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Daily Donchian channels (20-period)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    donchian_high = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
-    
-    # Daily ADX calculation (14-period)
+    # ADX calculation on 1d
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
@@ -68,12 +62,10 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilder_smooth(dx, period_adx)
     
-    # Align daily indicators to 12h timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
+    # Align ADX to 4h timeframe
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -87,13 +79,20 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or 
-            np.isnan(adx_aligned[i])):
+        if np.isnan(adx_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
+        
+        # Donchian channel (20-period)
+        if i >= 20:
+            highest_high = np.max(high[i-20:i])
+            lowest_low = np.min(low[i-20:i])
+        else:
+            highest_high = np.max(high[:i+1]) if i > 0 else high[i]
+            lowest_low = np.min(low[:i+1]) if i > 0 else low[i]
         
         # Volume filter (20-period average)
         if i >= 20:
@@ -102,25 +101,25 @@ def generate_signals(prices):
         else:
             volume_filter = False
         
-        # Check exits: price re-enters Donchian channel OR ADX weakening
+        # Check exits
         if position == 1:  # long position
-            # Exit: price below upper Donchian OR ADX < 20
-            if close[i] < donchian_high_aligned[i] or adx_aligned[i] < 20:
+            # Exit: price closes below Donchian lower OR ADX < 20
+            if close[i] < lowest_low or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price above lower Donchian OR ADX < 20
-            if close[i] > donchian_low_aligned[i] or adx_aligned[i] < 20:
+            # Exit: price closes above Donchian upper OR ADX < 20
+            if close[i] > highest_high or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: price breaks Donchian + volume + ADX trend
-            bull_breakout = close[i] > donchian_high_aligned[i]
-            bear_breakout = close[i] < donchian_low_aligned[i]
+            # Look for entries: Donchian breakout + volume + ADX trend
+            bull_breakout = close[i] > highest_high
+            bear_breakout = close[i] < lowest_low
             trend_filter = adx_aligned[i] > 25  # Strong trend
             
             if i >= 20 and bull_breakout and volume_filter and trend_filter:
