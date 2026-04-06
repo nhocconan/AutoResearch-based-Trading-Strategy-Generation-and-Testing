@@ -3,17 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12714_1h_4h_donchian_volume_v1"
-timeframe = "1h"
+name = "exp_12716_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.20
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -35,33 +40,22 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    
-    # Calculate 4h Donchian channels
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    upper_4h, lower_4h = calculate_donchian(high_4h, low_4h, DONCHIAN_PERIOD)
-    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
-    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
-    
-    # Load daily data for regime filter
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    sma_50_1d = pd.Series(close_1d).rolling(window=50, min_periods=50).mean().values
-    sma_50_1d_aligned = align_htf_to_ltf(prices, df_1d, sma_50_1d)
     
-    # Calculate 1h indicators
+    # Calculate daily EMA for trend filter
+    ema_1d = calculate_ema(df_1d['close'].values, EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -69,21 +63,16 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if (np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or 
-            np.isnan(sma_50_1d_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        # Skip if daily EMA not available
+        if np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
-        
-        # Session filter
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
         
         # Check stoploss
         if position == 1:  # long position
@@ -98,15 +87,15 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # 4h trend filter: price above/below 1d SMA50
-        trend_up = close[i] > sma_50_1d_aligned[i]
-        trend_down = close[i] < sma_50_1d_aligned[i]
+        # Trend filter: only long in uptrend (price > EMA), only short in downtrend (price < EMA)
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # Entry conditions: Donchian breakout with volume and trend
-        long_entry = in_session and volume_ok and trend_up and close[i] >= upper_4h_aligned[i]
-        short_entry = in_session and volume_ok and trend_down and close[i] <= lower_4h_aligned[i]
+        # Entry conditions
+        long_entry = volume_ok and uptrend and close[i] >= upper[i]
+        short_entry = volume_ok and downtrend and close[i] <= lower[i]
         
         # Generate signals
         if position == 0:
