@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(200) trend filter and volume confirmation.
 # Goes long when price breaks above 20-period high with 1d EMA uptrend and volume > average.
 # Goes short when price breaks below 20-period low with 1d EMA downtrend and volume > average.
 # Uses ATR-based stoploss to limit downside. Designed to work in both bull and bear markets
-# by following the trend on higher timeframe while capturing breakouts on 12h timeframe.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# by following the trend on higher timeframe while capturing breakouts on lower timeframe.
+# Target: 75-200 total trades over 4 years (19-50/year) with controlled risk.
 
-name = "12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema200_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
     # Price data
@@ -25,17 +25,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA trend filter
+    # 1-day data for EMA(200) trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 2:
+    if len(df_1d) < 200:
         return np.zeros(n)
     
-    # Calculate EMA(50) on 1d close
+    # Calculate EMA(200) on 1d close
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1d = pd.Series(close_1d).ewm(span=200, min_periods=200, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Donchian channels (20-period) on 12h
+    # Donchian channels (20-period) on 4h
     high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -55,7 +55,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
+    for i in range(200, n):
         # Skip if required data not available
         if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
             np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma[i]) or 
