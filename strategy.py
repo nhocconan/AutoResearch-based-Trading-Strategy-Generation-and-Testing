@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12838_1d_1w_donchian_breakout"
-timeframe = "1d"
+name = "exp_12839_6h_donchian20_1d_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
-# Parameters - tuned for 1d timeframe
+# Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_MA_PERIOD = 24
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 60  # Max 60 days
+MAX_HOLD_BARS = 48  # Max 12 days (48 * 6h)
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -36,23 +36,21 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate weekly ATR for trend filter
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
-    close_w = df_weekly['close'].values
-    atr_w = calculate_atr(high_w, low_w, close_w, ATR_PERIOD)
-    # Weekly trend: price > close + 0.5*ATR (uptrend), price < close - 0.5*ATR (downtrend)
-    trend_up = close_w > (close_w + 0.5 * atr_w)
-    trend_down = close_w < (close_w - 0.5 * atr_w)
+    # Calculate daily Donchian channels
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    close_d = df_daily['close'].values
     
-    # Align weekly trend to daily
-    trend_up_aligned = align_htf_to_ltf(prices, df_weekly, trend_up.astype(float))
-    trend_down_aligned = align_htf_to_ltf(prices, df_weekly, trend_down.astype(float))
+    donchian_upper_d, donchian_lower_d = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
     
-    # Calculate daily indicators
+    # Align to 6h timeframe
+    donchian_upper_d_aligned = align_htf_to_ltf(prices, df_daily, donchian_upper_d)
+    donchian_lower_d_aligned = align_htf_to_ltf(prices, df_daily, donchian_lower_d)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -60,7 +58,6 @@ def generate_signals(prices):
     
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -74,8 +71,8 @@ def generate_signals(prices):
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if weekly trend not available
-        if np.isnan(trend_up_aligned[i]) or np.isnan(trend_down_aligned[i]):
+        # Skip if daily Donchian not available
+        if np.isnan(donchian_upper_d_aligned[i]) or np.isnan(donchian_lower_d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -106,9 +103,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Donchian breakout with weekly trend filter
-        breakout_long = volume_ok and close[i] >= donchian_upper[i] and trend_up_aligned[i] > 0.5
-        breakout_short = volume_ok and close[i] <= donchian_lower[i] and trend_down_aligned[i] > 0.5
+        # Breakout above daily Donchian upper or below lower
+        breakout_long = volume_ok and close[i] >= donchian_upper_d_aligned[i]
+        breakout_short = volume_ok and close[i] <= donchian_lower_d_aligned[i]
         
         # Generate signals
         if position == 0:
