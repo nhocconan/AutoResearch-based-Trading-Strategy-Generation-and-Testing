@@ -1,24 +1,17 @@
-# 2025-06-21 03:30:00 UTC
-# Hypothesis: 4h Donchian(20) breakout with volume confirmation and 1d EMA trend filter.
-# Volume threshold set to 1.5x 20-period MA to reduce false signals and trade frequency.
-# Position size 0.25 to balance risk and reward. Stop loss at 2x ATR.
-# Target: 75-200 total trades over 4 years (19-50/year) to avoid fee drag.
-# Works in bull markets via breakouts, in bear markets via short breakdowns with trend filter.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12606_4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "exp_12607_6d_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 50
+PIVOT_DF = '1w'  # weekly pivot from 1d data
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5  # Reduced from 2.0 to increase signal quality without excessive trades
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -42,6 +35,20 @@ def calculate_donchian(high, low, period):
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
+def calculate_pivot_points(high, low, close):
+    """Calculate weekly pivot points from daily OHLC"""
+    # Pivot point = (H + L + C) / 3
+    pivot = (high + low + close) / 3.0
+    # Resistance levels
+    r1 = 2 * pivot - low
+    r2 = pivot + (high - low)
+    r3 = high + 2 * (pivot - low)
+    # Support levels
+    s1 = 2 * pivot - high
+    s2 = pivot - (high - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -50,11 +57,19 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend
-    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly pivot points from daily data
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h indicators
+    pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(high_1d, low_1d, close_1d)
+    
+    # Align pivot levels to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -70,11 +85,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily EMA not available
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if pivot data not available
+        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -96,17 +111,17 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (daily)
-        uptrend_1d = close[i] > ema_1d_aligned[i]
-        downtrend_1d = close[i] < ema_1d_aligned[i]
+        # Fade at extreme pivot levels (S3/R3)
+        fade_short = close[i] >= r3_aligned[i]  # at or above R3
+        fade_long = close[i] <= s3_aligned[i]   # at or below S3
         
-        # Donchian breakout conditions
+        # Breakout confirmation with volume
         long_breakout = close[i] > upper[i-1]  # break above previous upper band
         short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
         # Entry conditions
-        long_entry = volume_ok and uptrend_1d and long_breakout
-        short_entry = volume_ok and downtrend_1d and short_breakout
+        long_entry = volume_ok and fade_long and long_breakout
+        short_entry = volume_ok and fade_short and short_breakout
         
         # Generate signals
         if position == 0:
