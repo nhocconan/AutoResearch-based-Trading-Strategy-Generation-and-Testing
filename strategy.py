@@ -3,20 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
-# Long when price breaks above Donchian high + price > EMA50 + volume > 1.5x average
-# Short when price breaks below Donchian low + price < EMA50 + volume > 1.5x average
-# Exit when price crosses Donchian midpoint or EMA50
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation
+# Long when price breaks above Donchian high + price > 1d EMA50 + volume > 1.5x average
+# Short when price breaks below Donchian low + price < 1d EMA50 + volume > 1.5x average
+# Exit when price crosses 1d EMA50 or Donchian midpoint reverses
 # Uses 12h timeframe targeting 50-150 total trades over 4 years (12-37/year)
-# Works in trending markets by following breakouts with trend filter, avoids whipsaws
+# Works in trending markets by following breakouts with trend filter, avoids whipsaw in ranging markets
 
-name = "12h_donchian_1d_ema_vol_v1"
+name = "12h_donchian_1d_ema_vol_v5"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -30,7 +30,7 @@ def generate_signals(prices):
     donch_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     donch_mid = (donch_high + donch_low) / 2
     
-    # EMA50 from 1d timeframe
+    # 1d EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
@@ -52,15 +52,15 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Exit conditions: price crosses Donchian midpoint or EMA50
+        # Exit conditions: price crosses EMA50 or Donchian midpoint
         if position == 1:  # long position
-            if close[i] <= donch_mid[i] or close[i] <= ema_1d_aligned[i]:
+            if close[i] <= ema_1d_aligned[i] or close[i] <= donch_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] >= donch_mid[i] or close[i] >= ema_1d_aligned[i]:
+            if close[i] >= ema_1d_aligned[i] or close[i] >= donch_mid[i]:
                 signals[i] = 0.0
                 position = 0
             else:
