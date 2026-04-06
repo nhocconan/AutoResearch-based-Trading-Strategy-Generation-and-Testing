@@ -24,12 +24,6 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -38,14 +32,24 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly Donchian channels
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    upper_1w, lower_1w = calculate_donchian(high_1w, low_1w, DONCHIAN_PERIOD)
+    # Calculate weekly trend: price above/below 50-period EMA
+    close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    trend_1w = ema_50  # Using EMA as trend filter
+    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
     
-    # Align weekly Donchian to daily timeframe
-    upper_1w_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_1w_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate daily Donchian channels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    donchian_high = pd.Series(high_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Align Donchian levels to daily timeframe (already aligned since we're using daily)
+    donchian_high_aligned = donchian_high  # Already at daily frequency
+    donchian_low_aligned = donchian_low
     
     # Calculate daily indicators
     high = prices['high'].values
@@ -62,11 +66,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
     
     for i in range(start, n):
-        # Skip if weekly Donchian levels not available
-        if np.isnan(upper_1w_aligned[i]) or np.isnan(lower_1w_aligned[i]):
+        # Skip if weekly trend not available
+        if np.isnan(trend_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -88,18 +92,27 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above weekly upper band OR breakdown below weekly lower band
-        breakout_long = volume_ok and close[i] >= upper_1w_aligned[i]
-        breakout_short = volume_ok and close[i] <= lower_1w_aligned[i]
+        # Trend filter: only trade in direction of weekly trend
+        # Weekly trend: price above EMA50 = bullish, below = bearish
+        weekly_bullish = close[i] > trend_1w_aligned[i]
+        weekly_bearish = close[i] < trend_1w_aligned[i]
+        
+        # Breakout signals with volume and trend confirmation
+        breakout_long = volume_ok and weekly_bullish and close[i] >= donchian_high_aligned[i]
+        breakdown_short = volume_ok and weekly_bearish and close[i] <= donchian_low_aligned[i]
+        
+        # Entry conditions
+        long_entry = breakout_long
+        short_entry = breakdown_short
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_short:
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
