@@ -3,8 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1w_ema_v1"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA(20) trend filter and volume confirmation.
+# Uses tighter timeframe alignment (12h) for better trend sensitivity in both bull/bear markets.
+# Volume filter reduces false breakouts. Target: 20-50 trades/year per symbol.
+
+name = "4h_donchian20_12h_ema20_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,21 +35,19 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # Get 1w data for EMA trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # 20-period EMA on 12h timeframe
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
     
-    # Calculate EMA(50) on weekly
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 50:
-        ema_1w[49] = np.mean(close_1w[:50])
-        for i in range(50, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 49) / 51
+    ema_12h = np.full(len(close_12h), np.nan)
+    if len(close_12h) >= 20:
+        ema_12h[19] = np.mean(close_12h[:20])
+        for i in range(20, len(close_12h)):
+            ema_12h[i] = (close_12h[i] * 2 + ema_12h[i-1] * 18) / 20
     
-    # Align EMA to 12h timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    ema_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # 20-period Donchian channels
+    # 20-period Donchian channels on 4h
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     for i in range(20, n):
@@ -62,11 +64,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(30, 20)
+    start = max(30, 20, 20)
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(ema_1w_aligned[i]) or 
+        if (np.isnan(atr[i]) or np.isnan(ema_aligned[i]) or 
             np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
             np.isnan(vol_ma[i])):
             if position != 0:
@@ -80,16 +82,16 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low or stoploss hit
-            if (close[i] < donch_low[i] or
+            # Exit: price closes below EMA or stoploss hit
+            if (close[i] < ema_aligned[i] or
                 close[i] < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high or stoploss hit
-            if (close[i] > donch_high[i] or
+            # Exit: price closes above EMA or stoploss hit
+            if (close[i] > ema_aligned[i] or
                 close[i] > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -97,15 +99,15 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries
-            # Long: price breaks above Donchian high with volume and weekly EMA uptrend
+            # Long: price breaks above Donchian high with volume and above EMA (bullish)
             if (close[i] > donch_high[i] and volume_filter and 
-                close[i] > ema_1w_aligned[i]):
+                close[i] > ema_aligned[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low with volume and weekly EMA downtrend
+            # Short: price breaks below Donchian low with volume and below EMA (bearish)
             elif (close[i] < donch_low[i] and volume_filter and 
-                  close[i] < ema_1w_aligned[i]):
+                  close[i] < ema_aligned[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
