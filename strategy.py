@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA Trend + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts capture momentum, 1d EMA filter ensures trend alignment, volume confirms breakout strength, ATR stoploss limits drawdown. Designed for low trade frequency (target 50-150 total over 4 years) to minimize fee drag. Works in bull/bear by only trading with higher timeframe trend.
+4h Donchian(20) Breakout + 1d EMA Trend + Volume Filter + ATR Stoploss
+Hypothesis: Donchian breakouts capture momentum, 1d EMA filter ensures trend alignment, volume confirms breakout strength, ATR stoploss limits drawdown. Designed for low trade frequency (target 75-200 total over 4 years) to minimize fee drag. Works in bull/bear by only trading with higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dema_volume_atr_v1"
-timeframe = "12h"
+name = "4h_donchian20_1dema_volume_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -45,7 +45,7 @@ def generate_signals(prices):
             for i in range(2, len(atr_1d)):
                 atr_1d[i] = (tr[i-1] * 13 + atr_1d[i-1]) / 14
     
-    # Align indicators to 12h timeframe
+    # Align indicators to 4h timeframe
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
