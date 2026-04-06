@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + Volume + ADX Filter
-Hypothesis: Donchian breakouts on 4h timeframe capture medium-term momentum with proven performance.
-Volume confirms institutional participation. ADX filter from 4h ensures we only trade in trending markets.
-Designed for 100-200 trades over 4 years (25-50/year) to balance opportunity and fee cost.
+1d Donchian(20) Breakout + Volume Filter + Weekly ADX Filter
+Hypothesis: Daily Donchian breakouts capture medium-term trends with volume confirmation.
+Weekly ADX filter ensures we only trade when weekly trend is strong, reducing whipsaw.
+Designed for 30-100 trades over 4 years (7-25/year) to minimize fee drag.
 Works in both bull (breakouts) and bear (breakdowns) markets by going long on highs, short on lows.
 """
 
@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_volume_adx_v10"
-timeframe = "4h"
+name = "1d_donchian20_volume_weekly_adx_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,26 +20,26 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data for ADX (once before loop)
-    df_4h = get_htf_data(prices, '4h')
+    # Load weekly data for ADX (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
     
-    # ADX calculation on 4h
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    close_4h = df_4h['close'].values
+    # ADX calculation on weekly data
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
     # True Range
-    tr1 = np.abs(high_4h[1:] - low_4h[1:])
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
+    tr1 = np.abs(high_weekly[1:] - low_weekly[1:])
+    tr2 = np.abs(high_weekly[1:] - close_weekly[:-1])
+    tr3 = np.abs(low_weekly[1:] - close_weekly[:-1])
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr = np.concatenate([[np.nan], tr])
     
     # Directional Movement
-    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
-                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
-    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
-                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
+    dm_plus = np.where((high_weekly[1:] - high_weekly[:-1]) > (low_weekly[:-1] - low_weekly[1:]), 
+                       np.maximum(high_weekly[1:] - high_weekly[:-1], 0), 0)
+    dm_minus = np.where((low_weekly[:-1] - low_weekly[1:]) > (high_weekly[1:] - high_weekly[:-1]), 
+                        np.maximum(low_weekly[:-1] - low_weekly[1:], 0), 0)
     dm_plus = np.concatenate([[0], dm_plus])
     dm_minus = np.concatenate([[0], dm_minus])
     
@@ -63,10 +63,10 @@ def generate_signals(prices):
     
     # DX and ADX
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilder_smooth(dx, period_adx)
+    adx_weekly = wilder_smooth(dx, period_adx)
     
-    # Align ADX to 4h timeframe (already aligned since same timeframe)
-    adx_aligned = adx  # No need to align same timeframe
+    # Align ADX to daily timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_weekly, adx_weekly)
     
     # Price and volume data
     high = prices['high'].values
@@ -106,14 +106,14 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR ADX < 20
+            # Exit: price closes below Donchian lower OR weekly ADX < 20
             if close[i] < lowest_low or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR ADX < 20
+            # Exit: price closes above Donchian upper OR weekly ADX < 20
             if close[i] > highest_high or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
