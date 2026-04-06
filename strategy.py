@@ -8,7 +8,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Goes short when price breaks below 20-period low with 12h EMA downtrend and volume > average.
 # Uses ATR-based stoploss to limit downside. Designed to work in both bull and bear markets
 # by following the trend on higher timeframe while capturing breakouts on lower timeframe.
-# Target: 75-150 total trades over 4 years (19-38/year) with controlled risk.
+# Target: 100-200 total trades over 4 years (25-50/year) with controlled risk.
 
 name = "6h_donchian20_12h_ema_vol_v1"
 timeframe = "6h"
