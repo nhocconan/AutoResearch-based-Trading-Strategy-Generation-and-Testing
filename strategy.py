@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with weekly trend filter and volume confirmation.
+# Hypothesis: 12h Donchian(20) breakout with weekly trend filter and volume confirmation.
 # Long when price breaks above Donchian(20) high and weekly close > weekly open (bullish week).
 # Short when price breaks below Donchian(20) low and weekly close < weekly open (bearish week).
 # Uses volume > 1.5x 20-period average for confirmation.
