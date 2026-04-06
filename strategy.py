@@ -3,15 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian channel breakout with 1-week trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high + price > weekly EMA50 + volume > 1.5x average
-# Short when price breaks below Donchian(20) low + price < weekly EMA50 + volume > 1.5x average
-# Uses weekly EMA50 for trend filter to avoid counter-trend trades
+# Hypothesis: 6h Donchian(20) breakout with 1d weekly pivot direction and volume confirmation
+# Long when price breaks above 20-bar high + price > weekly pivot + volume > 1.5x average
+# Short when price breaks below 20-bar low + price < weekly pivot + volume > 1.5x average
+# Weekly pivot from daily data: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H
+# Uses weekly pivot for trend bias to avoid counter-trend trades
 # Volume confirmation reduces false signals
 # Target: 50-150 total trades over 4 years with controlled risk
 
-name = "12h_donchian20_1w_ema50_vol_v1"
-timeframe = "12h"
+name = "6h_donchian20_1d_weekly_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,20 +26,27 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1-week data for EMA50 trend filter
-    df_1w = get_htf_data(prices, '1w')
-    if len(df_1w) < 50:
+    # 1d data for weekly pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    if len(df_1d) < 3:
         return np.zeros(n)
     
-    close_1w = df_1w['close'].values
+    # Calculate weekly pivot points from daily data
+    # Weekly pivot = (Weekly High + Weekly Low + Weekly Close) / 3
+    # We'll approximate using daily data: use highest high, lowest low, last close of the week
+    # For simplicity, we use daily OHLC to calculate daily pivot then use it as weekly bias
+    # In practice, we'd resample to weekly, but using daily pivot as proxy for weekly bias
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # EMA50 calculation on weekly
-    ema50_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Daily pivot point: P = (H + L + C) / 3
+    pivot_1d = (high_1d + low_1d + close_1d) / 3.0
     
-    # Align weekly EMA50 to 12h timeframe
-    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    # Align 1d pivot to 6h timeframe
+    pivot_1d_aligned = align_htf_to_ltf(prices, df_1d, pivot_1d)
     
-    # Donchian channel calculation (20-period) on 12h
+    # Donchian channels (20-period) on 6h
     high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
     low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
@@ -49,10 +57,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(50, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema50_1w_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(volume_ma[i])):
+        if (np.isnan(high_max[i]) or np.isnan(low_min[i]) or 
+            np.isnan(pivot_1d_aligned[i]) or np.isnan(volume_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -65,8 +73,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks below Donchian low or trend changes
-            elif close[i] < low_min[i] or close[i] < ema50_1w_aligned[i]:
+            # Exit: price breaks below Donchian low or trend changes (below pivot)
+            elif close[i] < low_min[i] or close[i] < pivot_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -78,8 +86,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks above Donchian high or trend changes
-            elif close[i] > high_max[i] or close[i] > ema50_1w_aligned[i]:
+            # Exit: price breaks above Donchian high or trend changes (above pivot)
+            elif close[i] > high_max[i] or close[i] > pivot_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -87,16 +95,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries with volume confirmation
-            # Long: price breaks above Donchian high + uptrend + volume spike
-            if (close[i] > high_max[i] and
-                close[i] > ema50_1w_aligned[i] and
+            # Long: price breaks above Donchian high + above pivot + volume spike
+            if (close[i] > high_max[i] and close[i] > pivot_1d_aligned[i] and
                 volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low + downtrend + volume spike
-            elif (close[i] < low_min[i] and
-                  close[i] < ema50_1w_aligned[i] and
+            # Short: price breaks below Donchian low + below pivot + volume spike
+            elif (close[i] < low_min[i] and close[i] < pivot_1d_aligned[i] and
                   volume[i] > 1.5 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
