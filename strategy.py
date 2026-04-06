@@ -3,22 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(200) trend filter and volume confirmation (1.5x 20-period average)
-# Long when price breaks above Donchian high, price > 1d EMA(200), and volume > 1.5x average
-# Short when price breaks below Donchian low, price < 1d EMA(200), and volume > 1.5x average
-# Exit on opposite Donchian break or when price crosses below/above EMA(200)
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation (1.5x 20-period average)
+# Long when price breaks above Donchian high, price > 1d EMA(50), and volume > 1.5x average
+# Short when price breaks below Donchian low, price < 1d EMA(50), and volume > 1.5x average
+# Exit on opposite Donchian break or when price crosses below/above EMA
 # Stoploss at 2 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses slower EMA(200) to reduce whipsaw and improve trend filtering in both bull/bear markets
-# Target: 75-200 trades over 4 years (19-50/year)
+# Works in bull/bear by following 1d trend direction
+# Target: 50-150 trades over 4 years (12-37/year)
 
-name = "4h_donchian20_1d_ema200_vol_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -29,16 +29,16 @@ def generate_signals(prices):
     
     # 1d data for EMA trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 200:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # 1d EMA(200) for trend filter (slower for better trend filtering)
-    ema_1d = pd.Series(close_1d).ewm(span=200, adjust=False).mean().values
+    # 1d EMA(50) for trend filter
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 4h Donchian channels (20-period)
+    # 12h Donchian channels (20-period)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().shift(1).values
     
@@ -58,7 +58,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(200, n):
+    for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
             np.isnan(donchian_low[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
