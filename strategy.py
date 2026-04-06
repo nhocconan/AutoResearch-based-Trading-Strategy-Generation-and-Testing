@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-6h Camarilla pivot with volume and ATR filter
-Hypothesis: Camarilla pivot levels on 1d provide institutional support/resistance. 
-Fade at R3/S3 with volume confirmation, breakout continuation at R4/S4 with volume surge.
-Works in both bull (fade resistance, break support) and bear (fade support, break resistance).
+12h Donchian breakout with volume and ATR filter
+Hypothesis: 12h Donchian(20) breakouts capture medium-term trends in BTC/ETH/SOL.
+Volume confirmation reduces false breakouts, ATR stoploss manages risk.
+Works in bull (breakout continuation) and bear (breakdown continuation).
 Target: 50-150 total trades over 4 years.
 """
 
@@ -11,44 +11,31 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_1d_fade_break_v2"
-timeframe = "6h"
+name = "12h_donchian20_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Camarilla pivot (once before loop)
+    # Load 1d data for Donchian channels (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels from previous 1d bar
+    # Calculate Donchian channels (20-period high/low)
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
-    # Camarilla formulas (using previous day's range)
-    range_1d = high_1d - low_1d
-    close_prev = close_1d  # using same day's close for same-day levels (will be shifted by align)
+    # Calculate rolling max/min for Donchian
+    high_max = pd.Series(high_1d).rolling(window=20, min_periods=20).max().values
+    low_min = pd.Series(low_1d).rolling(window=20, min_periods=20).min().values
     
-    # Calculate levels
-    r4 = close_prev + (range_1d * 1.500)
-    r3 = close_prev + (range_1d * 1.250)
-    r2 = close_prev + (range_1d * 1.166)
-    r1 = close_prev + (range_1d * 1.083)
-    s1 = close_prev - (range_1d * 1.083)
-    s2 = close_prev - (range_1d * 1.166)
-    s3 = close_prev - (range_1d * 1.250)
-    s4 = close_prev - (range_1d * 1.500)
+    # Align Donchian channels to 12h timeframe
+    donch_high_12h = align_htf_to_ltf(prices, df_1d, high_max)
+    donch_low_12h = align_htf_to_ltf(prices, df_1d, low_min)
     
-    # Align levels to 6h timeframe (shifted by 1 day to avoid look-ahead)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
-    
-    # 6h data
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -56,7 +43,6 @@ def generate_signals(prices):
     
     # Volume filter: 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False).mean().values
-    vol_filter = volume > (1.5 * vol_ema)
     
     # ATR(14) for stoploss
     tr1 = high - low
@@ -71,12 +57,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 50  # For EMA and ATR
+    start = 50  # For Donchian and ATR
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(r3_6h[i]) or np.isnan(s3_6h[i]) or np.isnan(r4_6h[i]) or 
-            np.isnan(s4_6h[i]) or np.isnan(vol_ema[i]) or np.isnan(atr[i])):
+        if (np.isnan(donch_high_12h[i]) or np.isnan(donch_low_12h[i]) or 
+            np.isnan(vol_ema[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -85,44 +71,29 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: stoploss or reversal at S3
+            # Exit: stoploss or breakdown below Donchian low
             if (close[i] <= entry_price - 2.5 * atr[i] or
-                close[i] <= s3_6h[i]):
+                close[i] <= donch_low_12h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: stoploss or reversal at R3
+            # Exit: stoploss or breakout above Donchian high
             if (close[i] >= entry_price + 2.5 * atr[i] or
-                close[i] >= r3_6h[i]):
+                close[i] >= donch_high_12h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries
-            # Fade at S3/R3 with volume confirmation
-            fade_long = (close[i] <= s3_6h[i] * 1.002 and  # slightly above S3
-                        volume[i] > vol_ema[i] * 1.3)
-            fade_short = (close[i] >= r3_6h[i] * 0.998 and  # slightly below R3
-                         volume[i] > vol_ema[i] * 1.3)
+            # Look for entries: breakout with volume confirmation
+            breakout_long = (close[i] > donch_high_12h[i] and
+                           volume[i] > vol_ema[i] * 1.5)
+            breakout_short = (close[i] < donch_low_12h[i] and
+                            volume[i] > vol_ema[i] * 1.5)
             
-            # Breakout at S4/R4 with volume surge
-            breakout_long = (close[i] > s4_6h[i] and
-                           volume[i] > vol_ema[i] * 2.0)
-            breakout_short = (close[i] < r4_6h[i] and
-                            volume[i] > vol_ema[i] * 2.0)
-            
-            if fade_long:
-                signals[i] = 0.25
-                position = 1
-                entry_price = close[i]
-            elif fade_short:
-                signals[i] = -0.25
-                position = -1
-                entry_price = close[i]
-            elif breakout_long:
+            if breakout_long:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
