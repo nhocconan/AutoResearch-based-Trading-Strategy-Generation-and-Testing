@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with volume confirmation and ATR-based stops.
-# Works in bull/bear because breakouts capture strong directional moves, volume filters weak signals,
-# and ATR stops adapt to volatility. Target: 50-150 trades over 4 years (12-38/year).
+# Hypothesis: Daily Donchian breakout with volume confirmation and ATR stoploss on 12h timeframe
+# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
+# and ATR stoploss adapts to volatility. Target: 80-120 trades over 4 years (20-30/year).
 
-name = "exp_13021_4h_donchian20_1d_vol_atr_v1"
-timeframe = "4h"
+name = "exp_13022_12h_donchian20_1d_vol_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -47,11 +47,11 @@ def generate_signals(prices):
     low_d = df_daily['low'].values
     upper_d, lower_d = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     upper_aligned = align_htf_to_ltf(prices, df_daily, upper_d)
     lower_aligned = align_htf_to_ltf(prices, df_daily, lower_d)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -92,7 +92,7 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above upper or below lower Donchian
+        # Breakout above upper or breakdown below lower
         breakout_long = volume_ok and close[i] >= upper_aligned[i]
         breakout_short = volume_ok and close[i] <= lower_aligned[i]
         
