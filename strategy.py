@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly pivot breakout with volume confirmation on 1d timeframe
-# Works in bull/bear because breakouts capture strong moves, volume filters weak signals,
-# and pivot levels provide structural support/resistance that works across regimes.
-# Target: 30-80 trades over 4 years (7-20/year) to minimize fee drag.
+# Hypothesis: Daily pivot breakout with volume confirmation and ATR stoploss
+# Works in bull/bear by capturing strong momentum moves, volume filters weak signals,
+# pivot levels provide structural support/resistance that works across regimes.
+# Target: 50-100 trades over 4 years (12-25/year) to minimize fee drag.
 
-name = "exp_13004_1d_weekly_pivot_breakout_v2"
+name = "exp_13004_1d_pivot_breakout_v2"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.2
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
