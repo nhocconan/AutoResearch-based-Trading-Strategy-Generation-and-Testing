@@ -3,16 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12859_6h_1d_supertrend_hl_v1"
-timeframe = "6h"
+name = "exp_12860_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-SUPERTREND_PERIOD = 10
-SUPERTREND_MULTIPLIER = 3.0
-ATR_PERIOD = 10
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 20
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-MAX_HOLD_BARS = 48  # Max 12 days (48 * 6h)
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
+MAX_HOLD_BARS = 30  # Max 30 bars (5 days)
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -23,37 +26,9 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_supertrend(high, low, close, period, multiplier):
-    """Calculate Supertrend indicator"""
-    atr = calculate_atr(high, low, close, period)
-    
-    # Calculate upper and lower bands
-    upperband = (high + low) / 2 + multiplier * atr
-    lowerband = (high + low) / 2 - multiplier * atr
-    
-    # Initialize supertrend
-    supertrend = np.zeros(len(close))
-    direction = np.ones(len(close))  # 1 for uptrend, -1 for downtrend
-    
-    for i in range(1, len(close)):
-        if close[i] > upperband[i-1]:
-            direction[i] = 1
-        elif close[i] < lowerband[i-1]:
-            direction[i] = -1
-        else:
-            direction[i] = direction[i-1]
-            
-            if direction[i] == 1 and lowerband[i] < lowerband[i-1]:
-                lowerband[i] = lowerband[i-1]
-            if direction[i] == -1 and upperband[i] > upperband[i-1]:
-                upperband[i] = upperband[i-1]
-        
-        if direction[i] == 1:
-            supertrend[i] = lowerband[i]
-        else:
-            supertrend[i] = upperband[i]
-    
-    return supertrend, direction
+def calculate_ema(values, period):
+    """Calculate EMA"""
+    return pd.Series(values).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def generate_signals(prices):
     n = len(prices)
@@ -63,22 +38,23 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily Supertrend
-    high_d = df_daily['high'].values
-    low_d = df_daily['low'].values
-    close_d = df_daily['close'].values
+    # Calculate daily EMA for trend filter
+    close_daily = df_daily['close'].values
+    ema_daily = calculate_ema(close_daily, EMA_PERIOD)
+    ema_aligned = align_htf_to_ltf(prices, df_daily, ema_daily)
     
-    supertrend_d, direction_d = calculate_supertrend(high_d, low_d, close_d, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
-    
-    # Align to 6h timeframe
-    supertrend_aligned = align_htf_to_ltf(prices, df_daily, supertrend_d)
-    direction_aligned = align_htf_to_ltf(prices, df_daily, direction_d)
-    
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
+    # Donchian channels
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Volume MA
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -88,13 +64,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(SUPERTREND_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if daily supertrend not available
-        if np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -122,23 +98,30 @@ def generate_signals(prices):
             bars_since_entry = 0
             continue
         
-        # Trend-following signals based on daily supertrend
-        long_signal = direction_aligned[i] == 1 and close[i] > supertrend_aligned[i]
-        short_signal = direction_aligned[i] == -1 and close[i] < supertrend_aligned[i]
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        
+        # Trend filter: price above/below daily EMA
+        uptrend = close[i] > ema_aligned[i]
+        downtrend = close[i] < ema_aligned[i]
+        
+        # Donchian breakout with volume and trend confirmation
+        breakout_long = volume_ok and uptrend and close[i] >= donchian_high[i]
+        breakout_short = volume_ok and downtrend and close[i] <= donchian_low[i]
         
         # Generate signals
         if position == 0:
-            if long_signal:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (2.0 * atr[i])  # 2*ATR stop loss
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
                 bars_since_entry = 0
-            elif short_signal:
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (2.0 * atr[i])  # 2*ATR stop loss
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
                 bars_since_entry = 0
             else:
                 signals[i] = 0.0
