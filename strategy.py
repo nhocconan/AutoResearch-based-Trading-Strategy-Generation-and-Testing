@@ -8,7 +8,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Enter short when: price breaks below Donchian(20) low, price < 1w EMA(50), volume > 1.5x avg
 # Exit when: price retraces to midpoint of Donchian channel OR opposite breakout occurs
 # Uses weekly trend filter to avoid counter-trend trades, targeting 30-100 trades over 4 years
-# This structure has proven effective on multiple symbols (test Sharpe 1.10-1.38) and adapts to bear markets via trend filter
+# This structure has proven effective on SOLUSDT (test Sharpe 1.10-1.38) and adapts to bear markets via trend filter
 
 name = "1d_donchian20_1wema_vol_v1"
 timeframe = "1d"
