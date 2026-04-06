@@ -61,14 +61,6 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # ATR(20) for volatility filter
-    atr_ma = np.full(n, np.nan)
-    if n >= 20:
-        atr_ma[20] = np.mean(atr[6:20]) if not np.isnan(atr[6:20]).all() else np.nan
-        for i in range(21, n):
-            if not np.isnan(atr[i-1]):
-                atr_ma[i] = (atr_ma[i-1] * 19 + atr[i-1]) / 20
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -78,7 +70,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_ma[i]):
+        if np.isnan(atr[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -87,8 +79,6 @@ def generate_signals(prices):
         
         # Volume condition
         volume_filter = volume[i] > vol_ma[i] * 2.0
-        # Volatility filter: ATR > 1.5x its 20-period MA (avoid low volatility chop)
-        vol_filter = atr[i] > atr_ma[i] * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
@@ -109,17 +99,17 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries - only long in bull, only short in bear based on daily trend
-            # Long: price breaks above Donchian high, above 1d EMA50, with volume and volatility
+            # Long: price breaks above Donchian high, above 1d EMA50, with volume (only in bull market)
             if (close[i] > donchian_high[i] and 
                 close[i] > ema_50_aligned[i] and 
-                volume_filter and vol_filter):
+                volume_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low, below 1d EMA50, with volume and volatility
+            # Short: price breaks below Donchian low, below 1d EMA50, with volume (only in bear market)
             elif (close[i] < donchian_low[i] and 
                   close[i] < ema_50_aligned[i] and 
-                  volume_filter and vol_filter):
+                  volume_filter):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
