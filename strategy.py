@@ -8,11 +8,13 @@ timeframe = "4h"
 leverage = 1.0
 
 def calculate_donchian(high, low, period):
+    """Calculate Donchian upper and lower bands"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
 def calculate_atr(high, low, close, period):
+    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -21,7 +23,12 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_ema(values, span):
+    """Calculate EMA"""
+    return pd.Series(values).ewm(span=span, adjust=False, min_periods=span).mean().values
+
 def calculate_pivot_points(high, low, close):
+    """Calculate classic pivot points (daily)"""
     pivot = (high + low + close) / 3.0
     r1 = 2 * pivot - low
     s1 = 2 * pivot - high
