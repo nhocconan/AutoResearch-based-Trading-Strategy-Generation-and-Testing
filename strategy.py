@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian breakout with weekly trend filter and volume confirmation
-# Enter long when: price breaks above Donchian(20) high, price > weekly EMA(50), volume > 2x avg
-# Enter short when: price breaks below Donchian(20) low, price < weekly EMA(50), volume > 2x avg
-# Exit when: price touches opposite Donchian band or ATR-based stoploss
-# Uses weekly trend to filter breakouts, targeting 30-100 trades over 4 years
+# Hypothesis: 1d weekly breakout with volume confirmation and volatility filter
+# Enter long when price breaks above weekly high AND volume > 2x average AND volatility contraction
+# Enter short when price breaks below weekly low AND volume > 2x average AND volatility contraction
+# Exit when price returns to weekly midpoint or volatility expands
+# Uses weekly structure to capture breakouts in both bull and bear markets with volume confirmation
 
-name = "1d_donchian20_weekly_ema_vol_v1"
+name = "1d_weekly_breakout_volatility_filter_v1"
 timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 20:
         return np.zeros(n)
     
     # Price data
@@ -24,40 +24,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
-    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max()
-    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_high = high_roll.values
-    donchian_low = low_roll.values
+    # Weekly data for breakout levels
+    df_weekly = get_htf_data(prices, '1w')
+    high_weekly = df_weekly['high'].values
+    low_weekly = df_weekly['low'].values
+    close_weekly = df_weekly['close'].values
     
-    # Weekly EMA(50) for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
+    # Weekly high/low aligned to daily
+    weekly_high_aligned = align_htf_to_ltf(prices, df_weekly, high_weekly)
+    weekly_low_aligned = align_htf_to_ltf(prices, df_weekly, low_weekly)
+    weekly_mid = (weekly_high_aligned + weekly_low_aligned) / 2
     
     # Volume confirmation: volume > 2x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_threshold = 2.0 * volume_ma
     
-    # ATR(14) for stoploss
-    tr1 = pd.Series(high - low)
-    tr2 = pd.Series(np.abs(high - np.roll(close, 1)))
-    tr3 = pd.Series(np.abs(low - np.roll(close, 1)))
-    tr2.iloc[0] = tr1.iloc[0]
-    tr3.iloc[0] = tr1.iloc[0]
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.ewm(alpha=1/14, adjust=False, min_periods=14).mean().values
+    # Volatility filter: ATR(14) contraction (current ATR < 0.8 * 20-period ATR mean)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr2[0] = 0
+    tr3[0] = 0
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr_ma = pd.Series(atr).rolling(window=20, min_periods=20).mean().values
+    vol_contraction = atr < (0.8 * atr_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
     
-    for i in range(20, n):  # Wait for Donchian to stabilize
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
-            np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i]) or
-            np.isnan(atr[i])):
+        if (np.isnan(weekly_high_aligned[i]) or np.isnan(weekly_low_aligned[i]) or
+            np.isnan(volume_threshold[i]) or np.isnan(atr[i]) or np.isnan(atr_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -65,31 +64,29 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: touch lower Donchian band OR stoploss (2*ATR)
-            if close[i] <= donchian_low[i] or close[i] <= entry_price - 2.0 * atr[i]:
+            # Exit: price returns to weekly midpoint OR volatility expansion
+            if close[i] <= weekly_mid[i] or not vol_contraction[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: touch upper Donchian band OR stoploss (2*ATR)
-            if close[i] >= donchian_high[i] or close[i] >= entry_price + 2.0 * atr[i]:
+            # Exit: price returns to weekly midpoint OR volatility expansion
+            if close[i] >= weekly_mid[i] or not vol_contraction[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for breakouts: Donchian break + trend filter + volume
-            if volume[i] > volume_threshold[i]:
-                if close[i] > donchian_high[i] and close[i] > ema_50_aligned[i]:
-                    # Bullish breakout above weekly EMA
+            # Look for breakout entries: price breaks weekly level + volume + volatility contraction
+            if volume[i] > volume_threshold[i] and vol_contraction[i]:
+                if close[i] > weekly_high_aligned[i]:
+                    # Break above weekly high with volume and low volatility
                     signals[i] = 0.25
                     position = 1
-                    entry_price = close[i]
-                elif close[i] < donchian_low[i] and close[i] < ema_50_aligned[i]:
-                    # Bearish breakout below weekly EMA
+                elif close[i] < weekly_low_aligned[i]:
+                    # Break below weekly low with volume and low volatility
                     signals[i] = -0.25
                     position = -1
-                    entry_price = close[i]
     
     return signals
