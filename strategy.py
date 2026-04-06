@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
 """
-12h Donchian(10) Breakout + Volume Confirmation + ADX Filter from 1d (Optimized)
-Hypothesis: Donchian breakouts on 12h timeframe capture medium-term momentum with reduced trade frequency.
-Volume confirms institutional participation. ADX from 1d ensures we only trade in trending markets.
-Optimized for 12h timeframe to achieve target trade count of 50-150 total over 4 years.
+12h Donchian(20) Breakout + Volume + ADX Filter
+Hypothesis: Donchian breakouts on 12h timeframe capture medium-term momentum with low trade frequency.
+Volume confirms institutional participation. ADX filter from 1d ensures we only trade in trending markets.
+Designed for 12h timeframe to achieve 50-150 total trades over 4 years (12-37/year) with minimal fee drag.
+Works in both bull and bear markets by filtering for trend strength via ADX.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian10_volume_adx_v1"
+name = "12h_donchian20_volume_adx_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 30:
+    if n < 50:
         return np.zeros(n)
     
     # Load 1d data for ADX (once before loop)
@@ -77,7 +78,7 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from warmup period
-    start = max(10, 14)  # For Donchian and ADX
+    start = max(20, 14)  # For Donchian and ADX
     
     for i in range(start, n):
         # Skip if required data not available
@@ -88,17 +89,17 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Donchian channel (10-period) - shorter for more responsiveness on 12h
-        if i >= 10:
-            highest_high = np.max(high[i-10:i])
-            lowest_low = np.min(low[i-10:i])
+        # Donchian channel (20-period)
+        if i >= 20:
+            highest_high = np.max(high[i-20:i])
+            lowest_low = np.min(low[i-20:i])
         else:
             highest_high = np.max(high[:i+1]) if i > 0 else high[i]
             lowest_low = np.min(low[:i+1]) if i > 0 else low[i]
         
-        # Volume filter (10-period average)
-        if i >= 10:
-            vol_ma = np.mean(volume[i-10:i])
+        # Volume filter (20-period average)
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
             volume_filter = volume[i] > vol_ma * 1.5
         else:
             volume_filter = False
@@ -124,10 +125,10 @@ def generate_signals(prices):
             bear_breakout = close[i] < lowest_low
             trend_filter = adx_aligned[i] > 25
             
-            if i >= 10 and bull_breakout and volume_filter and trend_filter:
+            if i >= 20 and bull_breakout and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
-            elif i >= 10 and bear_breakout and volume_filter and trend_filter:
+            elif i >= 20 and bear_breakout and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
             else:
