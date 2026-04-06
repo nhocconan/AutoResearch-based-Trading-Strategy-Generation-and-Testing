@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1d weekly pivot direction and volume confirmation
-# Long when price breaks above Donchian(20) high, 1d price above weekly pivot (bullish bias), and volume > 1.5x average
-# Short when price breaks below Donchian(20) low, 1d price below weekly pivot (bearish bias), and volume > 1.5x average
-# Weekly pivot calculated from prior week's (Monday-Sunday) high, low, close
-# Exit when price crosses Donchian midpoint or reverses with volume confirmation
-# Target: 75-200 total trades over 4 years with controlled risk (max 0.25 position)
+# Hypothesis: 12h Bollinger Band Squeeze Breakout with 1d Trend Filter
+# Uses Bollinger Band width to identify low volatility periods (squeeze).
+# Breakout occurs when price closes outside Bollinger Bands after squeeze.
+# Trend filter uses 1d EMA50 to ensure breakouts align with higher timeframe trend.
+# Volume confirmation reduces false breakouts.
+# Designed for 12h timeframe to target 50-150 trades over 4 years.
 
-name = "6h_donchian20_1d_weekly_pivot_vol_v1"
-timeframe = "6h"
+name = "12h_bb_squeeze_1d_ema50_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,48 +25,39 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for weekly pivot calculation
+    # 1d data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 10:
+    if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     
-    # Calculate weekly pivot points (using Sunday as week end)
-    # Pivot = (Prior Week High + Prior Week Low + Prior Week Close) / 3
-    # We'll calculate this daily and forward-fill to 6h
-    weekly_pivot = np.full_like(close_1d, np.nan)
+    # EMA50 calculation on 1d
+    ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # For each day, determine if it's Sunday (week end)
-    # Assuming data starts at some point, we'll use a rolling 7-day window
-    # and assume the last day of the window is Sunday
-    for i in range(6, len(close_1d)):  # Need 7 days for a week
-        week_high = np.max(high_1d[i-6:i+1])
-        week_low = np.min(low_1d[i-6:i+1])
-        week_close = close_1d[i]
-        weekly_pivot[i] = (week_high + week_low + week_close) / 3.0
+    # Align 1d EMA50 to 12h timeframe
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # Forward fill for days before first complete week
-    for i in range(1, len(weekly_pivot)):
-        if np.isnan(weekly_pivot[i]):
-            weekly_pivot[i] = weekly_pivot[i-1]
+    # Bollinger Bands (20, 2) on 12h
+    bb_length = 20
+    bb_mult = 2.0
     
-    # Align weekly pivot to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1d, weekly_pivot)
+    # Middle band (SMA)
+    bb_middle = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).mean().values
     
-    # Donchian(20) channels
-    def donchian_channels(high, low, period):
-        upper = np.full_like(high, np.nan)
-        lower = np.full_like(low, np.nan)
-        for i in range(period-1, len(high)):
-            upper[i] = np.max(high[i-period+1:i+1])
-            lower[i] = np.min(low[i-period+1:i+1])
-        return upper, lower
+    # Standard deviation
+    bb_std = pd.Series(close).rolling(window=bb_length, min_periods=bb_length).std().values
     
-    upper_20, lower_20 = donchian_channels(high, low, 20)
-    middle_20 = (upper_20 + lower_20) / 2.0
+    # Upper and lower bands
+    bb_upper = bb_middle + (bb_std * bb_mult)
+    bb_lower = bb_middle - (bb_std * bb_mult)
+    
+    # Bollinger Band Width (normalized)
+    bb_width = (bb_upper - bb_lower) / bb_middle
+    
+    # Squeeze condition: BB width below 20-period average
+    bb_width_ma = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < bb_width_ma
     
     # Volume average (20-period)
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -84,10 +75,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):  # Start after Donchian warmup
+    for i in range(bb_length, n):  # Start after BB warmup
         # Skip if required data not available
-        if (np.isnan(upper_20[i]) or np.isnan(lower_20[i]) or 
-            np.isnan(weekly_pivot_aligned[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema50_1d_aligned[i]) or np.isnan(bb_upper[i]) or 
+            np.isnan(bb_lower[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -100,8 +91,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses Donchian midpoint or bearish pivot rejection
-            elif close[i] < middle_20[i] or (close[i] < weekly_pivot_aligned[i] and volume[i] > 1.5 * volume_ma[i]):
+            # Exit: price crosses below middle band or trend changes
+            elif close[i] < bb_middle[i] or close[i] < ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -113,26 +104,28 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price crosses Donchian midpoint or bullish pivot rejection
-            elif close[i] > middle_20[i] or (close[i] > weekly_pivot_aligned[i] and volume[i] > 1.5 * volume_ma[i]):
+            # Exit: price crosses above middle band or trend changes
+            elif close[i] > bb_middle[i] or close[i] > ema50_1d_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation
-            # Long: break above Donchian upper, price above weekly pivot (bullish bias), volume spike
-            if (close[i] > upper_20[i] and 
-                close[i] > weekly_pivot_aligned[i] and
-                volume[i] > 1.5 * volume_ma[i]):
+            # Look for entries: Bollinger Band breakout after squeeze
+            # Long: price closes above upper band after squeeze, uptrend, volume spike
+            if (squeeze[i-1] and  # was in squeeze previous bar
+                close[i] > bb_upper[i] and  # breakout above upper band
+                close[i] > ema50_1d_aligned[i] and  # above 1d EMA50 (uptrend)
+                volume[i] > 1.5 * volume_ma[i]):  # volume confirmation
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: break below Donchian lower, price below weekly pivot (bearish bias), volume spike
-            elif (close[i] < lower_20[i] and 
-                  close[i] < weekly_pivot_aligned[i] and
-                  volume[i] > 1.5 * volume_ma[i]):
+            # Short: price closes below lower band after squeeze, downtrend, volume spike
+            elif (squeeze[i-1] and  # was in squeeze previous bar
+                  close[i] < bb_lower[i] and  # breakout below lower band
+                  close[i] < ema50_1d_aligned[i] and  # below 1d EMA50 (downtrend)
+                  volume[i] > 1.5 * volume_ma[i]):  # volume confirmation
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
