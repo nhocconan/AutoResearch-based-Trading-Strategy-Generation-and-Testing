@@ -1,49 +1,45 @@
 #!/usr/bin/env python3
 """
-6h Elder Ray with 1d trend filter and volume confirmation
-Hypothesis: Elder Ray (Bull/Bear Power) identifies institutional buying/selling pressure.
-In bull markets: buy when Bull Power > 0 and EMA13 rising; in bear markets: sell when Bear Power < 0 and EMA13 falling.
-1d EMA50 filters trend direction to avoid counter-trend trades. Volume confirms institutional participation.
-Works in both bull (buy strength) and bear (sell weakness). Target: 75-200 total trades over 4 years.
+12h Donchian breakout with 1w trend filter and volume confirmation
+Hypothesis: Donchian breakouts capture momentum in trending markets. Weekly trend filter avoids counter-trend trades. Volume confirms breakout strength. Works in both bull (breakout above upper band) and bear (breakdown below lower band). Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_elder_ray_1d_trend_volume_v1"
-timeframe = "6h"
+name = "12h_donchian20_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 1d data for trend filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # 1d EMA50 for trend filter
-    close_1d = df_1d['close'].values
-    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_1d_prev = np.roll(ema50_1d, 1)
-    ema50_1d_prev[0] = ema50_1d[0]
-    ema50_rising = ema50_1d > ema50_1d_prev
-    ema50_falling = ema50_1d < ema50_1d_prev
-    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
-    ema50_rising_aligned = align_htf_to_ltf(prices, df_1d, ema50_rising)
-    ema50_falling_aligned = align_htf_to_ltf(prices, df_1d, ema50_falling)
+    # 1w EMA50 for trend filter
+    close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_prev = np.roll(ema50_1w, 1)
+    ema50_1w_prev[0] = ema50_1w[0]
+    ema50_rising = ema50_1w > ema50_1w_prev
+    ema50_falling = ema50_1w < ema50_1w_prev
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ema50_rising_aligned = align_htf_to_ltf(prices, df_1w, ema50_rising)
+    ema50_falling_aligned = align_htf_to_ltf(prices, df_1w, ema50_falling)
     
-    # 6h data
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    ema13 = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
     # Volume filter: 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -53,13 +49,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 50  # For EMA13 and EMA50
+    start = 50  # For EMA50 and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(ema13[i]) or np.isnan(vol_ema[i]) or 
-            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema50_rising_aligned[i]) or 
-            np.isnan(ema50_falling_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(vol_ema[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(ema50_rising_aligned[i]) or np.isnan(ema50_falling_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -68,29 +64,28 @@ def generate_signals(prices):
         
         # Check exits: reverse signal or stoploss
         if position == 1:  # long position
-            # Exit: Bear Power turns negative OR stoploss
-            if (bear_power[i] < 0 or 
-                close[i] <= entry_price - 2.0 * (high[i] - low[i])):  # ATR proxy
+            # Exit: price breaks below lower Donchian band OR stoploss
+            if (close[i] <= lowest_low[i] or 
+                close[i] <= entry_price - 2.5 * (highest_high[i] - lowest_low[i])):  # ATR proxy
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Bull Power turns positive OR stoploss
-            if (bull_power[i] > 0 or 
-                close[i] >= entry_price + 2.0 * (high[i] - low[i])):
+            # Exit: price breaks above upper Donchian band OR stoploss
+            if (close[i] >= highest_high[i] or 
+                close[i] >= entry_price + 2.5 * (highest_high[i] - lowest_low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Elder Ray + trend + volume
-            bull_entry = (bull_power[i] > 0 and 
-                         ema50_rising_aligned[i] and 
-                         volume[i] > vol_ema[i] * 1.5)
-            bear_entry = (bear_power[i] < 0 and 
-                         ema50_falling_aligned[i] and 
-                         volume[i] > vol_ema[i] * 1.5)
+            # Look for entries: Donchian breakout + trend + volume
+            bull_breakout = close[i] > highest_high[i]
+            bear_breakout = close[i] < lowest_low[i]
+            
+            bull_entry = bull_breakout and ema50_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bear_entry = bear_breakout and ema50_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
             
             if bull_entry:
                 signals[i] = 0.25
