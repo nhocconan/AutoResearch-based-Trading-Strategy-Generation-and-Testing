@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with 12h trend filter and volume confirmation
-Hypothesis: Donchian breakouts capture momentum while 12h EMA50 filters counter-trend moves.
-Volume spike confirms institutional participation. Works in bull (buy breakouts) and bear (sell breakdowns).
-Target: 75-200 total trades over 4 years with strict entry conditions to avoid overtrading.
+4h Donchian breakout with 12h trend filter and volume confirmation
+Hypothesis: Donchian channel breakouts capture institutional breakout moves.
+12h EMA50 filters trend direction to avoid counter-trend trades.
+Volume confirms breakout strength.
+Works in both bull (buy breakouts above upper band) and bear (sell breakouts below lower band).
+Target: 100-200 total trades over 4 years.
 """
 
 import numpy as np
@@ -16,7 +18,7 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Load 12h data for trend filter (once before loop)
@@ -39,10 +41,14 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
+    # Donchian Channel (20-period)
     lookback = 20
-    upper = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
-    lower = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    
+    for i in range(lookback - 1, n):
+        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
+        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
     
     # Volume filter: 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -52,11 +58,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 50  # For Donchian and EMA50
+    start = max(50, lookback - 1)  # For EMA50 and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(upper[i]) or np.isnan(lower[i]) or 
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
             np.isnan(vol_ema[i]) or np.isnan(ema50_12h_aligned[i]) or 
             np.isnan(ema50_rising_aligned[i]) or np.isnan(ema50_falling_aligned[i])):
             if position != 0:
@@ -67,28 +73,28 @@ def generate_signals(prices):
         
         # Check exits: reverse signal or stoploss
         if position == 1:  # long position
-            # Exit: price closes below lower band OR stoploss
-            if (close[i] <= lower[i] or 
-                close[i] <= entry_price - 2.5 * (high[i] - low[i])):  # ATR proxy
+            # Exit: price breaks below lower Donchian band OR stoploss
+            if (close[i] <= lowest_low[i] or 
+                close[i] <= entry_price - 2.5 * (highest_high[i] - lowest_low[i])):  # ATR proxy
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above upper band OR stoploss
-            if (close[i] >= upper[i] or 
-                close[i] >= entry_price + 2.5 * (high[i] - low[i])):
+            # Exit: price breaks above upper Donchian band OR stoploss
+            if (close[i] >= highest_high[i] or 
+                close[i] >= entry_price + 2.5 * (highest_high[i] - lowest_low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
             # Look for entries: Donchian breakout + trend + volume
-            bull_breakout = close[i] > upper[i-1]  # Break above previous upper band
-            bear_breakout = close[i] < lower[i-1]  # Break below previous lower band
+            bull_breakout = close[i] > highest_high[i]
+            bear_breakout = close[i] < lowest_low[i]
             
-            bull_entry = bull_breakout and ema50_rising_aligned[i] and volume[i] > vol_ema[i] * 2.0
-            bear_entry = bear_breakout and ema50_falling_aligned[i] and volume[i] > vol_ema[i] * 2.0
+            bull_entry = bull_breakout and ema50_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bear_entry = bear_breakout and ema50_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
             
             if bull_entry:
                 signals[i] = 0.25
