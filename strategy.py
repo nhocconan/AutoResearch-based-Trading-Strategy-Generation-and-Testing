@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA50 trend filter and volume confirmation
-# Long when price breaks above Donchian(20) high + close > EMA50 + volume > 1.5x average
-# Short when price breaks below Donchian(20) low + close < EMA50 + volume > 1.5x average
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA trend filter and volume confirmation
+# Long when price breaks above Donchian(20) high + close > 12h EMA50 + volume > 1.5x average
+# Short when price breaks below Donchian(20) low + close < 12h EMA50 + volume > 1.5x average
 # Uses 12h EMA50 for trend filter to avoid counter-trend trades
-# Target: 75-200 total trades over 4 years with controlled risk
-# ATR-based stoploss to limit drawdown
+# Designed for balanced performance in bull and bear markets with controlled trade frequency
+# Target: 75-200 total trades over 4 years with ATR-based stoploss to limit drawdown
 
 name = "4h_donchian20_12h_ema50_vol_v1"
 timeframe = "4h"
