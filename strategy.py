@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 6h Donchian(20) breakout + weekly pivot direction + volume confirmation.
-Hypothesis: Price breaks through 20-period high/low with volume confirmation
-and alignment with weekly pivot trend. Weekly pivot direction acts as trend filter
-to avoid counter-trend trades. Works in bull (breakouts above pivot) and bear
-(breakdowns below pivot) by only taking breakouts in the direction of weekly trend.
+Hypothesis: Price breaks out of 20-period Donchian channel with volume confirmation,
+filtered by weekly pivot direction (bullish/bearish). Works in trending markets.
+Uses weekly pivot from 1w timeframe for trend filter, 6h for entry.
 Target: 50-150 total trades over 4 years (12-37/year).
 """
 
@@ -18,30 +17,33 @@ leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
     # Load weekly data for pivot calculation (once before loop)
-    df_w = get_htf_data(prices, '1w')
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Calculate weekly pivot points (standard floor trader pivots)
-    pivot_w = (high_w + low_w + close_w) / 3.0
-    r1_w = 2 * pivot_w - low_w
-    s1_w = 2 * pivot_w - high_w
-    r2_w = pivot_w + (high_w - low_w)
-    s2_w = pivot_w - (high_w - low_w)
+    # Calculate weekly pivot points: P = (H+L+C)/3
+    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
+    # Support/resistance levels
+    r1_1w = 2 * pivot_1w - low_1w
+    s1_1w = 2 * pivot_1w - high_1w
+    r2_1w = pivot_1w + (high_1w - low_1w)
+    s2_1w = pivot_1w - (high_1w - low_1w)
+    r3_1w = high_1w + 2 * (pivot_1w - low_1w)
+    s3_1w = low_1w - 2 * (high_1w - pivot_1w)
     
-    # Weekly trend: above R1 = uptrend, below S1 = downtrend, between = range
-    # We'll use: bullish if close > R1, bearish if close < S1
-    weekly_bullish = close_w > r1_w
-    weekly_bearish = close_w < s1_w
-    
-    # Align weekly trend to 6h
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_w, weekly_bullish.astype(float))
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_w, weekly_bearish.astype(float))
+    # Align weekly pivot levels to 6h timeframe
+    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    r1_1w_aligned = align_htf_to_ltf(prices, df_1w, r1_1w)
+    s1_1w_aligned = align_htf_to_ltf(prices, df_1w, s1_1w)
+    r2_1w_aligned = align_htf_to_ltf(prices, df_1w, r2_1w)
+    s2_1w_aligned = align_htf_to_ltf(prices, df_1w, s2_1w)
+    r3_1w_aligned = align_htf_to_ltf(prices, df_1w, r3_1w)
+    s3_1w_aligned = align_htf_to_ltf(prices, df_1w, s3_1w)
     
     # 6h data
     close = prices['close'].values
@@ -49,12 +51,12 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
-    donchian_len = 20
-    highest_high = pd.Series(high).rolling(window=donchian_len, min_periods=donchian_len).max().values
-    lowest_low = pd.Series(low).rolling(window=donchian_len, min_periods=donchian_len).min().values
+    # Donchian Channel (20 period)
+    dc_period = 20
+    upper_dc = pd.Series(high).rolling(window=dc_period, min_periods=dc_period).max().values
+    lower_dc = pd.Series(low).rolling(window=dc_period, min_periods=dc_period).min().values
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 1.5x average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_confirm = volume > (1.5 * vol_ma)
     
@@ -71,13 +73,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(donchian_len, 20) + 1
+    start = max(dc_period, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or \
-           np.isnan(vol_ma[i]) or np.isnan(atr[i]) or \
-           np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]):
+        if np.isnan(pivot_1w_aligned[i]) or np.isnan(upper_dc[i]) or np.isnan(lower_dc[i]) or \
+           np.isnan(vol_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -86,31 +87,36 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: reversal signal (price crosses back below Donchian low) OR stoploss
-            if close[i] <= lowest_low[i] or close[i] <= entry_price - 2.5 * atr[i]:
+            # Exit: price returns to lower DC OR stoploss
+            if close[i] <= lower_dc[i] or close[i] <= entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: reversal signal (price crosses back above Donchian high) OR stoploss
-            if close[i] >= highest_high[i] or close[i] >= entry_price + 2.5 * atr[i]:
+            # Exit: price returns to upper DC OR stoploss
+            if close[i] >= upper_dc[i] or close[i] >= entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + weekly trend alignment
-            # Long: break above Donchian high + volume + weekly bullish
-            long_breakout = close[i] > highest_high[i]
-            # Short: break below Donchian low + volume + weekly bearish
-            short_breakout = close[i] < lowest_low[i]
+            # Look for entries: Donchian breakout + volume + weekly pivot bias
+            # Long: break above upper DC with volume, above weekly pivot (bullish bias)
+            long_breakout = close[i] > upper_dc[i]
+            long_vol = vol_confirm[i]
+            long_pivot_bias = close[i] > pivot_1w_aligned[i]  # Above weekly pivot = bullish
             
-            if long_breakout and vol_confirm[i] and weekly_bullish_aligned[i] > 0.5:
+            # Short: break below lower DC with volume, below weekly pivot (bearish bias)
+            short_breakout = close[i] < lower_dc[i]
+            short_vol = vol_confirm[i]
+            short_pivot_bias = close[i] < pivot_1w_aligned[i]  # Below weekly pivot = bearish
+            
+            if long_breakout and long_vol and long_pivot_bias:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_breakout and vol_confirm[i] and weekly_bearish_aligned[i] > 0.5:
+            elif short_breakout and short_vol and short_pivot_bias:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
