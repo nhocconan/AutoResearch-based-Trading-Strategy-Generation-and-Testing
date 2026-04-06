@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1w EMA100 trend filter and volume confirmation
-Hypothesis: Donchian breakouts capture institutional momentum, filtered by weekly trend for direction bias and volume for conviction. Works in bull (buy breakouts in uptrend) and bear (sell breakdowns in downtrend). Target: 50-150 trades over 4 years (12-37/year) to balance opportunity and cost.
+4h Donchian(20) breakout with daily pivot direction and volume confirmation
+Hypothesis: Donchian breakouts capture institutional momentum, filtered by daily pivot direction (from 1d data) for trend bias and volume for conviction. Works in bull (buy breakouts above daily pivot) and bear (sell breakdowns below daily pivot). Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1wtrend_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_dailypivot_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -36,36 +36,35 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1w EMA100 for trend bias
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 100:
-        ema_1w[99] = np.mean(close_1w[:100])
-        for i in range(100, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 18) / 20
+    # Get 1d data for daily pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Trend bias: above EMA = bullish, below = bearish
-    trend_bias_1w = np.where(close_1w > ema_1w, 1, -1)
+    # Calculate daily pivot points from previous day
+    # Daily pivot = (previous day high + previous day low + previous day close) / 3
+    daily_pivot = np.full(len(high_1d), np.nan)
+    for i in range(1, len(high_1d)):
+        daily_pivot[i] = (high_1d[i-1] + low_1d[i-1] + close_1d[i-1]) / 3.0
     
-    # Align to 12h timeframe
-    trend_bias_aligned = align_htf_to_ltf(prices, df_1w, trend_bias_1w)
+    # Daily bias: above pivot = bullish, below = bearish
+    daily_bias = np.where(close_1d > daily_pivot, 1, -1)
     
-    # Donchian channels (20-period) from 1w data
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Align daily bias to 4h timeframe
+    daily_bias_aligned = align_htf_to_ltf(prices, df_1d, daily_bias)
     
-    # Upper and lower bands from previous week to avoid look-ahead
-    upper_1w = np.full_like(high_1w, np.nan)
-    lower_1w = np.full_like(low_1w, np.nan)
+    # Donchian channels (20-period) from 1d data
+    upper_1d = np.full_like(high_1d, np.nan)
+    lower_1d = np.full_like(low_1d, np.nan)
     
-    for i in range(20, len(high_1w)):
-        upper_1w[i] = np.max(high_1w[i-20:i])
-        lower_1w[i] = np.min(low_1w[i-20:i])
+    for i in range(20, len(high_1d)):
+        upper_1d[i] = np.max(high_1d[i-20:i])
+        lower_1d[i] = np.min(low_1d[i-20:i])
     
-    # Align to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1w, upper_1w)
-    lower_aligned = align_htf_to_ltf(prices, df_1w, lower_1w)
+    # Align Donchian levels to 4h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -73,11 +72,11 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 100  # Need enough data for Donchian and EMA
+    start = 30  # Need enough data for Donchian and daily pivot
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(trend_bias_aligned[i]) or 
+        if (np.isnan(atr[i]) or np.isnan(daily_bias_aligned[i]) or 
             np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -92,10 +91,10 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian OR against 1w trend
+            # Exit: price breaks below lower Donchian OR against daily bias
             # Stoploss: price drops 2*ATR below entry
             if (close[i] < lower_aligned[i] or
-                trend_bias_aligned[i] == -1 or
+                daily_bias_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -104,10 +103,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian OR against 1w trend
+            # Exit: price breaks above upper Donchian OR against daily bias
             # Stoploss: price rises 2*ATR above entry
             if (close[i] > upper_aligned[i] or
-                trend_bias_aligned[i] == 1 or
+                daily_bias_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -117,20 +116,20 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 24 bars flat
-            if bars_since_entry >= 24:
-                # Breakout entries: upper/lower with trend
+            # Minimum holding period: only allow new entry after 12 bars flat
+            if bars_since_entry >= 12:
+                # Breakout entries: upper/lower with daily bias
                 bull_breakout = close[i] > upper_aligned[i]
                 bear_breakout = close[i] < lower_aligned[i]
                 
-                # Long: breakout with uptrend + volume
-                if bull_breakout and trend_bias_aligned[i] == 1 and volume_filter:
+                # Long: breakout above upper with bullish daily bias + volume
+                if bull_breakout and daily_bias_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: breakdown with downtrend + volume
-                elif bear_breakout and trend_bias_aligned[i] == -1 and volume_filter:
+                # Short: breakdown below lower with bearish daily bias + volume
+                elif bear_breakout and daily_bias_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
@@ -143,3 +142,152 @@ def generate_signals(prices):
                 bars_since_entry += 1
     
     return signals
+
+</think>
+
+#!/usr/bin/env python3
+"""
+4h Donchian(20) breakout with daily pivot direction and volume confirmation
+Hypothesis: Donchian breakouts capture institutional momentum, filtered by daily pivot direction (from 1d data) for trend bias and volume for conviction. Works in bull (buy breakouts above daily pivot) and bear (sell breakdowns below daily pivot). Target: 75-200 total trades over 4 years (19-50/year).
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "4h_donchian20_dailypivot_vol_v1"
+timeframe = "4h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    # Price and volume data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # 14-period ATR
+    atr = np.full(n, np.nan)
+    if n >= 14:
+        tr = np.maximum(
+            high[1:] - low[1:],
+            np.abs(high[1:] - close[:-1]),
+            np.abs(low[1:] - close[:-1])
+        )
+        if len(tr) > 0:
+            atr[1] = tr[0]
+            for i in range(2, n):
+                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
+    
+    # Get 1d data for daily pivot calculation
+    df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    
+    # Calculate daily pivot points from previous day
+    # Daily pivot = (previous day high + previous day low + previous day close) / 3
+    daily_pivot = np.full(len(high_1d), np.nan)
+    for i in range(1, len(high_1d)):
+        daily_pivot[i] = (high_1d[i-1] + low_1d[i-1] + close_1d[i-1]) / 3.0
+    
+    # Daily bias: above pivot = bullish, below = bearish
+    daily_bias = np.where(close_1d > daily_pivot, 1, -1)
+    
+    # Align daily bias to 4h timeframe
+    daily_bias_aligned = align_htf_to_ltf(prices, df_1d, daily_bias)
+    
+    # Donchian channels (20-period) from 1d data
+    upper_1d = np.full_like(high_1d, np.nan)
+    lower_1d = np.full_like(low_1d, np.nan)
+    
+    for i in range(20, len(high_1d)):
+        upper_1d[i] = np.max(high_1d[i-20:i])
+        lower_1d[i] = np.min(low_1d[i-20:i])
+    
+    # Align Donchian levels to 4h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    bars_since_entry = 0
+    
+    # Start from warmup period
+    start = 30  # Need enough data for Donchian and daily pivot
+    
+    for i in range(start, n):
+        # Skip if required data not available
+        if (np.isnan(atr[i]) or np.isnan(daily_bias_aligned[i]) or 
+            np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i])):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            bars_since_entry += 1
+            continue
+        
+        # Volume filter (20-period average)
+        vol_ma = np.mean(volume[max(0, i-20):i])
+        volume_filter = volume[i] > vol_ma * 1.5
+        
+        # Check exits and stoploss
+        if position == 1:  # long position
+            # Exit: price breaks below lower Donchian OR against daily bias
+            # Stoploss: price drops 2*ATR below entry
+            if (close[i] < lower_aligned[i] or
+                daily_bias_aligned[i] == -1 or
+                close[i] < entry_price - 2.0 * atr[i]):
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
+            else:
+                signals[i] = 0.25
+            bars_since_entry += 1
+        elif position == -1:  # short position
+            # Exit: price breaks above upper Donchian OR against daily bias
+            # Stoploss: price rises 2*ATR above entry
+            if (close[i] > upper_aligned[i] or
+                daily_bias_aligned[i] == 1 or
+                close[i] > entry_price + 2.0 * atr[i]):
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
+            else:
+                signals[i] = -0.25
+            bars_since_entry += 1
+        else:
+            # Look for entries
+            # Minimum holding period: only allow new entry after 12 bars flat
+            if bars_since_entry >= 12:
+                # Breakout entries: upper/lower with daily bias
+                bull_breakout = close[i] > upper_aligned[i]
+                bear_breakout = close[i] < lower_aligned[i]
+                
+                # Long: breakout above upper with bullish daily bias + volume
+                if bull_breakout and daily_bias_aligned[i] == 1 and volume_filter:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                # Short: breakdown below lower with bearish daily bias + volume
+                elif bear_breakout and daily_bias_aligned[i] == -1 and volume_filter:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.0
+                    bars_since_entry += 1
+            else:
+                signals[i] = 0.0
+                bars_since_entry += 1
+    
+    return signals
+
+</think>
