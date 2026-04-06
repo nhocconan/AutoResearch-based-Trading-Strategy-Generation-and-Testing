@@ -3,11 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6s Donchian channel breakout with weekly pivot direction and volume confirmation.
-# Uses weekly pivot points (calculated from previous week) to determine bias: long only above weekly pivot, short only below.
-# Donchian(20) breakout on 6h timeframe provides entry signals in direction of weekly bias.
-# Volume confirmation filters breakouts. Works in both bull (breakouts continue) and bear (breakdowns continue) markets.
-# Target: 50-150 total trades over 4 years (12-37/year) with strict entry conditions.
+# Hypothesis: 6h Donchian(20) breakout with weekly pivot direction and volume confirmation.
+# Weekly pivot levels (calculated from prior week) provide institutional reference points.
+# In uptrend (price above weekly pivot): long on breakout above Donchian(20) high with volume spike.
+# In downtrend (price below weekly pivot): short on breakdown below Donchian(20) low with volume spike.
+# Weekly pivot adds structural bias, reducing whipsaw in ranging markets.
+# Volume confirmation ensures breakouts have institutional participation.
+# Target: 12-37 trades/year by requiring confluence of trend, breakout, and volume.
 
 name = "exp_13635_6h_donchian20_weekly_pivot_vol_v1"
 timeframe = "6h"
@@ -21,8 +23,8 @@ SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels: upper = max(high, period), lower = min(low, period)"""
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -37,37 +39,34 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_pivot_points(high, low, close):
-    """Calculate classic pivot points: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H, etc."""
+def calculate_weekly_pivot(high, low, close):
+    """Calculate weekly pivot points from prior week's OHLC"""
+    # Pivot point = (H + L + C) / 3
     pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, s1, r2, s2, r3, s3
+    # Support 1 = (2 * Pivot) - High
+    s1 = (2 * pivot) - high
+    # Resistance 1 = (2 * Pivot) - Low
+    r1 = (2 * pivot) - low
+    return pivot, r1, s1
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for pivot points ONCE before loop
+    # Load weekly data for pivot calculation ONCE before loop
     df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate weekly pivot points from previous week's OHLC
+    # Calculate weekly pivot from prior week's OHLC
     weekly_high = df_weekly['high'].values
     weekly_low = df_weekly['low'].values
     weekly_close = df_weekly['close'].values
+    weekly_pivot, weekly_r1, weekly_s1 = calculate_weekly_pivot(weekly_high, weekly_low, weekly_close)
     
-    pivot, r1, s1, r2, s2, r3, s3 = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
-    
-    # We only need the weekly pivot for bias (could also use R3/S3 for stronger bias)
-    weekly_pivot = pivot
-    
-    # Align weekly pivot to 6h timeframe (shifted by 1 week for no look-ahead)
+    # Align weekly pivot to 6s timeframe (using prior week's values)
     weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
+    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
+    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
     
     # Calculate 6h indicators
     high = prices['high'].values
@@ -76,7 +75,7 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -113,20 +112,19 @@ def generate_signals(prices):
                 position = 0
                 continue
         
+        # Determine trend bias from weekly pivot
+        price_above_pivot = close[i] > weekly_pivot_aligned[i]
+        price_below_pivot = close[i] < weekly_pivot_aligned[i]
+        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Weekly bias: long above weekly pivot, short below weekly pivot
-        # Note: using strict inequality to avoid whipsaw at pivot level
-        bullish_bias = close[i] > weekly_pivot_aligned[i]
-        bearish_bias = close[i] < weekly_pivot_aligned[i]
+        # Breakout signals
+        # Long: price above weekly pivot AND breakout above Donchian upper with volume
+        long_signal = price_above_pivot and volume_ok and close[i] > donchian_upper[i]
         
-        # Donchian breakout signals
-        # Long: price breaks above Donchian upper band with volume and bullish bias
-        long_signal = volume_ok and bullish_bias and close[i] > donchian_upper[i]
-        
-        # Short: price breaks below Donchian lower band with volume and bearish bias
-        short_signal = volume_ok and bearish_bias and close[i] < donchian_lower[i]
+        # Short: price below weekly pivot AND breakdown below Donchian lower with volume
+        short_signal = price_below_pivot and volume_ok and close[i] < donchian_lower[i]
         
         # Generate signals
         if position == 0:
@@ -143,16 +141,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on Donchian break of middle or opposite signal
-            # Simple exit: reverse signal or stop loss
-            if short_signal:
+            # Exit long on breakdown below Donchian lower or stop loss
+            if close[i] < donchian_lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on opposite signal
-            if long_signal:
+            # Exit short on breakout above Donchian upper or stop loss
+            if close[i] > donchian_upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
