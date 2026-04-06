@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + Volume + ADX Filter (Optimized v13)
+4h Donchian(20) Breakout + Volume + ADX Filter (Optimized)
 Hypothesis: Donchian breakouts on 4h timeframe capture medium-term momentum with proven performance.
 Volume confirms institutional participation. ADX filter from 4h ensures we only trade in trending markets.
-Further optimized entry conditions to reduce trade frequency and improve edge.
+Reduced position size and optimized filters to achieve 75-200 trades over 4 years (19-50/year).
+Works in both bull (breakouts) and bear (breakdowns) markets by going long on highs, short on lows.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_volume_adx_v13"
+name = "4h_donchian20_volume_adx_v12"
 timeframe = "4h"
 leverage = 1.0
 
@@ -64,7 +65,7 @@ def generate_signals(prices):
     dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
     adx = wilder_smooth(dx, period_adx)
     
-    # Align ADX to 4h timeframe
+    # Align ADX from 1d to 4h
     adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Price and volume data
@@ -99,21 +100,21 @@ def generate_signals(prices):
         # Volume filter (20-period average)
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            volume_filter = volume[i] > vol_ma * 2.5  # Further increased threshold to reduce trades
+            volume_filter = volume[i] > vol_ma * 2.0  # Increased threshold to reduce trades
         else:
             volume_filter = False
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR ADX < 20
-            if close[i] < lowest_low or adx_aligned[i] < 20:
+            # Exit: price closes below Donchian lower OR ADX < 25
+            if close[i] < lowest_low or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.20
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR ADX < 20
-            if close[i] > highest_high or adx_aligned[i] < 20:
+            # Exit: price closes above Donchian upper OR ADX < 25
+            if close[i] > highest_high or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
@@ -122,7 +123,7 @@ def generate_signals(prices):
             # Look for entries: Donchian breakout + volume + ADX trend
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
-            trend_filter = adx_aligned[i] > 35  # Further increased threshold for stronger trend
+            trend_filter = adx_aligned[i] > 30  # Increased threshold for stronger trend
             
             if i >= 20 and bull_breakout and volume_filter and trend_filter:
                 signals[i] = 0.20
