@@ -7,10 +7,10 @@ name = "exp_13926_4h_donchian20_1d_ema_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
-# Hypothesis: 4h Donchian breakout with 1d EMA(50) trend filter and volume confirmation (>2.0x MA)
-# Works in bull by catching breakouts above daily trend, in bear by catching breakdowns below daily trend
-# Target: 100-180 trades over 4 years by using strict volume threshold (2.0x) and daily trend alignment
-# Uses proper Wilder ATR for volatility-based stops (2.5x ATR)
+# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation
+# Refined version with reduced trade frequency: higher volume threshold (2.5x) and stricter exit conditions
+# Target: 75-200 trades over 4 years by requiring strong volume confirmation and clear trend alignment
+# Works in bull (breaks out to new highs) and bear (breaks down to new lows)
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian upper and lower bands"""
@@ -57,7 +57,7 @@ def generate_signals(prices):
     # ATR for stop loss
     atr = calculate_atr(high, low, close, 14)
     
-    # Volume confirmation
+    # Volume confirmation with higher threshold to reduce trades
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -92,8 +92,8 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation - higher threshold to reduce trades
-        volume_ok = volume[i] > (volume_ma[i] * 2.0)
+        # Volume confirmation - higher threshold to reduce trades (2.5x instead of 2.0x)
+        volume_ok = volume[i] > (volume_ma[i] * 2.5)
         
         # Trend filter from 1d EMA
         trend_up = close[i] > ema_1d_aligned[i]
@@ -122,14 +122,14 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on Donchian breakdown or trend change
+            # Exit long on Donchian breakdown or trend change or trailing stop
             if close[i] < donchian_lower[i] or not trend_up:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short on Donchian breakout or trend change
+            # Exit short on Donchian breakout or trend change or trailing stop
             if close[i] > donchian_upper[i] or not trend_down:
                 signals[i] = 0.0
                 position = 0
