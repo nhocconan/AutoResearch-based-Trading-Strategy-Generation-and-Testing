@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian channel breakout with daily EMA trend filter and volume confirmation.
-# In bull markets, price breaks above upper Donchian band with volume and above daily EMA.
-# In bear markets, price breaks below lower Donchian band with volume and below daily EMA.
-# Uses Donchian(20) from 12h data and EMA(50) from daily for trend filter.
-# Volume confirmation reduces false breakouts. Target: 75-200 total trades over 4 years.
+# Hypothesis: 4-hour Donchian(20) breakout with volume confirmation and 1-day EMA trend filter.
+# Donchian channels capture breakouts; volume confirms institutional participation; daily EMA ensures
+# alignment with higher timeframe momentum to avoid counter-trend trades. Works in bull markets (breakouts above upper band)
+// and bear markets (breakdowns below lower band). Target: 75-200 total trades over 4 years.
 
-name = "exp_13296_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13297_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -40,7 +39,7 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for EMA trend filter
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate daily EMA for trend filter
@@ -48,7 +47,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -100,7 +99,7 @@ def generate_signals(prices):
         uptrend = close[i] > ema_1d_aligned[i]
         downtrend = close[i] < ema_1d_aligned[i]
         
-        # Breakout signals using Donchian channels
+        # Donchian breakout signals
         breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
         breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
