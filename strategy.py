@@ -3,10 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian breakout with daily EMA trend filter and volume confirmation.
-# Focuses on capturing strong directional moves in both bull and bear markets.
-# Uses volume to filter weak breakouts and EMA to align with higher timeframe trend.
-# Targets 75-200 trades over 4 years (19-50/year) to balance opportunity and cost.
+# Hypothesis: 4-hour Donchian channel breakout with daily volume confirmation and 1-day EMA trend filter.
+# The strategy captures strong directional moves while filtering weak signals using volume
+# and aligning with higher timeframe trend. Designed to work in both bull and bear markets
+# by focusing on breakouts that occur with institutional participation (volume spike).
+# Target: 80-180 trades over 4 years (20-45/year) to balance opportunity and cost.
 
 name = "exp_13046_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
