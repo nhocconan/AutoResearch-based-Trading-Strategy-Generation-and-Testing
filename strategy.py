@@ -1,51 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #12299: 6h Ichimoku Cloud + 1d Trend + Volume Confirmation
-Hypothesis: Use 1d Ichimoku for trend direction (price above/below cloud),
-6h Tenkan/Kijun cross for entry timing, and volume spikes for confirmation.
-Ichimoku provides dynamic support/resistance that adapts to volatility,
-working in both bull and bear markets. Target: 100-200 total trades over 4 years.
+Experiment #12299: 6h Camarilla Pivot + Volume + Trend Filter
+Hypothesis: Use daily Camarilla pivot levels (R3/S3 for mean reversion, R4/S4 for breakout)
+combined with 12h EMA trend filter and volume confirmation. Works in bull/bear by
+switching between mean reversion at extreme levels and breakout continuation.
+Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12299_6h_ichimoku_1d_trend_vol_v1"
+name = "exp_12299_6h_camarilla_pivot_vol_trend_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-TENKAN_PERIOD = 9
-KIJUN_PERIOD = 26
-SENKOU_B_PERIOD = 52
+CAMARILLA_LOOKBACK = 20
+TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_ichimoku(high, low, close):
-    """Calculate Ichimoku components"""
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
-    tenkan = (pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
-              pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
-    
-    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
-    kijun = (pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
-             pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan + kijun) / 2).shift(KIJUN_PERIOD)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
-    senkou_b = ((pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
-                 pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2).shift(KIJUN_PERIOD)
-    
-    # Chikou Span (Lagging Span): Close shifted 26 periods behind
-    chikou = pd.Series(close).shift(-KIJUN_PERIOD)
-    
-    return tenkan.values, kijun.values, senkou_a.values, senkou_b.values, chikou.values
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -56,23 +37,37 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_camarilla(high, low, close, lookback):
+    """Calculate Camarilla pivot levels for each bar"""
+    # Use rolling window of lookback period
+    high_max = pd.Series(high).rolling(window=lookback, min_periods=lookback).max().values
+    low_min = pd.Series(low).rolling(window=lookback, min_periods=lookback).min().values
+    close_prev = np.roll(close, 1)
+    close_prev[0] = close[0]  # handle first bar
+    
+    # Pivot point (standard)
+    pivot = (high_max + low_min + close_prev) / 3.0
+    range_val = high_max - low_min
+    
+    # Camarilla levels
+    r4 = close_prev + (range_val * 1.1 / 2)
+    r3 = close_prev + (range_val * 1.1 / 4)
+    s3 = close_prev - (range_val * 1.1 / 4)
+    s4 = close_prev - (range_val * 1.1 / 2)
+    
+    return r4, r3, s3, s4
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data ONCE before loop for trend
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d Ichimoku for trend
-    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d, chikou_1d = calculate_ichimoku(
-        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
-    
-    # Align 1d Ichimoku to 6h
-    tenkan_1d_aligned = align_ltf_to_htf(prices, df_1d, tenkan_1d)
-    kijun_1d_aligned = align_ltf_to_htf(prices, df_1d, kijun_1d)
-    senkou_a_1d_aligned = align_ltf_to_htf(prices, df_1d, senkou_a_1d)
-    senkou_b_1d_aligned = align_ltf_to_htf(prices, df_1d, senkou_b_1d)
+    # Calculate 12h EMA for trend
+    ema_12h = calculate_ema(df_12h['close'].values, TREND_EMA_PERIOD)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # Calculate 6h indicators
     high = prices['high'].values
@@ -80,7 +75,8 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    tenkan_6h, kijun_6h, _, _, _ = calculate_ichimoku(high, low, close)
+    r4, r3, s3, s4 = calculate_camarilla(high, low, close, CAMARILLA_LOOKBACK)
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -89,11 +85,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(SENKOU_B_PERIOD + KIJUN_PERIOD, TENKAN_PERIOD, KIJUN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(CAMARILLA_LOOKBACK, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 1d Ichimoku not available
-        if np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]):
+        # Skip if 12h EMA not available
+        if np.isnan(ema_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -113,23 +109,26 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # 1d Ichimoku trend filter
-        # Price above both Senkou spans = uptrend
-        # Price below both Senkou spans = downtrend
-        # Price between Senkou spans = neutral (no trade)
-        price_above_cloud = close[i] > senkou_a_1d_aligned[i] and close[i] > senkou_b_1d_aligned[i]
-        price_below_cloud = close[i] < senkou_a_1d_aligned[i] and close[i] < senkou_b_1d_aligned[i]
+        # Trend filter (12h)
+        uptrend_12h = close[i] > ema_12h_aligned[i]
+        downtrend_12h = close[i] < ema_12h_aligned[i]
         
-        # 6h Tenkan/Kijun cross for entry
-        tenkan_kijun_cross_up = tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]
-        tenkan_kijun_cross_down = tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]
+        # Camarilla conditions
+        # Mean reversion at S3/R3 (extreme levels)
+        long_mean_revert = close[i] <= s3[i] and close[i] > s4[i]  # between S3 and S4
+        short_mean_revert = close[i] >= r3[i] and close[i] < r4[i]  # between R3 and R4
         
-        # Entry conditions
-        long_entry = volume_ok and price_above_cloud and tenkan_kijun_cross_up
-        short_entry = volume_ok and price_below_cloud and tenkan_kijun_cross_down
+        # Breakout continuation at S4/R4
+        long_breakout = close[i] > s4[i]  # break above S4
+        short_breakout = close[i] < r4[i]  # break below R4
+        
+        # Entry conditions: mean reversion in ranging, breakout in trending
+        # In uptrend: look for long mean reversion at S3 or breakout above S4
+        # In downtrend: look for short mean reversion at R3 or breakdown below R4
+        long_entry = volume_ok and uptrend_12h and (long_mean_revert or long_breakout)
+        short_entry = volume_ok and downtrend_12h and (short_mean_revert or short_breakout)
         
         # Generate signals
         if position == 0:
@@ -151,6 +150,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
-# Alias for backward compatibility
-align_htf_to_ltf = align_ltf_to_htf
