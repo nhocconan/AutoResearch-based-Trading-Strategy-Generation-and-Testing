@@ -4,11 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 1d Donchian(20) breakout with 1w EMA trend filter and volume confirmation
-# Long when price breaks above 20-period daily Donchian high and 1w EMA(20) is rising
-# Short when price breaks below 20-period daily Donchian low and 1w EMA(20) is falling
+# Long when price breaks above 20-period Donchian high and 1w EMA(20) is rising
+# Short when price breaks below 20-period Donchian low and 1w EMA(20) is falling
 # Uses volume > 20-period average to confirm breakouts
-# Designed for low trade frequency (target: 30-100 trades over 4 years) with strong trend capture
-# Works in bull markets via trend-following breakouts and in bear via short breakdowns
+# Target: 30-100 total trades over 4 years with controlled risk in both bull and bear markets
+# Uses 1d timeframe with 1w trend filter to reduce trade frequency and improve signal quality
 
 name = "1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
