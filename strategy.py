@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation.
-# Long when price breaks above Donchian(20) high and 1d close > 1d open (bullish day).
-# Short when price breaks below Donchian(20) low and 1d close < 1d open (bearish day).
-# Volume > 1.5x 20-period average for confirmation.
-# Daily trend filter avoids counter-trend trades. Donchian breakouts capture momentum.
-# Target: 75-150 total trades over 4 years (19-38/year).
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour trend filter and volume confirmation.
+# Long when price breaks above Donchian(20) high and 12h close > 12h open (bullish 12h bar).
+# Short when price breaks below Donchian(20) low and 12h close < 12h open (bearish 12h bar).
+# Uses volume > 1.5x 20-period average for confirmation.
+# 12h trend filter avoids counter-trend trades. Donchian breakouts capture momentum.
+# Target: 75-200 total trades over 4 years (19-50/year).
 
-name = "12h_donchian20_1d_trend_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_12h_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -31,14 +31,14 @@ def generate_signals(prices):
     donchian_high = high_series.rolling(window=20, min_periods=20).max().values
     donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Daily trend filter: bullish/bearish day based on close vs open
-    df_1d = get_htf_data(prices, '1d')
-    daily_open = df_1d['open'].values
-    daily_close = df_1d['close'].values
-    daily_bullish = daily_close > daily_open  # True for bullish day
-    daily_bearish = daily_close < daily_open   # True for bearish day
-    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
-    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
+    # 12h trend filter: bullish/bearish 12h bar based on close vs open
+    df_12h = get_htf_data(prices, '12h')
+    twelve_h_open = df_12h['open'].values
+    twelve_h_close = df_12h['close'].values
+    twelve_h_bullish = twelve_h_close > twelve_h_open  # True for bullish 12h bar
+    twelve_h_bearish = twelve_h_close < twelve_h_open   # True for bearish 12h bar
+    twelve_h_bullish_aligned = align_htf_to_ltf(prices, df_12h, twelve_h_bullish)
+    twelve_h_bearish_aligned = align_htf_to_ltf(prices, df_12h, twelve_h_bearish)
     
     # Volume filter: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
@@ -49,8 +49,8 @@ def generate_signals(prices):
     entry_price = 0.0
     
     for i in range(20, n):
-        # Skip if daily trend data not available
-        if np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]):
+        # Skip if 12h trend data not available
+        if np.isnan(twelve_h_bullish_aligned[i]) or np.isnan(twelve_h_bearish_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -62,33 +62,33 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low or daily turn bearish
+            # Exit: price breaks below Donchian low or 12h turn bearish
             if (low[i] <= donchian_low[i] or 
-                daily_bearish_aligned[i]):
+                twelve_h_bearish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high or daily turn bullish
+            # Exit: price breaks above Donchian high or 12h turn bullish
             if (high[i] >= donchian_high[i] or 
-                daily_bullish_aligned[i]):
+                twelve_h_bullish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and daily trend filter
+            # Look for entries with volume confirmation and 12h trend filter
             if volume_filter:
-                # Long: break above Donchian high during bullish day
+                # Long: break above Donchian high during bullish 12h bar
                 if (high[i] > donchian_high[i] and 
-                    daily_bullish_aligned[i]):
+                    twelve_h_bullish_aligned[i]):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: break below Donchian low during bearish day
+                # Short: break below Donchian low during bearish 12h bar
                 elif (low[i] < donchian_low[i] and 
-                      daily_bearish_aligned[i]):
+                      twelve_h_bearish_aligned[i]):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
