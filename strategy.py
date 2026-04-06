@@ -3,38 +3,25 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R with daily trend filter and volume confirmation.
-# Williams %R measures momentum and identifies overbought/oversold conditions.
-# In trending markets, pullbacks to oversold (in uptrend) or overbought (in downtrend)
-# provide high-probability entries. Daily trend filter ensures alignment with higher
-# timeframe momentum. Volume confirmation filters out weak breakouts. Works in both
-# bull and bear markets by trading pullbacks within the trend.
+# Hypothesis: 6h Donchian breakout with daily ATR filter and volume confirmation.
+# Breakouts above 20-period high (or below low) with volume > 1.5x average and
+# ATR expansion (ATR > 1.2x ATR MA) indicate momentum with institutional interest.
+# Works in bull markets (breakouts up) and bear markets (breakdowns down).
+# ATR filter prevents whipsaws in low volatility regimes.
 
-name = "exp_13351_6h_williamsr_daily_trend_vol_v1"
+name = "exp_13351_6h_donchian20_atr_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-WILLIAMS_PERIOD = 14
-OVERSOLD = -80
-OVERBOUGHT = -20
-TREND_EMA_PERIOD = 50
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
+ATR_MA_PERIOD = 20
+ATR_THRESHOLD_MULTIPLIER = 1.2
+SIGNAL_SIZE = 0.25
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_williams_r(high, low, close, period):
-    """Calculate Williams %R"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-    return wr.values
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -50,13 +37,23 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load daily data ONCE before loop for ATR and Donchian
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend filter
+    # Calculate daily ATR for volatility filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, ATR_PERIOD)
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=ATR_MA_PERIOD, min_periods=ATR_MA_PERIOD).mean().values
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
+    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
+    
+    # Calculate daily Donchian channels
+    high_ma_1d = pd.Series(high_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    low_ma_1d = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    donchian_high_1d = align_htf_to_ltf(prices, df_1d, high_ma_1d)
+    donchian_low_1d = align_htf_to_ltf(prices, df_1d, low_ma_1d)
     
     # Calculate 6h indicators
     high = prices['high'].values
@@ -64,14 +61,8 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R
-    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
-    
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # ATR
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -79,11 +70,13 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(TREND_EMA_PERIOD, WILLIAMS_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, ATR_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        # Skip if indicators not available
+        if np.isnan(donchian_high_1d[i]) or np.isnan(donchian_low_1d[i]) or \
+           np.isnan(atr_1d_aligned[i]) or np.isnan(atr_ma_1d_aligned[i]) or \
+           np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -103,30 +96,27 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter: price above/below daily EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # ATR filter: current ATR > threshold * ATR MA (volatility expansion)
+        atr_expansion = atr_1d_aligned[i] > (atr_ma_1d_aligned[i] * ATR_THRESHOLD_MULTIPLIER)
         
-        # Williams %R signals
-        oversold = williams_r[i] < OVERSOLD
-        overbought = williams_r[i] > OVERBOUGHT
+        # Breakout signals using daily Donchian
+        breakout_up = volume_ok and atr_expansion and (high[i] > donchian_high_1d[i-1])
+        breakout_down = volume_ok and atr_expansion and (low[i] < donchian_low_1d[i-1])
         
         # Generate signals
         if position == 0:
-            # Long: uptrend + oversold + volume
-            if uptrend and oversold and volume_ok:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            # Short: downtrend + overbought + volume
-            elif downtrend and overbought and volume_ok:
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr_1d_aligned[i])
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr_1d_aligned[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
