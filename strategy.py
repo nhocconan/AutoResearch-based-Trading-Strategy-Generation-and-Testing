@@ -1,25 +1,25 @@
-#!/usr/bin/env python3
+#3#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h strategy using 1d Donchian breakout with volume confirmation and volatility filter.
+# Hypothesis: 4h strategy using 1d Donchian breakout with volume confirmation and ATR stoploss.
 # Goes long when price breaks above 1d Donchian upper channel with above-average volume,
 # short when breaks below lower channel with volume.
-# Uses 1d ATR-based volatility filter to avoid low-volatility chop.
+# Uses 1d EMA50 as trend filter to avoid counter-trend trades.
 # Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
+# Donchian channels provide clear breakout levels that work across market regimes.
 
-name = "exp_13783_4d_donchian1d_vol_volat_filt_v1"
+name = "exp_13783_4h_donchian1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 10
 VOLUME_THRESHOLD = 1.5
-VOLATILITY_MA_PERIOD = 20
-VOLATILITY_THRESHOLD = 0.5  # ATR as % of price must be above this
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -29,6 +29,10 @@ def calculate_donchian(high, low, period):
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -45,7 +49,7 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for Donchian channels and volatility filter ONCE before loop
+    # Load 1d data for Donchian channels and EMA trend filter ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d Donchian channels
@@ -53,17 +57,14 @@ def generate_signals(prices):
     low_1d = df_1d['low'].values
     donchian_upper, donchian_lower = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
     
-    # Calculate 1d ATR for volatility filter
+    # Calculate 1d EMA for trend filter
     close_1d = df_1d['close'].values
-    atr_1d = calculate_atr(high_1d, low_1d, close_1d, 14)
-    # Calculate ATR as percentage of price for volatility filter
-    volatility = atr_1d / close_1d
-    volatility_ma = pd.Series(volatility).rolling(window=VOLATILITY_MA_PERIOD, min_periods=VOLATILITY_MA_PERIOD).mean().values
+    ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
     
     # Align 1d indicators to 4h timeframe
     donchian_upper_aligned = align_htf_to_ltf(prices, df_1d, donchian_upper)
     donchian_lower_aligned = align_htf_to_ltf(prices, df_1d, donchian_lower)
-    volatility_ma_aligned = align_htf_to_ltf(prices, df_1d, volatility_ma)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # 4h data for entry timing and ATR
     high = prices['high'].values
@@ -83,11 +84,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, VOLATILITY_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or np.isnan(volatility_ma_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(donchian_upper_aligned[i]) or np.isnan(donchian_lower_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -112,12 +113,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Volatility filter - only trade when volatility is above average
-        volatilty_ok = volatility_ma_aligned[i] > VOLATILITY_THRESHOLD
+        # Trend direction from 1d EMA
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
         
         # Donchian breakout signals
-        long_signal = volume_ok and volatilty_ok and close[i] > donchian_upper_aligned[i]
-        short_signal = volume_ok and volatilty_ok and close[i] < donchian_lower_aligned[i]
+        long_signal = volume_ok and above_ema and close[i] > donchian_upper_aligned[i]
+        short_signal = volume_ok and below_ema and close[i] < donchian_lower_aligned[i]
         
         # Generate signals
         if position == 0:
