@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stop
-Hypothesis: Uses 12h timeframe for trade execution with 1d trend bias. 
-Breakouts in direction of daily EMA with volume confirmation capture momentum.
-Designed for low trade frequency (~15-25/year) to minimize fee decay in bear markets.
-Works in bull (breakouts with uptrend) and bear (breakdowns with downtrend).
+4h Donchian(20) Breakout + 1d EMA50 Trend + Volume Spike + ATR Stop
+Hypothesis: Breakouts with daily trend bias and volume confirmation capture momentum
+while avoiding chop. Daily EMA50 provides stronger trend filter than 12h EMA20.
+Designed for 20-40 trades/year to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dtrend_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1dema50_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,28 +38,28 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # 1d EMA20 for trend bias
+    # 1d EMA50 for trend bias
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 20:
-        ema_1d[19] = np.mean(close_1d[:20])
-        for i in range(20, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 18) / 20
+    if len(close_1d) >= 50:
+        ema_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 48) / 50
     
     # Trend bias: above EMA = bullish, below = bearish
     trend_bias_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align to 12h timeframe
+    # Align to 4h timeframe
     trend_bias_aligned = align_htf_to_ltf(prices, df_1d, trend_bias_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    bars_since_entry = 0
+    bars_since_exit = 0  # Minimum bars between trades
     
     # Start from warmup period
-    start = 20  # For Donchian
+    start = 50  # For EMA50 and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
@@ -69,7 +68,7 @@ def generate_signals(prices):
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
-            bars_since_entry += 1
+            bars_since_exit += 1
             continue
         
         # Donchian channel (20-period)
@@ -89,10 +88,10 @@ def generate_signals(prices):
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
                 signals[i] = 0.25
-            bars_since_entry += 1
+            bars_since_exit += 1
         elif position == -1:  # short position
             # Exit: price closes above Donchian upper OR against 1d trend
             # Stoploss: price rises 2*ATR above entry
@@ -101,14 +100,14 @@ def generate_signals(prices):
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
-                bars_since_entry = 0
+                bars_since_exit = 0
             else:
                 signals[i] = -0.25
-            bars_since_entry += 1
+            bars_since_exit += 1
         else:
             # Look for entries: Donchian breakout + 1d trend + volume spike
-            # Minimum holding period: only allow new entry after 15 bars flat
-            if bars_since_entry >= 15:
+            # Minimum 10 bars between trades to reduce frequency
+            if bars_since_exit >= 10:
                 bull_breakout = close[i] > highest_high
                 bear_breakout = close[i] < lowest_low
                 
@@ -117,18 +116,18 @@ def generate_signals(prices):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                    bars_since_entry = 0
+                    bars_since_exit = 0
                 # Short: bearish breakout with bearish 1d trend and volume
                 elif bear_breakout and trend_bias_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
-                    bars_since_entry = 0
+                    bars_since_exit = 0
                 else:
                     signals[i] = 0.0
-                    bars_since_entry += 1
+                    bars_since_exit += 1
             else:
                 signals[i] = 0.0
-                bars_since_entry += 1
+                bars_since_exit += 1
     
     return signals
