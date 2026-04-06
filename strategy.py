@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
-# Long when price breaks above Donchian upper (20-period) AND price > 1d EMA(50) AND volume > 2x 20-period average
-# Short when price breaks below Donchian lower (20-period) AND price < 1d EMA(50) AND volume > 2x 20-period average
-# Exit when price crosses Donchian midline (10-period average of upper/lower)
-# Uses 12h timeframe to reduce trade frequency, 1d EMA for trend filter, Donchian for breakout signals
-# Target: 50-150 total trades over 4 years (12-37/year) for optimal 12h performance
+# Hypothesis: 12h KAMA + 1d RSI + volume confirmation
+# Long when KAMA rising, RSI(1d) > 50, and volume > 1.5x 20-period average
+# Short when KAMA falling, RSI(1d) < 50, and volume > 1.5x 20-period average
+# Exit when KAMA changes direction (trend reversal)
+# Uses 12h timeframe to limit trades, 1d RSI for trend filter, volume for confirmation
+# Target: 50-150 total trades over 4 years (12-37/year)
 
-name = "12h_donchian20_1d_ema_vol_v1"
+name = "12h_kama_1d_rsi_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -20,68 +20,81 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price data
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_upper = highest_high.values
-    donchian_lower = lowest_low.values
-    donchian_mid = (donchian_upper + donchian_lower) / 2
+    # KAMA (Kaufman Adaptive Moving Average) on 12h
+    def kama(close, er_period=10, fast=2, slow=30):
+        change = np.abs(np.diff(close, n=er_period))
+        volatility = np.sum(np.abs(np.diff(close)), axis=0)
+        er = np.where(volatility != 0, change / volatility, 0)
+        sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+        kama = np.full_like(close, np.nan)
+        kama[er_period] = close[er_period]
+        for i in range(er_period+1, len(close)):
+            kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+        return kama
     
-    # 1-day EMA(50) trend filter
+    kama_vals = kama(close, er_period=10, fast=2, slow=30)
+    
+    # 1-day RSI(14) trend filter
     df_1d = get_htf_data(prices, '1d')
     daily_close = df_1d['close'].values
     
-    # Calculate 50-period EMA on daily close
-    daily_close_series = pd.Series(daily_close)
-    daily_ema = daily_close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate RSI on daily close
+    delta = np.diff(daily_close)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).rolling(window=14, min_periods=14).mean()
+    avg_loss = pd.Series(loss).rolling(window=14, min_periods=14).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    rsi = np.concatenate([np.full(14, np.nan), rsi.values])
     
-    # Align daily EMA to 12h timeframe
-    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
+    # Align daily RSI to 12h timeframe
+    rsi_aligned = align_htf_to_ltf(prices, df_1d, rsi)
     
-    # Volume confirmation: volume > 2x 20-period average
+    # Volume confirmation: volume > 1.5x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 2.0 * volume_ma.values
+    volume_threshold = 1.5 * volume_ma.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
+    for i in range(30, n):
         # Skip if required data not available
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(daily_ema_aligned[i]) or np.isnan(volume_threshold[i]):
+        if np.isnan(kama_vals[i]) or np.isnan(rsi_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: price crosses Donchian midline
+        # KAMA direction: rising if current > previous, falling if current < previous
+        kama_rising = kama_vals[i] > kama_vals[i-1]
+        kama_falling = kama_vals[i] < kama_vals[i-1]
+        
+        # Check exits: KAMA changes direction
         if position == 1:  # long position
-            if close[i] < donchian_mid[i]:
+            if not kama_rising:  # KAMA falling or flat
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] > donchian_mid[i]:
+            if not kama_falling:  # KAMA rising or flat
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with trend filter and volume confirmation
-            # Long: price breaks above Donchian upper AND price > daily EMA AND volume confirmation
-            if (close[i] > donchian_upper[i] and close[i-1] <= donchian_upper[i-1] and 
-                close[i] > daily_ema_aligned[i] and volume[i] > volume_threshold[i]):
+            # Look for entries with RSI filter and volume confirmation
+            # Long: KAMA rising AND RSI > 50 AND volume confirmation
+            if kama_rising and rsi_aligned[i] > 50 and volume[i] > volume_threshold[i]:
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower AND price < daily EMA AND volume confirmation
-            elif (close[i] < donchian_lower[i] and close[i-1] >= donchian_lower[i-1] and 
-                  close[i] < daily_ema_aligned[i] and volume[i] > volume_threshold[i]):
+            # Short: KAMA falling AND RSI < 50 AND volume confirmation
+            elif kama_falling and rsi_aligned[i] < 50 and volume[i] > volume_threshold[i]:
                 signals[i] = -0.25
                 position = -1
     
