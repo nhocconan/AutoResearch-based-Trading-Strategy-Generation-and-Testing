@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h Donchian breakout with 1d EMA filter and volume confirmation - optimized for hypothesis.
+4h Donchian breakout with 1d EMA filter and volume capture - optimized for hypothesis.
 Hypothesis: This strategy captures breakouts aligned with higher timeframe trend (1d EMA) and volume confirmation.
 It should work in bull markets via breakouts and in bear markets via short breakdowns.
 Volume filter ensures momentum, reducing false breakouts. Target: 75-200 trades over 4 years.
