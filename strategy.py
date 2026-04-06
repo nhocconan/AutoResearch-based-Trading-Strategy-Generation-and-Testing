@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Filter
-Hypothesis: Donchian breakouts capture momentum, weekly pivot provides directional bias from higher timeframe,
-volume confirms breakout strength. Designed for low trade frequency (target 50-150 total over 4 years) to minimize fee decay.
-Works in both bull and bear markets by using weekly pivot to filter direction.
+12h Donchian(20) Breakout + 1d EMA Trend + Volume Filter + ATR Stoploss
+Hypothesis: Donchian breakouts on 12h capture intermediate-term momentum, filtered by 1d EMA trend to avoid counter-trend trades. Volume confirms breakout strength. Designed for low trade frequency (target 50-150 total over 4 years) to minimize fee decay.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_weeklypivot_volume_v1"
-timeframe = "6h"
+name = "12h_donchian20_1dema_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,27 +37,17 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
-    if len(df_weekly) < 1:
-        weekly_pivot = np.full(n, np.nan)
-        weekly_r4 = np.full(n, np.nan)
-        weekly_s4 = np.full(n, np.nan)
-    else:
-        weekly_high = df_weekly['high'].values
-        weekly_low = df_weekly['low'].values
-        weekly_close = df_weekly['close'].values
-        
-        # Calculate weekly pivot points (standard)
-        weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-        weekly_range = weekly_high - weekly_low
-        weekly_r4 = weekly_pivot + (weekly_range * 3)  # R4 = pivot + 3*range
-        weekly_s4 = weekly_pivot - (weekly_range * 3)  # S4 = pivot - 3*range
-        
-        # Align to 6h timeframe (with shift(1) for completed weekly bars only)
-        weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
-        weekly_r4_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r4)
-        weekly_s4_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s4)
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    # Calculate 50-period EMA on 1d close
+    close_1d = df_1d['close'].values
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 0.037735849 + ema_1d[i-1] * 0.962264151)
+    # Align 1d EMA to 12h timeframe (already shifted by 1 inside)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -70,7 +58,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(weekly_pivot_aligned[i]):
+        if np.isnan(atr[i]) or np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -105,23 +93,19 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + weekly pivot filter
+            # Look for entries: Donchian breakout + volume + 1d EMA trend filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # Weekly pivot filter: only long above weekly pivot, short below weekly pivot
-            # Use R4/S4 for stronger breakout confirmation
-            weekly_pivot_val = weekly_pivot_aligned[i]
-            weekly_r4_val = weekly_r4_aligned[i]
-            weekly_s4_val = weekly_s4_aligned[i]
+            # Only trade in direction of 1d EMA trend
+            price_above_ema = close[i] > ema_1d_aligned[i]
+            price_below_ema = close[i] < ema_1d_aligned[i]
             
-            # Long: price above weekly pivot AND breaking above R4 (strong bullish)
-            # Short: price below weekly pivot AND breaking below S4 (strong bearish)
-            if bull_breakout and volume_filter and close[i] > weekly_pivot_val and close[i] > weekly_r4_val:
+            if bull_breakout and volume_filter and price_above_ema:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif bear_breakout and volume_filter and close[i] < weekly_pivot_val and close[i] < weekly_s4_val:
+            elif bear_breakout and volume_filter and price_below_ema:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
