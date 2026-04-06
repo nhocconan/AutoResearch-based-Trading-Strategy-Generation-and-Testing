@@ -150,3 +150,5 @@ def generate_signals(prices):
                 bars_since_entry += 1
     
     return signals
+
+</think>
