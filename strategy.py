@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout + 1d EMA(50) trend + volume confirmation
-# Long when price breaks above Donchian upper band AND price > 1d EMA(50) AND volume > 1.5x average
-# Short when price breaks below Donchian lower band AND price < 1d EMA(50) AND volume > 1.5x average
-# Exit when price crosses back through Donchian midpoint OR volume drops below threshold
-# Uses 4h timeframe for proper trade frequency (target: 75-200 trades over 4 years)
-# Works in both bull/bear markets by following trend on higher timeframe
+# Hypothesis: 4h Donchian breakout + 1d EMA trend + volume confirmation
+# Long when price breaks above Donchian(20) high AND price > 1d EMA(50) AND volume > 1.5x average
+# Short when price breaks below Donchian(20) low AND price < 1d EMA(50) AND volume > 1.5x average
+# Exit on opposite Donchian break or volume drop below average
+# Uses 4h timeframe with 1d trend filter for multi-timeframe alignment
+# Targets 75-200 total trades over 4 years with strong trend capture
 
-name = "4h_donchian20_1d_ema_vol_v1"
+name = "4h_donchian20_1d_ema_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,12 +25,11 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period) on 4h
+    # Donchian Channel (20-period)
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max()
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min()
-    donchian_up = highest_high.values
+    donchian_high = highest_high.values
     donchian_low = lowest_low.values
-    donchian_mid = (donchian_up + donchian_low) / 2
     
     # 1d EMA(50) for trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -47,33 +46,33 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if required data not available
-        if np.isnan(donchian_up[i]) or np.isnan(donchian_low[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i]):
+        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Exit conditions: price crosses Donchian midpoint OR volume drops below threshold
+        # Exit conditions
         if position == 1:  # long position
-            if close[i] < donchian_mid[i] or volume[i] < volume_threshold[i]:
+            if close[i] < donchian_low[i] or volume[i] < volume_ma.values[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] > donchian_mid[i] or volume[i] < volume_threshold[i]:
+            if close[i] > donchian_high[i] or volume[i] < volume_ma.values[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
             # Look for entries with trend confirmation and volume
-            # Long: price breaks above Donchian upper band AND price > 1d EMA(50) AND volume confirmation
-            if (close[i] > donchian_up[i] and close[i] > ema_50_aligned[i] and volume[i] > volume_threshold[i]):
+            # Long: break above Donchian high + above 1d EMA + volume confirmation
+            if (close[i] > donchian_high[i] and close[i] > ema_50_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower band AND price < 1d EMA(50) AND volume confirmation
+            # Short: break below Donchian low + below 1d EMA + volume confirmation
             elif (close[i] < donchian_low[i] and close[i] < ema_50_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
