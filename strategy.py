@@ -1,35 +1,49 @@
 #!/usr/bin/env python3
+"""
+Experiment #12595: 6h Elder Ray + Weekly Regime Filter
+Hypothesis: Elder Ray (Bull Power/Bear Power) identifies institutional buying/selling pressure.
+Weekly regime filter (above/below 200 EMA) ensures we trade with the higher timeframe trend.
+Works in bull markets via strong bull power + uptrend, and in bear via bear power + downtrend.
+Target: 50-150 total trades over 4 years (12-37/year) with disciplined entries.
+"""
+
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12594_1h_4h1d_trend_vol_session_v1"
-timeframe = "1h"
+name = "exp_12595_6h_elder_ray_weekly_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
+ELDER_RAY_LENGTH = 13          # EMA length for Elder Ray
+WEEKLY_EMA_LENGTH = 200        # Weekly trend filter
+RSI_LENGTH = 14                # Entry timing filter
 RSI_OVERBOUGHT = 70
 RSI_OVERSOLD = 30
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25             # Position size (25%)
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
-# Calculate RSI
+def calculate_ema(close, period):
+    """Calculate EMA with proper min_periods"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
 def calculate_rsi(close, period):
+    """Calculate RSI"""
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
+    
     avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-# Calculate ATR
 def calculate_atr(high, low, close, period):
+    """Calculate ATR"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -42,49 +56,41 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 4h RSI for trend
-    rsi_4h = calculate_rsi(df_4h['close'].values, RSI_PERIOD)
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    # Calculate weekly EMA for trend filter
+    ema_weekly = calculate_ema(df_weekly['close'].values, WEEKLY_EMA_LENGTH)
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
-    # Calculate 1d EMA for trend filter
-    ema_1d = pd.Series(df_1d['close'].values).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    # Elder Ray components
+    ema_close = calculate_ema(close, ELDER_RAY_LENGTH)
+    bull_power = high - ema_close
+    bear_power = low - ema_close
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
+    # RSI for entry timing
+    rsi = calculate_rsi(close, RSI_LENGTH)
+    
+    # ATR for stops
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period
-    start = max(RSI_PERIOD, 50, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    # Warmup period
+    start = max(ELDER_RAY_LENGTH, WEEKLY_EMA_LENGTH, RSI_LENGTH, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Session filter: only trade 08-20 UTC
-        if not (8 <= hours[i] <= 20):
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Skip if 4h RSI or 1d EMA not available
-        if np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(ema_weekly_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -103,18 +109,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Determine weekly regime
+        weekly_uptrend = close[i] > ema_weekly_aligned[i]
+        weekly_downtrend = close[i] < ema_weekly_aligned[i]
         
-        # Trend filters
-        uptrend_4h = rsi_4h_aligned[i] > 50
-        downtrend_4h = rsi_4h_aligned[i] < 50
-        uptrend_1d = close[i] > ema_1d_aligned[i]
-        downtrend_1d = close[i] < ema_1d_aligned[i]
+        # Elder Ray signals with RSI filter
+        strong_bull_power = bull_power[i] > 0 and bull_power[i] > bull_power[i-1]
+        strong_bear_power = bear_power[i] < 0 and bear_power[i] < bear_power[i-1]
         
-        # Entry conditions: RSI extremes with volume and trend alignment
-        long_entry = (rsi_4h_aligned[i] < RSI_OVERSOLD) and volume_ok and uptrend_4h and uptrend_1d
-        short_entry = (rsi_4h_aligned[i] > RSI_OVERBOUGHT) and volume_ok and downtrend_4h and downtrend_1d
+        rsi_not_overbought = rsi[i] < RSI_OVERBOUGHT
+        rsi_not_oversold = rsi[i] > RSI_OVERSOLD
+        
+        # Entry conditions
+        long_entry = (weekly_uptrend and strong_bull_power and rsi[i] < 50 and rsi_not_oversold)
+        short_entry = (weekly_downtrend and strong_bear_power and rsi[i] > 50 and rsi_not_overbought)
         
         # Generate signals
         if position == 0:
