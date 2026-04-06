@@ -3,10 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly ADX filter and volume confirmation.
-# Daily timeframe targets 30-100 trades over 4 years (7-25/year) with low frequency.
-# Donchian breakouts capture strong trends; ADX filters for trending markets; volume confirms institutional participation.
-# Works in bull (breakouts up) and bear (breakouts down) markets via symmetric long/short logic.
+# Hypothesis: 1-day Donchian(20) breakout + 1-week ADX trend filter + 1-week volume confirmation.
+# Breakouts capture strong trends. ADX filters for trending markets to avoid false breakouts in ranges.
+# Volume confirmation ensures institutional participation. Designed for 1d timeframe to target 30-100 trades over 4 years.
 
 name = "1d_donchian20_1w_adx_vol_v1"
 timeframe = "1d"
@@ -23,39 +22,38 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Daily Donchian channels (20-period)
+    # 1-day Donchian channels (20-period)
     highest_high = np.full(n, np.nan)
     lowest_low = np.full(n, np.nan)
     for i in range(19, n):
         highest_high[i] = np.max(high[i-19:i+1])
         lowest_low[i] = np.min(low[i-19:i+1])
     
-    # Weekly ADX(14) for trend strength
+    # 1-week ADX(14) for trend strength filtering
     df_1w = get_htf_data(prices, '1w')
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
     
-    # True Range
+    # True Range and Directional Movement
     tr = np.full(len(close_1w), np.nan)
+    dm_plus = np.full(len(close_1w), np.nan)
+    dm_minus = np.full(len(close_1w), np.nan)
+    
     if len(close_1w) > 1:
         tr[0] = high_1w[0] - low_1w[0]
+        dm_plus[0] = 0
+        dm_minus[0] = 0
         for i in range(1, len(close_1w)):
             tr[i] = max(high_1w[i] - low_1w[i],
                        abs(high_1w[i] - close_1w[i-1]),
                        abs(low_1w[i] - close_1w[i-1]))
-    
-    # Directional Movement
-    dm_plus = np.full(len(close_1w), np.nan)
-    dm_minus = np.full(len(close_1w), np.nan)
-    if len(close_1w) > 1:
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        for i in range(1, len(close_1w)):
             dm_plus[i] = max(high_1w[i] - high_1w[i-1], 0)
             dm_minus[i] = max(low_1w[i-1] - low_1w[i], 0)
+            dm_plus[i] = dm_plus[i] if dm_plus[i] > dm_minus[i] else 0
+            dm_minus[i] = dm_minus[i] if dm_minus[i] > dm_plus[i] else 0
     
-    # Smoothed TR, DM+, DM- (Wilder's smoothing)
+    # Smoothed TR, DM+, DM-
     atr_1w = np.full(len(close_1w), np.nan)
     s_dm_plus = np.full(len(close_1w), np.nan)
     s_dm_minus = np.full(len(close_1w), np.nan)
@@ -83,19 +81,19 @@ def generate_signals(prices):
     
     # ADX calculation
     adx = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 27:
-        dx_valid = dx[13:]
+    if len(close_1w) >= 27:  # Need 14 for DX + 14 for smoothing
+        dx_valid = dx[13:]  # Skip first 14 where DX is NaN
         if len(dx_valid) >= 14:
-            adx[26] = np.nanmean(dx_valid[:14])
+            adx[26] = np.nanmean(dx_valid[:14])  # First ADX at index 26
             for i in range(27, len(close_1w)):
                 adx[i] = (adx[i-1] * 13 + dx[i]) / 14
     
     adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
-    # Weekly volume average for confirmation
+    # 1-week volume average for confirmation
     vol_1w = df_1w['volume'].values
     vol_ma_1w = np.full(len(vol_1w), np.nan)
-    for i in range(4, len(vol_1w)):
+    for i in range(4, len(vol_1w)):  # 5-period average
         vol_ma_1w[i] = np.mean(vol_1w[i-4:i+1])
     
     vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
@@ -105,12 +103,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(27, 19, 4)
+    start = max(19, 27, 4)  # Donchian needs 19, ADX needs 27, volume needs 4
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(adx_aligned[i]) or np.isnan(vol_ma_aligned[i]) or 
-            np.isnan(highest_high[i]) or np.isnan(lowest_low[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -125,7 +123,7 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian or stoploss
+            # Exit: price below Donchian lower band or stoploss
             if (close[i] < lowest_low[i] or 
                 close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
@@ -133,7 +131,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian or stoploss
+            # Exit: price above Donchian upper band or stoploss
             if (close[i] > highest_high[i] or 
                 close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
@@ -141,14 +139,14 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries in trending markets with volume confirmation
+            # Look for entries in trending markets
             if trending_market and volume_filter:
-                # Long: price breaks above upper Donchian
+                # Long: price breaks above Donchian upper band
                 if close[i] > highest_high[i]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: price breaks below lower Donchian
+                # Short: price breaks below Donchian lower band
                 elif close[i] < lowest_low[i]:
                     signals[i] = -0.25
                     position = -1
