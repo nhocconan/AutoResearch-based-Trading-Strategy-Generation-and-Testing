@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + 1w EMA Trend + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts capture momentum, weekly EMA filter ensures trend alignment, volume confirms breakout strength, ATR stoploss limits drawdown. Designed for low trade frequency (target 30-100 total over 4 years) to minimize fee drift. Works in bull/bear by only trading with higher timeframe trend.
+12h Donchian(20) Breakout + 1d EMA Trend + Volume Filter + ATR Stoploss
+Hypothesis: Donchian breakouts capture momentum, 1d EMA filter ensures trend alignment, volume confirms breakout strength, ATR stoploss limits drawdown. Designed for low trade frequency (target 50-150 total over 4 years) to minimize fee drag. Works in bull/bear by only trading with higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_1wema_volume_atr_v1"
-timeframe = "1d"
+name = "12h_donchian20_1dema_volume_atr_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,37 +17,37 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for EMA and ATR (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Load 1d data for EMA and ATR (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     
-    # 50-period EMA on 1w
-    ema_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 50:
+    # 50-period EMA on 1d
+    ema_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 50:
         multiplier = 2 / (50 + 1)
-        ema_1w[0] = close_1w[0]
-        for i in range(1, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * multiplier) + (ema_1w[i-1] * (1 - multiplier))
+        ema_1d[0] = close_1d[0]
+        for i in range(1, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # 14-period ATR on 1w for stoploss
-    atr_1w = np.full_like(close_1w, np.nan)
-    if len(close_1w) >= 14:
+    # 14-period ATR on 1d for stoploss
+    atr_1d = np.full_like(close_1d, np.nan)
+    if len(close_1d) >= 14:
         tr = np.maximum(
-            high_1w[1:] - low_1w[1:],
-            np.abs(high_1w[1:] - close_1w[:-1]),
-            np.abs(low_1w[1:] - close_1w[:-1])
+            high_1d[1:] - low_1d[1:],
+            np.abs(high_1d[1:] - close_1d[:-1]),
+            np.abs(low_1d[1:] - close_1d[:-1])
         )
-        atr_1w[0] = np.nan
+        atr_1d[0] = np.nan
         if len(tr) > 0:
-            atr_1w[1] = tr[0]
-            for i in range(2, len(atr_1w)):
-                atr_1w[i] = (tr[i-1] * 13 + atr_1w[i-1]) / 14
+            atr_1d[1] = tr[0]
+            for i in range(2, len(atr_1d)):
+                atr_1d[i] = (tr[i-1] * 13 + atr_1d[i-1]) / 14
     
-    # Align indicators to 1d timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
+    # Align indicators to 12h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    atr_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_1d)
     
     # Price and volume data
     high = prices['high'].values
@@ -64,7 +64,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(atr_1w_aligned[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(atr_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -88,33 +88,33 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR below 1w EMA
+            # Exit: price closes below Donchian lower OR below 1d EMA
             # Stoploss: price drops 2*ATR below entry
             if (close[i] < lowest_low or 
-                close[i] < ema_1w_aligned[i] or
-                close[i] < entry_price - 2.0 * atr_1w_aligned[i]):
+                close[i] < ema_1d_aligned[i] or
+                close[i] < entry_price - 2.0 * atr_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR above 1w EMA
+            # Exit: price closes above Donchian upper OR above 1d EMA
             # Stoploss: price rises 2*ATR above entry
             if (close[i] > highest_high or 
-                close[i] > ema_1w_aligned[i] or
-                close[i] > entry_price + 2.0 * atr_1w_aligned[i]):
+                close[i] > ema_1d_aligned[i] or
+                close[i] > entry_price + 2.0 * atr_1d_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + 1w EMA trend filter
+            # Look for entries: Donchian breakout + volume + 1d EMA trend filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            # Only go long if price above 1w EMA, short if below
-            trend_uptrend = close[i] > ema_1w_aligned[i]
-            trend_downtrend = close[i] < ema_1w_aligned[i]
+            # Only go long if price above 1d EMA, short if below
+            trend_uptrend = close[i] > ema_1d_aligned[i]
+            trend_downtrend = close[i] < ema_1d_aligned[i]
             
             if i >= 20 and bull_breakout and volume_filter and trend_uptrend:
                 signals[i] = 0.25
