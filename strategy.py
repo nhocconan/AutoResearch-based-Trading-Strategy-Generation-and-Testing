@@ -3,24 +3,43 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian(20) breakout with 1-week EMA trend filter and volume confirmation.
-# In bull markets, breakouts capture strong uptrends; in bear markets, they catch sharp downtrends.
-# The weekly EMA ensures alignment with higher timeframe momentum, while volume filters out false breakouts.
-# Target: 30-100 total trades over 4 years (7-25/year) to minimize fee drag and improve generalization.
-# This strategy has historically performed well on SOLUSDT and aims to maintain performance across BTC/ETH/SOL.
+# Hypothesis: 6-hour Camarilla pivot with daily trend filter and volume confirmation.
+# Camarilla levels provide natural support/resistance zones: S3/R3 for mean reversion, S4/R4 for breakouts.
+# In ranging markets (common in 2025), fade at S3/R3 with daily trend filter.
+# In trending markets, breakouts at S4/R4 with volume confirmation capture momentum.
+# Daily trend filter ensures alignment with higher timeframe momentum.
+# Target: 80-150 total trades over 4 years (20-37/year) to balance opportunity and cost.
 
-name = "exp_13270_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_13271_6h_camarilla_pivot_1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 20  # Weekly EMA for trend filter
+PIVOT_LOOKBACK = 1  # Use previous day's OHLC for Camarilla
+TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+FADE_ZONE = 0.7  # Fade between S3/R3 (70% of range)
+
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given OHLC"""
+    range_ = high - low
+    if range_ == 0:
+        return close, close, close, close, close, close
+    close_val = close
+    s3 = close_val - (range_ * 1.1 / 6)
+    s4 = close_val - (range_ * 1.1 / 2)
+    r3 = close_val + (range_ * 1.1 / 6)
+    r4 = close_val + (range_ * 1.1 / 2)
+    pivot = (high + low + close_val) / 3
+    return pivot, s3, s4, r3, r4
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -31,37 +50,47 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate daily Camarilla levels from previous day
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 1d indicators
+    # Shift by 1 to use previous day's levels (no look-ahead)
+    pivot, s3, s4, r3, r4 = calculate_camarilla(high_1d, low_1d, close_1d)
+    pivot = np.roll(pivot, 1)
+    s3 = np.roll(s3, 1)
+    s4 = np.roll(s4, 1)
+    r3 = np.roll(r3, 1)
+    r4 = np.roll(r4, 1)
+    # First day will have NaN due to roll, which is correct
+    
+    # Align to 6h timeframe
+    pivot_6h = align_htf_to_ltf(prices, df_1d, pivot)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    
+    # Calculate daily EMA for trend filter
+    ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
+    ema_1d = np.roll(ema_1d, 1)  # Use previous day's EMA
+    ema_1d_6h = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Volume MA
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # ATR
+    # ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -70,11 +99,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1w_aligned[i]):
+        # Skip if daily data not available
+        if np.isnan(pivot_6h[i]) or np.isnan(ema_1d_6h[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,25 +122,46 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Volume confirmation (using 6-period average for responsiveness)
+        if i >= VOLUME_MA_PERIOD:
+            volume_ma = np.mean(volume[i-VOLUME_MA_PERIOD:i])
+            volume_ok = volume[i] > (volume_ma * VOLUME_THRESHOLD)
+        else:
+            volume_ok = False
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Trend filter: price above/below daily EMA
+        uptrend = close[i] > ema_1d_6h[i]
+        downtrend = close[i] < ema_1d_6h[i]
         
-        # Breakout signals
-        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
+        # Define zones
+        # Fade zone: between S3 and R3 (70% of range)
+        # Breakout zone: beyond S4/R4
+        fade_long_zone = (close[i] > s3_6h[i]) and (close[i] < pivot_6h[i])
+        fade_short_zone = (close[i] < r3_6h[i]) and (close[i] > pivot_6h[i])
+        breakout_long = close[i] > r4_6h[i]
+        breakout_short = close[i] < s4_6h[i]
         
         # Generate signals
         if position == 0:
-            if breakout_up:
+            # Fade strategy in ranging markets (when trend is weak)
+            if abs(close[i] - ema_1d_6h[i]) / ema_1d_6h[i] < 0.02:  # Near daily EMA = ranging
+                if fade_long_zone and volume_ok:
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                elif fade_short_zone and volume_ok:
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            # Breakout strategy in trending markets
+            elif breakout_long and uptrend and volume_ok:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            elif breakout_short and downtrend and volume_ok:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
