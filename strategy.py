@@ -1,106 +1,128 @@
 #!/usr/bin/env python3
 """
-12h Camarilla Pivot with Volume Spike and Chop Filter
-Hypothesis: Price reverses at Camarilla pivot levels (H3/L3) from prior day.
-Volume spike confirms institutional interest. Chop filter avoids whipsaws in ranging markets.
-Works in bull (buys at L3 in uptrend) and bear (sells at H3 in downtrend).
-Target: 50-150 total trades over 4 years (12-37/year).
+1h Momentum Reversal with 4h/1d Trend Filter and Volume Confirmation
+Hypothesis: In trending markets, pullbacks to the 4h EMA(20) with momentum divergence (RSI <30/70) offer high-probability entries.
+Volume confirms institutional participation. Session filter (08-20 UTC) reduces noise.
+Works in bull (buy pullbacks in uptrend) and bear (sell rallies in downtrend).
+Target: 80-160 total trades over 4 years (20-40/year).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_volume_chop"
-timeframe = "12h"
+name = "1h_momentum_reversal_4h1d_trend_volume"
+timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 200:
         return np.zeros(n)
     
-    # Load 1d data for Camarilla pivots (once before loop)
+    # Load 4h and 1d data for trend alignment (once before loop)
+    df_4h = get_htf_data(prices, '4h')
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla levels from prior day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # 4h EMA(20) for trend direction
+    close_4h = df_4h['close'].values
+    ema_4h = pd.Series(close_4h).ewm(span=20, adjust=False).mean().values
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    
+    # 1d EMA(50) for long-term trend
     close_1d = df_1d['close'].values
+    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Camarilla formulas
-    R4 = close_1d + ((high_1d - low_1d) * 1.1 / 2)
-    R3 = close_1d + ((high_1d - low_1d) * 1.1 / 4)
-    R2 = close_1d + ((high_1d - low_1d) * 1.1 / 6)
-    R1 = close_1d + ((high_1d - low_1d) * 1.1 / 12)
-    S1 = close_1d - ((high_1d - low_1d) * 1.1 / 12)
-    S2 = close_1d - ((high_1d - low_1d) * 1.1 / 6)
-    S3 = close_1d - ((high_1d - low_1d) * 1.1 / 4)
-    S4 = close_1d - ((high_1d - low_1d) * 1.1 / 2)
-    
-    # Align to 12h timeframe
-    R3_12h = align_htf_to_ltf(prices, df_1d, R3)  # Short entry level
-    S3_12h = align_htf_to_ltf(prices, df_1d, S3)  # Long entry level
-    
-    # 12h data
+    # 1h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    open_time = prices['open_time']
     
-    # Volume spike filter (2x 20-period average)
+    # 1h RSI(14) for momentum
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    
+    # 1h volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma)
+    vol_filter = volume > (1.5 * vol_ma)  # Require high volume
     
-    # Chop filter using EMA crossover (avoid whipsaws)
-    ema_fast = pd.Series(close).ewm(span=9, adjust=False).mean().values
-    ema_slow = pd.Series(close).ewm(span=21, adjust=False).mean().values
-    chop_filter = np.abs(ema_fast - ema_slow) > (0.001 * close)  # Trending condition
+    # 1h ATR(14) for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    # Session filter: 08-20 UTC
+    hours = pd.DatetimeIndex(open_time).hour
+    session_filter = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):  # Start after volume MA warmup
-        # Skip if pivot levels not available
-        if (np.isnan(R3_12h[i]) or np.isnan(S3_12h[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(ema_fast[i]) or np.isnan(ema_slow[i])):
+    # Start from warmup period
+    start = 200  # For EMA50_1d
+    
+    for i in range(start, n):
+        # Skip if required data not available
+        if (np.isnan(ema_4h_aligned[i]) or np.isnan(ema_50_1d_aligned[i]) or
+            np.isnan(rsi[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
         
+        # Session filter
+        if not session_filter[i]:
+            if position != 0:
+                signals[i] = position * 0.20
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Determine trend alignment: 4h EMA20 vs 1d EMA50
+        uptrend = ema_4h_aligned[i] > ema_50_1d_aligned[i]
+        downtrend = ema_4h_aligned[i] < ema_50_1d_aligned[i]
+        
         # Check exits
         if position == 1:  # long position
-            # Exit: price reaches S4 (strong support) or stoploss
-            if (low[i] <= S3_12h[i] * 0.995 or  # Near S3 level
-                close[i] <= entry_price - 2.0 * (high[i] - low[i])):  # ATR proxy
+            # Exit: momentum fading OR stoploss
+            if (rsi[i] > 70 or
+                close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:  # short position
-            # Exit: price reaches R4 (strong resistance) or stoploss
-            if (high[i] >= R3_12h[i] * 1.005 or  # Near R3 level
-                close[i] >= entry_price + 2.0 * (high[i] - low[i])):
+            # Exit: momentum fading OR stoploss
+            if (rsi[i] < 30 or
+                close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
         else:
-            # Look for entries at Camarilla levels with volume and trend
-            long_setup = (low[i] <= S3_12h[i] * 1.005 and  # Touch S3 level
-                         vol_spike[i] and chop_filter[i])
-            short_setup = (high[i] >= R3_12h[i] * 0.995 and  # Touch R3 level
-                          vol_spike[i] and chop_filter[i])
+            # Look for entries: momentum pullback + trend alignment + volume + session
+            long_setup = (rsi[i] < 30 and uptrend and vol_filter[i])
+            short_setup = (rsi[i] > 70 and downtrend and vol_filter[i])
             
             if long_setup:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
             elif short_setup:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
             else:
