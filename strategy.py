@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 1d Donchian breakout with 1w EMA filter and volume concentration.
-Hypothesis: Breakouts aligned with 1w trend and volume concentration capture medium-term trends while avoiding false breakouts.
+Hypothesis: Breakouts aligned with weekly trend and volume concentration capture major trends while avoiding false breakouts.
 Works in bull (breakouts) and bear (breakdowns) with proper filtering. Target: 30-100 trades over 4 years.
 """
 
@@ -36,11 +36,11 @@ def generate_signals(prices):
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate 1w EMA(50)
-    ema_1w = calculate_ema(close_1w, 50)
+    # Calculate 1w EMA(20)
+    ema_1w = calculate_ema(close_1w, 20)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 1d data
+    # Daily data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -62,8 +62,8 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 50 for EMA)
-    start = max(20, 20, 14, 50) + 1
+    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 20 for EMA)
+    start = max(20, 20, 14, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
