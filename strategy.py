@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA(50) trend filter and volume confirmation (1.5x 20-period average)
-# Long when price breaks above Donchian high, price > 12h EMA(50), and volume > 1.5x average
-# Short when price breaks below Donchian low, price < 12h EMA(50), and volume > 1.5x average
-# Exit on opposite Donchian break or when price crosses below/above EMA(50)
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA(20) trend filter and volume confirmation (1.3x 20-period average)
+# Long when price breaks above Donchian high, price > 12h EMA(20), and volume > 1.3x average
+# Short when price breaks below Donchian low, price < 12h EMA(20), and volume > 1.3x average
+# Exit on opposite Donchian break or when price crosses below/above EMA(20)
 # Stoploss at 2 * ATR(14)
 # Position size: 0.25 (25% of capital)
-# Uses 12h EMA for trend filter to reduce noise and improve trend alignment
+# Works in bull/bear by following 12h trend direction
 # Target: 75-200 trades over 4 years (19-50/year)
 
 name = "4h_donchian20_12h_ema_vol_v1"
@@ -34,8 +34,8 @@ def generate_signals(prices):
     
     close_12h = df_12h['close'].values
     
-    # 12h EMA(50) for trend filter
-    ema_12h = pd.Series(close_12h).ewm(span=50, adjust=False).mean().values
+    # 12h EMA(20) for trend filter
+    ema_12h = pd.Series(close_12h).ewm(span=20, adjust=False).mean().values
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
     # 4h Donchian channels (20-period)
@@ -99,14 +99,14 @@ def generate_signals(prices):
             # Long: price breaks above Donchian high, price above EMA (bullish trend), volume spike
             if (close[i] > donchian_high[i] and
                 close[i] > ema_12h_aligned[i] and
-                volume[i] > 1.5 * volume_ma[i]):
+                volume[i] > 1.3 * volume_ma[i]):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
             # Short: price breaks below Donchian low, price below EMA (bearish trend), volume spike
             elif (close[i] < donchian_low[i] and
                   close[i] < ema_12h_aligned[i] and
-                  volume[i] > 1.5 * volume_ma[i]):
+                  volume[i] > 1.3 * volume_ma[i]):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
