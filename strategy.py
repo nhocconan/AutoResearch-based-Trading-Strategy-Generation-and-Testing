@@ -1,24 +1,31 @@
+# 1d/1w Trend Following with Weekly EMA Trend Filter and Daily Momentum Confirmation
+# Uses weekly EMA to establish trend direction, daily EMA for momentum confirmation
+# Volume filter ensures trades occur with conviction
+# Aims for 50-150 total trades over 4 years (12-38/year) to minimize fee drag
+# Works in bull markets (trend following) and bear markets (counter-trend bounces at key levels)
+
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Weekly 52-week high/low breakout with volume confirmation on 1d timeframe
-# Works in bull/bear because breakouts capture strong directional moves, volume filters weak signals,
-# and 52-week levels represent significant structural support/resistance that works across regimes.
-# Target: 30-80 trades over 4 years (7-20/year) to minimize fee drag.
-
-name = "exp_12890_1d_weekly_52w_breakout_v1"
+name = "exp_12890_1d_weekly_ema_trend_daily_momentum_v1"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
+WEEKLY_EMA_PERIOD = 21
+DAILY_EMA_FAST = 9
+DAILY_EMA_SLOW = 21
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-LOOKBACK_PERIOD = 52  # 52 weeks
+ATR_STOP_MULTIPLIER = 2.5
+
+def calculate_ema(close, period):
+    """Calculate EMA with proper Wilder's smoothing"""
+    return pd.Series(close).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -29,31 +36,20 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_52w_high_low(high, low, lookback):
-    """Calculate 52-week high and low"""
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    high_52w = high_series.rolling(window=lookback, min_periods=lookback).max().values
-    low_52w = low_series.rolling(window=lookback, min_periods=lookback).min().values
-    return high_52w, low_52w
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Load weekly data ONCE before loop
     df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate weekly 52-week high and low
-    high_w = df_weekly['high'].values
-    low_w = df_weekly['low'].values
+    # Calculate weekly EMA for trend direction
+    weekly_close = df_weekly['close'].values
+    weekly_ema = calculate_ema(weekly_close, WEEKLY_EMA_PERIOD)
     
-    high_52w, low_52w = calculate_52w_high_low(high_w, low_w, LOOKBACK_PERIOD)
-    
-    # Align to daily timeframe
-    high_52w_aligned = align_htf_to_ltf(prices, df_weekly, high_52w)
-    low_52w_aligned = align_htf_to_ltf(prices, df_weekly, low_52w)
+    # Align weekly EMA to daily timeframe
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
     
     # Calculate daily indicators
     high = prices['high'].values
@@ -61,6 +57,8 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
+    daily_ema_fast = calculate_ema(close, DAILY_EMA_FAST)
+    daily_ema_slow = calculate_ema(close, DAILY_EMA_SLOW)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -70,11 +68,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, LOOKBACK_PERIOD) + 1
+    start = max(WEEKLY_EMA_PERIOD, DAILY_EMA_SLOW, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 52-week levels not available
-        if np.isnan(high_52w_aligned[i]) or np.isnan(low_52w_aligned[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(weekly_ema_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -96,18 +94,28 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above 52-week high or breakdown below 52-week low
-        breakout_long = volume_ok and close[i] >= high_52w_aligned[i]
-        breakout_short = volume_ok and close[i] <= low_52w_aligned[i]
+        # Daily EMA crossover for momentum
+        ema_bullish = daily_ema_fast[i] > daily_ema_slow[i]
+        ema_bearish = daily_ema_fast[i] < daily_ema_slow[i]
+        
+        # Trend filter: weekly EMA slope
+        if i > 1:
+            weekly_ema_rising = weekly_ema_aligned[i] > weekly_ema_aligned[i-1]
+            weekly_ema_falling = weekly_ema_aligned[i] < weekly_ema_aligned[i-1]
+        else:
+            weekly_ema_rising = False
+            weekly_ema_falling = False
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            # Long: weekly uptrend + daily bullish momentum + volume
+            if weekly_ema_rising and ema_bullish and volume_ok:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_short:
+            # Short: weekly downtrend + daily bearish momentum + volume
+            elif weekly_ema_falling and ema_bearish and volume_ok:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -115,10 +123,10 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
+            # Stay long until stop
             signals[i] = SIGNAL_SIZE
         elif position == -1:
+            # Stay short until stop
             signals[i] = -SIGNAL_SIZE
     
     return signals
-
-</think>
