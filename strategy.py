@@ -3,30 +3,41 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R with daily pivot reversal.
-# Uses daily Camarilla pivot levels to identify extreme overbought/oversold conditions.
-# Williams %R (14) below -80 or above -20 signals reversals at S3/R3 or S4/R4 levels.
-# Works in both bull and bear markets by fading extremes at key support/resistance.
-# Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: 6-hour Williams Alligator with 1-day Elder Ray (bull/bear power) for trend filtering.
+# Uses Alligator's jaw/teeth/lips to identify trend direction and strength, while Elder Ray confirms
+# bullish/bearish power from daily timeframe. Works in trending markets (both bull and bear) by
+# filtering counter-trend noise. Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13511_6h_williamsr_1d_camarilla_v1"
+name = "exp_13511_6h_alligator_1d_elder_ray_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-WILLIAMS_R_PERIOD = 14
-WILLIAMS_R_OVERBOUGHT = -20
-WILLIAMS_R_OVERSOLD = -80
+ALLIGATOR_JAW = 13    # Blue line
+ALLIGATOR_TEETH = 8   # Red line
+ALLIGATOR_LIPS = 5    # Green line
+ELDER_RAY_PERIOD = 13 # EMA period for Elder Ray
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_williams_r(high, low, close, period):
-    """Calculate Williams %R"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    wr = -100 * (highest_high - close) / (highest_high - lowest_low)
-    return wr.values
+def calculate_ema(close, period):
+    """Calculate EMA with proper Wilder's smoothing equivalent"""
+    return pd.Series(close).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+
+def calculate_alligator(close, jaw_period, teeth_period, lips_period):
+    """Calculate Williams Alligator lines"""
+    jaw = calculate_ema(close, jaw_period)
+    teeth = calculate_ema(close, teeth_period)
+    lips = calculate_ema(close, lips_period)
+    return jaw, teeth, lips
+
+def calculate_elder_ray(high, low, close, period):
+    """Calculate Elder Ray: Bull Power = High - EMA, Bear Power = Low - EMA"""
+    ema = calculate_ema(close, period)
+    bull_power = high - ema
+    bear_power = low - ema
+    return bull_power, bear_power
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -45,34 +56,21 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla pivot levels
+    # Calculate daily Elder Ray for trend filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    
-    pivot = (high_1d + low_1d + close_1d) / 3
-    range_1d = high_1d - low_1d
-    
-    # Camarilla levels
-    r4 = close_1d + range_1d * 1.500
-    r3 = close_1d + range_1d * 1.250
-    s3 = close_1d - range_1d * 1.250
-    s4 = close_1d - range_1d * 1.500
-    
-    # Align to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
-    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    bull_power, bear_power = calculate_elder_ray(high_1d, low_1d, close_1d, ELDER_RAY_PERIOD)
+    bull_power_aligned = align_htf_to_ltf(prices, df_1d, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_1d, bear_power)
     
     # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     
-    # Williams %R
-    williams_r = calculate_williams_r(high, low, close, WILLIAMS_R_PERIOD)
+    # Alligator lines
+    jaw, teeth, lips = calculate_alligator(close, ALLIGATOR_JAW, ALLIGATOR_TEETH, ALLIGATOR_LIPS)
     
     # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -83,12 +81,13 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WILLIAMS_R_PERIOD, ATR_PERIOD) + 1
+    start = max(ALLIGATOR_JAW, ALLIGATOR_TEETH, ALLIGATOR_LIPS, ELDER_RAY_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if any required data is not available
-        if (np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or
-            np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(williams_r[i])):
+        # Skip if indicators not available
+        if (np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or
+            np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -107,23 +106,24 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Reversal signals at Camarilla levels
-        # Long setup: oversold Williams %R at or below S3/S4
-        long_setup = (williams_r[i] <= WILLIAMS_R_OVERSOLD) and \
-                    (close[i] <= s3_aligned[i] or close[i] <= s4_aligned[i])
+        # Alligator trend conditions
+        # Uptrend: Lips > Teeth > Jaw (green > red > blue)
+        # Downtrend: Jaw > Teeth > Lips (blue > red > green)
+        uptrend = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        downtrend = jaw[i] > teeth[i] and teeth[i] > lips[i]
         
-        # Short setup: overbought Williams %R at or above R3/R4
-        short_setup = (williams_r[i] >= WILLIAMS_R_OVERBOUGHT) and \
-                     (close[i] >= r3_aligned[i] or close[i] >= r4_aligned[i])
+        # Elder Ray confirmation: Bull Power > 0 and Bear Power < 0 for strength
+        strong_bull = bull_power_aligned[i] > 0
+        strong_bear = bear_power_aligned[i] < 0
         
-        # Generate signals
+        # Entry signals
         if position == 0:
-            if long_setup:
+            if uptrend and strong_bull:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_setup:
+            elif downtrend and strong_bear:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -131,8 +131,18 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            signals[i] = SIGNAL_SIZE
+            # Stay in long while uptrend and bull power positive
+            if uptrend and strong_bull:
+                signals[i] = SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+                position = 0
         elif position == -1:
-            signals[i] = -SIGNAL_SIZE
+            # Stay in short while downtrend and bear power negative
+            if downtrend and strong_bear:
+                signals[i] = -SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+                position = 0
     
     return signals
