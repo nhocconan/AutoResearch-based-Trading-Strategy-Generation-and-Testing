@@ -456,4 +456,4 @@ def generate_signals(prices):
     
     return signals
 
---- End of file ---
+</false>
