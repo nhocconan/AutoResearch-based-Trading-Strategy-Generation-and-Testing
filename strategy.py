@@ -1,115 +1,133 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) breakout with weekly pivot direction and volume confirmation
-Hypothesis: Price breaking 6h Donchian(20) channels with weekly pivot bias (above/below weekly pivot)
-and volume surge captures institutional breakouts. Works in bull (long when above weekly pivot) and bear (short when below weekly pivot).
-Target: 50-150 total trades over 4 years.
+12h Camarilla Pivot + Volume Spike + Chop Regime
+Hypothesis: 12h Camarilla pivot levels (L3/L4/S3/S4) with volume surge and chop regime filter
+captures institutional breakouts and reversals. Works in bull (breakouts) and bear (reversals).
+Target: 100-150 trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_weekly_pivot_volume_v2"
-timeframe = "6h"
+name = "12h_camarilla_pivot_volume_chop_v3"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for pivot calculation (once before loop)
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1d data for pivot points (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # Weekly pivot points: P = (H+L+C)/3, R1 = 2P - L, S1 = 2P - H
-    # We'll use weekly close as proxy for pivot for simplicity and robustness
-    weekly_close = df_weekly['close'].values
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
+    # Calculate daily Camarilla pivot levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot and levels
-    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
-    weekly_r1 = 2 * weekly_pivot - weekly_low  # Resistance 1
-    weekly_s1 = 2 * weekly_pivot - weekly_high  # Support 1
+    pivot = (high_1d + low_1d + close_1d) / 3
+    range_1d = high_1d - low_1d
     
-    # Align weekly data to 6h timeframe
-    weekly_pivot_aligned = align_htf_to_ltf(prices, df_weekly, weekly_pivot)
-    weekly_r1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_r1)
-    weekly_s1_aligned = align_htf_to_ltf(prices, df_weekly, weekly_s1)
+    # Camarilla levels
+    s1 = close_1d - (range_1d * 1.0833)
+    s2 = close_1d - (range_1d * 1.1666)
+    s3 = close_1d - (range_1d * 1.2500)
+    s4 = close_1d - (range_1d * 1.5000)
+    r1 = close_1d + (range_1d * 1.0833)
+    r2 = close_1d + (range_1d * 1.1666)
+    r3 = close_1d + (range_1d * 1.2500)
+    r4 = close_1d + (range_1d * 1.5000)
     
-    # 6h data
+    # Align pivot levels to 12h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
-    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Volume filter: 20-period EMA
+    vol_ema = pd.Series(volume).ewm(span=20, adjust=False).mean().values
+    vol_filter = volume > (2.0 * vol_ema)  # Require strong volume surge
     
-    # Volume filter: 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)  # Require volume surge
+    # Choppiness Index (14-period) for regime filter
+    def calculate_chop(high, low, close, period=14):
+        tr1 = high - low
+        tr2 = np.abs(high - np.roll(close, 1))
+        tr3 = np.abs(low - np.roll(close, 1))
+        tr = np.maximum(tr1, np.maximum(tr2, tr3))
+        tr[0] = tr1[0]
+        atr = pd.Series(tr).rolling(window=period, min_periods=period).sum().values
+        
+        highest_high = pd.Series(high).rolling(window=period, min_periods=period).max().values
+        lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min().values
+        hhll = highest_high - lowest_low
+        
+        chop = np.zeros(len(close))
+        for i in range(len(close)):
+            if hhll[i] > 0 and atr[i] > 0:
+                chop[i] = 100 * np.log10(sum(atr[max(0, i-period+1):i+1]) / hhll[i]) / np.log10(period)
+            else:
+                chop[i] = 50.0
+        return chop
     
-    # ATR(14) for stoploss
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    chop = calculate_chop(high, low, close, 14)
+    chop_filter = chop > 50.0  # Choppy/ranging market (mean reversion)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = 60  # For Donchian(20) and ATR(14)
+    start = 50  # For EMA and chop calculation
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(weekly_pivot_aligned[i]) or np.isnan(weekly_r1_aligned[i]) or 
-            np.isnan(weekly_s1_aligned[i]) or np.isnan(highest_high[i]) or 
-            np.isnan(lowest_low[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(pivot_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(s4_aligned[i]) or
+            np.isnan(r3_aligned[i]) or np.isnan(r4_aligned[i]) or np.isnan(vol_ema[i]) or
+            np.isnan(chop[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits
+        # Check exits: mean reversion to pivot
         if position == 1:  # long position
-            # Exit: price breaks below Donchian lower OR stoploss
-            if (close[i] <= lowest_low[i] or
-                close[i] <= entry_price - 2.5 * atr[i]):
+            # Exit: price reaches pivot or S3/S4 levels
+            if (close[i] <= pivot_aligned[i] or
+                close[i] <= s3_aligned[i] or
+                close[i] <= s4_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian upper OR stoploss
-            if (close[i] >= highest_high[i] or
-                close[i] >= entry_price + 2.5 * atr[i]):
+            # Exit: price reaches pivot or R3/R4 levels
+            if (close[i] >= pivot_aligned[i] or
+                close[i] >= r3_aligned[i] or
+                close[i] >= r4_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + weekly pivot bias + volume
-            # Long: break above Donchian upper AND price above weekly pivot
-            long_breakout = close[i] > highest_high[i-1]
-            price_above_pivot = close[i] > weekly_pivot_aligned[i]
+            # Look for entries: S3/S4 bounce (long) or R3/R4 rejection (short) in choppy market
+            long_setup = (close[i] <= s3_aligned[i] or close[i] <= s4_aligned[i]) and vol_filter[i] and chop_filter[i]
+            short_setup = (close[i] >= r3_aligned[i] or close[i] >= r4_aligned[i]) and vol_filter[i] and chop_filter[i]
             
-            # Short: break below Donchian lower AND price below weekly pivot
-            short_breakout = close[i] < lowest_low[i-1]
-            price_below_pivot = close[i] < weekly_pivot_aligned[i]
-            
-            if long_breakout and price_above_pivot and vol_filter[i]:
+            if long_setup:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_breakout and price_below_pivot and vol_filter[i]:
+            elif short_setup:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
@@ -117,5 +135,3 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
-
-</think>
