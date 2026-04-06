@@ -3,14 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d ADX trend filter and volume confirmation.
-# Goes long when price breaks above Donchian(20) upper band with ADX > 25 and volume > 1.5x average.
-# Goes short when price breaks below Donchian(20) lower band with ADX > 25 and volume > 1.5x average.
-# Uses volatility-based exit: exit long when price crosses below Donchian midpoint, exit short when above midpoint.
-# Designed for low-frequency, high-conviction trades in both bull and bear markets.
-# Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 12h Donchian channel breakout with 1d volume confirmation and 1w EMA trend filter.
+# Goes long when price breaks above Donchian(20) high with volume > 1.5x average and price above 1w EMA.
+# Goes short when price breaks below Donchian(20) low with volume > 1.5x average and price below 1w EMA.
+# Uses ATR-based stoploss (2*ATR) to limit risk.
+# Target: 50-150 total trades over 4 years (12-37/year) with controlled risk.
 
-name = "12h_donchian20_1d_adx_vol_v1"
+name = "12h_donchian20_1d_vol_1w_ema_trend_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -25,80 +24,46 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for ADX trend filter
+    # 1d data for volume average
     df_1d = get_htf_data(prices, '1d')
-    if len(df_1d) < 30:
+    if len(df_1d) < 2:
         return np.zeros(n)
     
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(volume_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Calculate ADX components (14-period)
-    # True Range
-    tr1 = high_1d - low_1d
-    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
-    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    # 1w EMA for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    if len(df_1w) < 2:
+        return np.zeros(n)
+    
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Donchian channel (20-period)
+    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    
+    # ATR for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
     tr2[0] = 0
     tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    
-    # Directional Movement
-    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d), 
-                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
-    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)), 
-                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
-    
-    # Smooth TR, DM+, DM- using Wilder's smoothing (alpha = 1/period)
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) < period:
-            return result
-        # First value: simple average
-        result[period-1] = np.mean(data[:period])
-        # Subsequent values: Wilder smoothing
-        for i in range(period, len(data)):
-            result[i] = (result[i-1] * (period-1) + data[i]) / period
-        return result
-    
-    atr_1d = wilder_smooth(tr, 14)
-    dm_plus_smooth = wilder_smooth(dm_plus, 14)
-    dm_minus_smooth = wilder_smooth(dm_minus, 14)
-    
-    # DI+ and DI-
-    di_plus = np.where(atr_1d != 0, 100 * dm_plus_smooth / atr_1d, 0)
-    di_minus = np.where(atr_1d != 0, 100 * dm_minus_smooth / atr_1d, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilder_smooth(dx, 14)
-    
-    # Align ADX to 12h timeframe (shifted by 1 day for prior day's value)
-    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
-    
-    # Donchian channels (20-period) on 12h data
-    def rolling_max(arr, window):
-        return pd.Series(arr).rolling(window=window, min_periods=window).max().values
-    
-    def rolling_min(arr, window):
-        return pd.Series(arr).rolling(window=window, min_periods=window).min().values
-    
-    donch_high = rolling_max(high, 20)
-    donch_low = rolling_min(low, 20)
-    donch_mid = (donch_high + donch_low) / 2.0
-    
-    # Volume filters
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_strong = volume > (vol_ma * 1.5)  # Strong volume for breakouts
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(30, n):
+    for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(donch_mid[i]) or np.isnan(adx_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ma_1d_aligned[i]) or np.isnan(ema_1w_aligned[i]) or 
+            np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -106,33 +71,45 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price crosses below Donchian midpoint
-            if close[i] < donch_mid[i]:
+            # Stoploss: 2 * ATR below entry
+            if close[i] < entry_price - 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+            # Exit: price breaks below Donchian low or 1w EMA turns down
+            elif close[i] < donchian_low[i] or close[i] < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price crosses above Donchian midpoint
-            if close[i] > donch_mid[i]:
+            # Stoploss: 2 * ATR above entry
+            if close[i] > entry_price + 2.0 * atr[i]:
+                signals[i] = 0.0
+                position = 0
+                entry_price = 0.0
+            # Exit: price breaks above Donchian high or 1w EMA turns up
+            elif close[i] > donchian_high[i] or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout with ADX trend filter and volume confirmation
-            if adx_aligned[i] > 25 and vol_strong[i]:
-                # Long breakout: price breaks above Donchian upper band
-                if close[i] > donch_high[i]:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                # Short breakdown: price breaks below Donchian lower band
-                elif close[i] < donch_low[i]:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
+            # Look for entries with volume confirmation and trend filter
+            # Volume filter: current volume > 1.5x daily average volume
+            vol_filter = volume[i] > (vol_ma_1d_aligned[i] * 1.5)
+            
+            # Long breakout: price breaks above Donchian high with volume and above 1w EMA
+            if vol_filter and close[i] > donchian_high[i] and close[i] > ema_1w_aligned[i]:
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+            # Short breakdown: price breaks below Donchian low with volume and below 1w EMA
+            elif vol_filter and close[i] < donchian_low[i] and close[i] < ema_1w_aligned[i]:
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
     
     return signals
