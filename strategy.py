@@ -3,19 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Bollinger Band squeeze breakout with 12h trend filter and volume confirmation.
-# Uses Bollinger Band width percentile to detect low volatility squeezes, then breaks out in direction
-# of 12h trend with volume confirmation. Works in both bull and bear markets by capturing
-# volatility expansion after consolidation periods. Target: 80-180 total trades over 4 years (20-45/year).
+# Hypothesis: 4-hour Donchian(20) breakout with daily EMA(21) trend filter and volume confirmation.
+# Focuses on breakouts above upper channel (long) and below lower channel (short) with
+# daily trend alignment to avoid counter-trend trades. Volume > 1.5x 20-period MA confirms
+# institutional participation. Includes ATR-based stop loss (2x ATR) to limit drawdown.
+# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 
-name = "exp_13459_6h_bb_squeeze_12h_trend_vol_v1"
-timeframe = "6h"
+name = "exp_13460_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-BB_PERIOD = 20
-BB_STD = 2.0
-BBW_PERIOD = 50  # for percentile calculation
+DONCHIAN_PERIOD = 20
 EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
@@ -36,50 +35,30 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_bollinger_bands(close, period, std):
-    """Calculate Bollinger Bands"""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean()
-    std_dev = pd.Series(close).rolling(window=period, min_periods=period).std()
-    upper = sma + (std_dev * std)
-    lower = sma - (std_dev * std)
-    return upper.values, lower.values, sma.values
-
-def calculate_bb_width_percentile(upper, lower, sma, period):
-    """Calculate Bollinger Band width and its percentile"""
-    bb_width = (upper - lower) / sma
-    # Calculate percentile rank over lookback period
-    bb_width_series = pd.Series(bb_width)
-    bb_width_pct = bb_width_series.rolling(window=period, min_periods=period).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else np.nan, raw=False
-    ).values
-    return bb_width_pct
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h EMA for trend filter
-    close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, EMA_PERIOD)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate daily EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 6h indicators
+    # Calculate 4-hour indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands
-    bb_upper, bb_lower, bb_middle = calculate_bollinger_bands(close, BB_PERIOD, BB_STD)
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Bollinger Band width percentile (squeeze detector)
-    bbw_percentile = calculate_bb_width_percentile(bb_upper, bb_lower, bb_middle, BBW_PERIOD)
-    
-    # Volume MA
+    # Volume moving average
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR
@@ -91,19 +70,18 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(BBW_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if (np.isnan(ema_12h_aligned[i]) or np.isnan(bbw_percentile[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        # Skip if daily EMA not available
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
         
-        # Check stoploss
+        # Check stop loss
         if position == 1:  # long position
             if close[i] <= stop_price:
                 signals[i] = 0.0
@@ -115,15 +93,16 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Conditions
-        bb_squeeze = bbw_percentile[i] < 0.2  # Low volatility squeeze (<20th percentile)
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
-        uptrend = close[i] > ema_12h_aligned[i]
-        downtrend = close[i] < ema_12h_aligned[i]
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions
-        breakout_up = bb_squeeze and volume_ok and uptrend and (close[i] > bb_upper[i])
-        breakout_down = bb_squeeze and volume_ok and downtrend and (close[i] < bb_lower[i])
+        # Trend filter: price above/below daily EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
+        
+        # Breakout signals using Donchian channels
+        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
