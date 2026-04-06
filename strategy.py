@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14108_12h_donchian20_1w_ema_vol_v1"
-timeframe = "12h"
+name = "exp_14109_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def calculate_ema(arr, period):
@@ -23,18 +23,18 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for EMA filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 1d data for EMA filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA (20-period) for trend filter
-    ema_1w = calculate_ema(close_1w, 20)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 1d EMA (50-period) for trend filter
+    ema_1d = calculate_ema(close_1d, 50)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -56,12 +56,12 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for EMA, 14 for ATR)
-    start = max(20, 20, 14) + 1
+    # Start from warmup period (max of 20 for Donchian, 50 for EMA, 14 for ATR)
+    start = max(20, 50, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_1w_aligned[i]) or \
+        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_1d_aligned[i]) or \
            np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -90,10 +90,10 @@ def generate_signals(prices):
         breakout_up = close[i] > high_20[i-1] and vol_filter[i]
         breakout_down = close[i] < low_20[i-1] and vol_filter[i]
         
-        # 1w EMA trend filter
-        # Only take longs when price > 1w EMA, shorts when price < 1w EMA
-        trend_filter_long = close[i] > ema_1w_aligned[i]
-        trend_filter_short = close[i] < ema_1w_aligned[i]
+        # 1d EMA trend filter
+        # Only take longs when price > 1d EMA, shorts when price < 1d EMA
+        trend_filter_long = close[i] > ema_1d_aligned[i]
+        trend_filter_short = close[i] < ema_1d_aligned[i]
         
         # Generate signals
         if position == 0:
