@@ -3,40 +3,31 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI(2) extreme reversals with 4h trend filter and volume confirmation.
-# RSI(2) captures short-term overbought/oversold conditions. In strong trends, extreme RSI(2) values
-# often precede short-term reversals. Use 4h EMA(50) slope for trend direction: only take RSI(2) 
-# reversals in trend direction. In uptrend: buy when RSI(2) crosses above 10 from below (oversold bounce).
-# In downtrend: sell when RSI(2) crosses below 90 from above (overbought rejection).
-# Volume confirmation ensures institutional participation. Session filter (08-20 UTC) reduces noise.
-# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
-# Target: 15-37 trades/year by using strict RSI(2) extremes (<10 or >90) + trend + volume + session.
+# Hypothesis: 6h Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation.
+# Buy when price breaks above 6h Donchian upper band (20-bar high) in 1w uptrend.
+# Sell when price breaks below 6h Donchian lower band (20-bar low) in 1w downtrend.
+# Volume confirmation ensures institutional participation. Uses EMA(50) on weekly for trend.
+# Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
+# Target: 15-35 trades/year by using strict breakouts + trend + volume.
 
-name = "exp_13654_1h_rsi2_4h_trend_vol_sess_v1"
-timeframe = "1h"
+name = "exp_13655_6h_donchian20_1w_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 2
+DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-RSI_OVERBOUGHT = 90
-RSI_OVERSOLD = 10
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_rsi(close, period):
-    """Calculate RSI"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels: upper = rolling max(high), lower = rolling min(low)"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -57,23 +48,23 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data for trend filter ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1w data for trend filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = calculate_ema(close_4h, TREND_EMA_PERIOD)
-    ema_4h_slope = np.diff(ema_4h, prepend=ema_4h[0])  # slope approximation
-    ema_4h_slope_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_slope)
+    # Calculate 1w EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = calculate_ema(close_1w, TREND_EMA_PERIOD)
+    ema_1w_slope = np.diff(ema_1w, prepend=ema_1w[0])  # slope approximation
+    ema_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_slope)
     
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # RSI(2)
-    rsi = calculate_rsi(close, RSI_PERIOD)
+    # Donchian channels
+    donch_upper, donch_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -81,29 +72,22 @@ def generate_signals(prices):
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_4h_slope_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_1w_slope_aligned[i]) or np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
-        
-        # Session filter: only trade 08-20 UTC
-        hour = hours[i]
-        in_session = (8 <= hour <= 20)
         
         # Check stoploss
         if position == 1:  # long position
@@ -120,24 +104,15 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 4h EMA slope
-        uptrend = ema_4h_slope_aligned[i] > 0
-        downtrend = ema_4h_slope_aligned[i] < 0
+        # Trend direction from 1w EMA slope
+        uptrend = ema_1w_slope_aligned[i] > 0
+        downtrend = ema_1w_slope_aligned[i] < 0
         
-        # RSI(2) signals: extreme reversals
-        # Avoid lookback by checking current and previous values
-        if i > 0 and not np.isnan(rsi[i-1]):
-            rsi_prev = rsi[i-1]
-            rsi_curr = rsi[i]
-            
-            # Long signal: RSI(2) crosses above 10 from below in uptrend
-            long_signal = volume_ok and in_session and uptrend and rsi_prev <= RSI_OVERSOLD and rsi_curr > RSI_OVERSOLD
-            
-            # Short signal: RSI(2) crosses below 90 from above in downtrend
-            short_signal = volume_ok and in_session and downtrend and rsi_prev >= RSI_OVERBOUGHT and rsi_curr < RSI_OVERBOUGHT
-        else:
-            long_signal = False
-            short_signal = False
+        # Donchian breakout signals
+        # Long: price breaks above upper band in uptrend
+        long_signal = volume_ok and uptrend and close[i] > donch_upper[i-1]
+        # Short: price breaks below lower band in downtrend
+        short_signal = volume_ok and downtrend and close[i] < donch_lower[i-1]
         
         # Generate signals
         if position == 0:
@@ -154,29 +129,17 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on opposite RSI(2) signal or stop loss
-            if i > 0 and not np.isnan(rsi[i-1]):
-                rsi_prev = rsi[i-1]
-                rsi_curr = rsi[i]
-                # Exit if RSI(2) crosses below 90 (overbought - end of bounce)
-                if rsi_prev < RSI_OVERBOUGHT and rsi_curr >= RSI_OVERBOUGHT:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = SIGNAL_SIZE
+            # Exit long on opposite breakout or stop loss
+            if close[i] < donch_lower[i-1]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on opposite RSI(2) signal or stop loss
-            if i > 0 and not np.isnan(rsi[i-1]):
-                rsi_prev = rsi[i-1]
-                rsi_curr = rsi[i]
-                # Exit if RSI(2) crosses above 10 (oversold - end of decline)
-                if rsi_prev > RSI_OVERSOLD and rsi_curr <= RSI_OVERSOLD:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -SIGNAL_SIZE
+            # Exit short on opposite breakout or stop loss
+            if close[i] > donch_upper[i-1]:
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -SIGNAL_SIZE
     
