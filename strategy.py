@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 12h trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel during bullish 12h trend with volume > 1.2x 20-period average.
-# Short when price breaks below lower Donchian channel during bearish 12h trend with volume confirmation.
-# Uses 12h trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
-# Target: 50-150 total trades over 4 years (12-37/year) to stay within optimal range.
+# Hypothesis: 6h Williams %R with 12h trend filter and volume confirmation.
+# Long when Williams %R crosses above -20 from below during bullish 12h trend with volume > 1.2x 20-period average.
+# Short when Williams %R crosses below -80 from above during bearish 12h trend with volume confirmation.
+# Williams %R identifies overbought/oversold conditions; 12h trend filter ensures trades align with higher timeframe momentum.
+# Volume confirmation reduces false signals. Target: 75-150 total trades over 4 years (19-38/year).
 
-name = "6h_donchian20_12h_trend_vol_v1"
+name = "6h_williamsr_12h_trend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -24,20 +24,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
+    # Williams %R (14-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
+    close_series = pd.Series(close)
+    highest_high = high_series.rolling(window=14, min_periods=14).max()
+    lowest_low = low_series.rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = williams_r.replace([np.inf, -np.inf], np.nan).values
     
     # 12h trend filter: bullish/bearish based on close vs open
     df_12h = get_htf_data(prices, '12h')
     open_12h = df_12h['open'].values
     close_12h = df_12h['close'].values
-    bullish_12h = close_12h > open_12h  # True for bullish 12h bar
-    bearish_12h = close_12h < open_12h   # True for bearish 12h bar
-    bullish_12h_aligned = align_htf_to_ltf(prices, df_12h, bullish_12h)
-    bearish_12h_aligned = align_htf_to_ltf(prices, df_12h, bearish_12h)
+    trend_bullish = close_12h > open_12h  # True for bullish 12h bar
+    trend_bearish = close_12h < open_12h   # True for bearish 12h bar
+    trend_bullish_aligned = align_htf_to_ltf(prices, df_12h, trend_bullish)
+    trend_bearish_aligned = align_htf_to_ltf(prices, df_12h, trend_bearish)
     
     # Volume filter: current volume > 1.2x 20-period average
     volume_series = pd.Series(volume)
@@ -46,9 +49,9 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Skip if 12h trend data not available
-        if np.isnan(bullish_12h_aligned[i]) or np.isnan(bearish_12h_aligned[i]):
+    for i in range(14, n):
+        # Skip if Williams %R or trend data not available
+        if np.isnan(williams_r[i]) or np.isnan(trend_bullish_aligned[i]) or np.isnan(trend_bearish_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -58,34 +61,36 @@ def generate_signals(prices):
         # Volume condition
         volume_filter = volume[i] > vol_ma[i] * 1.2
         
+        # Williams %R cross signals
+        wr_above_80 = williams_r[i] > -80 and (i == 14 or williams_r[i-1] <= -80)
+        wr_below_20 = williams_r[i] < -20 and (i == 14 or williams_r[i-1] >= -20)
+        
         # Check exits
         if position == 1:  # long position
-            # Exit: price drops below lower Donchian or 12h turn bearish
-            if (low[i] <= lower[i] or 
-                bearish_12h_aligned[i]):
+            # Exit: Williams %R drops below -80 or trend turns bearish
+            if (williams_r[i] < -80 or 
+                trend_bearish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price rises above upper Donchian or 12h turn bullish
-            if (high[i] >= upper[i] or 
-                bullish_12h_aligned[i]):
+            # Exit: Williams %R rises above -20 or trend turns bullish
+            if (williams_r[i] > -20 or 
+                trend_bullish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and 12h trend filter
+            # Look for entries with volume confirmation and trend filter
             if volume_filter:
-                # Long: break above upper Donchian during bullish 12h trend
-                if (high[i] > upper[i] and 
-                    bullish_12h_aligned[i]):
+                # Long: Williams %R crosses above -80 from below during bullish trend
+                if wr_above_80 and trend_bullish_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: break below lower Donchian during bearish 12h trend
-                elif (low[i] < lower[i] and 
-                      bearish_12h_aligned[i]):
+                # Short: Williams %R crosses below -20 from above during bearish trend
+                elif wr_below_20 and trend_bearish_aligned[i]:
                     signals[i] = -0.25
                     position = -1
     
