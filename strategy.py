@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-12h Camarilla pivot with 1d trend filter and volume confirmation
-Hypothesis: Camarilla pivot levels on daily timeframe act as strong support/resistance.
-Price reversals at these levels with 1d trend alignment and volume confirmation provide
-high-probability entries. Works in bull (buy at S1/S2 in uptrend) and bear (sell at R1/R2 in downtrend).
-Target: 50-150 total trades over 4 years.
+4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+Hypothesis: 4h Donchian breakouts capture momentum with fewer trades than lower timeframes. 
+Filter by 1d EMA50 for trend bias and volume confirmation for conviction. Works in bull (buy breakouts above 1d EMA50) and bear (sell breakdowns below 1d EMA50).
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_camarilla_pivot_1d_trend_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema50_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -39,40 +38,12 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 1d data for Camarilla pivots
+    # Get 1d data for trend filter (EMA50) and volume confirmation
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    volume_1d = df_1d['volume'].values
     
-    # Calculate Camarilla levels from previous 1d bar
-    camarilla_r4 = np.full(len(close_1d), np.nan)
-    camarilla_r3 = np.full(len(close_1d), np.nan)
-    camarilla_r2 = np.full(len(close_1d), np.nan)
-    camarilla_r1 = np.full(len(close_1d), np.nan)
-    camarilla_s1 = np.full(len(close_1d), np.nan)
-    camarilla_s2 = np.full(len(close_1d), np.nan)
-    camarilla_s3 = np.full(len(close_1d), np.nan)
-    camarilla_s4 = np.full(len(close_1d), np.nan)
-    
-    for i in range(1, len(close_1d)):
-        # Previous day's range
-        prev_high = high_1d[i-1]
-        prev_low = low_1d[i-1]
-        prev_close = close_1d[i-1]
-        range_ = prev_high - prev_low
-        
-        if range_ > 0:
-            camarilla_r4[i] = prev_close + range_ * 1.1 / 2
-            camarilla_r3[i] = prev_close + range_ * 1.1 / 4
-            camarilla_r2[i] = prev_close + range_ * 1.1 / 6
-            camarilla_r1[i] = prev_close + range_ * 1.1 / 12
-            camarilla_s1[i] = prev_close - range_ * 1.1 / 12
-            camarilla_s2[i] = prev_close - range_ * 1.1 / 6
-            camarilla_s3[i] = prev_close - range_ * 1.1 / 4
-            camarilla_s4[i] = prev_close - range_ * 1.1 / 2
-    
-    # Get 1d data for trend filter (EMA50)
+    # EMA50 on 1d close
     ema_1d = np.full(len(close_1d), np.nan)
     if len(close_1d) >= 50:
         ema_1d[49] = np.mean(close_1d[:50])
@@ -82,19 +53,24 @@ def generate_signals(prices):
     # 1d trend: above EMA50 = bullish, below = bearish
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align 1d data to 12h timeframe
-    camarilla_r1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r1)
-    camarilla_r2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r2)
-    camarilla_s1_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s1)
-    camarilla_s2_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s2)
+    # Align 1d trend to 4h timeframe
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Get 1d volume for confirmation
-    volume_1d = df_1d['volume'].values
+    # 20-period average volume on 1d
     vol_ma_1d = np.full(len(volume_1d), np.nan)
     for i in range(20, len(volume_1d)):
         vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    
+    # Align volume MA to 4h timeframe
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Donchian channels (20-period) from 4h data
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
+    for i in range(20, n):
+        upper[i] = np.max(high[i-20:i])
+        lower[i] = np.min(low[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -102,12 +78,12 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 50  # Need enough data for Camarilla and EMA
+    start = 40  # Need enough data for Donchian and alignments
     
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(atr[i]) or np.isnan(trend_1d_aligned[i]) or 
-            np.isnan(camarilla_r1_aligned[i]) or np.isnan(camarilla_s1_aligned[i]) or
+            np.isnan(upper[i]) or np.isnan(lower[i]) or
             np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
@@ -116,15 +92,16 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 12h volume > 1.5x 1d average volume
-        vol_threshold = vol_ma_1d_aligned[i] * 1.5
+        # Volume filter: current 4h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d volume to 4h: approx 1/6 of 1d volume (since 6x 4h in 1d)
+        vol_threshold = vol_ma_1d_aligned[i] / 6.0 * 1.5
         volume_filter = volume[i] > vol_threshold
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price crosses S1 (stop reversal) or against 1d trend
+            # Exit: price breaks below lower Donchian OR against 1d trend
             # Stoploss: price drops 2*ATR below entry
-            if (close[i] < camarilla_s1_aligned[i] or
+            if (close[i] < lower[i] or
                 trend_1d_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
@@ -134,9 +111,9 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price crosses R1 (stop reversal) or against 1d trend
+            # Exit: price breaks above upper Donchian OR against 1d trend
             # Stoploss: price rises 2*ATR above entry
-            if (close[i] > camarilla_r1_aligned[i] or
+            if (close[i] > upper[i] or
                 trend_1d_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
@@ -147,25 +124,20 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 12 bars flat
-            if bars_since_entry >= 12:
-                # Mean reversion entries at Camarilla levels with 1d trend
-                # Long: price at S1/S2 in uptrend with volume
-                near_s1 = abs(close[i] - camarilla_s1_aligned[i]) < (0.1 * atr[i])
-                near_s2 = abs(close[i] - camarilla_s2_aligned[i]) < (0.15 * atr[i])
-                long_setup = (near_s1 or near_s2) and trend_1d_aligned[i] == 1 and volume_filter
+            # Minimum holding period: only allow new entry after 6 bars flat
+            if bars_since_entry >= 6:
+                # Breakout entries: upper/lower with 1d trend
+                bull_breakout = close[i] > upper[i]
+                bear_breakout = close[i] < lower[i]
                 
-                # Short: price at R1/R2 in downtrend with volume
-                near_r1 = abs(close[i] - camarilla_r1_aligned[i]) < (0.1 * atr[i])
-                near_r2 = abs(close[i] - camarilla_r2_aligned[i]) < (0.15 * atr[i])
-                short_setup = (near_r1 or near_r2) and trend_1d_aligned[i] == -1 and volume_filter
-                
-                if long_setup:
+                # Long: breakout above upper with bullish 1d trend + volume
+                if bull_breakout and trend_1d_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                elif short_setup:
+                # Short: breakdown below lower with bearish 1d trend + volume
+                elif bear_breakout and trend_1d_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
