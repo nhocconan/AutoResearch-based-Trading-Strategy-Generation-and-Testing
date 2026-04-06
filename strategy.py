@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with 1d Trend Filter and Volume Confirmation
-Hypothesis: Breakouts from Donchian channels on 12h, filtered by 1d trend and volume spikes,
-capture momentum in both bull and bear markets. The 1d trend filter avoids counter-trend
-trades, while volume ensures breakout legitimacy. ATR-based stops limit drawdown.
+6h Camarilla Pivot Breakout with Volume Confirmation
+Hypothesis: Camarilla pivot levels (derived from previous 1d) act as strong support/resistance.
+Breakouts above R4 or below S4 with volume confirmation indicate institutional interest and
+continuation of momentum. In ranging markets, reversals at R3/S3 provide mean-reversion
+opportunities. Works in both bull and bear markets by adapting to volatility regimes.
 Target: 50-150 total trades over 4 years.
 """
 
@@ -11,13 +12,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_trend_vol_v1"
-timeframe = "12h"
+name = "6h_camarilla_pivot_vol"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price and volume data
@@ -26,43 +27,42 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 20-period ATR for stops and filters
+    # 14-period ATR for stops
     atr = np.full(n, np.nan)
-    if n >= 20:
+    if n >= 14:
         tr = np.maximum(
             high[1:] - low[1:],
             np.abs(high[1:] - close[:-1]),
             np.abs(low[1:] - close[:-1])
         )
         if len(tr) > 0:
-            atr[20] = np.mean(tr[:20])
-            for i in range(21, n):
-                atr[i] = (atr[i-1] * 19 + tr[i-1]) / 20
+            atr[14] = np.mean(tr[:14])
+            for i in range(15, n):
+                atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # Donchian channels (20-period high/low)
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    
-    for i in range(20, n):
-        donch_high[i] = np.max(high[i-20:i])
-        donch_low[i] = np.min(low[i-20:i])
-    
-    # Get 1d data for trend filter
+    # Get daily data for Camarilla pivots
     df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Previous day's OHLC for pivot calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_open = df_1d['open'].shift(1).values
     
-    # 50-period EMA on 1d for trend
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 50:
-        ema_1d[49] = np.mean(close_1d[:50])
-        for i in range(50, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 49) / 51
+    # Typical price for pivot
+    typical_price = (prev_high + prev_low + prev_close) / 3
+    # Camarilla levels
+    r4 = typical_price + ((prev_high - prev_low) * 1.1 / 2)
+    r3 = typical_price + ((prev_high - prev_low) * 1.1 / 4)
+    s3 = typical_price - ((prev_high - prev_low) * 1.1 / 4)
+    s4 = typical_price - ((prev_high - prev_low) * 1.1 / 2)
     
-    # Trend: 1 if close > EMA (uptrend), -1 if close < EMA (downtrend)
-    trend_1d = np.where(close_1d > ema_1d, 1, -1)
-    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    # Align pivots to 6h timeframe
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
     
-    # Volume filter: current volume > 1.5x average over last 20 periods
+    # Volume filter: current volume > 1.3x average over last 20 periods
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -72,12 +72,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20)
+    start = max(20, 14)
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
-           np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(atr[i]) or np.isnan(r4_6h[i]) or np.isnan(r3_6h[i]) or \
+           np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -85,41 +85,37 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        volume_filter = volume[i] > vol_ma[i] * 1.3
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low OR trend turns down
-            # Stoploss: price drops 2.5*ATR below entry
-            if (close[i] <= donch_low[i] or
-                trend_1d_aligned[i] == -1 or
-                close[i] < entry_price - 2.5 * atr[i]):
+            # Exit: price breaks below S3 (mean reversion) OR stoploss hit
+            # Stoploss: price drops 2*ATR below entry
+            if (close[i] < s3_6h[i] or
+                close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high OR trend turns up
-            # Stoploss: price rises 2.5*ATR above entry
-            if (close[i] >= donch_high[i] or
-                trend_1d_aligned[i] == 1 or
-                close[i] > entry_price + 2.5 * atr[i]):
+            # Exit: price breaks above R3 (mean reversion) OR stoploss hit
+            # Stoploss: price rises 2*ATR above entry
+            if (close[i] > r3_6h[i] or
+                close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
             # Look for breakout entries
-            # Long: price breaks above Donchian high in uptrend with volume
-            if (close[i] > donch_high[i] and
-                trend_1d_aligned[i] == 1 and
+            # Long: price breaks above R4 with volume (bullish continuation)
+            if (close[i] > r4_6h[i] and
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low in downtrend with volume
-            elif (close[i] < donch_low[i] and
-                  trend_1d_aligned[i] == -1 and
+            # Short: price breaks below S4 with volume (bearish continuation)
+            elif (close[i] < s4_6h[i] and
                   volume_filter):
                 signals[i] = -0.25
                 position = -1
@@ -128,3 +124,134 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
+
+</think>
+
+#!/usr/bin/env python3
+"""
+6h Camarilla Pivot Breakout with Volume Confirmation
+Hypothesis: Camarilla pivot levels (derived from previous 1d) act as strong support/resistance.
+Breakouts above R4 or below S4 with volume confirmation indicate institutional interest and
+continuation of momentum. In ranging markets, reversals at R3/S3 provide mean-reversion
+opportunities. Works in both bull and bear markets by adapting to volatility regimes.
+Target: 50-150 total trades over 4 years.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "6h_camarilla_pivot_vol"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 30:
+        return np.zeros(n)
+    
+    # Price and volume data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # 14-period ATR for stops
+    atr = np.full(n, np.nan)
+    if n >= 14:
+        tr = np.maximum(
+            high[1:] - low[1:],
+            np.abs(high[1:] - close[:-1]),
+            np.abs(low[1:] - close[:-1])
+        )
+        if len(tr) > 0:
+            atr[14] = np.mean(tr[:14])
+            for i in range(15, n):
+                atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
+    
+    # Get daily data for Camarilla pivots
+    df_1d = get_htf_data(prices, '1d')
+    # Previous day's OHLC for pivot calculation
+    prev_close = df_1d['close'].shift(1).values
+    prev_high = df_1d['high'].shift(1).values
+    prev_low = df_1d['low'].shift(1).values
+    prev_open = df_1d['open'].shift(1).values
+    
+    # Typical price for pivot
+    typical_price = (prev_high + prev_low + prev_close) / 3
+    # Camarilla levels
+    r4 = typical_price + ((prev_high - prev_low) * 1.1 / 2)
+    r3 = typical_price + ((prev_high - prev_low) * 1.1 / 4)
+    s3 = typical_price - ((prev_high - prev_low) * 1.1 / 4)
+    s4 = typical_price - ((prev_high - prev_low) * 1.1 / 2)
+    
+    # Align pivots to 6h timeframe
+    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
+    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
+    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
+    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Volume filter: current volume > 1.3x average over last 20 periods
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    
+    # Start from warmup period
+    start = max(20, 14)
+    
+    for i in range(start, n):
+        # Skip if required data not available
+        if np.isnan(atr[i]) or np.isnan(r4_6h[i]) or np.isnan(r3_6h[i]) or \
+           np.isnan(s3_6h[i]) or np.isnan(s4_6h[i]) or np.isnan(vol_ma[i]):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Volume condition
+        volume_filter = volume[i] > vol_ma[i] * 1.3
+        
+        # Check exits and stoploss
+        if position == 1:  # long position
+            # Exit: price breaks below S3 (mean reversion) OR stoploss hit
+            # Stoploss: price drops 2*ATR below entry
+            if (close[i] < s3_6h[i] or
+                close[i] < entry_price - 2.0 * atr[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:  # short position
+            # Exit: price breaks above R3 (mean reversion) OR stoploss hit
+            # Stoploss: price rises 2*ATR above entry
+            if (close[i] > r3_6h[i] or
+                close[i] > entry_price + 2.0 * atr[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+        else:
+            # Look for breakout entries
+            # Long: price breaks above R4 with volume (bullish continuation)
+            if (close[i] > r4_6h[i] and
+                volume_filter):
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+            # Short: price breaks below S4 with volume (bearish continuation)
+            elif (close[i] < s4_6h[i] and
+                  volume_filter):
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
+            else:
+                signals[i] = 0.0
+    
+    return signals
+
+</think>
