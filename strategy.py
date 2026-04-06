@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 1-day trend filter and volume confirmation
-# Long when price breaks above 6h 20-period high AND 1d close > 1d 20-period EMA AND volume > 1.5x 20-period average volume
-# Short when price breaks below 6h 20-period low AND 1d close < 1d 20-period EMA AND volume > 1.5x 20-period average volume
-# Uses 1d trend filter to avoid counter-trend trades and volume confirmation to avoid false breakouts.
-# Target: 75-150 total trades over 4 years (19-38/year) to stay within optimal range.
+# Hypothesis: 12-hour Donchian channel breakout with daily trend filter
+# Long when price breaks above 20-period high AND daily close above 20-day EMA
+# Short when price breaks below 20-period low AND daily close below 20-day EMA
+# Uses daily trend filter to avoid counter-trend trades. Designed for 12h timeframe to balance trade frequency and signal quality.
+# Target: 50-150 total trades over 4 years (12-37/year) for optimal statistical validity and low fee drag.
 
-name = "6h_donchian20_1d_trend_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_ema_trend_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,20 +22,15 @@ def generate_signals(prices):
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Donchian Channel (20-period) on 6h data
+    # Donchian Channel (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     
     donchian_high = high_series.rolling(window=20, min_periods=20).max()
     donchian_low = low_series.rolling(window=20, min_periods=20).min()
     
-    # Average volume (20-period)
-    volume_series = pd.Series(volume)
-    avg_volume = volume_series.rolling(window=20, min_periods=20).mean()
-    
-    # 1-day trend filter: EMA(20) on 1d close
+    # Daily trend filter: EMA(20) on daily close
     df_1d = get_htf_data(prices, '1d')
     daily_close = df_1d['close'].values
     
@@ -43,7 +38,7 @@ def generate_signals(prices):
     daily_close_series = pd.Series(daily_close)
     daily_ema = daily_close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
     
-    # Align daily EMA to 6h timeframe
+    # Align daily EMA to 12h timeframe
     daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
     
     signals = np.zeros(n)
@@ -60,7 +55,7 @@ def generate_signals(prices):
         
         # Check exits: reverse position or trend change
         if position == 1:  # long position
-            # Exit: price breaks below 6h 20-period low or 1d trend turns bearish
+            # Exit: price breaks below 20-period low or daily trend turns bearish
             if (close[i] <= donchian_low[i] or 
                 daily_close[i] < daily_ema_aligned[i]):
                 signals[i] = 0.0
@@ -68,7 +63,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above 6h 20-period high or 1d trend turns bullish
+            # Exit: price breaks above 20-period high or daily trend turns bullish
             if (close[i] >= donchian_high[i] or 
                 daily_close[i] > daily_ema_aligned[i]):
                 signals[i] = 0.0
@@ -76,17 +71,15 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with 1d trend filter and volume confirmation
-            # Long: price breaks above 6h 20-period high AND 1d close > daily EMA AND volume > 1.5x average
+            # Look for entries with daily trend filter
+            # Long: price breaks above 20-period high AND daily close above daily EMA
             if (close[i] > donchian_high[i] and 
-                daily_close[i] > daily_ema_aligned[i] and
-                volume[i] > 1.5 * avg_volume[i]):
+                daily_close[i] > daily_ema_aligned[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 6h 20-period low AND 1d close < daily EMA AND volume > 1.5x average
+            # Short: price breaks below 20-period low AND daily close below daily EMA
             elif (close[i] < donchian_low[i] and 
-                  daily_close[i] < daily_ema_aligned[i] and
-                  volume[i] > 1.5 * avg_volume[i]):
+                  daily_close[i] < daily_ema_aligned[i]):
                 signals[i] = -0.25
                 position = -1
     
