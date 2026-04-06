@@ -3,73 +3,95 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with weekly trend filter
-# Enter long when TK crosses above Kijun (Tenkan > Kijun) and price above Kumo (cloud) from 1d
-# Enter short when TK crosses below Kijun and price below Kumo from 1d
-# Uses weekly trend filter: only long when price > weekly EMA50, short when price < weekly EMA50
-# Designed to capture trend continuation in both bull and bear markets with strict entry filters
-# Target: 50-150 total trades over 4 years
+# Hypothesis: 6h Elder Ray (Bull/Bear Power) with daily regime filter
+# Elder Ray: Bull Power = High - EMA(13), Bear Power = EMA(13) - Low
+# Regime filter: 1d ADX > 25 for trending, < 20 for ranging
+# In trending (ADX>25): go long when Bull Power > 0 and rising, short when Bear Power > 0 and rising
+# In ranging (ADX<20): mean reversion at Bollinger Bands (20,2)
+# Exit when power crosses zero or opposite signal
+# Designed to work in both bull (trending) and bear (ranging) markets
 
-name = "6h_ichimoku_weekly_trend_v1"
+name = "6h_elder_ray_regime_v1"
 timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Ichimoku components (9, 26, 52 periods) on 6h
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max().values
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min().values
-    tenkan = (high_9 + low_9) / 2
+    # Elder Ray components: EMA(13) of close
+    ema_13 = pd.Series(close).ewm(span=13, adjust=False).mean().values
+    bull_power = high - ema_13  # Bull Power = High - EMA
+    bear_power = ema_13 - low   # Bear Power = EMA - Low
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max().values
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min().values
-    kijun = (high_26 + low_26) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = (tenkan + kijun) / 2
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max().values
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min().values
-    senkou_b = (high_52 + low_52) / 2
-    
-    # Kumo (Cloud) boundaries: Senkou Span A and B shifted 26 periods ahead
-    # For simplicity, we use current Senkou spans as cloud boundaries
-    # In practice, cloud is plotted 26 periods ahead, but we use current for signal
-    # Upper cloud = max(senkou_a, senkou_b), Lower cloud = min(senkou_a, senkou_b)
-    upper_cloud = np.maximum(senkou_a, senkou_b)
-    lower_cloud = np.minimum(senkou_a, senkou_b)
-    
-    # 1d EMA50 for trend filter (daily trend)
+    # 1d ADX for regime filter (trending vs ranging)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
     
-    # Weekly EMA50 for stronger trend filter
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
-    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[:-1])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.concatenate([[np.max([high_1d[0] - low_1d[0], 0])], np.maximum(tr1, np.maximum(tr2, tr3))])
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Smoothed values (Wilder's smoothing = alpha = 1/period)
+    def wilders_smooth(data, period):
+        alpha = 1.0 / period
+        smoothed = np.zeros_like(data)
+        smoothed[0] = data[0]
+        for i in range(1, len(data)):
+            smoothed[i] = alpha * data[i] + (1 - alpha) * smoothed[i-1]
+        return smoothed
+    
+    atr_period = 14
+    tr_smooth = wilders_smooth(tr, atr_period)
+    dm_plus_smooth = wilders_smooth(dm_plus, atr_period)
+    dm_minus_smooth = wilders_smooth(dm_minus, atr_period)
+    
+    # DI+ and DI-
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = wilders_smooth(dx, atr_period)
+    
+    # Align ADX to 6h
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # Bollinger Bands for ranging regime (20,2)
+    bb_period = 20
+    bb_std = 2
+    sma_20 = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    bb_std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    bb_upper = sma_20 + bb_std * bb_std_dev
+    bb_lower = sma_20 - bb_std * bb_std_dev
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Need 52 periods for Senkou B
+    for i in range(30, n):
         # Skip if required data not available
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(upper_cloud[i]) or np.isnan(lower_cloud[i]) or
-            np.isnan(ema_50_1d_aligned[i]) or np.isnan(ema_50_1w_aligned[i])):
+        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
+            np.isnan(ema_13[i]) or np.isnan(adx_aligned[i]) or 
+            np.isnan(sma_20[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -77,34 +99,39 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: TK cross below KJ OR price below cloud OR weekly trend breaks
-            if (tenkan[i] < kijun[i] or close[i] < lower_cloud[i] or 
-                close[i] < ema_50_1w_aligned[i]):
+            # Exit: Bull Power crosses below zero OR Bear Power > Bull Power (momentum shift)
+            if bull_power[i] <= 0 or bear_power[i] > bull_power[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: TK cross above KJ OR price above cloud OR weekly trend breaks
-            if (tenkan[i] > kijun[i] or close[i] > upper_cloud[i] or 
-                close[i] > ema_50_1w_aligned[i]):
+            # Exit: Bear Power crosses below zero OR Bull Power > Bear Power (momentum shift)
+            if bear_power[i] <= 0 or bull_power[i] > bear_power[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: TK cross with price outside cloud and weekly trend alignment
-            # Bullish: TK crosses above KJ, price above cloud, above weekly EMA50
-            if (tenkan[i] > kijun[i] and tenkan[i-1] <= kijun[i-1] and  # TK cross above KJ
-                close[i] > upper_cloud[i] and 
-                close[i] > ema_50_1w_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-            # Bearish: TK crosses below KJ, price below cloud, below weekly EMA50
-            elif (tenkan[i] < kijun[i] and tenkan[i-1] >= kijun[i-1] and  # TK cross below KJ
-                  close[i] < lower_cloud[i] and 
-                  close[i] < ema_50_1w_aligned[i]):
-                signals[i] = -0.25
-                position = -1
+            # Regime-based entry logic
+            if adx_aligned[i] > 25:  # Trending regime
+                # Long: Bull Power > 0 and rising (current > previous)
+                if bull_power[i] > 0 and bull_power[i] > bull_power[i-1]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: Bear Power > 0 and rising (current > previous)
+                elif bear_power[i] > 0 and bear_power[i] > bear_power[i-1]:
+                    signals[i] = -0.25
+                    position = -1
+            elif adx_aligned[i] < 20:  # Ranging regime
+                # Mean reversion at Bollinger Bands
+                # Long: price touches or goes below lower band
+                if close[i] <= bb_lower[i]:
+                    signals[i] = 0.25
+                    position = 1
+                # Short: price touches or goes above upper band
+                elif close[i] >= bb_upper[i]:
+                    signals[i] = -0.25
+                    position = -1
     
     return signals
