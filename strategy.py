@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with 1d EMA(50) trend and volume surge
+4h Donchian(20) breakout with 1d EMA(50) trend and volume confirmation
 Hypothesis: Price breaking Donchian(20) channels with 1d EMA(50) trend alignment and volume surge captures institutional breakouts. Works in bull (long on upper break) and bear (short on lower break). Target: 75-200 trades over 4 years.
 """
 
@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_ema_vol_v3"
+name = "4h_donchian20_1d_ema_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
