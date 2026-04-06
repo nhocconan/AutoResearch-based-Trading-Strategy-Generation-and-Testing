@@ -3,23 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour strategy using 1-day Donchian(20) breakouts with volume confirmation and ATR stop loss.
-# Uses daily trend structure for directional entries, avoiding overtrading by using higher timeframe breakouts.
-# Designed for ~100 total trades over 4 years (25/year) to minimize fee drag.
-# Works in bull markets (breakouts with volume) and bear markets (breakdowns with volume).
-# Target: 50-150 total trades, 0.25 position size, max DD < -50%.
+# Hypothesis: 4h strategy using 1d Donchian(20) breakouts with volume confirmation and ATR stoploss.
+# Uses 1d Donchian breakouts for entries, volume for confirmation, and ATR for risk management.
+# Designed for ~100-200 total trades over 4 years (25-50/year) to avoid excessive fees.
+# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
+# Target: 100-200 total trades, 0.25 position size, max DD < -50%.
 
-name = "exp_13745_12h_donchian20_1d_vol"
-timeframe = "12h"
+name = "exp_13746_4h_donchian20_1d_vol"
+timeframe = "4h"
 leverage = 1.0
 
-# Parameters - optimized for low frequency, high conviction trades
+# Parameters - tuned for moderate trade frequency
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -33,10 +33,10 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 1d data for Donchian channels and volume MA ONCE before loop
+    # Load 1d data for Donchian and volume filters ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate 1d indicators
@@ -45,7 +45,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # ATR for stop loss (using 12h data)
+    # ATR for stop loss (using 4h data)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
