@@ -1,46 +1,57 @@
 #!/usr/bin/env python3
 """
-1d Donchian breakout with 1w trend filter and volume confirmation
-Hypothesis: Donchian(20) breakouts capture breakout momentum. 1w EMA200 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength.
-Works in both bull (buy breakouts above upper band in uptrend) and bear (sell breakdowns below lower band in downtrend). Target: 30-100 total trades over 4 years.
+12h Donchian(20) breakout with 1d trend filter and volume confirmation
+Hypothesis: Donchian breakouts capture strong momentum moves. 1d EMA50 filters trend direction to avoid counter-trend trades. Volume confirms institutional participation. Works in both bull (buy breakouts above) and bear (sell breakdowns below). Target: 50-150 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_1w_trend_volume_v1"
-timeframe = "1d"
+name = "12h_donchian20_1d_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1w EMA200 for trend filter
-    close_1w = df_1w['close'].values
-    ema200_1w = pd.Series(close_1w).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_1w_prev = np.roll(ema200_1w, 1)
-    ema200_1w_prev[0] = ema200_1w[0]
-    ema200_rising = ema200_1w > ema200_1w_prev
-    ema200_falling = ema200_1w < ema200_1w_prev
-    ema200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema200_1w)
-    ema200_rising_aligned = align_htf_to_ltf(prices, df_1w, ema200_rising)
-    ema200_falling_aligned = align_htf_to_ltf(prices, df_1w, ema200_falling)
+    # 1d EMA50 for trend filter
+    close_1d = df_1d['close'].values
+    ema50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1d_prev = np.roll(ema50_1d, 1)
+    ema50_1d_prev[0] = ema50_1d[0]
+    ema50_rising = ema50_1d > ema50_1d_prev
+    ema50_falling = ema50_1d < ema50_1d_prev
+    ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
+    ema50_rising_aligned = align_htf_to_ltf(prices, df_1d, ema50_rising)
+    ema50_falling_aligned = align_htf_to_ltf(prices, df_1d, ema50_falling)
     
-    # 1d data
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian(20) channels
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian channels (20-period)
+    def rolling_max(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.max(arr[i-window+1:i+1])
+        return res
+    
+    def rolling_min(arr, window):
+        res = np.full_like(arr, np.nan)
+        for i in range(window-1, len(arr)):
+            res[i] = np.min(arr[i-window+1:i+1])
+        return res
+    
+    donchian_high = rolling_max(high, 20)
+    donchian_low = rolling_min(low, 20)
     
     # Volume filter: 20-period EMA
     vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
@@ -50,13 +61,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 200  # For EMA200
+    start = 50  # For EMA50 and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(vol_ema[i]) or 
-            np.isnan(ema200_1w_aligned[i]) or np.isnan(ema200_rising_aligned[i]) or 
-            np.isnan(ema200_falling_aligned[i])):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(vol_ema[i]) or np.isnan(ema50_1d_aligned[i]) or 
+            np.isnan(ema50_rising_aligned[i]) or np.isnan(ema50_falling_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -65,29 +76,30 @@ def generate_signals(prices):
         
         # Check exits: reverse signal or stoploss
         if position == 1:  # long position
-            # Exit: price closes below lower Donchian band OR stoploss
-            if (close[i] <= low_20[i] or 
-                close[i] <= entry_price - 2.5 * (high[i] - low[i])):
+            # Exit: price crosses below Donchian low OR stoploss
+            atr = (high[i] - low[i])  # Simple ATR proxy
+            if (close[i] <= donchian_low[i] or 
+                close[i] <= entry_price - 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above upper Donchian band OR stoploss
-            if (close[i] >= high_20[i] or 
-                close[i] >= entry_price + 2.5 * (high[i] - low[i])):
+            # Exit: price crosses above Donchian high OR stoploss
+            atr = (high[i] - low[i])
+            if (close[i] >= donchian_high[i] or 
+                close[i] >= entry_price + 2.0 * atr):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
             # Look for entries: Donchian breakout + trend + volume
-            long_entry = (close[i] > high_20[i] and 
-                         ema200_rising_aligned[i] and 
-                         volume[i] > vol_ema[i] * 2.0)
-            short_entry = (close[i] < low_20[i] and 
-                          ema200_falling_aligned[i] and 
-                          volume[i] > vol_ema[i] * 2.0)
+            long_breakout = close[i] > donchian_high[i]
+            short_breakout = close[i] < donchian_low[i]
+            
+            long_entry = long_breakout and ema50_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            short_entry = short_breakout and ema50_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
             
             if long_entry:
                 signals[i] = 0.25
