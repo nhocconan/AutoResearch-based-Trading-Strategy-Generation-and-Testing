@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
-# Long when price breaks above 20-period high with 1d EMA(50) uptrend and volume > 20-period average
-# Short when price breaks below 20-period low with 1d EMA(50) downtrend and volume > 20-period average
-# ATR-based stoploss to limit drawdown
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
+# Long when price breaks above Donchian(20) upper band with EMA(50) uptrend and volume > MA
+# Short when price breaks below Donchian(20) lower band with EMA(50) downtrend and volume > MA
+# ATR-based stoploss to limit drawdown in both bull and bear markets
 # Target: 75-200 total trades over 4 years with controlled risk
 
 name = "4h_donchian20_1d_ema_vol_v1"
@@ -33,20 +33,23 @@ def generate_signals(prices):
     ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Donchian channels: 20-period high/low
-    high_max = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_min = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    # Donchian channels (20-period)
+    # Use pandas rolling with min_periods
+    high_series = pd.Series(high)
+    low_series = pd.Series(low)
+    donchian_high = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_low = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 20-period average
+    # Volume filter: 20-period moving average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > vol_ma
     
-    # ATR(14) for stoploss
+    # ATR for stoploss calculation (14-period)
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = tr1[0]
-    tr3[0] = tr1[0]
+    tr2[0] = 0  # First value has no previous close
+    tr3[0] = 0
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
@@ -56,8 +59,8 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(ema_1d_aligned[i]) or np.isnan(high_max[i]) or 
-            np.isnan(low_min[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+        if (np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_high[i]) or 
+            np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -70,8 +73,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks below Donchian low or 1d EMA turns down
-            elif close[i] < low_min[i] or ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+            # Exit: 1d EMA turns down or price breaks below Donchian low
+            elif ema_1d_aligned[i] < ema_1d_aligned[i-1] or close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -83,8 +86,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
-            # Exit: price breaks above Donchian high or 1d EMA turns up
-            elif close[i] > high_max[i] or ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+            # Exit: 1d EMA turns up or price breaks above Donchian high
+            elif ema_1d_aligned[i] > ema_1d_aligned[i-1] or close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -93,13 +96,13 @@ def generate_signals(prices):
         else:
             # Look for entries with volume confirmation
             if vol_filter[i]:
-                # Long when price breaks above Donchian high with uptrend
-                if close[i] > high_max[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
+                # Long when price breaks above Donchian high with 1d EMA uptrend
+                if close[i] > donchian_high[i] and ema_1d_aligned[i] > ema_1d_aligned[i-1]:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short when price breaks below Donchian low with downtrend
-                elif close[i] < low_min[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
+                # Short when price breaks below Donchian low with 1d EMA downtrend
+                elif close[i] < donchian_low[i] and ema_1d_aligned[i] < ema_1d_aligned[i-1]:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
