@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13960_4h_donchian20_1d_ema_vol_v1"
+name = "exp_13961_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
 # Uses 1d EMA(50) for trend direction: price above EMA = bullish bias (long only),
 # price below EMA = bearish bias (short only). Entry on 4h Donchian breakout in
 # direction of 1d trend with volume > 1.5x average. Exit on Donchian reversal or
