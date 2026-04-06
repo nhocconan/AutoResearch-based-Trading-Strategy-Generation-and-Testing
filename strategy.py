@@ -3,9 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA trend filter and volume confirmation.
-# Captures strong trending moves aligned with intermediate-term momentum. Volume ensures institutional participation.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA(21) trend filter and volume confirmation.
+# This strategy captures breakouts aligned with the intermediate-term trend (12h EMA) while
+# requiring volume confirmation to filter false breakouts. Works in both bull and bear markets:
+# - In bull markets: long breakouts above upper band with upward 12h trend
+# - In bear markets: short breakdowns below lower band with downward 12h trend
+# Volume requirement ensures institutional participation, reducing false signals.
 # Target: 75-200 total trades over 4 years (19-50/year).
 
 name = "exp_13573_4h_donchian20_12h_ema_vol_v1"
@@ -39,15 +42,15 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop
+    # Load 12-hour data ONCE before loop
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 12h EMA for trend filter
+    # Calculate 12-hour EMA for trend filter
     close_12h = df_12h['close'].values
     ema_12h = calculate_ema(close_12h, EMA_PERIOD)
     ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 4h indicators
+    # Calculate 4-hour indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
