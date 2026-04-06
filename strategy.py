@@ -1,27 +1,22 @@
-# 1d Camarilla Pivot Mean Reversion Strategy
-# Hypothesis: Price tends to revert from Camarilla pivot levels (S3/R3) with volume confirmation
-# Works in both bull/bear markets as mean reversion strategy
-# Uses 1d pivots on 1d timeframe (no intra-day alignment needed)
-# Target: 30-100 trades over 4 years (7-25/year)
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12690_1d_camarilla_pivot_mean_reversion_v1"
+name = "exp_12690_1d_1w_donchian_vol_trend_v1"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.25
+DONCHIAN_PERIOD = 20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR"""
+    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -29,20 +24,23 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_camarilla_pivot(high, low, close):
-    """Calculate Camarilla pivot levels"""
-    pivot = (high + low + close) / 3
-    range_val = high - low
-    r3 = pivot + (range_val * 1.1 / 2)
-    s3 = pivot - (range_val * 1.1 / 2)
-    r4 = pivot + (range_val * 1.1)
-    s4 = pivot - (range_val * 1.1)
-    return r3, s3, r4, s4
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
+    
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate weekly Donchian channels
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    donchian_high = pd.Series(high_1w).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low_1w).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    
+    # Align Donchian levels to daily timeframe
+    donchian_high_aligned = align_htf_to_ltf(prices, df_1w, donchian_high)
+    donchian_low_aligned = align_htf_to_ltf(prices, df_1w, donchian_low)
     
     # Calculate daily indicators
     high = prices['high'].values
@@ -53,18 +51,23 @@ def generate_signals(prices):
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Calculate Camarilla pivot levels
-    r3, s3, r4, s4 = calculate_camarilla_pivot(high, low, close)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
+        # Skip if weekly Donchian levels not available
+        if np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]):
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+            continue
+        
         # Check stoploss
         if position == 1:  # long position
             if close[i] <= stop_price:
@@ -80,18 +83,18 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Mean reversion at S3/R3 with volume
-        long_signal = volume_ok and close[i] <= s3[i]  # bounce from S3 support
-        short_signal = volume_ok and close[i] >= r3[i]  # rejection at R3 resistance
+        # Breakout above weekly Donchian high (long) or below weekly Donchian low (short)
+        long_breakout = volume_ok and close[i] > donchian_high_aligned[i]
+        short_breakout = volume_ok and close[i] < donchian_low_aligned[i]
         
         # Generate signals
         if position == 0:
-            if long_signal:
+            if long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_signal:
+            elif short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
