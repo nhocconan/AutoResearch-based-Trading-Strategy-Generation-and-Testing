@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using 1d Donchian(20) breakout with 12h volume confirmation and 1d EMA200 trend filter.
-# Goes long when price breaks above 1d Donchian upper band (from previous day) with above-average 12h volume and price above 1d EMA200,
-# short when breaks below 1d Donchian lower band with volume and price below 1d EMA200.
-# Uses ATR-based stop loss to manage risk.
-# 1d Donchian provides clean breakout levels with lower frequency, targeting 50-150 total trades over 4 years.
-# 12h volume confirms breakout strength, 1d EMA200 filters trend direction.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA200 filter and volume confirmation.
+# Goes long when price breaks above 4h Donchian upper band with volume > 1.5x 20-period MA and price > 1d EMA200.
+# Short when breaks below lower band with volume confirmation and price < 1d EMA200.
+# Uses ATR(14) stop loss at 2x ATR. Designed for 75-200 total trades over 4 years to avoid fee drag.
+# Donchian provides clear structure, EMA200 filters trend direction, volume confirms breakout strength.
 
-name = "exp_13825_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13826_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -48,33 +47,29 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for Donchian and EMA filters ONCE before loop
+    # Load 1d data for EMA trend filter ONCE before loop
     df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d Donchian channels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    upper_1d, lower_1d = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
     
     # Calculate 1d EMA for trend filter
     close_1d = df_1d['close'].values
     ema_1d = calculate_ema(close_1d, EMA_PERIOD)
     
-    # Align 1d indicators to 12h timeframe
-    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    # Align 1d EMA to 4h timeframe
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h data for ATR and volume
+    # 4h data for Donchian channels, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # Donchian channels on 4h data
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Volume confirmation (12h volume vs 20-period MA)
+    # Volume confirmation
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
@@ -87,7 +82,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -109,16 +104,16 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation (using 12h volume)
+        # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
         # Trend direction from 1d EMA
         above_ema = close[i] > ema_1d_aligned[i]
         below_ema = close[i] < ema_1d_aligned[i]
         
-        # 1d Donchian breakout signals
-        long_signal = volume_ok and above_ema and close[i] > upper_1d_aligned[i]
-        short_signal = volume_ok and below_ema and close[i] < lower_1d_aligned[i]
+        # Donchian breakout signals
+        long_signal = volume_ok and above_ema and close[i] > upper[i]
+        short_signal = volume_ok and below_ema and close[i] < lower[i]
         
         # Generate signals
         if position == 0:
@@ -135,15 +130,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on close below 1d Donchian lower band
-            if close[i] < lower_1d_aligned[i]:
+            # Exit long on close below Donchian lower band
+            if close[i] < lower[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on close above 1d Donchian upper band
-            if close[i] > upper_1d_aligned[i]:
+            # Exit short on close above Donchian upper band
+            if close[i] > upper[i]:
                 signals[i] = 0.0
                 position = 0
             else:
