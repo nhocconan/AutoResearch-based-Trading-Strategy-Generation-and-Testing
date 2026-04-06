@@ -3,30 +3,25 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Three Bar Reversal pattern with 1d trend filter and volume confirmation.
-# Three Bar Reversal: Bullish = 3 consecutive lower closes + close > prior close
-#                     Bearish = 3 consecutive higher closes + close < prior close
-# Trend filter: 1d EMA(50) slope > 0 = bull, < 0 = bear
-# Only take long in bull trend, short in bear trend
-# Volume > 1.3x 20-period average for confirmation
-# Exit: Opposite signal or stop loss at 2*ATR
-# Works in bull markets (catches pullbacks in uptrend) and bear markets (catches bounces in downtrend)
+# Hypothesis: 12h Donchian channel breakout with 1d volatility filter and volume confirmation.
+# Long when price breaks above 20-period Donchian high with expanding volume and low volatility regime.
+# Short when price breaks below 20-period Donchian low with expanding volume and low volatility regime.
+# Uses 1d ATR percentile to filter for low volatility environments where breakouts are more reliable.
+# Works in both bull and bear markets by capturing genuine breakouts with volume confirmation.
 
-name = "exp_13582_12h_three_bar_reversal_1d_trend_vol_v1"
+name = "exp_13582_12h_donchian20_1d_vol_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-EMA_TREND_PERIOD = 50
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.3
-SIGNAL_SIZE = 0.25
+VOLUME_THRESHOLD = 1.5
 ATR_PERIOD = 14
+VOLATILITY_LOOKBACK = 50
+VOLATILITY_PERCENTILE = 30  # Only trade when volatility is below 30th percentile
+SIGNAL_SIZE = 0.25
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -37,19 +32,27 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_percentile(data, lookback, percentile):
+    """Calculate rolling percentile"""
+    return pd.Series(data).rolling(window=lookback, min_periods=lookback).apply(
+        lambda x: np.percentile(x, percentile), raw=True
+    ).values
+
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for trend filter ONCE before loop
+    # Load 1d data for volatility filter ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA for trend filter
+    # Calculate 1d ATR for volatility regime
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, EMA_TREND_PERIOD)
-    ema_1d_slope = np.diff(ema_1d, prepend=ema_1d[0])  # slope approximation
-    ema_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_slope)
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, ATR_PERIOD)
+    atr_1d_percentile = calculate_percentile(atr_1d, VOLATILITY_LOOKBACK, VOLATILITY_PERCENTILE)
+    atr_1d_percentile_aligned = align_htf_to_ltf(prices, df_1d, atr_1d_percentile)
     
     # Calculate 12h indicators
     high = prices['high'].values
@@ -57,28 +60,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Three Bar Reversal components
-    # Bullish: 3 consecutive lower closes + close > prior close
-    close_down_1 = np.roll(close, 1) > close
-    close_down_2 = np.roll(close, 2) > close
-    close_down_3 = np.roll(close, 3) > close
-    three_down = close_down_1 & close_down_2 & close_down_3
-    close_up_prior = close > np.roll(close, 1)
-    bullish_reversal = three_down & close_up_prior
+    # Donchian channels
+    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Bearish: 3 consecutive higher closes + close < prior close
-    close_up_1 = np.roll(close, 1) < close
-    close_up_2 = np.roll(close, 2) < close
-    close_up_3 = np.roll(close, 3) < close
-    three_up = close_up_1 & close_up_2 & close_up_3
-    close_down_prior = close < np.roll(close, 1)
-    bearish_reversal = three_up & close_down_prior
+    # Volume confirmation
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Volume MA
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -86,11 +76,13 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 3) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, VOLATILITY_LOOKBACK) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_slope_aligned[i]) or np.isnan(bullish_reversal[i]) or np.isnan(bearish_reversal[i]) or np.isnan(volume_ma[i]):
+        if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or 
+            np.isnan(volume_ma[i]) or np.isnan(atr[i]) or 
+            np.isnan(atr_1d_percentile_aligned[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -109,16 +101,19 @@ def generate_signals(prices):
                 position = 0
                 continue
         
+        # Volatility filter: only trade when 1d ATR is below its percentile (low volatility)
+        low_volatility = atr_1d_percentile_aligned[i] > atr_1d[i]
+        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend from 1d EMA slope
-        bull_trend = ema_1d_slope_aligned[i] > 0
-        bear_trend = ema_1d_slope_aligned[i] < 0
+        # Donchian breakout signals
+        long_breakout = close[i] > donchian_high[i-1]  # Break above previous high
+        short_breakout = close[i] < donchian_low[i-1]  # Break below previous low
         
-        # Three Bar Reversal signals with trend filter
-        long_signal = volume_ok and bullish_reversal[i] and bull_trend
-        short_signal = volume_ok and bearish_reversal[i] and bear_trend
+        # Combine signals with filters
+        long_signal = volume_ok and low_volatility and long_breakout
+        short_signal = volume_ok and low_volatility and short_breakout
         
         # Generate signals
         if position == 0:
@@ -135,15 +130,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on bearish reversal or trend change
-            if bearish_reversal[i] or not bull_trend:
+            # Exit long on Donchian break of opposite side or stop loss
+            if close[i] < donchian_low[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on bullish reversal or trend change
-            if bullish_reversal[i] or not bear_trend:
+            # Exit short on Donchian break of opposite side or stop loss
+            if close[i] > donchian_high[i]:
                 signals[i] = 0.0
                 position = 0
             else:
