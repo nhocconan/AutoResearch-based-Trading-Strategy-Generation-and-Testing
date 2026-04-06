@@ -3,27 +3,29 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian channel breakout with weekly EMA trend filter and volume confirmation.
-# The 1-day timeframe reduces noise and transaction costs while capturing major trends.
-# Weekly EMA ensures alignment with higher timeframe momentum to avoid counter-trend trades.
-# Volume confirmation filters out false breakouts. Target: 30-100 total trades over 4 years.
+# Hypothesis: 12-hour Donchian channel breakout with 1-day ATR filter and volume confirmation.
+# Uses 1-day Donchian (20) for trend direction and 1-day ATR for volatility filtering.
+# Breaks above/below 12-hour Donchian (20) with sufficient volume and ATR > 1-day ATR average
+# capture momentum bursts while avoiding chop. Works in bull (breakouts up) and bear (breakdowns down).
+# Target: 75-200 total trades over 4 years.
 
-name = "exp_13344_1d_donchian20_weekly_ema_vol_v1"
-timeframe = "1d"
+name = "exp_13345_12h_donchian20_1d_atr_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20      # Daily Donchian period
-EMA_PERIOD = 20           # Weekly EMA period
-VOLUME_MA_PERIOD = 20     # Volume moving average
-VOLUME_THRESHOLD = 1.5    # Volume must be 1.5x average
-SIGNAL_SIZE = 0.25        # Position size (25% of capital)
-ATR_PERIOD = 14           # ATR period for stop loss
-ATR_STOP_MULTIPLIER = 2.0 # Stop loss multiplier
+DONCHIAN_PERIOD = 20
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_MA_PERIOD = 10
 
-def calculate_ema(close, period):
-    """Calculate EMA with proper handling"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channel upper and lower bands"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -39,40 +41,35 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for trend filter
-    df_1w = get_htf_data(prices, '1w')
-    # Load daily data ONCE before loop for Donchian channels
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Calculate daily Donchian channels
+    # Calculate daily Donchian (20) for trend filter
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
+    upper_1d, lower_1d = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
     
-    # Upper band = highest high over period, Lower band = lowest low over period
-    high_series = pd.Series(high_1d)
-    low_series = pd.Series(low_1d)
-    upper = high_series.rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lower = low_series.rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # Calculate daily ATR (14) and its MA for volatility filter
+    atr_1d = calculate_atr(high_1d, low_1d, close_1d, ATR_PERIOD)
+    atr_ma_1d = pd.Series(atr_1d).rolling(window=ATR_MA_PERIOD, min_periods=ATR_MA_PERIOD).mean().values
+    atr_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, atr_ma_1d)
     
-    # Align Donchian levels to 1d timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
-    
-    # Calculate 1d indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume MA for confirmation
+    # 12h Donchian (20) for entry signals
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    
+    # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
-    # ATR for stop loss
+    # 12h ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -81,11 +78,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, ATR_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if indicators not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
+        if np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]) or np.isnan(atr_ma_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -104,16 +101,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
+        # Trend filter: price above/below daily Donchian midpoint
+        mid_1d = (upper_1d_aligned[i] + lower_1d_aligned[i]) / 2
+        uptrend = close[i] > mid_1d
+        downtrend = close[i] < mid_1d
+        
+        # Volatility filter: current ATR > daily ATR average
+        vol_filter = atr[i] > atr_ma_1d_aligned[i]
+        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
-        
-        # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > upper_aligned[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lower_aligned[i-1])
+        # Breakout signals using 12h Donchian
+        breakout_up = uptrend and vol_filter and volume_ok and (high[i] > upper[i-1])
+        breakout_down = downtrend and vol_filter and volume_ok and (low[i] < lower[i-1])
         
         # Generate signals
         if position == 0:
@@ -121,12 +122,12 @@ def generate_signals(prices):
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price - (2.0 * atr[i])  # 2x ATR stop
             elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price + (2.0 * atr[i])  # 2x ATR stop
             else:
                 signals[i] = 0.0
         elif position == 1:
