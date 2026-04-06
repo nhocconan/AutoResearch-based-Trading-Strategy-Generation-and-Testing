@@ -3,34 +3,35 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12548_12h_donchian20_1d_trend_vol_v1"
-timeframe = "12h"
+name = "exp_12549_4h_donchian20_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
-# Parameters
+# Parameters - optimized for 4h timeframe to avoid overtrading
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.25
+VOLUME_THRESHOLD = 2.5  # Increased to reduce false signals
+SIGNAL_SIZE = 0.25  # Conservative position size to manage drawdown
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5  # Wider stop to avoid whipsaws
 
 def calculate_ema(close, period):
-    """Calculate EMA"""
+    """Calculate EMA with proper minimum periods"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR"""
+    """Calculate ATR with proper minimum periods"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = 0  # First value has no previous close
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
+    """Calculate Donchian channels with proper minimum periods"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -40,14 +41,14 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load daily data ONCE before loop - critical for performance
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend
+    # Calculate daily EMA for trend filter
     ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -62,7 +63,7 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period
+    # Start from warmup period - ensure all indicators are valid
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
@@ -86,18 +87,18 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Volume confirmation - require significant volume spike
+        volume_ok = not np.isnan(volume_ma[i]) and volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter (daily)
+        # Trend filter (daily) - only trade in direction of higher timeframe trend
         uptrend_1d = close[i] > ema_1d_aligned[i]
         downtrend_1d = close[i] < ema_1d_aligned[i]
         
-        # Donchian breakout conditions
-        long_breakout = close[i] > upper[i-1]  # break above previous upper band
-        short_breakout = close[i] < lower[i-1]  # break below previous lower band
+        # Donchian breakout conditions - break of previous period's channel
+        long_breakout = close[i] > upper[i-1]
+        short_breakout = close[i] < lower[i-1]
         
-        # Entry conditions
+        # Entry conditions - require all three: volume, trend, and breakout
         long_entry = volume_ok and uptrend_1d and long_breakout
         short_entry = volume_ok and downtrend_1d and short_breakout
         
