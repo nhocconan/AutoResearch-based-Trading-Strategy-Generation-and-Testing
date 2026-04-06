@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with volume and ATR filter
-Hypothesis: 4h Donchian breakouts capture medium-term trends in BTC/ETH/SOL.
+4h Donchian breakout with volume and ATR filter
+Hypothesis: 4h Donchian(20) breakouts capture medium-term trends in BTC/ETH/SOL.
 Volume confirmation reduces false breakouts, ATR stoploss manages risk.
 Works in bull (breakout continuation) and bear (breakdown continuation).
 Target: 75-200 total trades over 4 years.
