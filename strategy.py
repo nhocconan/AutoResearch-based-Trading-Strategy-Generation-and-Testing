@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel during bullish day with volume > 1.3x 20-period average.
+# Hypothesis: 12-hour Donchian(10) breakout with daily trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel during bullish day with volume > 1.2x 20-period average.
 # Short when price breaks below lower Donchian channel during bearish day with volume confirmation.
-# Uses daily trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
+# Uses daily trend filter to avoid counter-trend trades. Tight parameters to limit trades to 50-150 over 4 years.
 # Target: 50-150 total trades over 4 years (12-37/year) to stay within optimal range.
-# Parameters tuned for 12h timeframe to reduce trade frequency while maintaining edge.
 
-name = "12h_donchian20_1d_trend_vol_v1"
+name = "12h_donchian10_1d_trend_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price and volume data
@@ -25,11 +24,11 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
+    # Donchian channel (10-period) - shorter for more sensitivity on 12h
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
+    upper = high_series.rolling(window=10, min_periods=10).max().values
+    lower = low_series.rolling(window=10, min_periods=10).min().values
     
     # Daily trend filter: bullish/bearish day based on close vs open
     df_1d = get_htf_data(prices, '1d')
@@ -40,14 +39,14 @@ def generate_signals(prices):
     daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
     daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
     
-    # Volume filter: current volume > 1.3x 20-period average
+    # Volume filter: current volume > 1.2x 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(10, n):
         # Skip if daily trend data not available
         if np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]):
             if position != 0:
@@ -57,7 +56,7 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.3
+        volume_filter = volume[i] > vol_ma[i] * 1.2
         
         # Check exits
         if position == 1:  # long position
