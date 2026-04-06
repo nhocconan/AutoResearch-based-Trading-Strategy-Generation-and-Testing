@@ -3,30 +3,35 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with 12h trend filter and volume confirmation.
-# Breakouts above the 20-bar high or below the 20-bar low capture strong momentum moves.
-# Only take breakouts in the direction of the 12h EMA(50) trend to avoid counter-trend trades.
-# Volume confirmation ensures institutional participation. This works in both bull and bear markets
-# as it captures momentum in the prevailing trend direction. Target: 12-37 trades/year.
+# Hypothesis: 6s Williams Alligator + Elder Ray (Bull/Bear Power) on 12h for regime.
+# Williams Alligator identifies trend presence/absence via SMAs (Jaw/Teeth/Lips).
+# Elder Ray measures bull/bear power via EMA(13): Bull Power = High - EMA, Bear Power = Low - EMA.
+# Strategy: Only trade when Alligator indicates trending (JAW > TEETH > LIPS or reverse).
+# In uptrend: buy when Bull Power turns positive (bullish momentum).
+# In downtrend: sell when Bear Power turns negative (bearish momentum).
+# Uses 6h timeframe for entries, 12h for regime/filter. Target: 12-35 trades/year.
 
-name = "exp_13639_6h_donchian20_12h_trend_vol_v1"
+name = "exp_13639_6w_alligator_elderay_12h_regime_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 50
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+ALLIGATOR_PERIOD_JAW = 13  # Smoothed
+ALLIGATOR_PERIOD_TEETH = 8
+ALLIGATOR_PERIOD_LIPS = 5
+ELDER_EMA_PERIOD = 13
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_smma(data, period):
+    """Smoothed Moving Average (used in Alligator)"""
+    sma = np.zeros_like(data)
+    sma[:period-1] = np.nan
+    sma[period-1] = np.mean(data[:period])
+    for i in range(period, len(data)):
+        sma[i] = (sma[i-1] * (period-1) + data[i]) / period
+    return sma
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -47,29 +52,38 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for trend filter ONCE before loop
+    # Load 12h data for regime filter ONCE before loop
     df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 12h EMA for trend filter
+    # Calculate 12h Williams Alligator
     close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
-    ema_12h_slope = np.diff(ema_12h, prepend=ema_12h[0])  # slope approximation
-    ema_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_slope)
+    jaw = calculate_smma(close_12h, ALLIGATOR_PERIOD_JAW)
+    teeth = calculate_smma(close_12h, ALLIGATOR_PERIOD_TEETH)
+    lips = calculate_smma(close_12h, ALLIGATOR_PERIOD_LIPS)
+    
+    # Align Alligator components to 6h
+    jaw_aligned = align_htf_to_ltf(prices, df_12h, jaw)
+    teeth_aligned = align_htf_to_ltf(prices, df_12h, teeth)
+    lips_aligned = align_htf_to_ltf(prices, df_12h, lips)
+    
+    # Calculate 12h Elder Ray (Bull/Bear Power)
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    ema_12h = calculate_ema(close_12h, ELDER_EMA_PERIOD)
+    bull_power = high_12h - ema_12h  # Bull Power = High - EMA
+    bear_power = low_12h - ema_12h   # Bear Power = Low - EMA
+    
+    # Align Elder Ray components to 6h
+    bull_power_aligned = align_htf_to_ltf(prices, df_12h, bull_power)
+    bear_power_aligned = align_htf_to_ltf(prices, df_12h, bear_power)
     
     # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Volume MA
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -77,12 +91,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(ALLIGATOR_PERIOD_JAW, ALLIGATOR_PERIOD_TEETH, ALLIGATOR_PERIOD_LIPS, ELDER_EMA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(ema_12h_slope_aligned[i]) or np.isnan(donchian_upper[i]) or 
-            np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
+        if np.isnan(jaw_aligned[i]) or np.isnan(teeth_aligned[i]) or np.isnan(lips_aligned[i]) or \
+           np.isnan(bull_power_aligned[i]) or np.isnan(bear_power_aligned[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -101,29 +115,36 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        # Williams Alligator trend detection
+        # Uptrend: JAW > TEETH > LIPS
+        # Downtrend: JAW < TEETH < LIPS
+        # Otherwise: ranging/sleeping (no trade)
+        jaw_val = jaw_aligned[i]
+        teeth_val = teeth_aligned[i]
+        lips_val = lips_aligned[i]
         
-        # Trend direction from 12h EMA slope
-        uptrend = ema_12h_slope_aligned[i] > 0
-        downtrend = ema_12h_slope_aligned[i] < 0
+        uptrend = jaw_val > teeth_val and teeth_val > lips_val
+        downtrend = jaw_val < teeth_val and teeth_val < lips_val
         
-        # Donchian breakout signals
-        # Avoid lookback by checking current and previous values
-        if i > 0 and not np.isnan(donchian_upper[i-1]) and not np.isnan(donchian_lower[i-1]):
-            upper_prev = donchian_upper[i-1]
-            lower_prev = donchian_lower[i-1]
-            upper_curr = donchian_upper[i]
-            lower_curr = donchian_lower[i]
+        # Elder Ray signals
+        bull_power_val = bull_power_aligned[i]
+        bear_power_val = bear_power_aligned[i]
+        
+        # Long: in uptrend AND Bull Power turns positive (bullish momentum)
+        long_signal = False
+        short_signal = False
+        
+        if i > 0:
+            bull_power_prev = bull_power_aligned[i-1]
+            bear_power_prev = bear_power_aligned[i-1]
             
-            # Long signal: price breaks above Donchian upper in uptrend
-            long_signal = volume_ok and uptrend and close[i] > upper_curr and close[i-1] <= upper_prev
+            # Long signal: Bull Power crosses above zero in uptrend
+            if uptrend and bull_power_prev <= 0 and bull_power_val > 0:
+                long_signal = True
             
-            # Short signal: price breaks below Donchian lower in downtrend
-            short_signal = volume_ok and downtrend and close[i] < lower_curr and close[i-1] >= lower_prev
-        else:
-            long_signal = False
-            short_signal = False
+            # Short signal: Bear Power crosses below zero in downtrend
+            if downtrend and bear_power_prev >= 0 and bear_power_val < 0:
+                short_signal = True
         
         # Generate signals
         if position == 0:
@@ -140,33 +161,17 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on opposite Donchian breakout or stop loss
-            if i > 0 and not np.isnan(donchian_upper[i-1]) and not np.isnan(donchian_lower[i-1]):
-                upper_prev = donchian_upper[i-1]
-                lower_prev = donchian_lower[i-1]
-                upper_curr = donchian_upper[i]
-                lower_curr = donchian_lower[i]
-                # Exit if price breaks below Donchian lower (end of uptrend)
-                if close[i] < lower_curr and close[i-1] >= lower_prev:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = SIGNAL_SIZE
+            # Exit long if trend changes or Bear Power turns negative
+            if not uptrend or (i > 0 and bear_power_aligned[i-1] < 0 and bear_power_val >= 0):
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on opposite Donchian breakout or stop loss
-            if i > 0 and not np.isnan(donchian_upper[i-1]) and not np.isnan(donchian_lower[i-1]):
-                upper_prev = donchian_upper[i-1]
-                lower_prev = donchian_lower[i-1]
-                upper_curr = donchian_upper[i]
-                lower_curr = donchian_lower[i]
-                # Exit if price breaks above Donchian upper (end of downtrend)
-                if close[i] > upper_curr and close[i-1] <= upper_prev:
-                    signals[i] = 0.0
-                    position = 0
-                else:
-                    signals[i] = -SIGNAL_SIZE
+            # Exit short if trend changes or Bull Power turns positive
+            if not downtrend or (i > 0 and bull_power_aligned[i-1] > 0 and bull_power_val <= 0):
+                signals[i] = 0.0
+                position = 0
             else:
                 signals[i] = -SIGNAL_SIZE
     
