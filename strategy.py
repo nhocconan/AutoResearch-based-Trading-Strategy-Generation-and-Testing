@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Ichimoku Cloud with 1-week trend filter
-# Uses Ichimoku Tenkan/Kijun cross + price relative to cloud for trend signals
-# Weekly EMA(20) filter to only trade in alignment with higher timeframe trend
-# Target: 50-150 trades over 4 years (12-37/year) with controlled frequency
-# Works in bull/bear via trend filter - only takes longs in uptrend, shorts in downtrend
+# Hypothesis: 6h Donchian(20) breakout with weekly trend filter and volume confirmation
+# Enter long when: price breaks above Donchian(20) high, weekly trend is up (price > weekly EMA(50)), volume > 1.5x average
+# Enter short when: price breaks below Donchian(20) low, weekly trend is down (price < weekly EMA(50)), volume > 1.5x average
+# Exit when: price crosses back through Donchian(20) midpoint OR opposite breakout occurs
+# Uses weekly trend to filter breakouts, targeting 50-150 trades over 4 years on 6h timeframe
 
-name = "6h_ichimoku_1wtrend_v1"
+name = "6h_donchian20_weeklytrend_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -22,75 +22,60 @@ def generate_signals(prices):
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    volume = prices['volume'].values
     
-    # Ichimoku components (9, 26, 52 periods)
-    # Tenkan-sen (Conversion Line): (9-period high + 9-period low) / 2
-    high_9 = pd.Series(high).rolling(window=9, min_periods=9).max()
-    low_9 = pd.Series(low).rolling(window=9, min_periods=9).min()
-    tenkan = ((high_9 + low_9) / 2).values
+    # Donchian channels (20-period) on 6h
+    high_roll = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_roll = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    donchian_mid = (high_roll + low_roll) / 2
     
-    # Kijun-sen (Base Line): (26-period high + 26-period low) / 2
-    high_26 = pd.Series(high).rolling(window=26, min_periods=26).max()
-    low_26 = pd.Series(low).rolling(window=26, min_periods=26).min()
-    kijun = ((high_26 + low_26) / 2).values
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun) / 2
-    senkou_a = ((tenkan + kijun) / 2)
-    
-    # Senkou Span B (Leading Span B): (52-period high + 52-period low) / 2
-    high_52 = pd.Series(high).rolling(window=52, min_periods=52).max()
-    low_52 = pd.Series(low).rolling(window=52, min_periods=52).min()
-    senkou_b = ((high_52 + low_52) / 2)
-    
-    # Weekly EMA(20) for trend filter
+    # Weekly EMA(50) for trend filter
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False).mean().values
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
+    
+    # Volume confirmation: volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    volume_threshold = 1.5 * volume_ma
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(52, n):  # Wait for Senkou B to stabilize
+    for i in range(20, n):  # Wait for Donchian to stabilize
         # Skip if required data not available
-        if (np.isnan(tenkan[i]) or np.isnan(kijun[i]) or 
-            np.isnan(senkou_a[i]) or np.isnan(senkou_b[i]) or
-            np.isnan(ema_20_aligned[i])):
+        if (np.isnan(high_roll[i]) or np.isnan(low_roll[i]) or 
+            np.isnan(ema_50_1w_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Cloud top and bottom
-        cloud_top = max(senkou_a[i], senkou_b[i])
-        cloud_bottom = min(senkou_a[i], senkou_b[i])
-        
         if position == 1:  # long position
-            # Exit: price below cloud OR Tenkan < Kijun (weakening momentum)
-            if close[i] < cloud_bottom or tenkan[i] < kijun[i]:
+            # Exit: price crosses below Donchian midpoint OR reverse breakout with volume
+            if close[i] < donchian_mid[i] or (close[i] < low_roll[i] and volume[i] > volume_threshold[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price above cloud OR Tenkan > Kijun (weakening momentum)
-            if close[i] > cloud_top or tenkan[i] > kijun[i]:
+            # Exit: price crosses above Donchian midpoint OR reverse breakout with volume
+            if close[i] > donchian_mid[i] or (close[i] > high_roll[i] and volume[i] > volume_threshold[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Ichimoku signals + weekly trend filter
-            # Bullish: Tenkan crosses above Kijun AND price above cloud
-            if (tenkan[i-1] <= kijun[i-1] and tenkan[i] > kijun[i] and 
-                close[i] > cloud_top and close[i] > ema_20_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-            # Bearish: Tenkan crosses below Kijun AND price below cloud
-            elif (tenkan[i-1] >= kijun[i-1] and tenkan[i] < kijun[i] and 
-                  close[i] < cloud_bottom and close[i] < ema_20_aligned[i]):
-                signals[i] = -0.25
-                position = -1
+            # Look for breakout entries: Donchian breakout + weekly trend + volume
+            if volume[i] > volume_threshold[i]:
+                if close[i] > high_roll[i] and close[i] > ema_50_1w_aligned[i]:
+                    # Bullish breakout above weekly EMA - upward continuation
+                    signals[i] = 0.25
+                    position = 1
+                elif close[i] < low_roll[i] and close[i] < ema_50_1w_aligned[i]:
+                    # Bearish breakout below weekly EMA - downward continuation
+                    signals[i] = -0.25
+                    position = -1
     
     return signals
