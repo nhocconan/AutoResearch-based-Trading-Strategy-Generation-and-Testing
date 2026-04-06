@@ -1,136 +1,122 @@
 #!/usr/bin/env python3
 """
-1h Donchian(20) Breakout + Volume + ADX Filter (4h)
-Hypothesis: Donchian breakouts on 1h timeframe capture short-term momentum with 4h trend filter.
-Volume confirms institutional participation. 4h ADX filter ensures we only trade in trending markets.
-Designed for 60-150 total trades over 4 years (15-37/year) to balance opportunity and fee cost.
-Works in both bull (breakouts) and bear (breakdowns) markets by going long on highs, short on lows.
+1h Donchian Breakout with 4h Trend Filter and Volume Confirmation
+Hypothesis: Uses 1h for precise entry/exit timing while relying on 4h trend direction (via Donchian breakout) and volume confirmation to filter false signals. Designed for 60-150 total trades over 4 years (15-37/year) on 1h timeframe. Works in bull markets via long breakouts and bear markets via short breakdowns. Includes session filter (08-20 UTC) to reduce noise.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_donchian20_volume_4hadx_v2"
+name = "1h_donchian20_4htrend_volume_v1"
 timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 40:
         return np.zeros(n)
     
-    # Load 4h data for ADX (once before loop)
+    # Load 4h data ONCE before loop
     df_4h = get_htf_data(prices, '4h')
-    
-    # ADX calculation on 4h
     high_4h = df_4h['high'].values
     low_4h = df_4h['low'].values
     close_4h = df_4h['close'].values
     
-    # True Range
-    tr1 = np.abs(high_4h[1:] - low_4h[1:])
-    tr2 = np.abs(high_4h[1:] - close_4h[:-1])
-    tr3 = np.abs(low_4h[1:] - close_4h[:-1])
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr = np.concatenate([[np.nan], tr])
+    # 4h Donchian channels (20-period)
+    highest_high_4h = np.full_like(high_4h, np.nan)
+    lowest_low_4h = np.full_like(low_4h, np.nan)
+    for i in range(20, len(high_4h)):
+        highest_high_4h[i] = np.max(high_4h[i-20:i])
+        lowest_low_4h[i] = np.min(low_4h[i-20:i])
     
-    # Directional Movement
-    dm_plus = np.where((high_4h[1:] - high_4h[:-1]) > (low_4h[:-1] - low_4h[1:]), 
-                       np.maximum(high_4h[1:] - high_4h[:-1], 0), 0)
-    dm_minus = np.where((low_4h[:-1] - low_4h[1:]) > (high_4h[1:] - high_4h[:-1]), 
-                        np.maximum(low_4h[:-1] - low_4h[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
+    # 4h trend: 1 if price > upper band, -1 if price < lower band, 0 otherwise
+    trend_4h = np.zeros_like(close_4h)
+    for i in range(20, len(close_4h)):
+        if close_4h[i] > highest_high_4h[i]:
+            trend_4h[i] = 1
+        elif close_4h[i] < lowest_low_4h[i]:
+            trend_4h[i] = -1
     
-    # Wilder's smoothing
-    def wilder_smooth(data, period):
-        result = np.full_like(data, np.nan)
-        if len(data) >= period:
-            result[period-1] = np.nansum(data[:period])
-            for i in range(period, len(data)):
-                result[i] = result[i-1] - (result[i-1] / period) + data[i]
-        return result
+    # Align 4h trend to 1h (shifted by 1 bar inside align_htf_to_ltf)
+    trend_4h_aligned = align_htf_to_ltf(prices, df_4h, trend_4h)
     
-    period_adx = 14
-    tr_smooth = wilder_smooth(tr, period_adx)
-    dm_plus_smooth = wilder_smooth(dm_plus, period_adx)
-    dm_minus_smooth = wilder_smooth(dm_minus, period_adx)
-    
-    # DI+ and DI-
-    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
-    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
-    
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = wilder_smooth(dx, period_adx)
-    
-    # Align ADX to 1h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_4h, adx)
-    
-    # Price and volume data
+    # 1h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    # Volume filter (20-period average)
+    vol_ma = np.full_like(volume, np.nan)
+    for i in range(20, len(volume)):
+        vol_ma[i] = np.mean(volume[i-20:i])
+    
+    # Session filter: 08-20 UTC (pre-compute)
+    hours = prices.index.hour
+    session_filter = (hours >= 8) & (hours <= 20)
+    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    # Start from warmup period
-    start = max(20, 14)  # For Donchian and ADX
+    # Start from warmup
+    start = 20
     
     for i in range(start, n):
-        # Skip if required data not available
-        if np.isnan(adx_aligned[i]):
+        # Skip if 4h trend not ready
+        if np.isnan(trend_4h_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
         
-        # Donchian channel (20-period)
-        if i >= 20:
-            highest_high = np.max(high[i-20:i])
-            lowest_low = np.min(low[i-20:i])
-        else:
-            highest_high = np.max(high[:i+1]) if i > 0 else high[i]
-            lowest_low = np.min(low[:i+1]) if i > 0 else low[i]
+        # Volume condition
+        vol_condition = not np.isnan(vol_ma[i]) and volume[i] > vol_ma[i] * 1.5
         
-        # Volume filter (20-period average)
-        if i >= 20:
-            vol_ma = np.mean(volume[i-20:i])
-            volume_filter = volume[i] > vol_ma * 1.5
-        else:
-            volume_filter = False
+        # Session condition
+        sess_condition = session_filter[i]
         
         # Check exits
-        if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR ADX < 20
-            if close[i] < lowest_low or adx_aligned[i] < 20:
-                signals[i] = 0.0
-                position = 0
+        if position == 1:  # long
+            # Exit: 1h close below 20-period low OR trend flips to bear
+            if i >= 20:
+                lowest_low_1h = np.min(low[i-20:i])
+                if close[i] < lowest_low_1h or trend_4h_aligned[i] == -1:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = 0.20
             else:
                 signals[i] = 0.20
-        elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR ADX < 20
-            if close[i] > highest_high or adx_aligned[i] < 20:
-                signals[i] = 0.0
-                position = 0
+        elif position == -1:  # short
+            # Exit: 1h close above 20-period high OR trend flips to bull
+            if i >= 20:
+                highest_high_1h = np.max(high[i-20:i])
+                if close[i] > highest_high_1h or trend_4h_aligned[i] == 1:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -0.20
             else:
                 signals[i] = -0.20
         else:
-            # Look for entries: Donchian breakout + volume + ADX trend
-            bull_breakout = close[i] > highest_high
-            bear_breakout = close[i] < lowest_low
-            trend_filter = adx_aligned[i] > 25  # Strong trend
-            
-            if i >= 20 and bull_breakout and volume_filter and trend_filter:
-                signals[i] = 0.20
-                position = 1
-            elif i >= 20 and bear_breakout and volume_filter and trend_filter:
-                signals[i] = -0.20
-                position = -1
+            # Look for entries: 1h breakout in direction of 4h trend + volume + session
+            if i >= 20:
+                highest_high_1h = np.max(high[i-20:i])
+                lowest_low_1h = np.min(low[i-20:i)]
+                
+                bull_breakout = close[i] > highest_high_1h
+                bear_breakout = close[i] < lowest_low_1h
+                
+                if bull_breakout and trend_4h_aligned[i] == 1 and vol_condition and sess_condition:
+                    signals[i] = 0.20
+                    position = 1
+                elif bear_breakout and trend_4h_aligned[i] == -1 and vol_condition and sess_condition:
+                    signals[i] = -0.20
+                    position = -1
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
     
