@@ -3,75 +3,34 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour CRSI (2) strategy with weekly trend filter and volume confirmation.
-# CRSI combines short-term RSI, streak RSI, and percentile rank to identify extreme
-# overbought/oversold conditions. In trending markets (weekly EMA), we look for
-# pullbacks to extreme CRSI levels. Volume confirms institutional participation.
-# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+# Hypothesis: 4-hour 34-period EMA trend filter with 4-hour Donchian channel (20) breakout and volume confirmation.
+# Uses 12-hour EMA for higher timeframe trend confirmation. Trades only in direction of higher timeframe trend
+# to avoid counter-trend whipsaws. Volume requirement ensures breakouts have institutional participation.
+# Stoploss at 2x ATR manages risk. Designed for 40-80 trades per year to minimize fee drag.
 
-name = "exp_13312_12h_crsi_weekly_trend_vol_v1"
-timeframe = "12h"
+name = "exp_13313_4h_ema34_donchian20_vol_12hma_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-CRSI_PERIOD = 3
-STREAK_PERIOD = 2
-PERCENT_RANK_LOOKBACK = 100
-WEEKLY_EMA_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_rsi(close, period):
-    """Calculate RSI using Wilder's smoothing"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-def calculate_streak_rsi(close, period):
-    """Calculate RSI on consecutive up/down days"""
-    # Calculate price changes
-    changes = np.diff(close, prepend=close[0])
-    # Assign +1 for up, -1 for down
-    streak = np.where(changes > 0, 1, np.where(changes < 0, -1, 0))
-    # Calculate consecutive streaks
-    streak_count = np.zeros_like(changes)
-    current_streak = 0
-    for i in range(len(changes)):
-        if streak[i] != 0:
-            if i == 0 or streak[i] == streak[i-1]:
-                current_streak += streak[i]
-            else:
-                current_streak = streak[i]
-            streak_count[i] = current_streak
-        else:
-            streak_count[i] = 0
-    # Apply RSI to streak counts
-    return calculate_rsi(streak_count.astype(float), period)
-
-def calculate_percent_rank(series, lookback):
-    """Calculate percentile rank of current value over lookback period"""
-    rank = np.full_like(series, np.nan, dtype=float)
-    for i in range(len(series)):
-        if i < lookback:
-            continue
-        window = series[i-lookback:i]
-        if len(window) == 0:
-            continue
-        # Calculate percentile rank: percentage of values less than current
-        rank[i] = (np.sum(window < series[i]) / len(window)) * 100
-    return rank
+EMA_FAST = 34      # Fast EMA for trend
+EMA_SLOW = 12      # Slow EMA for higher timeframe trend (12h EMA on 4h chart)
+DONCHIAN_PERIOD = 20  # Donchian channel period
+VOLUME_MA = 20     # Volume moving average
+VOLUME_THRESHOLD = 1.5  # Volume must be 1.5x average
+SIGNAL_SIZE = 0.25   # Position size (25% of capital)
+ATR_PERIOD = 14    # ATR period for stoploss
+ATR_STOP_MULT = 2.0  # ATR multiplier for stoploss
 
 def calculate_ema(close, period):
-    """Calculate EMA"""
+    """Calculate EMA with proper min_periods"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -84,33 +43,31 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop for higher timeframe trend
+    df_12h = get_htf_data(prices, '12h')
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, EMA_SLOW)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, WEEKLY_EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
-    
-    # Calculate 12h indicators
-    close = prices['close'].values
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # CRSI components
-    rsi = calculate_rsi(close, CRSI_PERIOD)
-    streak_rsi = calculate_streak_rsi(close, STREAK_PERIOD)
-    percent_rank = calculate_percent_rank(rsi, PERCENT_RANK_LOOKBACK)
-    crsi = (rsi + streak_rsi + percent_rank) / 3.0
+    # EMA for trend filter (fast)
+    ema_fast = calculate_ema(close, EMA_FAST)
     
-    # Volume MA
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    # Donchian channels
+    donch_up, donch_low = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
-    # ATR
+    # Volume moving average
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA, min_periods=VOLUME_MA).mean().values
+    
+    # ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -119,11 +76,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WEEKLY_EMA_PERIOD, PERCENT_RANK_LOOKBACK, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_FAST, EMA_SLOW, DONCHIAN_PERIOD, VOLUME_MA, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(crsi[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        # Skip if indicators not ready
+        if np.isnan(ema_12h_aligned[i]) or np.isnan(ema_fast[i]) or np.isnan(donch_up[i]) or np.isnan(donch_low[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -142,30 +99,31 @@ def generate_signals(prices):
                 position = 0
                 continue
         
+        # Determine trend from 12h EMA and 4h EMA
+        uptrend_12h = close[i] > ema_12h_aligned[i]
+        downtrend_12h = close[i] < ema_12h_aligned[i]
+        uptrend_4h = close[i] > ema_fast[i]
+        downtrend_4h = close[i] < ema_fast[i]
+        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
-        
-        # CRSI extreme levels
-        crsi_oversold = crsi[i] < 15
-        crsi_overbought = crsi[i] > 85
+        # Donchian breakout signals
+        breakout_up = volume_ok and uptrend_12h and uptrend_4h and (high[i] > donch_up[i-1])
+        breakout_down = volume_ok and downtrend_12h and downtrend_4h and (low[i] < donch_low[i-1])
         
         # Generate signals
         if position == 0:
-            # Look for pullbacks in trend with volume confirmation
-            if uptrend and crsi_oversold and volume_ok:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif downtrend and crsi_overbought and volume_ok:
+                stop_price = entry_price - (ATR_STOP_MULT * atr[i])
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price + (ATR_STOP_MULT * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
