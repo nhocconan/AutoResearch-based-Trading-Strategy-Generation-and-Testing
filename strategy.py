@@ -3,21 +3,20 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h momentum with 4h/1d trend filter and volume confirmation
-# Long when 4h EMA21 > 1d EMA50 (bullish trend) AND 1h RSI(14) > 50 AND volume > 1.5x average
-# Short when 4h EMA21 < 1d EMA50 (bearish trend) AND 1h RSI(14) < 50 AND volume > 1.5x average
-# Exit when trend reverses or RSI crosses back to neutral
-# Uses 4h/1d for trend direction, 1h for entry timing
-# Target: 60-150 trades over 4 years (15-37/year) to avoid fee drag
-# Works in bull markets (follows trend) and bear markets (shorts trend)
+# Hypothesis: 1h momentum with 4h trend filter and 1d regime filter
+# Long when 4h EMA(21) trending up, 1d ADX < 25 (range), and 1h RSI(2) crosses above 10
+# Short when 4h EMA(21) trending down, 1d ADX < 25 (range), and 1h RSI(2) crosses below 90
+# Uses 4h for trend direction, 1d for range regime, 1h for precise entry timing
+# Designed for low trade frequency (target: 80-120 total over 4 years) to minimize fee drag
+# Works in bull/bear by fading extreme 1h RSI in ranging markets with 4h trend alignment
 
-name = "1h_momentum_4h1d_trend_vol_v1"
+name = "1h_rsi2_4hma_1dadx_v1"
 timeframe = "1h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
     # Price data
@@ -26,626 +25,92 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Session filter: 08-20 UTC (inclusive)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 4h EMA21 for trend
+    # 4h EMA(21) for trend direction - calculated once before loop
     df_4h = get_htf_data(prices, '4h')
     close_4h = df_4h['close'].values
     ema_4h = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    ema_4h_trend = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # 1d EMA50 for trend
+    # 1d ADX(14) for regime detection (range vs trend) - calculated once before loop
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 1h RSI(14) for momentum
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr3 = np.abs(low_1d - np.concatenate([[close_1d[0]], close_1d[:-1]]))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])) > 
+                       (np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d), 
+                       np.maximum(high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]]), 0), 0)
+    dm_minus = np.where((np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d) > 
+                        (high_1d - np.concatenate([[high_1d[0]], high_1d[:-1]])), 
+                        np.maximum(np.concatenate([[low_1d[0]], low_1d[:-1]]) - low_1d, 0), 0)
+    
+    # Smoothed values
+    tr_ma = pd.Series(tr).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    dm_plus_ma = pd.Series(dm_plus).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    dm_minus_ma = pd.Series(dm_minus).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    
+    # DI and DX
+    di_plus = 100 * dm_plus_ma / (tr_ma + 1e-10)
+    di_minus = 100 * dm_minus_ma / (tr_ma + 1e-10)
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
+    adx = pd.Series(dx).ewm(alpha=1/14, min_periods=14, adjust=False).mean().values
+    adx_1d = align_htf_to_ltf(prices, df_1d, adx)
+    
+    # 1h RSI(2) for entry timing
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+    avg_gain = pd.Series(gain).ewm(alpha=1/2, min_periods=2, adjust=False).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/2, min_periods=2, adjust=False).mean()
     rs = avg_gain / (avg_loss + 1e-10)
     rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
     
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
+    # Pre-compute session filter (08-20 UTC)
+    hours = pd.DatetimeIndex(prices['open_time']).hour
+    in_session = (hours >= 8) & (hours <= 20)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(50, n):
-        # Skip if required data not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_threshold[i]):
+    for i in range(30, n):  # Start after warmup period
+        # Skip if required data not available or outside session
+        if (np.isnan(ema_4h_trend[i]) or np.isnan(adx_1d[i]) or np.isnan(rsi[i]) or 
+            not in_session[i]):
             if position != 0:
                 signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
         
-        # Check session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Trend condition: 4h EMA21 vs 1d EMA50
-        bullish_trend = ema_4h_aligned[i] > ema_1d_aligned[i]
-        bearish_trend = ema_4h_aligned[i] < ema_1d_aligned[i]
-        
-        # Exit conditions
+        # Exit conditions: RSI returns to neutral (50) or ADX > 25 (trending regime)
         if position == 1:  # long position
-            if not bullish_trend or rsi[i] < 40:
+            if rsi[i] >= 50 or adx_1d[i] > 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.20
         elif position == -1:  # short position
-            if not bearish_trend or rsi[i] > 60:
+            if rsi[i] <= 50 or adx_1d[i] > 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.20
         else:
-            # Look for entries
-            # Long: bullish trend + RSI > 50 (bullish momentum) + volume confirmation
-            if bullish_trend and rsi[i] > 50 and volume[i] > volume_threshold[i]:
+            # Look for entries in ranging market (ADX < 25) with extreme RSI
+            # Long: RSI extremely oversold (<10) in ranging market + 4h uptrend
+            if (adx_1d[i] < 25 and rsi[i] < 10 and ema_4h_trend[i] > ema_4h_trend[max(0, i-1)]):
                 signals[i] = 0.20
                 position = 1
-            # Short: bearish trend + RSI < 50 (bearish momentum) + volume confirmation
-            elif bearish_trend and rsi[i] < 50 and volume[i] > volume_threshold[i]:
+            # Short: RSI extremely overbought (>90) in ranging market + 4h downtrend
+            elif (adx_1d[i] < 25 and rsi[i] > 90 and ema_4h_trend[i] < ema_4h_trend[max(0, i-1)]):
                 signals[i] = -0.20
                 position = -1
     
     return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 1h momentum with 4h/1d trend filter and volume confirmation
-# Long when 4h EMA21 > 1d EMA50 (bullish trend) AND 1h RSI(14) > 50 AND volume > 1.5x average
-# Short when 4h EMA21 < 1d EMA50 (bearish trend) AND 1h RSI(14) < 50 AND volume > 1.5x average
-# Exit when trend reverses or RSI crosses back to neutral
-# Uses 4h/1d for trend direction, 1h for entry timing
-# Target: 60-150 trades over 4 years (15-37/year) to avoid fee drag
-# Works in bull markets (follows trend) and bear markets (shorts trend)
-
-name = "1h_momentum_4h1d_trend_vol_v1"
-timeframe = "1h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 100:
-        return np.zeros(n)
-    
-    # Price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Session filter: 08-20 UTC (inclusive)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 4h EMA21 for trend
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1d EMA50 for trend
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # 1h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(50, n):
-        # Skip if required data not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_threshold[i]):
-            if position != 0:
-                signals[i] = position * 0.20
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Check session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Trend condition: 4h EMA21 vs 1d EMA50
-        bullish_trend = ema_4h_aligned[i] > ema_1d_aligned[i]
-        bearish_trend = ema_4h_aligned[i] < ema_1d_aligned[i]
-        
-        # Exit conditions
-        if position == 1:  # long position
-            if not bullish_trend or rsi[i] < 40:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.20
-        elif position == -1:  # short position
-            if not bearish_trend or rsi[i] > 60:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.20
-        else:
-            # Look for entries
-            # Long: bullish trend + RSI > 50 (bullish momentum) + volume confirmation
-            if bullish_trend and rsi[i] > 50 and volume[i] > volume_threshold[i]:
-                signals[i] = 0.20
-                position = 1
-            # Short: bearish trend + RSI < 50 (bearish momentum) + volume confirmation
-            elif bearish_trend and rsi[i] < 50 and volume[i] > volume_threshold[i]:
-                signals[i] = -0.20
-                position = -1
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 1h momentum with 4h/1d trend filter and volume confirmation
-# Long when 4h EMA21 > 1d EMA50 (bullish trend) AND 1h RSI(14) > 50 AND volume > 1.5x average
-# Short when 4h EMA21 < 1d EMA50 (bearish trend) AND 1h RSI(14) < 50 AND volume > 1.5x average
-# Exit when trend reverses or RSI crosses back to neutral
-# Uses 4h/1d for trend direction, 1h for entry timing
-# Target: 60-150 trades over 4 years (15-37/year) to avoid fee drag
-# Works in bull markets (follows trend) and bear markets (shorts trend)
-
-name = "1h_momentum_4h1d_trend_vol_v1"
-timeframe = "1h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 100:
-        return np.zeros(n)
-    
-    # Price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Session filter: 08-20 UTC (inclusive)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 4h EMA21 for trend
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1d EMA50 for trend
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # 1h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(50, n):
-        # Skip if required data not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_threshold[i]):
-            if position != 0:
-                signals[i] = position * 0.20
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Check session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Trend condition: 4h EMA21 vs 1d EMA50
-        bullish_trend = ema_4h_aligned[i] > ema_1d_aligned[i]
-        bearish_trend = ema_4h_aligned[i] < ema_1d_aligned[i]
-        
-        # Exit conditions
-        if position == 1:  # long position
-            if not bullish_trend or rsi[i] < 40:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.20
-        elif position == -1:  # short position
-            if not bearish_trend or rsi[i] > 60:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.20
-        else:
-            # Look for entries
-            # Long: bullish trend + RSI > 50 (bullish momentum) + volume confirmation
-            if bullish_trend and rsi[i] > 50 and volume[i] > volume_threshold[i]:
-                signals[i] = 0.20
-                position = 1
-            # Short: bearish trend + RSI < 50 (bearish momentum) + volume confirmation
-            elif bearish_trend and rsi[i] < 50 and volume[i] > volume_threshold[i]:
-                signals[i] = -0.20
-                position = -1
-    
-    return signals
-
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 1h momentum with 4h/1d trend filter and volume confirmation
-# Long when 4h EMA21 > 1d EMA50 (bullish trend) AND 1h RSI(14) > 50 AND volume > 1.5x average
-# Short when 4h EMA21 < 1d EMA50 (bearish trend) AND 1h RSI(14) < 50 AND volume > 1.5x average
-# Exit when trend reverses or RSI crosses back to neutral
-# Uses 4h/1d for trend direction, 1h for entry timing
-# Target: 60-150 trades over 4 years (15-37/year) to avoid fee drag
-# Works in bull markets (follows trend) and bear markets (shorts trend)
-
-name = "1h_momentum_4h1d_trend_vol_v1"
-timeframe = "1h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 100:
-        return np.zeros(n)
-    
-    # Price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Session filter: 08-20 UTC (inclusive)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 4h EMA21 for trend
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1d EMA50 for trend
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # 1h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(50, n):
-        # Skip if required data not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_threshold[i]):
-            if position != 0:
-                signals[i] = position * 0.20
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Check session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Trend condition: 4h EMA21 vs 1d EMA50
-        bullish_trend = ema_4h_aligned[i] > ema_1d_aligned[i]
-        bearish_trend = ema_4h_aligned[i] < ema_1d_aligned[i]
-        
-        # Exit conditions
-        if position == 1:  # long position
-            if not bullish_trend or rsi[i] < 40:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.20
-        elif position == -1:  # short position
-            if not bearish_trend or rsi[i] > 60:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.20
-        else:
-            # Look for entries
-            # Long: bullish trend + RSI > 50 (bullish momentum) + volume confirmation
-            if bullish_trend and rsi[i] > 50 and volume[i] > volume_threshold[i]:
-                signals[i] = 0.20
-                position = 1
-            # Short: bearish trend + RSI < 50 (bearish momentum) + volume confirmation
-            elif bearish_trend and rsi[i] < 50 and volume[i] > volume_threshold[i]:
-                signals[i] = -0.20
-                position = -1
-    
-    return signals
-
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 1h momentum with 4h/1d trend filter and volume confirmation
-# Long when 4h EMA21 > 1d EMA50 (bullish trend) AND 1h RSI(14) > 50 AND volume > 1.5x average
-# Short when 4h EMA21 < 1d EMA50 (bearish trend) AND 1h RSI(14) < 50 AND volume > 1.5x average
-# Exit when trend reverses or RSI crosses back to neutral
-# Uses 4h/1d for trend direction, 1h for entry timing
-# Target: 60-150 trades over 4 years (15-37/year) to avoid fee drag
-# Works in bull markets (follows trend) and bear markets (shorts trend)
-
-name = "1h_momentum_4h1d_trend_vol_v1"
-timeframe = "1h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 100:
-        return np.zeros(n)
-    
-    # Price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Session filter: 08-20 UTC (inclusive)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 4h EMA21 for trend
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1d EMA50 for trend
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # 1h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(50, n):
-        # Skip if required data not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_threshold[i]):
-            if position != 0:
-                signals[i] = position * 0.20
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Check session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Trend condition: 4h EMA21 vs 1d EMA50
-        bullish_trend = ema_4h_aligned[i] > ema_1d_aligned[i]
-        bearish_trend = ema_4h_aligned[i] < ema_1d_aligned[i]
-        
-        # Exit conditions
-        if position == 1:  # long position
-            if not bullish_trend or rsi[i] < 40:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.20
-        elif position == -1:  # short position
-            if not bearish_trend or rsi[i] > 60:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.20
-        else:
-            # Look for entries
-            # Long: bullish trend + RSI > 50 (bullish momentum) + volume confirmation
-            if bullish_trend and rsi[i] > 50 and volume[i] > volume_threshold[i]:
-                signals[i] = 0.20
-                position = 1
-            # Short: bearish trend + RSI < 50 (bearish momentum) + volume confirmation
-            elif bearish_trend and rsi[i] < 50 and volume[i] > volume_threshold[i]:
-                signals[i] = -0.20
-                position = -1
-    
-    return signals
-
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 1h momentum with 4h/1d trend filter and volume confirmation
-# Long when 4h EMA21 > 1d EMA50 (bullish trend) AND 1h RSI(14) > 50 AND volume > 1.5x average
-# Short when 4h EMA21 < 1d EMA50 (bearish trend) AND 1h RSI(14) < 50 AND volume > 1.5x average
-# Exit when trend reverses or RSI crosses back to neutral
-# Uses 4h/1d for trend direction, 1h for entry timing
-# Target: 60-150 trades over 4 years (15-37/year) to avoid fee drag
-# Works in bull markets (follows trend) and bear markets (shorts trend)
-
-name = "1h_momentum_4h1d_trend_vol_v1"
-timeframe = "1h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 100:
-        return np.zeros(n)
-    
-    # Price data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Session filter: 08-20 UTC (inclusive)
-    hours = prices.index.hour
-    in_session = (hours >= 8) & (hours <= 20)
-    
-    # 4h EMA21 for trend
-    df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=21, min_periods=21, adjust=False).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
-    
-    # 1d EMA50 for trend
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # 1h RSI(14) for momentum
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    rsi = rsi.values
-    
-    # Volume confirmation: volume > 1.5x 20-period average
-    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(50, n):
-        # Skip if required data not available
-        if np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_threshold[i]):
-            if position != 0:
-                signals[i] = position * 0.20
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Check session
-        if not in_session[i]:
-            if position != 0:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Trend condition: 4h EMA21 vs 1d EMA50
-        bullish_trend = ema_4h_aligned[i] > ema_1d_aligned[i]
-        bearish_trend = ema_4h_aligned[i] < ema_1d_aligned[i]
-        
-        # Exit conditions
-        if position == 1:  # long position
-            if not bullish_trend or rsi[i] < 40:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.20
-        elif position == -1:  # short position
-            if not bearish_trend or rsi[i] > 60:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.20
-        else:
-            # Look for entries
-            # Long: bullish trend + RSI > 50 (bullish momentum) + volume confirmation
-            if bullish_trend and rsi[i] > 50 and volume[i] > volume_threshold[i]:
-                signals[i] = 0.20
-                position = 1
-            # Short: bearish trend + RSI < 50 (bearish momentum) + volume confirmation
-            elif bearish_trend and rsi[i] < 5
