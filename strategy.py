@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
 """
-6h Williams Alligator + Elder Ray + 1w Trend Filter
-- Williams Alligator: Jaw (13,8), Teeth (8,5), Lips (5,3) SMMA
-- Elder Ray: Bull Power = High - EMA(13), Bear Power = Low - EMA(13)
-- Long: Alligator aligned bullish (Lips > Teeth > Jaw) + Bull Power > 0 + price > 1w EMA(50)
-- Short: Alligator aligned bearish (Lips < Teeth < Jaw) + Bear Power < 0 + price < 1w EMA(50)
-- Exit: opposite signal or stop loss (2*ATR)
-- Position size: 0.25
+12h Donchian breakout with 1d EMA filter and volume confirmation.
+- Long: price breaks above 12h Donchian(20) + price > 1d EMA(50) + volume > 1.5x average
+- Short: price breaks below 12h Donchian(20) + price < 1d EMA(50) + volume > 1.5x average
+- Exit: stop loss (2*ATR) or reversal signal
+- Position size: 0.25 (25%)
 - Target: 75-200 trades over 4 years (19-50/year)
 """
 
@@ -14,27 +12,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14215_6w_alligator_elder_1w_ema_v1"
-timeframe = "6h"
+name = "exp_14216_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
-
-def smma(series, period):
-    """Smoothed Moving Average (used in Williams Alligator)"""
-    s = pd.Series(series)
-    # First value is simple average
-    sma = s.rolling(window=period, min_periods=period).mean()
-    # Subsequent values: SMMA = (prev_smma * (period-1) + current) / period
-    smma_vals = np.full(len(s), np.nan)
-    if len(s) >= period:
-        smma_vals[period-1] = sma.iloc[period-1]
-        for i in range(period, len(s)):
-            if not np.isnan(smma_vals[i-1]):
-                smma_vals[i] = (smma_vals[i-1] * (period-1) + s.iloc[i]) / period
-    return smma_vals
-
-def calculate_ema(close, period):
-    """Calculate EMA with proper min_periods"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR with proper min_periods"""
@@ -46,42 +26,36 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_ema(close, period):
+    """Calculate EMA with proper min_periods"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for EMA filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 1d data for EMA filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate 1w EMA(50)
-    ema_1w = calculate_ema(close_1w, 50)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 1d EMA(50)
+    ema_1d = calculate_ema(close_1d, 50)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 6h data
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Williams Alligator (13,8,5 periods with shifts 8,5,3)
-    jaw = smma(close, 13)  # Blue line
-    teeth = smma(close, 8)  # Red line
-    lips = smma(close, 5)   # Green line
+    # Donchian channels (20-period)
+    highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Shift the lines as per Alligator definition
-    jaw = np.roll(jaw, 8)
-    teeth = np.roll(teeth, 5)
-    lips = np.roll(lips, 3)
-    # Set shifted values to nan
-    jaw[:8] = np.nan
-    teeth[:5] = np.nan
-    lips[:3] = np.nan
-    
-    # Elder Ray: Bull/Bear Power using EMA(13)
-    ema13 = calculate_ema(close, 13)
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # Volume filter: volume > 1.5x 20-period average
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.5 * vol_ma)
     
     # ATR for stop loss (14-period)
     atr = calculate_atr(high, low, close, 14)
@@ -91,13 +65,13 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of Alligator setup, EMA13, ATR)
-    start = max(13+8, 13, 14) + 1
+    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 50 for EMA)
+    start = max(20, 20, 14, 50) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or \
-           np.isnan(ema_1w_aligned[i]) or np.isnan(atr[i]) or np.isnan(ema13[i]):
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_1d_aligned[i]) or \
+           np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -119,26 +93,20 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Alligator alignment
-        alligator_bull = (lips[i] > teeth[i]) and (teeth[i] > jaw[i])
-        alligator_bear = (lips[i] < teeth[i]) and (teeth[i] < jaw[i])
-        
-        # Elder Ray signals
-        bull_energy = bull_power[i] > 0
-        bear_energy = bear_power[i] < 0
-        
-        # 1w trend filter
-        above_1w_ema = close[i] > ema_1w_aligned[i]
-        below_1w_ema = close[i] < ema_1w_aligned[i]
+        # Donchian breakout signals with 1d EMA filter and volume
+        # Long: break above upper band + price > 1d EMA + volume
+        # Short: break below lower band + price < 1d EMA + volume
+        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_1d_aligned[i]) and vol_filter[i]
+        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_1d_aligned[i]) and vol_filter[i]
         
         # Generate signals
         if position == 0:
-            if alligator_bull and bull_energy and above_1w_ema:
+            if breakout_long:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (2.0 * atr[i])
-            elif alligator_bear and bear_energy and below_1w_ema:
+            elif breakout_short:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
@@ -146,15 +114,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on stop or bearish Alligator alignment
-            if close[i] <= stop_price or alligator_bear:
+            # Exit long on stop or breakdown of lower band
+            if close[i] <= stop_price or close[i] < lowest_low[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short on stop or bullish Alligator alignment
-            if close[i] >= stop_price or alligator_bull:
+            # Exit short on stop or breakout of upper band
+            if close[i] >= stop_price or close[i] > highest_high[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
