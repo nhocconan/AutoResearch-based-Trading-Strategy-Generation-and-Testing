@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) Breakout + 12h ADX Trend + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts capture momentum, 12h ADX ensures trending market (avoiding chop), volume confirms breakout strength, ATR stoploss limits drawdown. Works in bull/bear by only trading when ADX > 25 (trending regime). Target 75-200 trades over 4 years to minimize fee drag.
+1d Donchian(20) Breakout + 1w EMA Trend + Volume Filter + ATR Stoploss
+Hypothesis: Donchian breakouts capture momentum, weekly EMA filter ensures trend alignment, volume confirms breakout strength, ATR stoploss limits drawdown. Designed for low trade frequency (target 30-100 total over 4 years) to minimize fee drift. Works in bull/bear by only trading with higher timeframe trend.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_12hadx_volume_atr_v1"
-timeframe = "4h"
+name = "1d_donchian20_1wema_volume_atr_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,82 +17,37 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for ADX and ATR (once before loop)
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
+    # Load 1w data for EMA and ATR (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # 14-period ADX on 12h
-    adx_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 14:
-        # True Range
-        tr = np.maximum(
-            high_12h[1:] - low_12h[1:],
-            np.abs(high_12h[1:] - close_12h[:-1]),
-            np.abs(low_12h[1:] - close_12h[:-1])
-        )
-        # Directional Movement
-        up_move = high_12h[1:] - high_12h[:-1]
-        down_move = low_12h[:-1] - low_12h[1:]
-        plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-        minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-        
-        # Smooth TR, +DM, -DM
-        tr14 = np.full_like(tr, np.nan)
-        plus_dm14 = np.full_like(tr, np.nan)
-        minus_dm14 = np.full_like(tr, np.nan)
-        
-        if len(tr) >= 14:
-            tr14[0] = np.nansum(tr[:14])
-            plus_dm14[0] = np.nansum(plus_dm[:14])
-            minus_dm14[0] = np.nansum(minus_dm[:14])
-            
-            for i in range(1, len(tr)):
-                tr14[i] = tr14[i-1] - (tr14[i-1] / 14) + tr[i]
-                plus_dm14[i] = plus_dm14[i-1] - (plus_dm14[i-1] / 14) + plus_dm[i]
-                minus_dm14[i] = minus_dm14[i-1] - (minus_dm14[i-1] / 14) + minus_dm[i]
-        
-        # DI+ and DI-
-        plus_di = np.full_like(tr, np.nan)
-        minus_di = np.full_like(tr, np.nan)
-        dx = np.full_like(tr, np.nan)
-        
-        valid = ~np.isnan(tr14) & (tr14 != 0)
-        plus_di[valid] = (plus_dm14[valid] / tr14[valid]) * 100
-        minus_di[valid] = (minus_dm14[valid] / tr14[valid]) * 100
-        
-        # DX and ADX
-        dx_sum = plus_di + minus_di
-        dx_valid = (dx_sum != 0) & ~np.isnan(plus_di) & ~np.isnan(minus_di)
-        dx[dx_valid] = (np.abs(plus_di[dx_valid] - minus_di[dx_valid]) / dx_sum[dx_valid]) * 100
-        
-        # ADX (smoothed DX)
-        adx_12h = np.full_like(close_12h, np.nan)
-        dx_valid = ~np.isnan(dx)
-        if np.sum(dx_valid) >= 14:
-            adx_12h[13] = np.nanmean(dx[:14])
-            for i in range(14, len(dx)):
-                if not np.isnan(dx[i]):
-                    adx_12h[i] = (adx_12h[i-1] * 13 + dx[i]) / 14
+    # 50-period EMA on 1w
+    ema_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 50:
+        multiplier = 2 / (50 + 1)
+        ema_1w[0] = close_1w[0]
+        for i in range(1, len(close_1w)):
+            ema_1w[i] = (close_1w[i] * multiplier) + (ema_1w[i-1] * (1 - multiplier))
     
-    # 14-period ATR on 12h for stoploss
-    atr_12h = np.full_like(close_12h, np.nan)
-    if len(close_12h) >= 14:
+    # 14-period ATR on 1w for stoploss
+    atr_1w = np.full_like(close_1w, np.nan)
+    if len(close_1w) >= 14:
         tr = np.maximum(
-            high_12h[1:] - low_12h[1:],
-            np.abs(high_12h[1:] - close_12h[:-1]),
-            np.abs(low_12h[1:] - close_12h[:-1])
+            high_1w[1:] - low_1w[1:],
+            np.abs(high_1w[1:] - close_1w[:-1]),
+            np.abs(low_1w[1:] - close_1w[:-1])
         )
-        atr_12h[0] = np.nan
+        atr_1w[0] = np.nan
         if len(tr) > 0:
-            atr_12h[1] = tr[0]
-            for i in range(2, len(atr_12h)):
-                atr_12h[i] = (tr[i-1] * 13 + atr_12h[i-1]) / 14
+            atr_1w[1] = tr[0]
+            for i in range(2, len(atr_1w)):
+                atr_1w[i] = (tr[i-1] * 13 + atr_1w[i-1]) / 14
     
-    # Align indicators to 4h timeframe
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
-    atr_12h_aligned = align_htf_to_ltf(prices, df_12h, atr_12h)
+    # Align indicators to 1d timeframe
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    atr_1w_aligned = align_htf_to_ltf(prices, df_1w, atr_1w)
     
     # Price and volume data
     high = prices['high'].values
@@ -105,11 +60,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(20, 30)  # For Donchian and ADX
+    start = max(20, 50)  # For Donchian and EMA
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(adx_12h_aligned[i]) or np.isnan(atr_12h_aligned[i]):
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(atr_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -133,35 +88,39 @@ def generate_signals(prices):
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR ADX < 20 (trend weakening)
+            # Exit: price closes below Donchian lower OR below 1w EMA
             # Stoploss: price drops 2*ATR below entry
             if (close[i] < lowest_low or 
-                adx_12h_aligned[i] < 20 or
-                close[i] < entry_price - 2.0 * atr_12h_aligned[i]):
+                close[i] < ema_1w_aligned[i] or
+                close[i] < entry_price - 2.0 * atr_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR ADX < 20 (trend weakening)
+            # Exit: price closes above Donchian upper OR above 1w EMA
             # Stoploss: price rises 2*ATR above entry
             if (close[i] > highest_high or 
-                adx_12h_aligned[i] < 20 or
-                close[i] > entry_price + 2.0 * atr_12h_aligned[i]):
+                close[i] > ema_1w_aligned[i] or
+                close[i] > entry_price + 2.0 * atr_1w_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + ADX trend filter (ADX > 25)
+            # Look for entries: Donchian breakout + volume + 1w EMA trend filter
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
             
-            if i >= 20 and bull_breakout and volume_filter and (adx_12h_aligned[i] > 25):
+            # Only go long if price above 1w EMA, short if below
+            trend_uptrend = close[i] > ema_1w_aligned[i]
+            trend_downtrend = close[i] < ema_1w_aligned[i]
+            
+            if i >= 20 and bull_breakout and volume_filter and trend_uptrend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif i >= 20 and bear_breakout and volume_filter and (adx_12h_aligned[i] > 25):
+            elif i >= 20 and bear_breakout and volume_filter and trend_downtrend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
