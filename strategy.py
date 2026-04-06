@@ -1,56 +1,34 @@
 #!/usr/bin/env python3
 """
-Experiment #12159: 6h Williams Alligator + Elder Ray (Bull/Bear Power) with 1d Trend Filter
-Hypothesis: Williams Alligator identifies trend direction via jaw/teeth/lips alignment.
-Elder Ray measures bull/bear power behind price moves. Combined with 1d EMA trend filter,
-this captures strong momentum moves while avoiding chop. Works in bull (bull power > 0 with
-jaws < teeth < lips) and bear (bear power < 0 with jaws > teeth > lips). Target: 75-200 trades.
+Experiment #12160: 4h Donchian Breakout with 1d Trend and Volume Confirmation - Revised
+Hypothesis: Previous versions failed due to too few trades (<15). This version reduces
+filters to increase trade frequency while maintaining edge: Removed strict volume threshold,
+uses dynamic position sizing based on trend strength, and adds re-entry logic. Target: 100-200 trades.
+Works in bull (breakouts continue) and bear (breakouts reverse quickly) via 1d trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12159_6h_alligator_elder_ray_1d_trend_v1"
-timeframe = "6h"
+name = "exp_12160_4h_donchian20_1d_ema_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-ALLIGATOR_JAW_PERIOD = 13
-ALLIGATOR_TEETH_PERIOD = 8
-ALLIGATOR_LIPS_PERIOD = 5
-ELDER_RAY_PERIOD = 13
+DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
-SIGNAL_SIZE = 0.25
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.2  # Reduced from 1.5
+BASE_SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.0  # Reduced from 2.5 for tighter stops
 
-def calculate_alligator(close, jaw_period, teeth_period, lips_period):
-    """Williams Alligator: SMMA (smoothed moving average) of median price"""
-    # Median price = (high + low) / 2
-    median_price = (close + close) / 2  # Simplified for close-only, but we'll use typical price later
-    
-    # SMMA calculation (similar to Wilder's smoothing)
-    def smma(series, period):
-        sma = np.full_like(series, np.nan, dtype=float)
-        if len(series) >= period:
-            sma[period-1] = np.mean(series[:period])
-            for i in range(period, len(series)):
-                sma[i] = (sma[i-1] * (period-1) + series[i]) / period
-        return sma
-    
-    jaw = smma(median_price, jaw_period)
-    teeth = smma(median_price, teeth_period)
-    lips = smma(median_price, lips_period)
-    
-    return jaw, teeth, lips
-
-def calculate_elder_ray(high, low, close, period):
-    """Elder Ray: Bull Power = High - EMA, Bear Power = Low - EMA"""
-    ema_close = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-    bull_power = high - ema_close
-    bear_power = low - ema_close
-    return bull_power, bear_power
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -77,16 +55,14 @@ def generate_signals(prices):
     ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
+    volume = prices['volume'].values
     
-    # Typical price for Alligator (more accurate than just close)
-    typical_price = (high + low + close) / 3
-    
-    jaw, teeth, lips = calculate_alligator(typical_price, ALLIGATOR_JAW_PERIOD, ALLIGATOR_TEETH_PERIOD, ALLIGATOR_LIPS_PERIOD)
-    bull_power, bear_power = calculate_elder_ray(high, low, close, ELDER_RAY_PERIOD)
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -95,13 +71,13 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ALLIGATOR_JAW_PERIOD, ELDER_RAY_PERIOD, TREND_EMA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if 1d EMA not available
         if np.isnan(ema_1d_aligned[i]):
             if position != 0:
-                signals[i] = position * SIGNAL_SIZE
+                signals[i] = position * BASE_SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
@@ -118,62 +94,183 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Alligator conditions (need valid values)
-        jaw_val = jaw[i]
-        teeth_val = teeth[i]
-        lips_val = lips[i]
+        # Donchian breakout conditions
+        breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
+        breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
         
-        if np.isnan(jaw_val) or np.isnan(teeth_val) or np.isnan(lips_val):
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Elder Ray conditions
-        bull_val = bull_power[i]
-        bear_val = bear_power[i]
-        
-        if np.isnan(bull_val) or np.isnan(bear_val):
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Alligator alignment: jaws < teeth < lips = uptrend, jaws > teeth > lips = downtrend
-        alligator_uptrend = (jaw_val < teeth_val) and (teeth_val < lips_val)
-        alligator_downtrend = (jaw_val > teeth_val) and (teeth_val > lips_val)
-        
-        # Elder Ray: bull power > 0 = bulls in control, bear power < 0 = bears in control
-        bulls_in_control = bull_val > 0
-        bears_in_control = bear_val < 0
+        # Volume confirmation (reduced threshold)
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter (1d)
         uptrend_1d = close[i] > ema_1d_aligned[i]
         downtrend_1d = close[i] < ema_1d_aligned[i]
         
+        # Dynamic position sizing based on trend strength
+        trend_strength = abs(close[i] - ema_1d_aligned[i]) / ema_1d_aligned[i] if ema_1d_aligned[i] != 0 else 0
+        size_multiplier = min(1.5, 0.5 + trend_strength * 10)  # Scale 0.5 to 1.5
+        signal_size = BASE_SIGNAL_SIZE * size_multiplier
+        
         # Entry conditions
-        long_entry = alligator_uptrend and bulls_in_control and uptrend_1d
-        short_entry = alligator_downtrend and bears_in_control and downtrend_1d
+        long_entry = breakout_up and volume_ok and uptrend_1d
+        short_entry = breakout_down and volume_ok and downtrend_1d
         
         # Generate signals
         if position == 0:
             if long_entry:
-                signals[i] = SIGNAL_SIZE
+                signals[i] = signal_size
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
             elif short_entry:
-                signals[i] = -SIGNAL_SIZE
+                signals[i] = -signal_size
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            signals[i] = SIGNAL_SIZE
+            signals[i] = BASE_SIGNAL_SIZE  # Use base size when holding
         elif position == -1:
-            signals[i] = -SIGNAL_SIZE
+            signals[i] = -BASE_SIGNAL_SIZE
     
     return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+Experiment #12160: 4h Donchian Breakout with 1d Trend and Volume Confirmation - Revised
+Hypothesis: Previous versions failed due to too few trades (<15). This version reduces
+filters to increase trade frequency while maintaining edge: Removed strict volume threshold,
+uses dynamic position sizing based on trend strength, and adds re-entry logic. Target: 100-200 trades.
+Works in bull (breakouts continue) and bear (breakouts reverse quickly) via 1d trend filter.
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "exp_12160_4h_donchian20_1d_ema_vol_v2"
+timeframe = "4h"
+leverage = 1.0
+
+# Parameters
+DONCHIAN_PERIOD = 20
+TREND_EMA_PERIOD = 50
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 1.2  # Reduced from 1.5
+BASE_SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0  # Reduced from 2.5 for tighter stops
+
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
+def calculate_atr(high, low, close, period):
+    """Calculate ATR"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return atr
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
+    
+    # Calculate 1d EMA for trend
+    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Calculate 4h indicators
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    stop_price = 0.0
+    
+    # Start from warmup period
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    
+    for i in range(start, n):
+        # Skip if 1d EMA not available
+        if np.isnan(ema_1d_aligned[i]):
+            if position != 0:
+                signals[i] = position * BASE_SIGNAL_SIZE
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Check stoploss
+        if position == 1:  # long position
+            if close[i] <= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        
+        # Donchian breakout conditions
+        breakout_up = high[i] > donchian_upper[i-1] if i > 0 and not np.isnan(donchian_upper[i-1]) else False
+        breakout_down = low[i] < donchian_lower[i-1] if i > 0 and not np.isnan(donchian_lower[i-1]) else False
+        
+        # Volume confirmation (reduced threshold)
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        
+        # Trend filter (1d)
+        uptrend_1d = close[i] > ema_1d_aligned[i]
+        downtrend_1d = close[i] < ema_1d_aligned[i]
+        
+        # Dynamic position sizing based on trend strength
+        trend_strength = abs(close[i] - ema_1d_aligned[i]) / ema_1d_aligned[i] if ema_1d_aligned[i] != 0 else 0
+        size_multiplier = min(1.5, 0.5 + trend_strength * 10)  # Scale 0.5 to 1.5
+        signal_size = BASE_SIGNAL_SIZE * size_multiplier
+        
+        # Entry conditions
+        long_entry = breakout_up and volume_ok and uptrend_1d
+        short_entry = breakout_down and volume_ok and downtrend_1d
+        
+        # Generate signals
+        if position == 0:
+            if long_entry:
+                signals[i] = signal_size
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif short_entry:
+                signals[i] = -signal_size
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+            else:
+                signals[i] = 0.0
+        elif position == 1:
+            signals[i] = BASE_SIGNAL_SIZE  # Use base size when holding
+        elif position == -1:
+            signals[i] = -BASE_SIGNAL_SIZE
+    
+    return signals
+
+</think>
