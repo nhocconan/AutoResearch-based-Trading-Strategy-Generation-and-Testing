@@ -3,30 +3,28 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Williams Alligator (3 SMAs: Jaw=13, Teeth=8, Lips=5) with daily pivot breakout
-# and volume confirmation. Alligator lines act as dynamic support/resistance; price crossing
-# all three lines with volume indicates strong trend. Daily pivot adds confluence for
-# institutional interest zones. Works in bull markets (bullish alignment above pivot) and
-# bear markets (bearish alignment below pivot). Target: 50-150 total trades over 4 years.
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
+# Breakouts above/below 20-period high/low capture momentum. Daily EMA ensures alignment with
+# higher timeframe trend to avoid counter-trend trades. Volume confirmation filters false breakouts.
+# Works in bull markets (breakouts above resistance) and bear markets (breakdowns below support).
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13292_12h_alligator_pivot_vol_v1"
+name = "exp_13292_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-JAW_PERIOD = 13   # Alligator Jaw (slowest)
-TEETH_PERIOD = 8  # Alligator Teeth
-LIPS_PERIOD = 5   # Alligator Lips (fastest)
-PIVOT_PERIOD = 1  # Daily pivot
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+DONCHIAN_PERIOD = 20      # For breakout levels
+EMA_PERIOD = 50           # Daily EMA for trend filter
+VOLUME_MA_PERIOD = 20     # Volume moving average
+VOLUME_THRESHOLD = 1.5    # Volume must be 1.5x average
+SIGNAL_SIZE = 0.25        # Position size (25% of capital)
+ATR_PERIOD = 14           # ATR for stoploss
+ATR_STOP_MULTIPLIER = 2.0 # Stoploss distance
 
-def calculate_sma(arr, period):
-    """Calculate Simple Moving Average"""
-    return pd.Series(arr).rolling(window=period, min_periods=period).mean().values
+def calculate_ema(close, period):
+    """Calculate EMA with proper min_periods"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -37,6 +35,12 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels: upper = rolling max(high), lower = rolling min(low)"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -45,32 +49,19 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Alligator components (12h data)
-    close = prices['close'].values
-    jaw = calculate_sma(close, JAW_PERIOD)
-    teeth = calculate_sma(close, TEETH_PERIOD)
-    lips = calculate_sma(close, LIPS_PERIOD)
-    
-    # Calculate daily pivots
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily EMA for trend filter
     close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Standard pivot point: P = (H + L + C) / 3
-    # Support 1: S1 = 2*P - H
-    # Resistance 1: R1 = 2*P - L
-    pivot = (high_1d + low_1d + close_1d) / 3.0
-    r1 = 2 * pivot - high_1d
-    s1 = 2 * pivot - low_1d
-    
-    # Align pivots to 12h timeframe
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    
-    # 12h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Donchian channels (20-period)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -84,12 +75,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(JAW_PERIOD, TEETH_PERIOD, LIPS_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_PERIOD, VOLUME_MA_PERIOD, DONCHIAN_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not ready
-        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or \
-           np.isnan(r1_aligned[i]) or np.isnan(s1_aligned[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -111,13 +101,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Alligator alignment: Lips > Teeth > Jaw = bullish, Lips < Teeth < Jaw = bearish
-        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaw[i]
-        bearish_alignment = lips[i] < teeth[i] and teeth[i] < jaw[i]
+        # Trend filter: price above/below daily EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # Breakout signals with pivot confluence
-        breakout_up = volume_ok and bullish_alignment and (high[i] > r1_aligned[i-1])
-        breakout_down = volume_ok and bearish_alignment and (low[i] < s1_aligned[i-1])
+        # Breakout signals using Donchian channels
+        breakout_up = volume_ok and uptrend and (high[i] > donchian_upper[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < donchian_lower[i-1])
         
         # Generate signals
         if position == 0:
