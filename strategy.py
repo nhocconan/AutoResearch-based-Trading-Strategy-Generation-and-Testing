@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13924_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_13925_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
-# Hypothesis: 1d Donchian breakout with 1w EMA trend filter and volume confirmation
+# Hypothesis: 12h Donchian breakout with 1d EMA trend filter and volume confirmation
 # Works in bull (breaks out to new highs) and bear (breaks down to new lows)
-# Target: 75-200 trades over 4 years by using strict volume threshold (2.0x) and
-# requiring alignment with weekly trend to avoid counter-trend whipsaws
+# Target: 50-150 trades over 4 years by using strict volume threshold (2.0x) and
+# requiring alignment with daily trend to avoid counter-trend whipsaws
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian upper and lower bands"""
@@ -37,15 +37,15 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for trend filter ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for trend filter ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA for trend direction
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, 50)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 1d EMA for trend direction
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, 50)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 1d data for Donchian, ATR, and volume
+    # 12h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -70,7 +70,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -95,9 +95,9 @@ def generate_signals(prices):
         # Volume confirmation - higher threshold to reduce trades
         volume_ok = volume[i] > (volume_ma[i] * 2.0)
         
-        # Trend filter from 1w EMA
-        trend_up = close[i] > ema_1w_aligned[i]
-        trend_down = close[i] < ema_1w_aligned[i]
+        # Trend filter from 1d EMA
+        trend_up = close[i] > ema_1d_aligned[i]
+        trend_down = close[i] < ema_1d_aligned[i]
         
         # Donchian breakout signals
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
