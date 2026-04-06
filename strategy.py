@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
-# Long when price breaks above Donchian upper (20-period) AND price > 1d EMA(50) AND volume > 2x 20-period average
-# Short when price breaks below Donchian lower (20-period) AND price < 1d EMA(50) AND volume > 2x 20-period average
+# Hypothesis: 4-hour Donchian breakout with 1-day trend filter and volume confirmation
+# Long when price breaks above Donchian upper (20-period) AND price > 1-day EMA(50) AND volume > 2x 20-period average
+# Short when price breaks below Donchian lower (20-period) AND price < 1-day EMA(50) AND volume > 2x 20-period average
 # Exit when price crosses Donchian midline (10-period average of upper/lower)
-# Uses 12h timeframe to reduce trade frequency, 1d EMA for trend filter, Donchian for breakout signals
-# Target: 50-150 total trades over 4 years (12-37/year) for optimal 12h performance
+# Uses 4h timeframe to reduce trade frequency, 1d EMA for trend filter, Donchian for breakout signals
+# Target: 75-200 total trades over 4 years (19-50/year) for optimal 4h performance
 
-name = "12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -40,7 +40,7 @@ def generate_signals(prices):
     daily_close_series = pd.Series(daily_close)
     daily_ema = daily_close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align daily EMA to 12h timeframe
+    # Align daily EMA to 4h timeframe
     daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
     
     # Volume confirmation: volume > 2x 20-period average
