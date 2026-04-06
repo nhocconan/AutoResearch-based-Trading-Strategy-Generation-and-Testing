@@ -3,262 +3,107 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14094_1h_donchian20_1d_ema_vol_v1"
-timeframe = "1h"
+name = "exp_14095_6d_ichimoku_cloud_tf"
+timeframe = "6h"
 leverage = 1.0
 
 def calculate_ema(arr, period):
     """Calculate EMA with proper min_periods"""
     return pd.Series(arr).ewm(span=period, adjust=False, min_periods=period).mean().values
 
-def calculate_atr(high, low, close, period):
-    """Calculate ATR with proper min_periods"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
-
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for EMA filter (once before loop)
+    # Load 1d data for Ichimoku cloud and trend (once before loop)
     df_1d = get_htf_data(prices, '1d')
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Calculate 1d EMA (50-period) for trend filter
-    ema_1d = calculate_ema(close_1d, 50)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Ichimoku components (9, 26, 52 periods)
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    high_9 = pd.Series(high_1d).rolling(window=9, min_periods=9).max().values
+    low_9 = pd.Series(low_1d).rolling(window=9, min_periods=9).min().values
+    tenkan = (high_9 + low_9) / 2
     
-    # 1h data
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    high_26 = pd.Series(high_1d).rolling(window=26, min_periods=26).max().values
+    low_26 = pd.Series(low_1d).rolling(window=26, min_periods=26).min().values
+    kijun = (high_26 + low_26) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2)
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    high_52 = pd.Series(high_1d).rolling(window=52, min_periods=52).max().values
+    low_52 = pd.Series(low_1d).rolling(window=52, min_periods=52).min().values
+    senkou_b = ((high_52 + low_52) / 2)
+    
+    # Align Ichimoku components to 6h timeframe (shifted by 1 for completed bars)
+    tenkan_6h = align_htf_to_ltf(prices, df_1d, tenkan)
+    kijun_6h = align_htf_to_ltf(prices, df_1d, kijun)
+    senkou_a_6h = align_htf_to_ltf(prices, df_1d, senkou_a)
+    senkou_b_6h = align_htf_to_ltf(prices, df_1d, senkou_b)
+    
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period) - upper and lower bands
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: volume > 1.8x 20-period average
+    # Volume filter: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.8 * vol_ma)
-    
-    # ATR for stop loss (14-period)
-    atr = calculate_atr(high, low, close, 14)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
+    vol_filter = volume > (1.5 * vol_ma)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 50 for EMA, 14 for ATR)
-    start = max(20, 50, 14) + 1
+    # Start from warmup period (max of 52 for Ichimoku, 20 for volume)
+    start = max(52, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_1d_aligned[i]) or \
-           np.isnan(atr[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(tenkan_6h[i]) or np.isnan(kijun_6h[i]) or np.isnan(senkou_a_6h[i]) or \
+           np.isnan(senkou_b_6h[i]) or np.isnan(vol_ma[i]):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check stops
-        if position == 1:  # long position
-            # Check stop loss
-            if close[i] <= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
+        # Ichimoku signals
+        # Bullish: Tenkan > Kijun and price above cloud
+        # Bearish: Tenkan < Kijun and price below cloud
+        bullish = tenkan_6h[i] > kijun_6h[i] and close[i] > max(senkou_a_6h[i], senkou_b_6h[i])
+        bearish = tenkan_6h[i] < kijun_6h[i] and close[i] < min(senkou_a_6h[i], senkou_b_6h[i])
         
-        elif position == -1:  # short position
-            # Check stop loss
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
-        
-        # Donchian breakout signals with volume confirmation
-        # Long: price breaks above upper band with volume confirmation
-        # Short: price breaks below lower band with volume confirmation
-        breakout_up = close[i] > high_20[i-1] and vol_filter[i]
-        breakout_down = close[i] < low_20[i-1] and vol_filter[i]
-        
-        # 1d EMA trend filter
-        # Only take longs when price > 1d EMA, shorts when price < 1d EMA
-        trend_filter_long = close[i] > ema_1d_aligned[i]
-        trend_filter_short = close[i] < ema_1d_aligned[i]
-        
-        # Generate signals
+        # Generate signals with volume confirmation
         if position == 0:
-            if breakout_up and trend_filter_long and session_filter[i]:
-                signals[i] = 0.20
+            if bullish and vol_filter[i]:
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (2.0 * atr[i])
-            elif breakout_down and trend_filter_short and session_filter[i]:
-                signals[i] = -0.20
+            elif bearish and vol_filter[i]:
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (2.0 * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on stop or reversal breakout
-            if close[i] <= stop_price or breakout_down:
+            # Exit long on bearish cross or price below cloud
+            if not bullish or close[i] < min(senkou_a_6h[i], senkou_b_6h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short on stop or reversal breakout
-            if close[i] >= stop_price or breakout_up:
+            # Exit short on bullish cross or price above cloud
+            if not bearish or close[i] > max(senkou_a_6h[i], senkou_b_6h[i]):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-name = "exp_14094_1h_donchian20_1d_ema_vol_v1"
-timeframe = "1h"
-leverage = 1.0
-
-def calculate_ema(arr, period):
-    """Calculate EMA with proper min_periods"""
-    return pd.Series(arr).ewm(span=period, adjust=False, min_periods=period).mean().values
-
-def calculate_atr(high, low, close, period):
-    """Calculate ATR with proper min_periods"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    tr[0] = tr1[0]
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return atr
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Load 1d data for EMA filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    
-    # Calculate 1d EMA (50-period) for trend filter
-    ema_1d = calculate_ema(close_1d, 50)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # 1h data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Donchian channel (20-period) - upper and lower bands
-    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
-    
-    # Volume filter: volume > 1.8x 20-period average
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.8 * vol_ma)
-    
-    # ATR for stop loss (14-period)
-    atr = calculate_atr(high, low, close, 14)
-    
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    entry_price = 0.0
-    stop_price = 0.0
-    
-    # Start from warmup period (max of 20 for Donchian, 50 for EMA, 14 for ATR)
-    start = max(20, 50, 14) + 1
-    
-    for i in range(start, n):
-        # Skip if required data not available
-        if np.isnan(high_20[i]) or np.isnan(low_20[i]) or np.isnan(ema_1d_aligned[i]) or \
-           np.isnan(atr[i]) or np.isnan(vol_ma[i]):
-            if position != 0:
-                signals[i] = position * 0.20
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Check stops
-        if position == 1:  # long position
-            # Check stop loss
-            if close[i] <= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
-        
-        elif position == -1:  # short position
-            # Check stop loss
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
-        
-        # Donchian breakout signals with volume confirmation
-        # Long: price breaks above upper band with volume confirmation
-        # Short: price breaks below lower band with volume confirmation
-        breakout_up = close[i] > high_20[i-1] and vol_filter[i]
-        breakout_down = close[i] < low_20[i-1] and vol_filter[i]
-        
-        # 1d EMA trend filter
-        # Only take longs when price > 1d EMA, shorts when price < 1d EMA
-        trend_filter_long = close[i] > ema_1d_aligned[i]
-        trend_filter_short = close[i] < ema_1d_aligned[i]
-        
-        # Generate signals
-        if position == 0:
-            if breakout_up and trend_filter_long and session_filter[i]:
-                signals[i] = 0.20
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (2.0 * atr[i])
-            elif breakout_down and trend_filter_short and session_filter[i]:
-                signals[i] = -0.20
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (2.0 * atr[i])
-            else:
-                signals[i] = 0.0
-        elif position == 1:
-            # Exit long on stop or reversal breakout
-            if close[i] <= stop_price or breakout_down:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.20
-        elif position == -1:
-            # Exit short on stop or reversal breakout
-            if close[i] >= stop_price or breakout_up:
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
