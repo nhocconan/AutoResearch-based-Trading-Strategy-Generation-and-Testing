@@ -3,20 +3,22 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
-# Long when price breaks above Donchian upper (20-period) AND price > 1d EMA(20) AND volume > 1.5x 20-period average
-# Short when price breaks below Donchian lower (20-period) AND price < 1d EMA(20) AND volume > 1.5x 20-period average
+# Hypothesis: 4h Donchian breakout with 1d EMA trend filter and volume confirmation
+# Long when price breaks above Donchian upper (20-period) AND price > 1d EMA(50) AND volume > 2x 20-period average
+# Short when price breaks below Donchian lower (20-period) AND price < 1d EMA(50) AND volume > 2x 20-period average
 # Exit when price crosses Donchian midline (10-period average of upper/lower)
-# Uses 12h timeframe to reduce trade frequency, 1d EMA for trend filter, Donchian for breakout signals
-# Target: 50-150 total trades over 4 years (12-37/year) for optimal 12h performance
+# Uses 4h timeframe for balance of trade frequency and signal quality
+# 1d EMA for long-term trend filter to avoid counter-trend trades
+# Volume confirmation to ensure breakout strength
+# Target: 100-200 total trades over 4 years (25-50/year) for optimal 4h performance
 
-name = "12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -32,25 +34,25 @@ def generate_signals(prices):
     donchian_lower = lowest_low.values
     donchian_mid = (donchian_upper + donchian_lower) / 2
     
-    # 1-day EMA(20) trend filter
+    # 1-day EMA(50) trend filter
     df_1d = get_htf_data(prices, '1d')
     daily_close = df_1d['close'].values
     
-    # Calculate 20-period EMA on daily close
+    # Calculate 50-period EMA on daily close
     daily_close_series = pd.Series(daily_close)
-    daily_ema = daily_close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
+    daily_ema = daily_close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align daily EMA to 12h timeframe
+    # Align daily EMA to 4h timeframe
     daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
     
-    # Volume confirmation: volume > 1.5x 20-period average
+    # Volume confirmation: volume > 2x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
-    volume_threshold = 1.5 * volume_ma.values
+    volume_threshold = 2.0 * volume_ma.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(40, n):
+    for i in range(50, n):
         # Skip if required data not available
         if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(daily_ema_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
