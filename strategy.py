@@ -3,22 +3,21 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian breakout with volume confirmation and weekly EMA trend filter.
-# Uses daily price channels (Donchian 20) for breakout signals, volume surge for confirmation,
-# and weekly EMA to ensure alignment with higher timeframe momentum. This avoids counter-trend
-# trades and works in both bull (breakouts above resistance) and bear (breakdowns below support)
-# markets. Target: 75-250 total trades over 4 years (~20-60/year) to balance signal quality
-# and fee drag. Position size 0.25 to manage drawdown.
+# Hypothesis: 6-hour Elder Ray index (Bull/Bear power) with weekly EMA trend filter and volume confirmation.
+# Elder Ray measures bullish/bearish power relative to EMA, helping identify trend strength and reversals.
+# Combined with weekly EMA trend filter to avoid counter-trend trades and volume confirmation for conviction.
+# Works in bull markets (strong bull power) and bear markets (strong bear power).
+# Target: 50-150 total trades over 4 years.
 
-name = "exp_13298_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_13299_6h_elder_ray_weekly_vol_v2"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 20
+ELDER_EMA_PERIOD = 13   # EMA for Elder Ray calculation
+WEEKLY_EMA_PERIOD = 20  # Weekly EMA for trend filter
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
@@ -43,30 +42,24 @@ def generate_signals(prices):
     
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    # Load daily data ONCE before loop for Donchian channels
-    df_1d = get_htf_data(prices, '1d')
     
     # Calculate weekly EMA for trend filter
     close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
+    ema_1w = calculate_ema(close_1w, WEEKLY_EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate daily Donchian channels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    # Upper band: highest high over period, Lower band: lowest low over period
-    upper = pd.Series(high_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lower = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Align Donchian levels to daily timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_1d, upper)
-    lower_aligned = align_htf_to_ltf(prices, df_1d, lower)
-    
-    # Calculate daily indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Elder Ray EMA (13-period)
+    elder_ema = calculate_ema(close, ELDER_EMA_PERIOD)
+    
+    # Elder Ray components: Bull Power = High - EMA, Bear Power = Low - EMA
+    bull_power = high - elder_ema
+    bear_power = low - elder_ema
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -80,11 +73,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(WEEKLY_EMA_PERIOD, ELDER_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if indicators not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(elder_ema[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -110,18 +103,20 @@ def generate_signals(prices):
         uptrend = close[i] > ema_1w_aligned[i]
         downtrend = close[i] < ema_1w_aligned[i]
         
-        # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > upper_aligned[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lower_aligned[i-1])
+        # Elder Ray signals with volume and trend confirmation
+        # Long: Strong bull power + uptrend + volume
+        # Short: Strong bear power + downtrend + volume
+        long_signal = volume_ok and uptrend and (bull_power[i] > 0) and (bull_power[i] > bear_power[i])
+        short_signal = volume_ok and downtrend and (bear_power[i] < 0) and (abs(bear_power[i]) > abs(bull_power[i]))
         
         # Generate signals
         if position == 0:
-            if breakout_up:
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
