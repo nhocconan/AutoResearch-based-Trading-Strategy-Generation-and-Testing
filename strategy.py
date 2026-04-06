@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
 """
-1d Bollinger Squeeze with 1w Volume Confirmation
-Hypothesis: Bollinger Bands squeeze indicates low volatility and impending breakout.
-Volume confirmation filters breakouts. Works in bull markets (breakouts up) and bear markets (breakouts down).
-Target: 20-40 trades/year (80-160 total over 4 years).
+1d Donchian(20) breakout + 1w EMA(50) trend + volume confirmation + ATR stoploss
+Hypothesis: Donchian breakouts capture strong trends with clear entry/exit rules.
+1w EMA provides long-term trend filter (only trade in trend direction).
+Volume confirms breakout strength. ATR-based stops manage risk.
+Works in bull (long breakouts above EMA) and bear (short breakdowns below EMA).
+Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "14358_1d_bollinger_squeeze_vol_v1"
+name = "14358_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 1w data for volume confirmation (once before loop)
+    # Load 1w data for EMA(50) trend filter (once before loop)
     df_1w = get_htf_data(prices, '1w')
-    vol_1w = df_1w['volume'].values
+    close_1w = df_1w['close'].values
+    
+    # EMA(50) on weekly data
+    ema_50 = pd.Series(close_1w).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
     # Daily data
     high = prices['high'].values
@@ -29,33 +35,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean()
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std()
-    upper = sma + (std * bb_std)
-    lower = sma - (std * bb_std)
+    # Donchian(20) channels
+    high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Bollinger Band Width (normalized)
-    bb_width = (upper - lower) / sma
-    bb_width_s = pd.Series(bb_width)
-    
-    # Bollinger Band Width percentile (20-period lookback)
-    bb_width_percentile = bb_width_s.rolling(window=20, min_periods=20).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    ).values
-    
-    # Volume filter: 1w volume above 50th percentile of last 4 weeks
-    vol_1w_s = pd.Series(vol_1w)
-    vol_percentile = vol_1w_s.rolling(window=4, min_periods=4).apply(
-        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
-    ).values
-    vol_filter_1w = vol_percentile > 0.5  # Above median volume
-    
-    # Align 1w indicators to daily timeframe
-    bb_width_percentile_aligned = align_htf_to_ltf(prices, df_1w, bb_width_percentile)
-    vol_filter_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_filter_1w.astype(float))
+    # Volume filter: avoid low volume periods
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (0.7 * vol_ma)  # Require at least 70% of average volume
     
     # ATR for stoploss
     tr1 = high - low
@@ -70,13 +56,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(bb_period, 20) + 4  # BB period + volume lookback
+    start = max(20, 50) + 14  # Donchian(20) + EMA(50) warmup + ATR(14)
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(bb_width_percentile_aligned[i]) or 
-            np.isnan(vol_filter_1w_aligned[i]) or 
-            np.isnan(atr[i])):
+        if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -85,36 +70,38 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price below middle band OR stoploss
-            if (close[i] <= sma[i] or close[i] <= entry_price - 2.5 * atr[i]):
+            # Exit: price breaks below Donchian low OR trend turns bearish OR stoploss
+            if (close[i] <= low_20[i] or close[i] < ema_50_aligned[i] or
+                close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price above middle band OR stoploss
-            if (close[i] >= sma[i] or close[i] >= entry_price + 2.5 * atr[i]):
+            # Exit: price breaks above Donchian high OR trend turns bullish OR stoploss
+            if (close[i] >= high_20[i] or close[i] > ema_50_aligned[i] or
+                close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Bollinger squeeze (low volatility) + volume breakout
-            squeeze = bb_width_percentile_aligned[i] < 0.2  # Bottom 20% of BB width
-            vol_ok = vol_filter_1w_aligned[i] > 0.5  # Above median 1w volume
+            # Look for entries: breakout in trend direction + volume
+            long_breakout = close[i] > high_20[i]
+            short_breakout = close[i] < low_20[i]
             
-            if squeeze and vol_ok:
-                # Breakout direction based on price vs SMA
-                if close[i] > sma[i]:
-                    signals[i] = 0.25
-                    position = 1
-                    entry_price = close[i]
-                elif close[i] < sma[i]:
-                    signals[i] = -0.25
-                    position = -1
-                    entry_price = close[i]
-                else:
-                    signals[i] = 0.0
+            # Only trade in direction of weekly trend
+            long_entry = long_breakout and close[i] > ema_50_aligned[i] and vol_filter[i]
+            short_entry = short_breakout and close[i] < ema_50_aligned[i] and vol_filter[i]
+            
+            if long_entry:
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+            elif short_entry:
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
             else:
                 signals[i] = 0.0
     
