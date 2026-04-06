@@ -3,16 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13936_12h_donchian20_1d_ema_vol_v2"
-timeframe = "12h"
+name = "exp_13937_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation (2.0x)
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation (2.0x)
 # Works in bull (breaks out to new highs) and bear (breaks down to new lows)
-# Target: 75-150 trades over 4 years by using moderate volume threshold (1.8x) and
+# Target: 75-200 trades over 4 years by using strict volume threshold (2.0x) and
 # requiring alignment with daily trend to avoid counter-trend whipsaws
-# Added: ATR-based trailing stop (2.0x) and exit on Donchian reversal or trend change
-# Focus: reduce false signals while maintaining enough trades for statistical significance
+# Added: ATR-based trailing stop (2.5x) and exit on Donchian reversal or trend change
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian upper and lower bands"""
@@ -47,7 +46,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(close_1d, 50)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h data for Donchian, ATR, and volume
+    # 4h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -59,7 +58,7 @@ def generate_signals(prices):
     # ATR for stop loss
     atr = calculate_atr(high, low, close, 14)
     
-    # Volume confirmation - moderate threshold to balance signal quality and trade count
+    # Volume confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
@@ -94,8 +93,8 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation - moderate threshold to increase trade frequency
-        volume_ok = volume[i] > (volume_ma[i] * 1.8)
+        # Volume confirmation - higher threshold to reduce trades
+        volume_ok = volume[i] > (volume_ma[i] * 2.0)
         
         # Trend filter from 1d EMA
         trend_up = close[i] > ema_1d_aligned[i]
@@ -115,12 +114,12 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (2.0 * atr[i])
+                stop_price = entry_price - (2.5 * atr[i])
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (2.0 * atr[i])
+                stop_price = entry_price + (2.5 * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
