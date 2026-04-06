@@ -3,35 +3,40 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h Bollinger Band squeeze breakout with 4h trend filter and volume confirmation.
-# In low volatility (Bollinger Band squeeze), price often breaks out strongly. 
-# Use 4h EMA(50) for trend direction: only take breakouts in trend direction.
+# Hypothesis: 1h RSI(2) extreme reversals with 4h trend filter and volume confirmation.
+# RSI(2) captures short-term overbought/oversold conditions. In strong trends, extreme RSI(2) values
+# often precede short-term reversals. Use 4h EMA(50) slope for trend direction: only take RSI(2) 
+# reversals in trend direction. In uptrend: buy when RSI(2) crosses above 10 from below (oversold bounce).
+# In downtrend: sell when RSI(2) crosses below 90 from above (overbought rejection).
 # Volume confirmation ensures institutional participation. Session filter (08-20 UTC) reduces noise.
-# Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-# Target: 15-37 trades/year by using strict Bollinger Band squeeze + breakout + trend + volume + session.
+# Works in bull markets (buy dips in uptrend) and bear markets (sell rallies in downtrend).
+# Target: 15-37 trades/year by using strict RSI(2) extremes (<10 or >90) + trend + volume + session.
 
-name = "exp_13654_1h_bb_squeeze_4h_trend_vol_sess_v1"
+name = "exp_13654_1h_rsi2_4h_trend_vol_sess_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-BB_PERIOD = 20
-BB_STD_DEV = 2.0
+RSI_PERIOD = 2
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
+RSI_OVERBOUGHT = 90
+RSI_OVERSOLD = 10
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_bbands(close, period, std_dev):
-    """Calculate Bollinger Bands"""
-    sma = pd.Series(close).rolling(window=period, min_periods=period).mean()
-    std = pd.Series(close).rolling(window=period, min_periods=period).std()
-    upper = sma + (std * std_dev)
-    lower = sma - (std * std_dev)
-    width = upper - lower
-    return upper.values, lower.values, width.values
+def calculate_rsi(close, period):
+    """Calculate RSI"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -67,8 +72,8 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands
-    bb_upper, bb_lower, bb_width = calculate_bbands(close, BB_PERIOD, BB_STD_DEV)
+    # RSI(2)
+    rsi = calculate_rsi(close, RSI_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -85,11 +90,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(BB_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(RSI_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_4h_slope_aligned[i]) or np.isnan(bb_upper[i]) or np.isnan(bb_lower[i]) or np.isnan(bb_width[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_4h_slope_aligned[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -112,14 +117,6 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Bollinger Band squeeze: width below 20th percentile of last 50 periods
-        if i >= 50:
-            width_lookback = bb_width[max(0, i-50):i]
-            width_percentile = np.percentile(width_lookback, 20) if len(width_lookback) > 0 else bb_width[i]
-            squeeze = bb_width[i] <= width_percentile
-        else:
-            squeeze = False
-        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
@@ -127,12 +124,20 @@ def generate_signals(prices):
         uptrend = ema_4h_slope_aligned[i] > 0
         downtrend = ema_4h_slope_aligned[i] < 0
         
-        # Bollinger Band breakout signals
-        # Long: price breaks above upper band during squeeze in uptrend
-        long_signal = squeeze and volume_ok and in_session and uptrend and close[i] > bb_upper[i]
-        
-        # Short: price breaks below lower band during squeeze in downtrend
-        short_signal = squeeze and volume_ok and in_session and downtrend and close[i] < bb_lower[i]
+        # RSI(2) signals: extreme reversals
+        # Avoid lookback by checking current and previous values
+        if i > 0 and not np.isnan(rsi[i-1]):
+            rsi_prev = rsi[i-1]
+            rsi_curr = rsi[i]
+            
+            # Long signal: RSI(2) crosses above 10 from below in uptrend
+            long_signal = volume_ok and in_session and uptrend and rsi_prev <= RSI_OVERSOLD and rsi_curr > RSI_OVERSOLD
+            
+            # Short signal: RSI(2) crosses below 90 from above in downtrend
+            short_signal = volume_ok and in_session and downtrend and rsi_prev >= RSI_OVERBOUGHT and rsi_curr < RSI_OVERBOUGHT
+        else:
+            long_signal = False
+            short_signal = False
         
         # Generate signals
         if position == 0:
@@ -149,17 +154,29 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on opposite BB signal or stop loss
-            if close[i] < bb_lower[i]:  # price breaks below lower band
-                signals[i] = 0.0
-                position = 0
+            # Exit long on opposite RSI(2) signal or stop loss
+            if i > 0 and not np.isnan(rsi[i-1]):
+                rsi_prev = rsi[i-1]
+                rsi_curr = rsi[i]
+                # Exit if RSI(2) crosses below 90 (overbought - end of bounce)
+                if rsi_prev < RSI_OVERBOUGHT and rsi_curr >= RSI_OVERBOUGHT:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = SIGNAL_SIZE
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on opposite BB signal or stop loss
-            if close[i] > bb_upper[i]:  # price breaks above upper band
-                signals[i] = 0.0
-                position = 0
+            # Exit short on opposite RSI(2) signal or stop loss
+            if i > 0 and not np.isnan(rsi[i-1]):
+                rsi_prev = rsi[i-1]
+                rsi_curr = rsi[i]
+                # Exit if RSI(2) crosses above 10 (oversold - end of decline)
+                if rsi_prev > RSI_OVERSOLD and rsi_curr <= RSI_OVERSOLD:
+                    signals[i] = 0.0
+                    position = 0
+                else:
+                    signals[i] = -SIGNAL_SIZE
             else:
                 signals[i] = -SIGNAL_SIZE
     
