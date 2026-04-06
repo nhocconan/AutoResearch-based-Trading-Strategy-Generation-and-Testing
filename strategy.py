@@ -3,58 +3,30 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h volume-weighted RSI (VW-RSI) with 1d trend filter and volatility filter.
-# VW-RSI uses volume-weighted average price (VWAP) instead of close for RSI calculation.
-# In trending markets, volume confirms strength; in ranging markets, extremes signal reversals.
-# 1d EMA(50) slope determines trend direction: only take VW-RSI signals in trend direction.
-# Volatility filter (ATR ratio) avoids low-volatility chop.
-# Works in bull markets (buy strength on dips) and bear markets (sell weakness on rallies).
+# Hypothesis: 12h Donchian channel breakout with 1d trend filter and volume confirmation.
+# Donchian breakouts capture strong momentum moves. Use 1d EMA(50) to filter for trend direction.
+# In uptrend: buy when price breaks above 20-period high. In downtrend: sell when price breaks below 20-period low.
+# Volume confirmation ensures institutional participation. Works in bull markets (buy strength) and bear markets (sell weakness).
+# ATR-based stop loss manages risk. Designed for low trade frequency to minimize fee drag.
 
-name = "exp_13611_6h_vwrsi_1d_trend_volfilt_v1"
-timeframe = "6h"
+name = "exp_13612_12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-VW_RSI_PERIOD = 14
+DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-ATR_PERIOD = 14
-ATR_RATIO_PERIOD = 30
-ATR_RATIO_THRESHOLD = 0.5
 SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_vw_rsi(high, low, close, volume, period):
-    """Calculate Volume-Weighted RSI using VWAP-like price"""
-    # Calculate typical price
-    typical_price = (high + low + close) / 3.0
-    # Volume-weighted price (approximation of VWAP)
-    vw_price = np.zeros_like(typical_price)
-    cumulative_volume = np.zeros_like(volume)
-    cumulative_vwp = np.zeros_like(typical_price)
-    
-    # Calculate cumulative values for VWAP-like calculation
-    for i in range(len(typical_price)):
-        cumulative_volume[i] = volume[i] + (cumulative_volume[i-1] if i > 0 else 0)
-        cumulative_vwp[i] = typical_price[i] * volume[i] + (cumulative_vwp[i-1] if i > 0 else 0)
-        if cumulative_volume[i] > 0:
-            vw_price[i] = cumulative_vwp[i] / cumulative_volume[i]
-        else:
-            vw_price[i] = typical_price[i]
-    
-    # Calculate RSI on volume-weighted price
-    delta = np.diff(vw_price, prepend=vw_price[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    
-    # Wilder's smoothing
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min()
+    return upper.values, lower.values
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -83,19 +55,17 @@ def generate_signals(prices):
     ema_1d_slope = np.diff(ema_1d, prepend=ema_1d[0])  # slope approximation
     ema_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_slope)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume-weighted RSI
-    vw_rsi = calculate_vw_rsi(high, low, close, volume, VW_RSI_PERIOD)
+    # Donchian channels
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     
-    # ATR for stop loss and volatility filter
+    # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    atr_long = calculate_atr(high, low, close, ATR_RATIO_PERIOD)
-    atr_ratio = atr / (atr_long + 1e-10)  # short-term ATR / long-term ATR
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -106,12 +76,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VW_RSI_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, ATR_RATIO_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(ema_1d_slope_aligned[i]) or np.isnan(vw_rsi[i]) or 
-            np.isnan(volume_ma[i]) or np.isnan(atr_ratio[i])):
+        if np.isnan(ema_1d_slope_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -130,26 +99,26 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Filters
+        # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
-        volatility_ok = atr_ratio[i] > ATR_RATIO_THRESHOLD  # avoid low volatility
         
         # Trend direction from 1d EMA slope
         uptrend = ema_1d_slope_aligned[i] > 0
         downtrend = ema_1d_slope_aligned[i] < 0
         
-        # VW-RSI signals: oversold/overbought with trend
-        # In uptrend: buy when VW-RSI crosses above 30 from below (end of pullback)
-        # In downtrend: sell when VW-RSI crosses below 70 from above (end of bounce)
-        if i > 0 and not np.isnan(vw_rsi[i-1]):
-            vw_rsi_prev = vw_rsi[i-1]
-            vw_rsi_curr = vw_rsi[i]
+        # Donchian breakout signals
+        # Avoid lookback by checking current and previous values
+        if i > 0 and not np.isnan(donchian_upper[i-1]) and not np.isnan(donchian_lower[i-1]):
+            upper_prev = donchian_upper[i-1]
+            lower_prev = donchian_lower[i-1]
+            upper_curr = donchian_upper[i]
+            lower_curr = donchian_lower[i]
             
-            # Long signal: VW-RSI crosses above 30 in uptrend
-            long_signal = volume_ok and volatility_ok and uptrend and vw_rsi_prev <= 30 and vw_rsi_curr > 30
+            # Long signal: price breaks above Donchian upper in uptrend
+            long_signal = volume_ok and uptrend and close[i] > upper_curr and close[i-1] <= upper_prev
             
-            # Short signal: VW-RSI crosses below 70 in downtrend
-            short_signal = volume_ok and volatility_ok and downtrend and vw_rsi_prev >= 70 and vw_rsi_curr < 70
+            # Short signal: price breaks below Donchian lower in downtrend
+            short_signal = volume_ok and downtrend and close[i] < lower_curr and close[i-1] >= lower_prev
         else:
             long_signal = False
             short_signal = False
@@ -169,12 +138,14 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on opposite VW-RSI signal or stop loss
-            if i > 0 and not np.isnan(vw_rsi[i-1]):
-                vw_rsi_prev = vw_rsi[i-1]
-                vw_rsi_curr = vw_rsi[i]
-                # Exit if VW-RSI crosses below 70 (overbought in uptrend)
-                if vw_rsi_prev < 70 and vw_rsi_curr >= 70:
+            # Exit long on opposite Donchian breakout or stop loss
+            if i > 0 and not np.isnan(donchian_upper[i-1]) and not np.isnan(donchian_lower[i-1]):
+                upper_prev = donchian_upper[i-1]
+                lower_prev = donchian_lower[i-1]
+                upper_curr = donchian_upper[i]
+                lower_curr = donchian_lower[i]
+                # Exit if price breaks below Donchian lower (trend reversal)
+                if close[i] < lower_curr and close[i-1] >= lower_prev:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -182,12 +153,14 @@ def generate_signals(prices):
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on opposite VW-RSI signal or stop loss
-            if i > 0 and not np.isnan(vw_rsi[i-1]):
-                vw_rsi_prev = vw_rsi[i-1]
-                vw_rsi_curr = vw_rsi[i]
-                # Exit if VW-RSI crosses above 30 (oversold in downtrend)
-                if vw_rsi_prev > 30 and vw_rsi_curr <= 30:
+            # Exit short on opposite Donchian breakout or stop loss
+            if i > 0 and not np.isnan(donchian_upper[i-1]) and not np.isnan(donchian_lower[i-1]):
+                upper_prev = donchian_upper[i-1]
+                lower_prev = donchian_lower[i-1]
+                upper_curr = donchian_upper[i]
+                lower_curr = donchian_lower[i]
+                # Exit if price breaks above Donchian upper (trend reversal)
+                if close[i] > upper_curr and close[i-1] <= upper_prev:
                     signals[i] = 0.0
                     position = 0
                 else:
