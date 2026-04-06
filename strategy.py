@@ -4,11 +4,10 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 6-hour Donchian(20) breakout with weekly pivot direction and volume confirmation.
-# Uses weekly pivot points for direction (above/below weekly pivot = bullish/bearish),
-# 6h Donchian breakouts for entries, and volume confirmation (1.5x volume).
-# Designed for ~100 total trades over 4 years (25/year) to avoid excessive fees.
-# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
-# Target: 75-200 total trades, 0.25 position size, max DD < -50%.
+# Uses weekly pivot levels for bias (above/below central pivot), 6h Donchian breakouts for entries,
+# and volume > 1.5x 8-period MA for confirmation. Designed for 50-150 total trades over 4 years
+# (12-37/year) to balance statistical significance and fee drag. Works in bull (breakouts above pivot)
+# and bear (breakdowns below pivot) markets by aligning with weekly structure.
 
 name = "exp_13727_6h_donchian20_1w_pivot_vol_v1"
 timeframe = "6h"
@@ -32,27 +31,38 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
 def calculate_pivot_points(high, low, close):
-    """Calculate classic pivot points: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H"""
+    """Calculate classic pivot points: P = (H+L+C)/3, R1 = 2P-L, S1 = 2P-H, etc."""
     pivot = (high + low + close) / 3.0
     r1 = 2 * pivot - low
     s1 = 2 * pivot - high
-    return pivot, r1, s1
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for pivot points ONCE before loop
+    # Load 1w data for pivot bias ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1w pivot points
+    # Calculate weekly pivot points
     high_1w = df_1w['high'].values
     low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    pivot_1w, r1_1w, s1_1w = calculate_pivot_points(high_1w, low_1w, close_1w)
-    pivot_1w_aligned = align_htf_to_ltf(prices, df_1w, pivot_1w)
+    
+    pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(high_1w, low_1w, close_1w)
+    
+    # Align weekly pivot levels to 6h timeframe (using central pivot for bias)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
     
     # Calculate 6h indicators
     high = prices['high'].values
@@ -80,7 +90,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(pivot_1w_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(pivot_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -105,20 +115,20 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 1w pivot (above pivot = bullish, below = bearish)
-        bullish = close[i] > pivot_1w_aligned[i]
-        bearish = close[i] < pivot_1w_aligned[i]
+        # Bias from weekly pivot: above pivot = long bias, below pivot = short bias
+        above_pivot = close[i] > pivot_aligned[i]
+        below_pivot = close[i] < pivot_aligned[i]
         
         # Donchian breakout signals
         if i > 0 and not np.isnan(donchian_high[i-1]) and not np.isnan(donchian_low[i-1]):
             high_prev = donchian_high[i-1]
             low_prev = donchian_low[i-1]
             
-            # Long signal: price breaks above Donchian high in bullish regime
-            long_signal = volume_ok and bullish and close[i] > high_prev and close[i-1] <= high_prev
+            # Long signal: price breaks above Donchian high with above-pivot bias
+            long_signal = volume_ok and above_pivot and close[i] > high_prev and close[i-1] <= high_prev
             
-            # Short signal: price breaks below Donchian low in bearish regime
-            short_signal = volume_ok and bearish and close[i] < low_prev and close[i-1] >= low_prev
+            # Short signal: price breaks below Donchian low with below-pivot bias
+            short_signal = volume_ok and below_pivot and close[i] < low_prev and close[i-1] >= low_prev
         else:
             long_signal = False
             short_signal = False
