@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h trend-following with 4h momentum filter and volatility breakout
-# Enter long when: 4h RSI > 55, price breaks above 1h Keltner upper band, volume > 1.3x average
-# Enter short when: 4h RSI < 45, price breaks below 1h Keltner lower band, volume > 1.3x average
-# Uses 4h RSI to filter trend direction, targeting 80-120 trades over 4 years
-# Keltner channels adapt to volatility, reducing false breakouts in low volatility
+# Hypothesis: 1h momentum with 4h/1d trend alignment and volume confirmation
+# Go long when: RSI > 55, price > 4h VWAP, volume > 1.3x avg, during active session (08-20 UTC)
+# Go short when: RSI < 45, price < 4h VWAP, volume > 1.3x avg, during active session
+# Exit when RSI crosses opposite threshold (50 for longs, 50 for shorts)
+# Uses 4h trend filter to avoid counter-trend trades, targeting 80-120 trades over 4 years
 
-name = "1h_keltner_breakout_4hrsi_vol_v1"
+name = "1h_momentum_4hvwap_vol_session_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -24,32 +24,24 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 4h RSI for trend filter
+    # RSI(14) on 1h
+    delta = pd.Series(close).diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/14, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/14, adjust=False).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.values
+    
+    # 4h VWAP for trend filter
     df_4h = get_htf_data(prices, '4h')
-    close_4h = df_4h['close'].values
-    delta_4h = pd.Series(close_4h).diff()
-    gain_4h = delta_4h.clip(lower=0)
-    loss_4h = -delta_4h.clip(upper=0)
-    avg_gain_4h = gain_4h.ewm(alpha=1/14, adjust=False).mean()
-    avg_loss_4h = loss_4h.ewm(alpha=1/14, adjust=False).mean()
-    rs_4h = avg_gain_4h / (avg_loss_4h + 1e-10)
-    rsi_4h = 100 - (100 / (1 + rs_4h))
-    rsi_4h = rsi_4h.values
-    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
+    typical_4h = (df_4h['high'].values + df_4h['low'].values + df_4h['close'].values) / 3
+    vwap_4h = (np.cumsum(typical_4h * df_4h['volume'].values) / 
+               np.cumsum(df_4h['volume'].values))
+    vwap_4h_aligned = align_htf_to_ltf(prices, df_4h, vwap_4h)
     
-    # 1h Keltner Channel (20 EMA, 2x ATR)
-    ema_20 = pd.Series(close).ewm(span=20, adjust=False).mean().values
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr2[0] = 0
-    tr3[0] = 0
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    atr = pd.Series(tr).ewm(span=14, adjust=False).mean().values
-    kc_upper = ema_20 + 2 * atr
-    kc_lower = ema_20 - 2 * atr
-    
-    # Volume filter: volume > 1.3x 20-period average
+    # Volume confirmation: volume > 1.3x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     volume_threshold = 1.3 * volume_ma
     
@@ -61,8 +53,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if required data not available
-        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_20[i]) or 
-            np.isnan(kc_upper[i]) or np.isnan(kc_lower[i]) or 
+        if (np.isnan(rsi[i]) or np.isnan(vwap_4h_aligned[i]) or 
             np.isnan(volume_threshold[i])):
             if position != 0:
                 signals[i] = position * 0.20
@@ -74,28 +65,28 @@ def generate_signals(prices):
         in_session = (8 <= hour <= 20)
         
         if position == 1:  # long position
-            # Exit: price below EMA(20) OR RSI < 45
-            if close[i] < ema_20[i] or rsi_4h_aligned[i] < 45:
+            # Exit: RSI < 50 (momentum faded)
+            if rsi[i] < 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.20
         elif position == -1:  # short position
-            # Exit: price above EMA(20) OR RSI > 55
-            if close[i] > ema_20[i] or rsi_4h_aligned[i] > 55:
+            # Exit: RSI > 50 (momentum faded)
+            if rsi[i] > 50:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.20
         else:
-            # Look for entries: volatility breakout + 4h RSI filter + volume + session
+            # Look for entries: RSI momentum + trend filter + volume + session
             if in_session and volume[i] > volume_threshold[i]:
-                if rsi_4h_aligned[i] > 55 and close[i] > kc_upper[i]:
-                    # Bullish breakout with 4h uptrend
+                if rsi[i] > 55 and close[i] > vwap_4h_aligned[i]:
+                    # Bullish momentum above 4h VWAP
                     signals[i] = 0.20
                     position = 1
-                elif rsi_4h_aligned[i] < 45 and close[i] < kc_lower[i]:
-                    # Bearish breakout with 4h downtrend
+                elif rsi[i] < 45 and close[i] < vwap_4h_aligned[i]:
+                    # Bearish momentum below 4h VWAP
                     signals[i] = -0.20
                     position = -1
     
