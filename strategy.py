@@ -3,34 +3,31 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using Donchian(40) breakout with 1d EMA50 trend filter and volume confirmation.
-# Uses wider Donchian period to reduce trade frequency while maintaining strong breakout signals.
-# Goes long when price breaks above 12h Donchian upper band with above-average volume and price above 1d EMA50.
-# Short when breaks below 12h Donchian lower band with volume and price below 1d EMA50.
-# Exit on opposite band touch to avoid whipsaw. Designed for 50-150 total trades over 4 years.
+# Hypothesis: 12h strategy using Donchian(15) breakout with volume confirmation and 1d ADX trend filter.
+# Goes long when price breaks above 12h Donchian upper band with above-average volume and 1d ADX > 25 (trending),
+# short when breaks below 12h Donchian lower band with volume and 1d ADX > 25.
+# Uses ATR-based stop loss to manage risk. Designed for 50-150 total trades over 4 years (12-37/year).
+# ADX filter avoids whipsaws in ranging markets, improving signal quality and reducing false breakouts.
 
-name = "exp_13836_12h_donchian40_1d_ema50_vol_v1"
+name = "exp_13836_12h_donchian15_1d_adx_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 40
-EMA_PERIOD = 50
+DONCHIAN_PERIOD = 15
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -42,20 +39,39 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_adx(high, low, close, period):
+    """Calculate ADX"""
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), np.maximum(np.roll(low, 1) - low, 0), 0)
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / atr
+    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
+    dx = np.where((plus_di + minus_di) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
+
 def generate_signals(prices):
     n = len(prices)
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for EMA trend filter ONCE before loop
+    # Load 1d data for ADX filter ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA for trend filter
+    # Calculate 1d ADX for trend filter
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    adx_1d = calculate_adx(high_1d, low_1d, close_1d, ADX_PERIOD)
     
-    # Align 1d EMA to 12h timeframe
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align 1d ADX to 12h timeframe
+    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
     
     # 12h data for Donchian channels, ATR, and volume
     high = prices['high'].values
@@ -78,11 +94,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, ADX_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(adx_1d_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -107,13 +123,12 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 1d EMA
-        above_ema = close[i] > ema_1d_aligned[i]
-        below_ema = close[i] < ema_1d_aligned[i]
+        # Trend direction from 1d ADX
+        trending = adx_1d_aligned[i] > ADX_THRESHOLD
         
         # Donchian breakout signals
-        long_signal = volume_ok and above_ema and close[i] > upper[i]
-        short_signal = volume_ok and below_ema and close[i] < lower[i]
+        long_signal = volume_ok and trending and close[i] > upper[i]
+        short_signal = volume_ok and trending and close[i] < lower[i]
         
         # Generate signals
         if position == 0:
