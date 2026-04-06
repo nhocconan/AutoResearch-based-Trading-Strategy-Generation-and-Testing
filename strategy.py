@@ -3,47 +3,36 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily KAMA (Kaufman Adaptive Moving Average) with RSI filter and volume confirmation.
-# KAMA adapts to market noise - fast in trends, slow in ranges. Combined with RSI for momentum
-# and volume confirmation, it captures strong moves while avoiding chop. Works in bull markets
-# (KAMA up + RSI > 50) and bear markets (KAMA down + RSI < 50). Target: 50-150 total trades over 4 years.
+# Hypothesis: 6-hour Williams Alligator (Jaws, Teeth, Lips) combined with 1-day trend filter.
+# Alligator identifies trend phases: when lines are intertwined (sleeping) = range,
+# when diverging (awakening) = trend. Uses 1-day EMA to filter direction.
+# Works in bull markets (long when bullish alignment + above daily EMA)
+# and bear markets (short when bearish alignment + below daily EMA).
+# Target: 50-150 total trades over 4 years (12-37/year).
 
-name = "exp_13490_1d_kama_rsi_vol_v1"
-timeframe = "1d"
+name = "exp_13491_6h_alligator_1d_ema_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-KAMA_ER_FAST = 2
-KAMA_ER_SLOW = 30
-RSI_PERIOD = 14
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+JAWS_PERIOD = 13   # Blue line
+TEETH_PERIOD = 8   # Red line
+LIPS_PERIOD = 5    # Green line
+EMA_PERIOD = 21    # Daily EMA for trend filter
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_kama(close, er_fast, er_slow):
-    """Calculate Kaufman Adaptive Moving Average"""
-    change = np.abs(close - np.roll(close, 10))
-    volatility = np.sum(np.abs(np.diff(close, axis=0)), axis=0) if len(close) > 1 else 0
-    er = np.where(volatility != 0, change / volatility, 0)
-    sc = (er * (2/(er_fast+1) - 2/(er_slow+1)) + 2/(er_slow+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
-
-def calculate_rsi(close, period):
-    """Calculate Relative Strength Index"""
-    delta = np.diff(close)
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+def calculate_smma(values, period):
+    """Calculate Smoothed Moving Average (SMMA) - Wilder's smoothing"""
+    sma = pd.Series(values).rolling(window=period, min_periods=period).mean()
+    # First value is SMA, then smoothed
+    smma = np.full_like(values, np.nan, dtype=float)
+    if len(values) >= period:
+        smma[period-1] = sma.iloc[period-1]
+        for i in range(period, len(values)):
+            smma[i] = (smma[i-1] * (period-1) + values[i]) / period
+    return smma
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -59,30 +48,25 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = pd.Series(close_1w).ewm(span=21, adjust=False, min_periods=21).mean().values
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate daily EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate daily indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
-    volume = prices['volume'].values
     
-    # KAMA
-    kama = calculate_kama(close, KAMA_ER_FAST, KAMA_ER_SLOW)
+    # Williams Alligator (using SMMA)
+    jaws = calculate_smma(high, JAWS_PERIOD)  # Typically uses median price, but high for sensitivity
+    teeth = calculate_smma(high, TEETH_PERIOD)
+    lips = calculate_smma(high, LIPS_PERIOD)
     
-    # RSI
-    rsi = calculate_rsi(close, RSI_PERIOD)
-    
-    # Volume MA
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # ATR
+    # ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -91,11 +75,12 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(30, RSI_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(JAWS_PERIOD, TEETH_PERIOD, LIPS_PERIOD, EMA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(kama[i]) or np.isnan(rsi[i]):
+        # Skip if indicators not available
+        if (np.isnan(jaws[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -114,29 +99,24 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Alligator alignment conditions
+        # Bullish alignment: Lips > Teeth > Jaws (green above red above blue)
+        bullish_alignment = lips[i] > teeth[i] and teeth[i] > jaws[i]
+        # Bearish alignment: Jaws > Teeth > Lips (blue above red above green)
+        bearish_alignment = jaws[i] > teeth[i] and teeth[i] > lips[i]
         
-        # KAMA direction
-        kama_up = close[i] > kama[i]
-        kama_down = close[i] < kama[i]
-        
-        # RSI filter
-        rsi_bullish = rsi[i] > 50
-        rsi_bearish = rsi[i] < 50
-        
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Trend filter from daily EMA
+        above_daily_ema = close[i] > ema_1d_aligned[i]
+        below_daily_ema = close[i] < ema_1d_aligned[i]
         
         # Entry signals
         if position == 0:
-            if kama_up and rsi_bullish and uptrend and volume_ok:
+            if bullish_alignment and above_daily_ema:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif kama_down and rsi_bearish and downtrend and volume_ok:
+            elif bearish_alignment and below_daily_ema:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
