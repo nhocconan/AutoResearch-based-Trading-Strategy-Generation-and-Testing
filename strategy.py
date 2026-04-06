@@ -3,26 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h strategy using Donchian(40) breakout with volume confirmation and 1w EMA200 trend filter.
-# Long when price breaks above 12h Donchian upper band with volume > 1.5x 20-period average and price above 1w EMA200.
-# Short when price breaks below 12h Donchian lower band with volume confirmation and price below 1w EMA200.
-# Exit on opposite Donchian band touch. Uses ATR(14) stop loss at 2.5x.
-# Designed for 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
-# Longer Donchian period (40) reduces frequency vs standard 20, targeting 75-150 total trades.
-# Weekly EMA filter ensures alignment with major trend, reducing whipsaws in both bull and bear markets.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation.
+# Goes long when price breaks above 4h Donchian upper band with volume > 1.5x 20-period MA and price above 1d EMA200.
+# Short when breaks below 4h Donchian lower band with volume confirmation and price below 1d EMA200.
+# Exits on opposite Donchian band touch. ATR-based stop loss (2x ATR) for risk management.
+# Designed for 75-200 total trades over 4 years (19-50/year) to minimize fee drag.
 
-name = "exp_13862_12h_donchian40_1w_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13863_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 40  # Longer period for fewer, higher-quality signals
-EMA_PERIOD = 200      # Weekly EMA for trend filter
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 200
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25    # 25% position size to manage drawdown
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5  # Wider stop to avoid premature exits
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian channels"""
@@ -49,23 +47,23 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1w data for EMA trend filter ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for EMA trend filter ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1w EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_PERIOD)
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
     
-    # Align 1w EMA to 12h timeframe
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Align 1d EMA to 4h timeframe
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 12h data for Donchian channels, ATR, and volume
+    # 4h data for Donchian channels, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels on 12h data
+    # Donchian channels on 4h data
     upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
@@ -84,7 +82,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -109,9 +107,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 1w EMA
-        above_ema = close[i] > ema_1w_aligned[i]
-        below_ema = close[i] < ema_1w_aligned[i]
+        # Trend direction from 1d EMA
+        above_ema = close[i] > ema_1d_aligned[i]
+        below_ema = close[i] < ema_1d_aligned[i]
         
         # Donchian breakout signals
         long_signal = volume_ok and above_ema and close[i] > upper[i]
