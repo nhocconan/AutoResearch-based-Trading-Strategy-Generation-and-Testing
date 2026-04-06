@@ -3,59 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Williams %R with 12-hour trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. In trending markets (ADX > 25),
-# we trade pullbacks in the direction of the 12h trend. Volume confirms momentum.
+# Hypothesis: 4-hour Donchian breakout with 1-day EMA trend filter and volume confirmation.
+# In bull markets, breakouts capture strong uptrends; in bear markets, they catch sharp downtrends.
+# The daily EMA ensures alignment with higher timeframe momentum, while volume filters out false breakouts.
 # Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and cost.
 
-name = "exp_13179_6h_williamsr_12h_adx_vol_v1"
-timeframe = "6h"
+name = "exp_13180_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-WILLIAMS_PERIOD = 14
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_williams_r(high, low, close, period):
-    """Calculate Williams %R"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    return williams_r.values
-
-def calculate_adx(high, low, close, period):
-    """Calculate ADX (Average Directional Index)"""
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    
-    # Smooth TR, DM+, DM-
-    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / tr_smooth
-    di_minus = 100 * dm_minus_smooth / tr_smooth
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    return adx.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -66,29 +30,32 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h ADX for trend filter
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, ADX_PERIOD)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # Calculate daily EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 6h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R
-    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -102,11 +69,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WILLIAMS_PERIOD, ADX_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if ADX not available
-        if np.isnan(adx_12h_aligned[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -128,23 +95,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_12h_aligned[i] > ADX_THRESHOLD
+        # Trend filter: price above/below daily EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
         
-        # Williams %R signals: oversold < -80, overbought > -20
-        oversold = williams_r[i] < -80
-        overbought = williams_r[i] > -20
+        # Breakout signals
+        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
-        # Generate signals: trade pullbacks in trending market
+        # Generate signals
         if position == 0:
-            if trending and volume_ok and oversold:
-                # Long on pullback in uptrend
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif trending and volume_ok and overbought:
-                # Short on pullback in downtrend
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
