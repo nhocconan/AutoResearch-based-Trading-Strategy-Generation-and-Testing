@@ -3,13 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13986_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13987_6d_donchian20_1w_pivot_vol_v1"
+timeframe = "6h"
 leverage = 1.0
-
-def calculate_ema(close, period):
-    """Calculate Exponential Moving Average"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian upper and lower bands"""
@@ -27,21 +23,41 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_pivot_points(high, low, close):
+    """Calculate weekly pivot points"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    r4 = r3 + (high - low)
+    s4 = s3 - (high - low)
+    return pivot, r1, r2, r3, r4, s1, s2, s3, s4
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data for pivot points
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA(50) for trend bias
-    ema_1d = calculate_ema(df_1d['close'].values, 50)
+    # Calculate weekly pivot points
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
+    weekly_close = df_1w['close'].values
+    pivot, r1, r2, r3, r4, s1, s2, s3, s4 = calculate_pivot_points(weekly_high, weekly_low, weekly_close)
     
-    # Align 1d EMA to 4h timeframe (use previous 1d bar for trend)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Align weekly pivot points to 6h timeframe (use previous week's pivots)
+    pivot_aligned = align_htf_to_ltf(prices, df_1w, pivot)
+    r3_aligned = align_htf_to_ltf(prices, df_1w, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1w, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1w, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1w, s4)
     
-    # 4h data for Donchian, ATR, and volume
+    # 6h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -66,8 +82,9 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
-           np.isnan(volume_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or \
+           np.isnan(r4_aligned[i]) or np.isnan(s4_aligned[i]) or np.isnan(donchian_upper[i]) or \
+           np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -80,29 +97,35 @@ def generate_signals(prices):
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
-                continue
+            else:
+                signals[i] = 0.25
+            continue
         
         elif position == -1:  # short position
             # Check stop loss
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
-                continue
-        
-        # Determine trend bias from 1d EMA (50)
-        bullish_trend = close[i] > ema_1d_aligned[i]  # price above 1d EMA50 = bullish
-        bearish_trend = close[i] < ema_1d_aligned[i]  # price below 1d EMA50 = bearish
+            else:
+                signals[i] = -0.25
+            continue
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * 1.5)
         
         # Donchian breakout signals (using previous bar's bands)
-        breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
-        breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
+        breakout_up = close[i] > donchian_upper[i-1]
+        breakout_down = close[i] < donchian_lower[i-1]
         
-        # Entry signals - only in direction of 1d trend
-        long_signal = bullish_trend and volume_ok and breakout_up
-        short_signal = bearish_trend and volume_ok and breakout_down
+        # Fade at R3/S3, breakout continuation at R4/S4
+        fade_long = close[i] <= s3_aligned[i] and volume_ok
+        fade_short = close[i] >= r3_aligned[i] and volume_ok
+        breakout_long = close[i] > r4_aligned[i] and volume_ok and breakout_up
+        breakout_short = close[i] < s4_aligned[i] and volume_ok and breakout_down
+        
+        # Entry signals
+        long_signal = fade_long or breakout_long
+        short_signal = fade_short or breakout_short
         
         # Generate signals
         if position == 0:
@@ -119,15 +142,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on Donchian breakdown or trend change to bearish
-            if close[i] < donchian_lower[i] or not bullish_trend:
+            # Exit long on Donchian breakdown or price above R4
+            if close[i] < donchian_lower[i] or close[i] > r4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
-            # Exit short on Donchian breakout or trend change to bullish
-            if close[i] > donchian_upper[i] or not bearish_trend:
+            # Exit short on Donchian breakout or price below S4
+            if close[i] > donchian_upper[i] or close[i] < s4_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
