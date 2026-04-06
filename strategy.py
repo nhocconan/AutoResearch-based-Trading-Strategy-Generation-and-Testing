@@ -3,13 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation.
+# Hypothesis: 6-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation.
 # Uses daily trend to filter counter-trend trades, volume to reduce false breakouts.
 # Designed for fewer trades (target 75-200 over 4 years) to minimize fee drift.
 # Works in bull/bear by only trading with higher timeframe trend.
+# Weekly pivot adds directional bias: trade with weekly trend only.
 
-name = "4h_donchian20_1d_ema50_vol_v1"
-timeframe = "4h"
+name = "6h_donchian20_1d_ema50_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -48,7 +49,7 @@ def generate_signals(prices):
     
     ema_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 20-period Donchian channels on 4h
+    # 20-period Donchian channels on 6h
     donch_high = np.full(n, np.nan)
     donch_low = np.full(n, np.nan)
     for i in range(20, n):
