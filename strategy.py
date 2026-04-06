@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) breakout with 1w trend filter and volume confirmation
-Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1w EMA trend for bias and 1w volume for conviction. Works in bull (buy breakouts above 1w EMA) and bear (sell breakdowns below 1w EMA). Target: 75-200 total trades over 4 years (19-50/year).
+6h RSI(2) Extreme + 1d Trend Filter + Volume Confirmation
+Hypothesis: RSI(2) identifies extreme short-term overbought/oversold conditions. 
+In strong trends (1d EMA50), these extremes often precede continuations rather than reversals.
+Volume confirms institutional participation. Works in bull (buy RSI<10 in uptrend) and 
+bear (sell RSI>90 in downtrend). Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_ata, align_htf_to_ltf
 
-name = "1d_donchian20_1w_trend_vol_v1"
-timeframe = "1d"
+name = "6h_rsi2_1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -18,59 +21,58 @@ def generate_signals(prices):
         return np.zeros(n)
     
     # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR
-    atr = np.full(n, np.nan)
-    if n >= 14:
-        tr = np.maximum(
-            high[1:] - low[1:],
-            np.abs(high[1:] - close[:-1]),
-            np.abs(low[1:] - close[:-1])
-        )
-        if len(tr) > 0:
-            atr[1] = tr[0]
-            for i in range(2, n):
-                atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
+    # RSI(2) on 6h close
+    rsi = np.full(n, 50.0)  # Start at neutral
+    if n >= 3:
+        # Calculate price changes
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0.0)
+        loss = np.where(delta < 0, -delta, 0.0)
+        
+        # Wilder's smoothing
+        avg_gain = np.full(n, np.nan)
+        avg_loss = np.full(n, np.nan)
+        avg_gain[2] = np.mean(gain[1:3])  # First 2-period average
+        avg_loss[2] = np.mean(loss[1:3])
+        
+        for i in range(3, n):
+            avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2
+            avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi = 100 - (100 / (1 + rs))
+        rsi[:2] = 50.0  # Not enough data
     
-    # Get 1w data for trend filter (EMA21)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Get 1d data for trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # EMA21 on 1w close
-    ema_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 21:
-        ema_1w[20] = np.mean(close_1w[:21])
-        for i in range(21, len(close_1w)):
-            ema_1w[i] = (close_1w[i] * 2 + ema_1w[i-1] * 19) / 21
+    # EMA50 on 1d close
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 48) / 50
     
-    # 1w trend: above EMA21 = bullish, below = bearish
-    trend_1w = np.where(close_1w > ema_1w, 1, -1)
+    # 1d trend: above EMA50 = bullish, below = bearish
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align 1w trend to 1d timeframe
-    trend_1w_aligned = align_htf_to_ltf(prices, df_1w, trend_1w)
+    # Align 1d trend to 6h timeframe
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Get 1w data for volume confirmation
-    volume_1w = df_1w['volume'].values
+    # Get 1d data for volume confirmation
+    volume_1d = df_1d['volume'].values
     
-    # 20-period average volume on 1w
-    vol_ma_1w = np.full(len(volume_1w), np.nan)
-    for i in range(20, len(volume_1w)):
-        vol_ma_1w[i] = np.mean(volume_1w[i-20:i])
+    # 20-period average volume on 1d
+    vol_ma_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
     
-    # Align volume MA to 1d timeframe
-    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
-    
-    # Donchian channels (20-period) from 1d data
-    upper = np.full(n, np.nan)
-    lower = np.full(n, np.nan)
-    
-    for i in range(20, n):
-        upper[i] = np.max(high[i-20:i])
-        lower[i] = np.min(low[i-20:i])
+    # Align volume MA to 6h timeframe
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,13 +80,12 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 40  # Need enough data for Donchian and alignments
+    start = 50  # Need enough data for RSI and EMA
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(trend_1w_aligned[i]) or 
-            np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(vol_ma_1w_aligned[i])):
+        if (np.isnan(rsi[i]) or np.isnan(trend_1d_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -92,18 +93,20 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 1d volume > 1.5x 1w average volume (scaled)
-        # Scale 1w volume to 1d: approx 1/7 of 1w volume (since 7x 1d in 1w)
-        vol_threshold = vol_ma_1w_aligned[i] / 7.0 * 1.5
+        # Volume filter: current 6h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d volume to 6h: approx 1/4 of 1d volume (since 4x 6h in 1d)
+        vol_threshold = vol_ma_1d_aligned[i] / 4.0 * 1.5
         volume_filter = volume[i] > vol_threshold
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian OR against 1w trend
-            # Stoploss: price drops 2*ATR below entry
-            if (close[i] < lower[i] or
-                trend_1w_aligned[i] == -1 or
-                close[i] < entry_price - 2.0 * atr[i]):
+            # Exit: RSI returns to neutral (>50) OR against 1d trend
+            # Stoploss: price drops 2*ATR below entry (using 6-period ATR approximation)
+            price_change = abs(close[i] - close[i-1]) if i > 0 else 0
+            atr_approx = price_change * 6  # Rough 6-period ATR
+            if (rsi[i] > 50 or
+                trend_1d_aligned[i] == -1 or
+                close[i] < entry_price - 2.0 * atr_approx):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
@@ -111,11 +114,13 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian OR against 1w trend
+            # Exit: RSI returns to neutral (<50) OR against 1d trend
             # Stoploss: price rises 2*ATR above entry
-            if (close[i] > upper[i] or
-                trend_1w_aligned[i] == 1 or
-                close[i] > entry_price + 2.0 * atr[i]):
+            price_change = abs(close[i] - close[i-1]) if i > 0 else 0
+            atr_approx = price_change * 6
+            if (rsi[i] < 50 or
+                trend_1d_aligned[i] == 1 or
+                close[i] > entry_price + 2.0 * atr_approx):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
@@ -124,20 +129,179 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 12 bars flat
-            if bars_since_entry >= 12:
-                # Breakout entries: upper/lower with 1w trend
-                bull_breakout = close[i] > upper[i]
-                bear_breakout = close[i] < lower[i]
+            # Minimum holding period: only allow new entry after 8 bars flat
+            if bars_since_entry >= 8:
+                # Extreme RSI entries
+                rsi_oversold = rsi[i] < 10
+                rsi_overbought = rsi[i] > 90
                 
-                # Long: breakout above upper with bullish 1w trend + volume
-                if bull_breakout and trend_1w_aligned[i] == 1 and volume_filter:
+                # Long: RSI extremely oversold with bullish 1d trend + volume
+                if rsi_oversold and trend_1d_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: breakdown below lower with bearish 1w trend + volume
-                elif bear_breakout and trend_1w_aligned[i] == -1 and volume_filter:
+                # Short: RSI extremely overbought with bearish 1d trend + volume
+                elif rsi_overbought and trend_1d_aligned[i] == -1 and volume_filter:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                else:
+                    signals[i] = 0.0
+                    bars_since_entry += 1
+            else:
+                signals[i] = 0.0
+                bars_since_entry += 1
+    
+    return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+6h RSI(2) Extreme + 1d Trend Filter + Volume Confirmation
+Hypothesis: RSI(2) identifies extreme short-term overbought/oversold conditions. 
+In strong trends (1d EMA50), these extremes often precede continuations rather than reversals.
+Volume confirms institutional participation. Works in bull (buy RSI<10 in uptrend) and 
+bear (sell RSI>90 in downtrend). Target: 100-200 total trades over 4 years (25-50/year).
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "6h_rsi2_1d_trend_vol_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 50:
+        return np.zeros(n)
+    
+    # Price and volume data
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # RSI(2) on 6h close
+    rsi = np.full(n, 50.0)  # Start at neutral
+    if n >= 3:
+        # Calculate price changes
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0.0)
+        loss = np.where(delta < 0, -delta, 0.0)
+        
+        # Wilder's smoothing
+        avg_gain = np.full(n, np.nan)
+        avg_loss = np.full(n, np.nan)
+        avg_gain[2] = np.mean(gain[1:3])  # First 2-period average
+        avg_loss[2] = np.mean(loss[1:3])
+        
+        for i in range(3, n):
+            avg_gain[i] = (avg_gain[i-1] * 1 + gain[i]) / 2
+            avg_loss[i] = (avg_loss[i-1] * 1 + loss[i]) / 2
+        
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)
+        rsi = 100 - (100 / (1 + rs))
+        rsi[:2] = 50.0  # Not enough data
+    
+    # Get 1d data for trend filter (EMA50)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # EMA50 on 1d close
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 48) / 50
+    
+    # 1d trend: above EMA50 = bullish, below = bearish
+    trend_1d = np.where(close_1d > ema_1d, 1, -1)
+    
+    # Align 1d trend to 6h timeframe
+    trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
+    
+    # Get 1d data for volume confirmation
+    volume_1d = df_1d['volume'].values
+    
+    # 20-period average volume on 1d
+    vol_ma_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    
+    # Align volume MA to 6h timeframe
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    bars_since_entry = 0
+    
+    # Start from warmup period
+    start = 50  # Need enough data for RSI and EMA
+    
+    for i in range(start, n):
+        # Skip if required data not available
+        if (np.isnan(rsi[i]) or np.isnan(trend_1d_aligned[i]) or 
+            np.isnan(vol_ma_1d_aligned[i])):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            bars_since_entry += 1
+            continue
+        
+        # Volume filter: current 6h volume > 1.5x 1d average volume (scaled)
+        # Scale 1d volume to 6h: approx 1/4 of 1d volume (since 4x 6h in 1d)
+        vol_threshold = vol_ma_1d_aligned[i] / 4.0 * 1.5
+        volume_filter = volume[i] > vol_threshold
+        
+        # Check exits and stoploss
+        if position == 1:  # long position
+            # Exit: RSI returns to neutral (>50) OR against 1d trend
+            # Stoploss: price drops 2*ATR below entry (using 6-period ATR approximation)
+            price_change = abs(close[i] - close[i-1]) if i > 0 else 0
+            atr_approx = price_change * 6  # Rough 6-period ATR
+            if (rsi[i] > 50 or
+                trend_1d_aligned[i] == -1 or
+                close[i] < entry_price - 2.0 * atr_approx):
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
+            else:
+                signals[i] = 0.25
+            bars_since_entry += 1
+        elif position == -1:  # short position
+            # Exit: RSI returns to neutral (<50) OR against 1d trend
+            # Stoploss: price rises 2*ATR above entry
+            price_change = abs(close[i] - close[i-1]) if i > 0 else 0
+            atr_approx = price_change * 6
+            if (rsi[i] < 50 or
+                trend_1d_aligned[i] == 1 or
+                close[i] > entry_price + 2.0 * atr_approx):
+                signals[i] = 0.0
+                position = 0
+                bars_since_entry = 0
+            else:
+                signals[i] = -0.25
+            bars_since_entry += 1
+        else:
+            # Look for entries
+            # Minimum holding period: only allow new entry after 8 bars flat
+            if bars_since_entry >= 8:
+                # Extreme RSI entries
+                rsi_oversold = rsi[i] < 10
+                rsi_overbought = rsi[i] > 90
+                
+                # Long: RSI extremely oversold with bullish 1d trend + volume
+                if rsi_oversold and trend_1d_aligned[i] == 1 and volume_filter:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close[i]
+                    bars_since_entry = 0
+                # Short: RSI extremely overbought with bearish 1d trend + volume
+                elif rsi_overbought and trend_1d_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
