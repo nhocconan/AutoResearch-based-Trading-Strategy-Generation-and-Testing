@@ -1,27 +1,32 @@
 #!/usr/bin/env python3
 """
-Experiment #11926: 4h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: 4h Donchian(20) breakouts capture medium-term trends. 1d EMA provides trend bias,
-and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1d trend filter. Target: 75-200 trades over 4 years.
+Experiment #11927: 6h Donchian Breakout with 1d Trend and Volume Confirmation (Redux)
+Hypothesis: 6h Donchian(20) breakouts capture medium-term trends. 1d EMA provides trend bias,
+and volume filter ensures institutional participation. Tightening parameters from prior failures:
+- Reduced EMA period to 34 (more responsive)
+- Lowered volume threshold to 1.3
+- Increased signal size to 0.30
+- Added minimum holding period of 3 bars to reduce churn
+Target: 50-150 trades over 4 years, works in bull (breakouts continue) and bear (breakouts reverse quickly).
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_ata, align_htf_to_ltf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11926_4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "exp_11927_6h_donchian20_1d_ema_vol_v2"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 50
+TREND_EMA_PERIOD = 34
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+VOLUME_THRESHOLD = 1.3
+SIGNAL_SIZE = 0.30
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
+MIN_HOLD_BARS = 3
 
 def calculate_donchian_channels(high, low, period):
     """Calculate Donchian channels"""
@@ -54,7 +59,7 @@ def generate_signals(prices):
     ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Calculate 4h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -68,11 +73,14 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
+    bars_since_entry = 0
     
     # Start from warmup period
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
+        bars_since_entry += 1
+        
         # Skip if 1d EMA not available
         if np.isnan(ema_1d_aligned[i]):
             if position != 0:
@@ -86,11 +94,13 @@ def generate_signals(prices):
             if close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
+                bars_since_entry = 0
                 continue
         
         # Donchian breakout conditions
@@ -104,9 +114,9 @@ def generate_signals(prices):
         uptrend_1d = close[i] > ema_1d_aligned[i]
         downtrend_1d = close[i] < ema_1d_aligned[i]
         
-        # Entry conditions
-        long_entry = breakout_up and volume_ok and uptrend_1d
-        short_entry = breakout_down and volume_ok and downtrend_1d
+        # Entry conditions (only if minimum hold period satisfied)
+        long_entry = breakout_up and volume_ok and uptrend_1d and bars_since_entry >= MIN_HOLD_BARS
+        short_entry = breakout_down and volume_ok and downtrend_1d and bars_since_entry >= MIN_HOLD_BARS
         
         # Generate signals
         if position == 0:
@@ -115,11 +125,13 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                bars_since_entry = 0
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
@@ -128,4 +140,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</script>
