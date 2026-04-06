@@ -76,10 +76,6 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -91,14 +87,6 @@ def generate_signals(prices):
         # Skip if required data not available
         if np.isnan(atr[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Apply session filter
-        if not session_filter[i]:
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -229,10 +217,6 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -244,14 +228,6 @@ def generate_signals(prices):
         # Skip if required data not available
         if np.isnan(atr[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Apply session filter
-        if not session_filter[i]:
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -382,10 +358,6 @@ def generate_signals(prices):
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
     
-    # Session filter: 8-20 UTC
-    hours = pd.DatetimeIndex(prices['open_time']).hour
-    session_filter = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
@@ -397,14 +369,6 @@ def generate_signals(prices):
         # Skip if required data not available
         if np.isnan(atr[i]) or np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or \
            np.isnan(trend_1d_aligned[i]) or np.isnan(vol_ma[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Apply session filter
-        if not session_filter[i]:
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -456,4 +420,4 @@ def generate_signals(prices):
     
     return signals
 
-</false>
+--- END OF FILE ---
