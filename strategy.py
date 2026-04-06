@@ -3,17 +3,16 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian channel breakout with weekly EMA trend filter and volume confirmation
-# Works in bull/bear because breakouts capture strong moves, EMA filter avoids counter-trend trades,
-# and volume ensures breakouts have conviction. Target: 50-120 trades over 4 years.
+# Hypothesis: Daily Donchian channel breakout with volume confirmation and ATR stoploss
+# Works in bull/bear because breakouts capture strong moves, volume filters false breakouts,
+# and ATR adapts to volatility. Target: 80-150 trades over 4 years (20-38/year).
 
-name = "exp_12938_1d_donchian20_weekly_ema_volume_v1"
-timeframe = "1d"
+name = "exp_12937_4h_donchian20_1d_vol_atr_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -29,34 +28,44 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channel upper and lower bands"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA
-    close_weekly = df_weekly['close'].values
-    ema_weekly = pd.Series(close_weekly).ewm(span=EMA_PERIOD, adjust=False, min_periods=EMA_PERIOD).mean().values
-    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    # Calculate daily Donchian channels
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    close_d = df_daily['close'].values
+    vol_d = df_daily['volume'].values
     
-    # Calculate daily indicators
+    donchian_upper, donchian_lower = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
+    volume_ma_d = pd.Series(vol_d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    atr_d = calculate_atr(high_d, low_d, close_d, ATR_PERIOD)
+    
+    # Align to 4h timeframe
+    donchian_upper_4h = align_htf_to_ltf(prices, df_daily, donchian_upper)
+    donchian_lower_4h = align_htf_to_ltf(prices, df_daily, donchian_lower)
+    volume_ma_4h = align_htf_to_ltf(prices, df_daily, volume_ma_d)
+    atr_4h = align_htf_to_ltf(prices, df_daily, atr_d)
+    
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Volume moving average
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # ATR for stop loss
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    volume_ma_4h_local = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    atr_4h_local = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -64,11 +73,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(ema_weekly_aligned[i]):
+        # Skip if daily data not available
+        if np.isnan(donchian_upper_4h[i]) or np.isnan(donchian_lower_4h[i]) or np.isnan(volume_ma_4h[i]) or np.isnan(atr_4h[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -87,25 +96,27 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Volume confirmation (use both daily and 4h volume)
+        volume_ok_daily = volume_ma_4h[i] > 0 and volume[i] > (volume_ma_4h[i] * VOLUME_THRESHOLD)
+        volume_ok_4h = volume_ma_4h_local[i] > 0 and volume[i] > (volume_ma_4h_local[i] * VOLUME_THRESHOLD)
+        volume_ok = volume_ok_daily or volume_ok_4h
         
-        # Breakout conditions
-        breakout_long = volume_ok and close[i] >= donchian_high[i]
-        breakout_short = volume_ok and close[i] <= donchian_low[i]
+        # Breakout above/below Donchian bands
+        breakout_long = volume_ok and close[i] >= donchian_upper_4h[i]
+        breakout_short = volume_ok and close[i] <= donchian_lower_4h[i]
         
-        # Trend filter: only trade in direction of weekly EMA
+        # Generate signals
         if position == 0:
-            if breakout_long and close[i] > ema_weekly_aligned[i]:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_short and close[i] < ema_weekly_aligned[i]:
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr_4h_local[i])
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr_4h_local[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
