@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-12h Donchian breakout with 1d EMA filter and volume concentration - optimized for hypothesis.
-Hypothesis: This strategy captures breakouts aligned with higher timeframe trend (1d EMA) and volume concentration.
-It should work in bull markets via breakouts and in bear markets via short breakdowns.
-Volume concentration filters low-volume false breakouts. Target: 50-150 trades over 4 years.
+1h Donchian breakout with 4h EMA filter and volume confirmation
+Hypothesis: This strategy uses 4h EMA as trend filter and 1h Donchian breakouts with volume confirmation.
+By using 4h for trend direction and 1h for entry timing, we aim for 60-150 trades over 4 years.
+Volume filter ensures momentum, reducing false breakouts. Works in bull via breakouts and bear via breakdowns.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14252_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_14254_1h_donchian20_4h_ema_vol_v1"
+timeframe = "1h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period):
@@ -33,15 +33,15 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA filter (once before loop)
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Load 4h data for EMA filter (once before loop)
+    df_4h = get_htf_data(prices, '4h')
+    close_4h = df_4h['close'].values
     
-    # Calculate 1d EMA(50)
-    ema_1d = calculate_ema(close_1d, 50)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate 4h EMA(50)
+    ema_4h = calculate_ema(close_4h, 50)
+    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
     
-    # 12h data
+    # 1h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -68,10 +68,10 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_1d_aligned[i]) or \
+        if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_4h_aligned[i]) or \
            np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.20
             else:
                 signals[i] = 0.0
             continue
@@ -91,21 +91,21 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout signals with 1d EMA filter and volume
-        # Long: break above upper band + price > 1d EMA + volume
-        # Short: break below lower band + price < 1d EMA + volume
-        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_1d_aligned[i]) and vol_filter[i]
-        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_1d_aligned[i]) and vol_filter[i]
+        # Donchian breakout signals with 4h EMA filter and volume
+        # Long: break above upper band + price > 4h EMA + volume
+        # Short: break below lower band + price < 4h EMA + volume
+        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_4h_aligned[i]) and vol_filter[i]
+        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_4h_aligned[i]) and vol_filter[i]
         
         # Generate signals
         if position == 0:
             if breakout_long:
-                signals[i] = 0.25
+                signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (2.0 * atr[i])
             elif breakout_short:
-                signals[i] = -0.25
+                signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (2.0 * atr[i])
@@ -117,13 +117,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.20
         elif position == -1:
             # Exit short on stop or breakout of upper band
             if close[i] >= stop_price or close[i] > highest_high[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.20
     
     return signals
