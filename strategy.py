@@ -3,53 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Camarilla pivot reversal with 1-day ADX trend filter and volume confirmation.
-# Uses Camarilla levels (L3/L4 for shorts, H3/H4 for longs) from the previous day.
-# In ranging markets, price reverses at these levels; in trending markets, breaks through with volume.
-# ADX > 25 filters for trending conditions to avoid false reversals.
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag.
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA trend filter and volume confirmation.
+# Breakouts capture strong momentum moves in both bull and bear markets.
+# The 12-hour EMA ensures alignment with intermediate trend, while volume filters false breakouts.
+# Target: 75-200 total trades over 4 years (19-50/year) to balance opportunity and fee drag.
+# Strategy includes ATR-based stop loss to manage risk and reduce drawdown.
 
-name = "exp_13272_12h_camarilla_pivot_adx_vol_v1"
-timeframe = "12h"
+name = "exp_13273_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_LOOKBACK = 1  # Previous day's levels
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 20  # 12-hour EMA for trend filter
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_adx(high, low, close, period):
-    """Calculate ADX (Average Directional Index)"""
-    # True Range
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    
-    # Directional Movement
-    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    
-    # Smooth TR, DM+
-    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    
-    # Directional Indicators
-    di_plus = 100 * dm_plus_smooth / (tr_smooth + 1e-10)
-    di_minus = 100 * dm_minus_smooth / (tr_smooth + 1e-10)
-    
-    # DX and ADX
-    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus + 1e-10)
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
-    return adx
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -69,46 +40,29 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop for Camarilla pivots and ADX
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12-hour data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate daily ADX for trend filter
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    adx_1d = calculate_adx(high_1d, low_1d, close_1d, ADX_PERIOD)
-    adx_1d_aligned = align_htf_to_ltf(prices, df_1d, adx_1d)
+    # Calculate 12-hour EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, EMA_PERIOD)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate daily Camarilla levels (using previous day's OHLC)
-    # Camarilla: H4 = close + 1.5*(high-low), H3 = close + 1.1*(high-low)
-    #          L3 = close - 1.1*(high-low), L4 = close - 1.5*(high-low)
-    daily_high = df_1d['high'].values
-    daily_low = df_1d['low'].values
-    daily_close = df_1d['close'].values
-    
-    camarilla_high_low = daily_high - daily_low
-    camarilla_h4 = daily_close + 1.5 * camarilla_high_low
-    camarilla_h3 = daily_close + 1.1 * camarilla_high_low
-    camarilla_l3 = daily_close - 1.1 * camarilla_high_low
-    camarilla_l4 = daily_close - 1.5 * camarilla_high_low
-    
-    # Align Camarilla levels to 12h timeframe (use previous day's levels)
-    camarilla_h4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h4)
-    camarilla_h3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_h3)
-    camarilla_l3_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l3)
-    camarilla_l4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_l4)
-    
-    # Calculate 12h indicators
+    # Calculate 4-hour indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ATR for stoploss
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    # Donchian channels
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -116,11 +70,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(ADX_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if ADX not available
-        if np.isnan(adx_1d_aligned[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -142,36 +96,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_1d_aligned[i] > ADX_THRESHOLD
+        # Trend filter: price above/below 12h EMA
+        uptrend = close[i] > ema_12h_aligned[i]
+        downtrend = close[i] < ema_12h_aligned[i]
         
-        # Camarilla reversal signals (more effective in ranging markets)
-        # Weaken the signal in strong trends to avoid fading momentum
-        reversal_long = volume_ok and (not trending) and (low[i] <= camarilla_l3_aligned[i]) and (close[i] > camarilla_l3_aligned[i])
-        reversal_short = volume_ok and (not trending) and (high[i] >= camarilla_h3_aligned[i]) and (close[i] < camarilla_h3_aligned[i])
-        
-        # Breakout signals in trending markets
-        breakout_long = volume_ok and trending and (high[i] > camarilla_h4_aligned[i])
-        breakout_short = volume_ok and trending and (low[i] < camarilla_l4_aligned[i])
+        # Breakout signals
+        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
-            if reversal_long:
+            if breakout_up:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif reversal_short:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_long:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_short:
+            elif breakout_down:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
