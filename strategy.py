@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-4h Donchian(20) breakout with 12h ADX trend filter and volume confirmation
-Hypothesis: Donchian breakouts capture momentum, filtered by 12h ADX > 25 for trending markets and 12h volume > 1.5x average for conviction. Works in bull (buy breakouts with ADX up) and bear (sell breakdowns with ADX up). Uses 12h timeframe for trend to reduce noise vs 1d. Target: 75-200 total trades over 4 years.
+1d Donchian(20) breakout with 1w ADX trend filter and volume confirmation
+Hypothesis: Donchian breakouts on daily timeframe capture multi-week momentum, filtered by 1w ADX > 25 for trending markets and 1w volume > 1.5x average for conviction. Works in bull (buy breakouts) and bear (sell breakdowns). Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_12h_adx_vol_v1"
-timeframe = "4h"
+name = "1d_donchian20_1w_adx_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -36,40 +36,40 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 12h data for ADX and volume filters
-    df_12h = get_htf_data(prices, '12h')
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # Get 1w data for ADX and volume filters
+    df_1w = get_htf_data(prices, '1w')
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
+    volume_1w = df_1w['volume'].values
     
-    # 14-period ADX on 12h data
-    adx = np.full(len(close_12h), np.nan)
-    if len(close_12h) >= 14:
+    # 14-period ADX on 1w data
+    adx = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 14:
         # True Range
-        tr_12h = np.maximum(
-            high_12h[1:] - low_12h[1:],
-            np.abs(high_12h[1:] - close_12h[:-1]),
-            np.abs(low_12h[1:] - close_12h[:-1])
+        tr_1w = np.maximum(
+            high_1w[1:] - low_1w[1:],
+            np.abs(high_1w[1:] - close_1w[:-1]),
+            np.abs(low_1w[1:] - close_1w[:-1])
         )
         # Directional Movement
-        up_move = high_12h[1:] - high_12h[:-1]
-        down_move = low_12h[:-1] - low_12h[1:]
+        up_move = high_1w[1:] - high_1w[:-1]
+        down_move = low_1w[:-1] - low_1w[1:]
         plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
         minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
         
         # Smoothing (Wilder's smoothing = 1/14)
-        atr_12h = np.full(len(tr_12h), np.nan)
-        if len(tr_12h) > 0:
-            atr_12h[0] = tr_12h[0]
-            for i in range(1, len(tr_12h)):
-                atr_12h[i] = (atr_12h[i-1] * 13 + tr_12h[i]) / 14
+        atr_1w = np.full(len(tr_1w), np.nan)
+        if len(tr_1w) > 0:
+            atr_1w[0] = tr_1w[0]
+            for i in range(1, len(tr_1w)):
+                atr_1w[i] = (atr_1w[i-1] * 13 + tr_1w[i]) / 14
         
         plus_di = np.full(len(up_move), np.nan)
         minus_di = np.full(len(down_move), np.nan)
-        if len(atr_12h) > 0 and not np.all(np.isnan(atr_12h)):
+        if len(atr_1w) > 0 and not np.all(np.isnan(atr_1w)):
             # Avoid division by zero
-            valid_atr = atr_12h.copy()
+            valid_atr = atr_1w.copy()
             valid_atr[valid_atr == 0] = 1e-10
             plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/14, adjust=False).mean().values / valid_atr
             minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/14, adjust=False).mean().values / valid_atr
@@ -97,16 +97,16 @@ def generate_signals(prices):
                         adx_valid[i] = np.nan
             adx[14:] = adx_valid[14:] if len(adx_valid) > 14 else adx_valid
     
-    # 20-period average volume on 12h
-    vol_ma_12h = np.full(len(volume_12h), np.nan)
-    for i in range(20, len(volume_12h)):
-        vol_ma_12h[i] = np.mean(volume_12h[i-20:i])
+    # 20-period average volume on 1w
+    vol_ma_1w = np.full(len(volume_1w), np.nan)
+    for i in range(20, len(volume_1w)):
+        vol_ma_1w[i] = np.mean(volume_1w[i-20:i])
     
-    # Align 12h indicators to 4h timeframe
-    adx_aligned = align_htf_to_ltf(prices, df_12h, adx)
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
+    # Align 1w indicators to 1d timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
+    vol_ma_1w_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
     
-    # Donchian channels (20-period) from 4h data
+    # Donchian channels (20-period) from 1d data
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
     
@@ -126,7 +126,7 @@ def generate_signals(prices):
         # Skip if required data not available
         if (np.isnan(atr[i]) or np.isnan(adx_aligned[i]) or 
             np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(vol_ma_12h_aligned[i])):
+            np.isnan(vol_ma_1w_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -134,9 +134,9 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 4h volume > 1.5x 12h average volume (scaled)
-        # Scale 12h volume to 4h: approx 1/2 of 12h volume (since 2x 4h in 12h)
-        vol_threshold = vol_ma_12h_aligned[i] / 2.0 * 1.5
+        # Volume filter: current 1d volume > 1.5x 1w average volume (scaled)
+        # Scale 1w volume to 1d: approx 1/5 of 1w volume (since 5x 1d in 1w)
+        vol_threshold = vol_ma_1w_aligned[i] / 5.0 * 1.5
         volume_filter = volume[i] > vol_threshold
         
         # ADX filter: trending market (ADX > 25)
@@ -169,8 +169,8 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 12 bars flat
-            if bars_since_entry >= 12:
+            # Minimum holding period: only allow new entry after 10 bars flat
+            if bars_since_entry >= 10:
                 # Breakout entries: upper/lower with ADX filter and volume
                 bull_breakout = close[i] > upper[i]
                 bear_breakout = close[i] < lower[i]
