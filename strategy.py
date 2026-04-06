@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """
-Experiment #11870: 1d Donchian Breakout with 1w Trend and Volume Confirmation
-Hypothesis: 1d Donchian(20) breakouts capture long-term trends. 1w EMA provides trend bias,
-and volume filter ensures institutional participation. Works in bull (breakouts continue) and
-bear (breakouts reverse quickly) by using 1w trend filter. Target: 30-100 trades over 4 years.
+Experiment #11873: 4h Donchian Breakout with 12h Trend and Volume Confirmation
+Hypothesis: 4h Donchian(20) breakouts with 12h EMA trend filter and volume confirmation capture medium-term trends while minimizing overtrading. The 12h trend filter reduces false breakouts in sideways markets, and volume confirmation ensures institutional participation. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11870_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_11873_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -47,14 +45,14 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1w EMA for trend
-    ema_1w = calculate_ema(df_1w['close'].values, TREND_EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 12h EMA for trend
+    ema_12h = calculate_ema(df_12h['close'].values, TREND_EMA_PERIOD)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 1d indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -73,8 +71,8 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 1w EMA not available
-        if np.isnan(ema_1w_aligned[i]):
+        # Skip if 12h EMA not available
+        if np.isnan(ema_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -100,13 +98,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (1w)
-        uptrend_1w = close[i] > ema_1w_aligned[i]
-        downtrend_1w = close[i] < ema_1w_aligned[i]
+        # Trend filter (12h)
+        uptrend_12h = close[i] > ema_12h_aligned[i]
+        downtrend_12h = close[i] < ema_12h_aligned[i]
         
         # Entry conditions
-        long_entry = breakout_up and volume_ok and uptrend_1w
-        short_entry = breakout_down and volume_ok and downtrend_1w
+        long_entry = breakout_up and volume_ok and uptrend_12h
+        short_entry = breakout_down and volume_ok and downtrend_12h
         
         # Generate signals
         if position == 0:
@@ -128,3 +126,4 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+</exp_11873_4h_donchian20_12h_ema_vol_v1>
