@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12679_6h_camarilla1d_vol_v1"
+name = "exp_12679_6d_camarilla_pivot_volume_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-CAMARILLA_PERIOD = 1  # daily OHLC
+PIVOT_PERIOD = 1
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -28,27 +28,15 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_camarilla(high, low, close):
-    """
-    Calculate Camarilla pivot levels for the day
-    Based on previous day's H, L, C
-    Returns levels: H4, L4, H3, L3, H2, L2, H1, L1
-    """
-    # Typical price
-    pp = (high + low + close) / 3.0
-    range_ = high - low
-    
-    # Camarilla levels
-    h4 = pp + range_ * 1.1 / 2
-    l4 = pp - range_ * 1.1 / 2
-    h3 = pp + range_ * 1.1 / 4
-    l3 = pp - range_ * 1.1 / 4
-    h2 = pp + range_ * 1.1 / 6
-    l2 = pp - range_ * 1.1 / 6
-    h1 = pp + range_ * 1.1 / 12
-    l1 = pp - range_ * 1.1 / 12
-    
-    return h4, l4, h3, l3, h2, l2, h1, l1
+def calculate_camarilla_pivot(high, low, close):
+    """Calculate Camarilla pivot levels for given period"""
+    pivot = (high + low + close) / 3
+    range_val = high - low
+    r3 = pivot + (range_val * 1.1 / 2)
+    s3 = pivot - (range_val * 1.1 / 2)
+    r4 = pivot + (range_val * 1.1)
+    s4 = pivot - (range_val * 1.1)
+    return r3, s3, r4, s4
 
 def generate_signals(prices):
     n = len(prices)
@@ -58,32 +46,17 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Camarilla levels from previous day's OHLC
-    # We use shift(1) to ensure we only use completed daily bars
+    # Calculate daily Camarilla pivot levels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
+    r3_1d, s3_1d, r4_1d, s4_1d = calculate_camarilla_pivot(high_1d, low_1d, close_1d)
     
-    # Calculate Camarilla for each day (using previous day's data)
-    h4_1d = np.full_like(close_1d, np.nan)
-    l4_1d = np.full_like(close_1d, np.nan)
-    h3_1d = np.full_like(close_1d, np.nan)
-    l3_1d = np.full_like(close_1d, np.nan)
-    
-    for i in range(1, len(close_1d)):
-        h4, l4, h3, l3, _, _, _, _ = calculate_camarilla(
-            high_1d[i-1], low_1d[i-1], close_1d[i-1]
-        )
-        h4_1d[i] = h4
-        l4_1d[i] = l4
-        h3_1d[i] = h3
-        l3_1d[i] = l3
-    
-    # Align to 6h timeframe
-    h4_1d_aligned = align_htf_to_ltf(prices, df_1d, h4_1d)
-    l4_1d_aligned = align_htf_to_ltf(prices, df_1d, l4_1d)
-    h3_1d_aligned = align_htf_to_ltf(prices, df_1d, h3_1d)
-    l3_1d_aligned = align_htf_to_ltf(prices, df_1d, l3_1d)
+    # Align pivot levels to 6h timeframe
+    r3_1d_aligned = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_aligned = align_htf_to_ltf(prices, df_1d, s3_1d)
+    r4_1d_aligned = align_htf_to_ltf(prices, df_1d, r4_1d)
+    s4_1d_aligned = align_htf_to_ltf(prices, df_1d, s4_1d)
     
     # Calculate 6h indicators
     high = prices['high'].values
@@ -103,8 +76,8 @@ def generate_signals(prices):
     start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily Camarilla not available
-        if np.isnan(h4_1d_aligned[i]) or np.isnan(l4_1d_aligned[i]):
+        # Skip if daily pivot levels not available
+        if np.isnan(r3_1d_aligned[i]) or np.isnan(s3_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -126,11 +99,11 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Fade at H3/L3, breakout at H4/L4
-        fade_long = close[i] <= l3_1d_aligned[i] and volume_ok
-        fade_short = close[i] >= h3_1d_aligned[i] and volume_ok
-        breakout_long = close[i] >= h4_1d_aligned[i] and volume_ok
-        breakout_short = close[i] <= l4_1d_aligned[i] and volume_ok
+        # Fade at R3/S3, breakout at R4/S4
+        fade_long = volume_ok and close[i] <= s3_1d_aligned[i]  # fade at S3 (support)
+        fade_short = volume_ok and close[i] >= r3_1d_aligned[i]  # fade at R3 (resistance)
+        breakout_long = volume_ok and close[i] >= r4_1d_aligned[i]  # breakout above R4
+        breakout_short = volume_ok and close[i] <= s4_1d_aligned[i]  # breakdown below S4
         
         # Entry conditions
         long_entry = fade_long or breakout_long
