@@ -6,8 +6,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Hypothesis: 1d Donchian(20) breakout with 1w trend filter and volume confirmation.
 # Long when price breaks above upper Donchian channel during bullish week with volume > 1.5x 20-period average.
 # Short when price breaks below lower Donchian channel during bearish week with volume confirmation.
-# Uses weekly trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
-# Target: 30-100 total trades over 4 years (7-25/year) to stay within optimal range.
+# Uses weekly trend filter to avoid counter-trend trades. Target: 30-100 total trades over 4 years.
 
 name = "1d_donchian20_1w_trend_vol_v1"
 timeframe = "1d"
