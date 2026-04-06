@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout + Daily Trend + Volume Confirmation v2
-Hypothesis: 4h Donchian breakouts filtered by daily EMA trend and volume spikes.
-Daily trend ensures we trade with higher timeframe momentum, reducing false breakouts.
-Volume confirmation ensures momentum behind breakouts.
-Works in bull via breakouts, bear via breakdowns with trend filter.
-Target: 100-200 total trades over 4 years (25-50/year).
+4h Donchian(20) + Daily EMA(50) + Volume Spike (2.0x)
+- Trend filter: Daily EMA(50) filters breakout direction
+- Volume: Requires 2x average volume for confirmation
+- Entry: Breakout above/below Donchian channel with trend + volume
+- Exit: Stoploss at 2*ATR(14) or opposite signal
+- Position: 0.25 (25% of capital)
+Target: 75-200 trades over 4 years (19-50/year)
+Works in bull via breakouts, bear via breakdowns with trend filter
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12457_4h_donchian20_1d_trend_vol_v2"
+name = "exp_12457_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -130,4 +132,3 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
-</lyzard>
