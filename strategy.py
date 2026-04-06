@@ -2,7 +2,7 @@
 """
 12h Donchian(20) Breakout + Volume Filter + ATR Stoploss
 Hypothesis: Donchian breakouts capture momentum, volume confirms breakout strength, ATR stoploss limits drawdown.
-Designed for low trade frequency (target 75-250 total over 4 years) to minimize fee decay.
+Designed for low trade frequency (target 50-150 total over 4 years) to minimize fee decay.
 """
 
 import numpy as np
