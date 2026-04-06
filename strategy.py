@@ -3,13 +3,13 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_ema50_vol_v6"
-timeframe = "4h"
+name = "1d_weekly_donchian20_ema50_vol_v3"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -31,11 +31,11 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # Get 1d data for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
+    # Get weekly data for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
     
-    # Calculate EMA(50) on 1d
+    # Calculate EMA(50) on weekly
     def ema(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -46,17 +46,17 @@ def generate_signals(prices):
             ema_val[i] = alpha * arr[i] + (1 - alpha) * ema_val[i-1]
         return ema_val
     
-    ema_50 = ema(close_1d, 50)
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    ema_50 = ema(close_1w, 50)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
-    # Donchian channels (20-period) on 4h
+    # Donchian channels (20-period) on 1d
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(20, n):
         donchian_high[i] = np.max(high[i-20:i])
         donchian_low[i] = np.min(low[i-20:i])
     
-    # Volume filter: current volume > 2.5x average over last 20 periods (stricter)
+    # Volume filter: current volume > 2.0x average over last 20 periods
     vol_ma = np.full(n, np.nan)
     for i in range(20, n):
         vol_ma[i] = np.mean(volume[i-20:i])
@@ -77,8 +77,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Volume condition (stricter)
-        volume_filter = volume[i] > vol_ma[i] * 2.5
+        # Volume condition
+        volume_filter = volume[i] > vol_ma[i] * 2.0
         
         # Check exits and stoploss
         if position == 1:  # long position
@@ -98,15 +98,15 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries - only long in bull, only short in bear based on daily trend
-            # Long: price breaks above Donchian high, above 1d EMA50, with volume (only in bull market)
+            # Look for entries - only long in bull, only short in bear based on weekly trend
+            # Long: price breaks above Donchian high, above weekly EMA50, with volume (only in bull market)
             if (close[i] > donchian_high[i] and 
                 close[i] > ema_50_aligned[i] and 
                 volume_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: price breaks below Donchian low, below 1d EMA50, with volume (only in bear market)
+            # Short: price breaks below Donchian low, below weekly EMA50, with volume (only in bear market)
             elif (close[i] < donchian_low[i] and 
                   close[i] < ema_50_aligned[i] and 
                   volume_filter):
