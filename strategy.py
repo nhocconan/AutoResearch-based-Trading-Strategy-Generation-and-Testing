@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13939_6d_donchian20_12h_trend_vol_v1"
-timeframe = "6h"
+name = "exp_13940_4h_donchian20_1d_ema_vol_v2"
+timeframe = "4h"
 leverage = 1.0
 
-# Hypothesis: 6h Donchian(20) breakout with 12h EMA(50) trend filter and volume confirmation (2.0x)
-# Works in bull (breaks out to new highs) and bear (breaks down to new lows)
-# Target: 75-200 trades over 4 years by using strict volume threshold (2.0x) and
-# requiring alignment with 12h trend to avoid counter-trend whipsaws
-# Added: ATR-based trailing stop (2.5x) and exit on Donchian reversal or trend change
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation (1.8x)
+# Tighter volume filter (1.8x vs 2.0x) and optimized entry/exit to increase trade frequency
+# while maintaining selectivity. Target: 100-250 trades over 4 years (25-60/year).
+# Uses ATR-based trailing stop (2.0x) and exits on Donchian reversal or trend change.
+# Designed to work in both bull (breakouts to new highs) and bear (breakdowns to new lows).
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian upper and lower bands"""
@@ -38,15 +38,15 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data for trend filter ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 1d data for trend filter ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h EMA for trend direction
-    close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, 50)
-    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
+    # Calculate 1d EMA for trend direction
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, 50)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # 6h data for Donchian, ATR, and volume
+    # 4h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -71,7 +71,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -93,12 +93,12 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation - higher threshold to reduce trades
-        volume_ok = volume[i] > (volume_ma[i] * 2.0)
+        # Volume confirmation - optimized threshold
+        volume_ok = volume[i] > (volume_ma[i] * 1.8)
         
-        # Trend filter from 12h EMA
-        trend_up = close[i] > ema_12h_aligned[i]
-        trend_down = close[i] < ema_12h_aligned[i]
+        # Trend filter from 1d EMA
+        trend_up = close[i] > ema_1d_aligned[i]
+        trend_down = close[i] < ema_1d_aligned[i]
         
         # Donchian breakout signals
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
@@ -114,12 +114,12 @@ def generate_signals(prices):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (2.5 * atr[i])
+                stop_price = entry_price - (2.0 * atr[i])
             elif short_signal:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (2.5 * atr[i])
+                stop_price = entry_price + (2.0 * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
