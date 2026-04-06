@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Experiment #11962: 12h Donchian Breakout with 1d Trend and Volume Confirmation
-Hypothesis: 12h Donchian(20) breakouts capture long-term trends with low frequency. 
-1d EMA provides trend bias to avoid counter-trend trades, and volume filter ensures 
-institutional participation. Designed for low trade frequency (12-37/year) to minimize 
-fee drag and work in both bull (trend continuation) and bear (trend reversal) markets.
+Experiment #11965: 12h Donchian Breakout with 1d Trend and Volume Confirmation
+Hypothesis: 12h Donchian(20) breakouts capture medium-term trends with fewer trades than lower timeframes.
+1d EMA provides trend bias, and volume filter ensures institutional participation.
+Designed to work in both bull (breakouts continue) and bear (breakouts reverse quickly) by using 1d trend filter.
+Target: 50-150 trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11962_12h_donchian20_1d_ema_vol_v1"
+name = "exp_11965_12h_donchian20_1d_ema_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
