@@ -3,19 +3,23 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12684_1d_wk_volatility_breakout_v1"
-timeframe = "1d"
+name = "exp_12685_12h_donchian20_1d_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-VOLATILITY_PERIOD = 20
-VOLATILITY_MULTIPLIER = 2.0
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-MAX_HOLDING_PERIOD = 15  # max 15 days
+ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_donchian(high, low, period):
+    """Calculate Donchian upper and lower bands"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -31,42 +35,38 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly ATR for volatility regime
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
-    atr_1w = calculate_atr(high_1w, low_1w, close_1w, VOLATILITY_PERIOD)
+    # Calculate daily Donchian channels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    upper_1d, lower_1d = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
     
-    # Calculate volatility ratio (current vs historical)
-    atr_ratio = atr_1w / (pd.Series(atr_1w).rolling(window=50, min_periods=50).mean().values + 1e-10)
+    # Align Donchian levels to 12h timeframe
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
     
-    # Align volatility ratio to daily timeframe
-    atr_ratio_aligned = align_htf_to_ltf(prices, df_1w, atr_ratio)
-    
-    # Calculate daily indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    atr_daily = calculate_atr(high, low, close, ATR_PERIOD)
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    entry_bar = 0
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if volatility ratio not available
-        if np.isnan(atr_ratio_aligned[i]):
+        # Skip if daily Donchian levels not available
+        if np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -85,43 +85,25 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Check max holding period
-        if position != 0 and (i - entry_bar) >= MAX_HOLDING_PERIOD:
-            signals[i] = 0.0
-            position = 0
-            continue
-        
-        # Volatility filter: only trade when volatility is expanding
-        vol_expanding = atr_ratio_aligned[i] > VOLATILITY_MULTIPLIER
-        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions: price breaks ATR-based bands
-        upper_band = close[i-1] + (VOLATILITY_MULTIPLIER * atr_daily[i-1])
-        lower_band = close[i-1] - (VOLATILITY_MULTIPLIER * atr_daily[i-1])
-        
-        breakout_up = vol_expanding and volume_ok and close[i] > upper_band
-        breakout_down = vol_expanding and volume_ok and close[i] < lower_band
-        
-        # Entry conditions
-        long_entry = breakout_up
-        short_entry = breakout_down
+        # Breakout logic
+        breakout_long = volume_ok and close[i] >= upper_1d_aligned[i]
+        breakout_short = volume_ok and close[i] <= lower_1d_aligned[i]
         
         # Generate signals
         if position == 0:
-            if long_entry:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                entry_bar = i
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr_daily[i])
-            elif short_entry:
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                entry_bar = i
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr_daily[i])
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
