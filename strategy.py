@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation
-Hypothesis: Donchian breakouts on 12h capture momentum moves with low frequency.
+4h Donchian(20) breakout with 1d EMA200 trend filter and volume confirmation v3
+Hypothesis: Donchian breakouts on 4h capture momentum moves with low frequency.
 Daily EMA200 filters trend direction to avoid counter-trend trades.
-Volume confirms breakout strength. Designed for 50-150 trades over 4 years to minimize fee drag.
+Volume confirms breakout strength. Designed for 75-200 trades over 4 years to minimize fee drag.
 Works in bull (buy breakouts above) and bear (sell breakouts below) via trend filter.
 """
 
@@ -11,8 +11,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_trend_volume_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_trend_volume_v3"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -34,7 +34,7 @@ def generate_signals(prices):
     ema200_rising_aligned = align_htf_to_ltf(prices, df_1d, ema200_rising)
     ema200_falling_aligned = align_htf_to_ltf(prices, df_1d, ema200_falling)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
