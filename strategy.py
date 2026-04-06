@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtd_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
-# Uses 4h Donchian channel breakouts for trend entry.
-# 1d trend filter (price above/below 50-day EMA) ensures alignment with daily trend.
+# Hypothesis: 4-hour Donchian breakout with daily trend filter and volume confirmation.
+# Uses 4-hour Donchian channel (20-period) breakouts for trend continuation.
+# Daily trend filter (price above/below 100-day EMA) ensures alignment with higher timeframe trend.
 # Volume confirmation (current volume > 1.5x 20-period average) filters low-quality breakouts.
 # Works in bull markets via upward breakouts and in bear markets via downward breakdowns.
 # Target: 75-200 trades over 4 years (19-50/year).
 
-name = "4h_donchian20_1d_ema_vol_v1"
+name = "4h_donchian20_daily_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -25,23 +25,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian channel (20-period)
+    # 4-hour Donchian channel (20-period)
     donchian_high = np.full(n, np.nan)
     donchian_low = np.full(n, np.nan)
     for i in range(19, n):
         donchian_high[i] = np.max(high[i-19:i+1])
         donchian_low[i] = np.min(low[i-19:i+1])
     
-    # 1d trend filter: 50-day EMA on daily closes
+    # Daily trend filter: 100-day EMA on daily closes
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    ema_50d = np.full(len(close_1d), np.nan)
-    for i in range(49, len(close_1d)):
-        if i == 49:
-            ema_50d[i] = np.mean(close_1d[0:50])
+    ema_100d = np.full(len(close_1d), np.nan)
+    for i in range(99, len(close_1d)):
+        if i == 99:
+            ema_100d[i] = np.mean(close_1d[0:100])
         else:
-            ema_50d[i] = close_1d[i] * 2/(50+1) + ema_50d[i-1] * (1 - 2/(50+1))
-    ema_50d_aligned = align_htf_to_ltf(prices, df_1d, ema_50d)
+            ema_100d[i] = close_1d[i] * 2/(100+1) + ema_100d[i-1] * (1 - 2/(100+1))
+    ema_100d_aligned = align_htf_to_ltf(prices, df_1d, ema_100d)
     
     # Volume filter: current volume > 1.5x 20-period average
     vol_ma = np.full(n, np.nan)
@@ -54,7 +54,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if daily trend data not available
-        if np.isnan(ema_50d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
+        if np.isnan(ema_100d_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -92,13 +92,13 @@ def generate_signals(prices):
             if volume_filter:
                 # Breakout above Donchian high with daily uptrend
                 if (close[i] > donchian_high[i] and close[i-1] <= donchian_high[i] and 
-                    close[i] > ema_50d_aligned[i]):
+                    close[i] > ema_100d_aligned[i]):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                 # Breakdown below Donchian low with daily downtrend
                 elif (close[i] < donchian_low[i] and close[i-1] >= donchian_low[i] and 
-                      close[i] < ema_50d_aligned[i]):
+                      close[i] < ema_100d_aligned[i]):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
