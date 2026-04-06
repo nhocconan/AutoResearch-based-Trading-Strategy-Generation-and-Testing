@@ -1,8 +1,5 @@
-#!/usr/bin/env python3
-"""
-4h Donchian breakout with 1d trend filter and volume confirmation
-Hypothesis: Donchian channel breakouts capture strong trends. 1d EMA50 filters for higher timeframe trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in both bull (buy breakouts above) and bear (sell breakouts below). Target: 75-200 total trades over 4 years.
-"""
+# 4h Donchian breakout with 1d trend filter and volume confirmation
+# Hypothesis: Donchian channel breakouts capture strong trends. 1d EMA50 filters for higher timeframe trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in both bull (buy breakouts above) and bear (sell breakouts below). Target: 75-200 total trades over 4 years.
 
 import numpy as np
 import pandas as pd
