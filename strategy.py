@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-14380_4h_donchian20_1d_ema_vol_v1
-Hypothesis: Donchian breakout with EMA trend filter and volume confirmation on 4h timeframe.
-Long when price breaks above 20-period Donchian high + price > 50 EMA + volume > 1.5x average.
-Short when price breaks below 20-period Donchian low + price < 50 EMA + volume > 1.5x average.
-Uses 1d EMA for higher timeframe trend filter. Designed to work in both bull and bear markets
-by requiring alignment with higher timeframe trend. Target: 75-200 total trades over 4 years.
+4h Donchian(20) Breakout + Volume Confirmation + 1d EMA(50) Trend Filter
+Hypothesis: Price breaking Donchian(20) channels with volume confirmation and 1d EMA(50) trend filter captures breakouts in both bull and bear markets. 1d EMA provides higher timeframe trend bias to avoid counter-trend trades. Volume ensures breakout conviction. Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "14380_4h_donchian20_1d_ema_vol_v1"
+name = "14381_4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
@@ -21,13 +17,13 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for EMA filter (once before loop)
+    # Load 1d data for EMA(50) trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # Calculate 50 EMA on daily timeframe
-    ema_50_1d = pd.Series(close_1d).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_50_1d)
+    # 1d EMA(50) for trend filter
+    ema_50 = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
     # 4h data
     high = prices['high'].values
@@ -35,16 +31,13 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels (20-period)
+    # Donchian(20) channels on 4h
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # 50 EMA on 4h timeframe
-    ema_50_4h = pd.Series(close).ewm(span=50, adjust=False, min_periods=50).mean().values
-    
     # Volume filter: avoid low volume periods
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)  # Require at least 150% of average volume
+    vol_filter = volume > (1.2 * vol_ma)  # Require 120% of average volume for breakout conviction
     
     # ATR for stoploss
     tr1 = high - low
@@ -59,13 +52,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(20, 50) + 1
+    start = max(20, 50)  # Donchian(20) and EMA(50) need 50 bars
     
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(ema_50_4h[i]) or np.isnan(ema_50_1d_aligned[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i])):
+            np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -74,36 +66,33 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low OR EMA filter fails OR stoploss
-            if (close[i] <= donchian_low[i] or 
-                close[i] < ema_50_4h[i] or 
-                close[i] < ema_50_1d_aligned[i] or
+            # Exit: price breaks below Donchian low OR trend reverses OR stoploss
+            if (close[i] <= donchian_low[i] or
+                close[i] < ema_50_aligned[i] or
                 close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high OR EMA filter fails OR stoploss
-            if (close[i] >= donchian_high[i] or 
-                close[i] > ema_50_4h[i] or 
-                close[i] > ema_50_1d_aligned[i] or
+            # Exit: price breaks above Donchian high OR trend reverses OR stoploss
+            if (close[i] >= donchian_high[i] or
+                close[i] > ema_50_aligned[i] or
                 close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + EMA alignment + volume
-            long_breakout = close[i] > donchian_high[i]
-            short_breakout = close[i] < donchian_low[i]
+            # Look for entries: Donchian breakout + volume + trend filter
+            long_breakout = (close[i] > donchian_high[i-1])  # Break above previous high
+            short_breakout = (close[i] < donchian_low[i-1])  # Break below previous low
             
-            # EMA alignment: price above both 4h and 1d EMA for long, below both for short
-            ema_alignment_long = (close[i] > ema_50_4h[i]) and (close[i] > ema_50_1d_aligned[i])
-            ema_alignment_short = (close[i] < ema_50_4h[i]) and (close[i] < ema_50_1d_aligned[i])
+            # Trend filter: EMA(50) slope
+            ema_slope = ema_50_aligned[i] - ema_50_aligned[i-1] if i > 0 else 0
             
-            long_setup = long_breakout and ema_alignment_long and vol_filter[i]
-            short_setup = short_breakout and ema_alignment_short and vol_filter[i]
+            long_setup = long_breakout and vol_filter[i] and (ema_slope > 0)  # Uptrend
+            short_setup = short_breakout and vol_filter[i] and (ema_slope < 0)  # Downtrend
             
             if long_setup:
                 signals[i] = 0.25
