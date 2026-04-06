@@ -3,17 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12854_1h_4h1d_donchian_vol_v1"
-timeframe = "1h"
+name = "exp_12855_6h_weekly_pivot_breakout_v2"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 24
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+WEEKLY_PIVOT_PERIOD = 1
+VOLUME_MA_PERIOD = 48  # 2 weeks of 6h bars
+VOLUME_THRESHOLD = 2.0
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+MAX_HOLD_BARS = 36  # Max 9 days (36 * 6h)
+MIN_BETWEEN_TRADES = 24  # Minimum 4 days between trades
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -24,38 +26,58 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_pivot_points(high, low, close):
+    """Calculate weekly pivot points"""
+    pivot = (high + low + close) / 3.0
+    r1 = 2 * pivot - low
+    s1 = 2 * pivot - high
+    r2 = pivot + (high - low)
+    s2 = pivot - (high - low)
+    r3 = high + 2 * (pivot - low)
+    s3 = low - 2 * (high - pivot)
+    return pivot, r1, r2, r3, s1, s2, s3
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 4h Donchian channels
-    high_4h = df_4h['high'].values
-    low_4h = df_4h['low'].values
-    upper_4h, lower_4h = calculate_donchian(high_4h, low_4h, DONCHIAN_PERIOD)
+    # Calculate weekly pivot points
+    high_w = df_weekly['high'].values
+    low_w = df_weekly['low'].values
+    close_w = df_weekly['close'].values
     
-    # Calculate 1d Donchian channels
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    upper_1d, lower_1d = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
+    pivot_vals = np.zeros(len(close_w))
+    r1_vals = np.zeros(len(close_w))
+    r2_vals = np.zeros(len(close_w))
+    r3_vals = np.zeros(len(close_w))
+    s1_vals = np.zeros(len(close_w))
+    s2_vals = np.zeros(len(close_w))
+    s3_vals = np.zeros(len(close_w))
     
-    # Align to 1h timeframe
-    upper_4h_aligned = align_htf_to_ltf(prices, df_4h, upper_4h)
-    lower_4h_aligned = align_htf_to_ltf(prices, df_4h, lower_4h)
-    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
-    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
+    for i in range(len(close_w)):
+        pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(high_w[i], low_w[i], close_w[i])
+        pivot_vals[i] = pivot
+        r1_vals[i] = r1
+        r2_vals[i] = r2
+        r3_vals[i] = r3
+        s1_vals[i] = s1
+        s2_vals[i] = s2
+        s3_vals[i] = s3
     
-    # Calculate 1h indicators
+    # Align to 6h timeframe
+    pivot_aligned = align_htf_to_ltf(prices, df_weekly, pivot_vals)
+    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1_vals)
+    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2_vals)
+    r3_aligned = align_htf_to_ltf(prices, df_weekly, r3_vals)
+    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1_vals)
+    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2_vals)
+    s3_aligned = align_htf_to_ltf(prices, df_weekly, s3_vals)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -69,16 +91,17 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     bars_since_entry = 0
+    bars_since_last_trade = 0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
+        bars_since_last_trade += 1
         
-        # Skip if Donchian levels not available
-        if np.isnan(upper_4h_aligned[i]) or np.isnan(lower_4h_aligned[i]) or \
-           np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]):
+        # Skip if pivot levels not available
+        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -91,35 +114,50 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
+                bars_since_last_trade = 0
                 continue
         elif position == -1:  # short position
             if close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
                 bars_since_entry = 0
+                bars_since_last_trade = 0
                 continue
+        
+        # Time-based exit to prevent overtrading
+        if bars_since_entry >= MAX_HOLD_BARS:
+            signals[i] = 0.0
+            position = 0
+            bars_since_entry = 0
+            bars_since_last_trade = 0
+            continue
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout conditions requiring BOTH 4h and 1d agreement
-        breakout_long = volume_ok and close[i] >= upper_4h_aligned[i] and close[i] >= upper_1d_aligned[i]
-        breakout_short = volume_ok and close[i] <= lower_4h_aligned[i] and close[i] <= lower_1d_aligned[i]
+        # Breakout above R3 or breakdown below S3
+        breakout_long = volume_ok and close[i] >= r3_aligned[i]
+        breakout_short = volume_ok and close[i] <= s3_aligned[i]
         
         # Generate signals
         if position == 0:
-            if breakout_long:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            elif breakout_short:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
+            if bars_since_last_trade >= MIN_BETWEEN_TRADES:
+                if breakout_long:
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                    bars_since_entry = 0
+                    bars_since_last_trade = 0
+                elif breakout_short:
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                    bars_since_entry = 0
+                    bars_since_last_trade = 0
+                else:
+                    signals[i] = 0.0
             else:
                 signals[i] = 0.0
         elif position == 1:
