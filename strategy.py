@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with 1-week EMA(50) trend filter and volume confirmation (1.5x volume).
-# Uses 1w trend for direction, 1d Donchian breakouts for entries, volume for confirmation.
-# Designed for ~50-100 total trades over 4 years (12-25/year) to avoid excessive fees.
+# Hypothesis: Daily Donchian(20) breakout with weekly EMA(50) trend filter and volume confirmation (1.5x volume).
+# Uses weekly trend for direction, daily Donchian breakouts for entries, volume for confirmation.
+# Designed for ~75 total trades over 4 years (19/year) to avoid excessive fees.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
-# Target: 50-100 total trades, 0.25 position size, max DD < -50%.
+# Target: 75-100 total trades, 0.25 position size, max DD < -50%.
 
 name = "exp_13724_1d_donchian20_1w_ema_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
-# Parameters - tuned for low trade frequency
+# Parameters - tuned for moderate trade frequency
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 8
@@ -41,15 +41,15 @@ def generate_signals(prices):
     if n < 60:
         return np.zeros(n)
     
-    # Load 1w data for trend filter ONCE before loop
+    # Load weekly data for trend filter ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1w EMA for trend filter
+    # Calculate weekly EMA for trend filter
     close_1w = df_1w['close'].values
     ema_1w = calculate_ema(close_1w, TREND_EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 1d indicators
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -100,7 +100,7 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 1w EMA
+        # Trend direction from weekly EMA
         above_ema = close[i] > ema_1w_aligned[i]
         below_ema = close[i] < ema_1w_aligned[i]
         
