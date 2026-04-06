@@ -3,24 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian channel breakout with 1d volume confirmation and 12h trend filter.
-# Long: price breaks above Donchian(20) high + volume > 1.5x average + 12h EMA(50) rising
-# Short: price breaks below Donchian(20) low + volume > 1.5x average + 12h EMA(50) falling
-# Exit: opposite signal or stop loss at 2.5*ATR. Uses tight entries to limit trades.
-# Works in bull markets (captures breakouts) and bear markets (captures breakdowns).
+# Hypothesis: 1-day Donchian channel breakout with weekly trend filter and volume confirmation
+# Long when price breaks above 20-day high with weekly uptrend and volume > 1.5x average
+# Short when price breaks below 20-day low with weekly downtrend and volume > 1.5x average
+# Exit on opposite breakout or stop loss at 2*ATR
+# Works in bull markets (captures breakouts) and bear markets (captures breakdowns)
 
-name = "exp_13583_4h_donchian20_1d_vol_12h_trend_v1"
-timeframe = "4h"
+name = "exp_13584_1d_donchian20_1w_trend_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
+WEEKLY_TREND_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-TREND_EMA_PERIOD = 50
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -40,35 +40,30 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for volume confirmation
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data for trend filter ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 1d volume moving average
-    vol_1d = df_1d['volume'].values
-    vol_ma_1d = pd.Series(vol_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = calculate_ema(close_1w, WEEKLY_TREND_PERIOD)
+    ema_1w_slope = np.diff(ema_1w, prepend=ema_1w[0])  # slope approximation
+    ema_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_slope)
     
-    # Load 12h data for trend filter
-    df_12h = get_htf_data(prices, '12h')
-    
-    # Calculate 12h EMA for trend
-    close_12h = df_12h['close'].values
-    ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
-    ema_12h_slope = np.diff(ema_12h, prepend=ema_12h[0])  # slope approximation
-    ema_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_slope)
-    
-    # Calculate 4h indicators
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     # Donchian channels
-    donchian_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    donchian_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Volume MA
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -76,11 +71,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, TREND_EMA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, WEEKLY_TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma_1d_aligned[i]) or np.isnan(ema_12h_slope_aligned[i]):
+        if np.isnan(ema_1w_slope_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -99,25 +94,25 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation (using 1d average)
-        volume_ok = volume[i] > (vol_ma_1d_aligned[i] * VOLUME_THRESHOLD)
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter from 12h EMA slope
-        bull_trend = ema_12h_slope_aligned[i] > 0
-        bear_trend = ema_12h_slope_aligned[i] < 0
+        # Trend filter from weekly EMA slope
+        weekly_uptrend = ema_1w_slope_aligned[i] > 0
+        weekly_downtrend = ema_1w_slope_aligned[i] < 0
         
         # Breakout signals
-        long_breakout = close[i] > donchian_high[i-1]  # break above previous period's high
-        short_breakout = close[i] < donchian_low[i-1]  # break below previous period's low
+        long_breakout = close[i] > highest_high[i-1]  # break above previous period's high
+        short_breakout = close[i] < lowest_low[i-1]   # break below previous period's low
         
         # Generate signals
         if position == 0:
-            if volume_ok and bull_trend and long_breakout:
+            if volume_ok and weekly_uptrend and long_breakout:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif volume_ok and bear_trend and short_breakout:
+            elif volume_ok and weekly_downtrend and short_breakout:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -125,15 +120,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on short breakout or trend change
-            if short_breakout or not bull_trend:
+            # Exit long on short breakout or stop loss
+            if short_breakout:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on long breakout or trend change
-            if long_breakout or not bear_trend:
+            # Exit short on long breakout or stop loss
+            if long_breakout:
                 signals[i] = 0.0
                 position = 0
             else:
