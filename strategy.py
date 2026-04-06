@@ -3,39 +3,70 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h trend filter with 1h pullback entry and volume confirmation.
-# In both bull and bear markets, trends exist but require pullbacks for optimal entry.
-# 4h EMA determines trend direction, 1h RSI identifies pullbacks, volume confirms momentum.
-# Target: 80-150 trades over 4 years (20-38/year) to balance opportunity and cost.
-# Session filter (08-20 UTC) reduces noise during low-liquidity hours.
+# Hypothesis: 6h Williams %R + 1d ADX trend filter with volume confirmation
+# Williams %R identifies overbought/oversold conditions (mean reversion)
+# ADX > 25 filters for trending markets to avoid whipsaws
+# Volume surge confirms momentum behind moves
+# Works in bull/bear: mean reversion in ranges, trend following in trends
+# Target: 80-150 trades over 4 years (20-38/year) for statistical validity
 
-name = "exp_12914_1h_4h_trend_pullback_v1"
-timeframe = "1h"
+name = "exp_12915_6h_williamsr_adx_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-EMA_FAST = 9
-EMA_SLOW = 21
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
+WILLIAMS_PERIOD = 14
+WILLIAMS_OVERBOUGHT = -20
+WILLIAMS_OVERSOLD = -80
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_rsi(close, period):
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
+def calculate_williams_r(high, low, close, period):
+    """Williams %R: (Highest High - Close) / (Highest High - Lowest Low) * -100"""
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    # Handle division by zero
+    williams_r = np.where((highest_high - lowest_low) == 0, -50, williams_r)
+    return williams_r.values
+
+def calculate_adx(high, low, close, period):
+    """ADX calculation using Wilder's smoothing"""
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    
+    # Directional Movement
+    dm_plus = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    dm_minus = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    # Smooth TR, DM+
+    tr_smooth = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    dm_plus_smooth = pd.Series(dm_plus).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    dm_minus_smooth = pd.Series(dm_minus).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    
+    # Directional Indicators
+    di_plus = 100 * dm_plus_smooth / tr_smooth
+    di_minus = 100 * dm_minus_smooth / tr_smooth
+    
+    # DX and ADX
+    dx = 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus)
+    dx = np.where((di_plus + di_minus) == 0, 0, dx)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    
+    return adx.values
 
 def calculate_atr(high, low, close, period):
+    """ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -48,50 +79,37 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA for trend
-    close_4h = df_4h['close'].values
-    ema_fast = pd.Series(close_4h).ewm(span=EMA_FAST, adjust=False, min_periods=EMA_FAST).mean().values
-    ema_slow = pd.Series(close_4h).ewm(span=EMA_SLOW, adjust=False, min_periods=EMA_SLOW).mean().values
-    trend_up = ema_fast > ema_slow
+    # Calculate daily ADX
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    close_d = df_daily['close'].values
+    adx_daily = calculate_adx(high_d, low_d, close_d, ADX_PERIOD)
+    adx_aligned = align_htf_to_ltf(prices, df_daily, adx_daily)
     
-    # Align trend to 1h
-    trend_up_aligned = align_htf_to_ltf(prices, df_4h, trend_up)
-    
-    # Calculate 1h indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    rsi = calculate_rsi(close, RSI_PERIOD)
+    williams_r = calculate_williams_r(high, low, close, WILLIAMS_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    
-    # Pre-compute session hours
-    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
-    start = max(EMA_SLOW, RSI_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    # Start from warmup period
+    start = max(WILLIAMS_PERIOD, ADX_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Session filter: 08-20 UTC
-        hour = hours[i]
-        if hour < 8 or hour > 20:
-            if position != 0:
-                signals[i] = position * SIGNAL_SIZE
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Skip if trend data not available
-        if np.isnan(trend_up_aligned[i]):
+        # Skip if ADX not available
+        if np.isnan(adx_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -113,30 +131,30 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Entry logic: pullback in trend direction
-        if trend_up_aligned[i]:  # uptrend
-            # Look for RSI pullback from overbought
-            if rsi[i] < RSI_OVERBOUGHT and rsi[i-1] >= RSI_OVERBOUGHT:
-                if volume_ok:
-                    signals[i] = SIGNAL_SIZE
-                    position = 1
-                    entry_price = close[i]
-                    stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                else:
-                    signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        # Williams %R signals
+        williams_oversold = williams_r[i] <= WILLIAMS_OVERSOLD
+        williams_overbought = williams_r[i] >= WILLIAMS_OVERBOUGHT
+        
+        # ADX trend filter: only trade when ADX > threshold (trending market)
+        strong_trend = adx_aligned[i] > ADX_THRESHOLD
+        
+        # Generate signals
+        if position == 0:
+            if williams_oversold and volume_ok and strong_trend:
+                signals[i] = SIGNAL_SIZE
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+            elif williams_overbought and volume_ok and strong_trend:
+                signals[i] = -SIGNAL_SIZE
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
-                signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-        else:  # downtrend
-            # Look for RSI bounce from oversold
-            if rsi[i] > RSI_OVERSOLD and rsi[i-1] <= RSI_OVERSOLD:
-                if volume_ok:
-                    signals[i] = -SIGNAL_SIZE
-                    position = -1
-                    entry_price = close[i]
-                    stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                else:
-                    signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
-            else:
-                signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+                signals[i] = 0.0
+        elif position == 1:
+            signals[i] = SIGNAL_SIZE
+        elif position == -1:
+            signals[i] = -SIGNAL_SIZE
     
     return signals
