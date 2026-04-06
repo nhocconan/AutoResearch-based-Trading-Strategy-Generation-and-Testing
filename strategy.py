@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + 1d Pivot + Volume
-Hypothesis: Combining 6h Donchian breakouts with daily pivot levels and volume confirmation
-creates high-probability entries. Pivot levels act as institutional support/resistance,
-while volume confirms breakout strength. Works in both bull and bear markets by trading
-breakouts in direction of higher timeframe bias.
-Target: 50-150 total trades over 4 years (12-37/year).
+12h Donchian(20) Breakout + Volume + ADX Filter
+Hypothesis: Donchian breakouts on 12h timeframe capture medium-term momentum with proven performance.
+Volume confirms institutional participation. ADX filter from 1w ensures we only trade in trending markets.
+Reduced position size and optimized filters to achieve 50-150 trades over 4 years (12-37/year).
+Works in both bull (breakouts) and bear (breakdowns) markets by going long on highs, short on lows.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_1d_pivot_volume_v1"
-timeframe = "6h"
+name = "12h_donchian20_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,37 +20,53 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for pivot calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data for ADX (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily pivot points (standard formula)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # ADX calculation on 1w
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Pivot Point (PP) = (H + L + C) / 3
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Resistance 1 (R1) = (2 * PP) - L
-    r1 = (2 * pp) - low_1d
-    # Support 1 (S1) = (2 * PP) - H
-    s1 = (2 * pp) - high_1d
-    # Resistance 2 (R2) = PP + (H - L)
-    r2 = pp + (high_1d - low_1d)
-    # Support 2 (S2) = PP - (H - L)
-    s2 = pp - (high_1d - low_1d)
-    # Resistance 3 (R3) = H + 2*(PP - L)
-    r3 = high_1d + 2 * (pp - low_1d)
-    # Support 3 (S3) = L - 2*(H - PP)
-    s3 = low_1d - 2 * (high_1d - pp)
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Align pivot levels to 6h timeframe (shifted by 1 day for completed bar)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Wilder's smoothing
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    period_adx = 14
+    tr_smooth = wilder_smooth(tr, period_adx)
+    dm_plus_smooth = wilder_smooth(dm_plus, period_adx)
+    dm_minus_smooth = wilder_smooth(dm_minus, period_adx)
+    
+    # DI+ and DI-
+    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
+    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, period_adx)
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     # Price and volume data
     high = prices['high'].values
@@ -63,11 +78,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from warmup period
-    start = 20  # For Donchian channel
+    start = max(20, 14)  # For Donchian and ADX
     
     for i in range(start, n):
-        # Skip if pivot data not available
-        if np.isnan(pp_aligned[i]):
+        # Skip if required data not available
+        if np.isnan(adx_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -75,41 +90,45 @@ def generate_signals(prices):
             continue
         
         # Donchian channel (20-period)
-        highest_high = np.max(high[i-20:i])
-        lowest_low = np.min(low[i-20:i])
+        if i >= 20:
+            highest_high = np.max(high[i-20:i])
+            lowest_low = np.min(low[i-20:i])
+        else:
+            highest_high = np.max(high[:i+1]) if i > 0 else high[i]
+            lowest_low = np.min(low[:i+1]) if i > 0 else low[i]
         
         # Volume filter (20-period average)
-        vol_ma = np.mean(volume[i-20:i])
-        volume_filter = volume[i] > vol_ma * 1.5
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
+            volume_filter = volume[i] > vol_ma * 2.0  # Increased threshold to reduce trades
+        else:
+            volume_filter = False
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR below S1
-            if close[i] < lowest_low or close[i] < s1_aligned[i]:
+            # Exit: price closes below Donchian lower OR ADX < 25
+            if close[i] < lowest_low or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR above R1
-            if close[i] > highest_high or close[i] > r1_aligned[i]:
+            # Exit: price closes above Donchian upper OR ADX < 25
+            if close[i] > highest_high or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + pivot filter
+            # Look for entries: Donchian breakout + volume + ADX trend
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
+            trend_filter = adx_aligned[i] > 30  # Increased threshold for stronger trend
             
-            # Additional filter: breakout should be beyond S1/R1 for strength
-            strong_bull = bull_breakout and close[i] > s1_aligned[i]
-            strong_bear = bear_breakout and close[i] < r1_aligned[i]
-            
-            if strong_bull and volume_filter:
+            if i >= 20 and bull_breakout and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
-            elif strong_bear and volume_filter:
+            elif i >= 20 and bear_breakout and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
             else:
@@ -118,22 +137,22 @@ def generate_signals(prices):
     return signals
 
 </think>
+
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + 1d Pivot + Volume
-Hypothesis: Combining 6h Donchian breakouts with daily pivot levels and volume confirmation
-creates high-probability entries. Pivot levels act as institutional support/resistance,
-while volume confirms breakout strength. Works in both bull and bear markets by trading
-breakouts in direction of higher timeframe bias.
-Target: 50-150 total trades over 4 years (12-37/year).
+12h Donchian(20) Breakout + Volume + ADX Filter
+Hypothesis: Donchian breakouts on 12h timeframe capture medium-term momentum with proven performance.
+Volume confirms institutional participation. ADX filter from 1w ensures we only trade in trending markets.
+Reduced position size and optimized filters to achieve 50-150 trades over 4 years (12-37/year).
+Works in both bull (breakouts) and bear (breakdowns) markets by going long on highs, short on lows.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_1d_pivot_volume_v1"
-timeframe = "6h"
+name = "12h_donchian20_volume_adx_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -141,37 +160,53 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for pivot calculation (once before loop)
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data for ADX (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate daily pivot points (standard formula)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    # ADX calculation on 1w
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
+    close_1w = df_1w['close'].values
     
-    # Pivot Point (PP) = (H + L + C) / 3
-    pp = (high_1d + low_1d + close_1d) / 3.0
-    # Resistance 1 (R1) = (2 * PP) - L
-    r1 = (2 * pp) - low_1d
-    # Support 1 (S1) = (2 * PP) - H
-    s1 = (2 * pp) - high_1d
-    # Resistance 2 (R2) = PP + (H - L)
-    r2 = pp + (high_1d - low_1d)
-    # Support 2 (S2) = PP - (H - L)
-    s2 = pp - (high_1d - low_1d)
-    # Resistance 3 (R3) = H + 2*(PP - L)
-    r3 = high_1d + 2 * (pp - low_1d)
-    # Support 3 (S3) = L - 2*(H - PP)
-    s3 = low_1d - 2 * (high_1d - pp)
+    # True Range
+    tr1 = np.abs(high_1w[1:] - low_1w[1:])
+    tr2 = np.abs(high_1w[1:] - close_1w[:-1])
+    tr3 = np.abs(low_1w[1:] - close_1w[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # Align pivot levels to 6h timeframe (shifted by 1 day for completed bar)
-    pp_aligned = align_htf_to_ltf(prices, df_1d, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
-    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    # Directional Movement
+    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
+                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
+    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
+                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
+    
+    # Wilder's smoothing
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
+    
+    period_adx = 14
+    tr_smooth = wilder_smooth(tr, period_adx)
+    dm_plus_smooth = wilder_smooth(dm_plus, period_adx)
+    dm_minus_smooth = wilder_smooth(dm_minus, period_adx)
+    
+    # DI+ and DI-
+    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
+    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, period_adx)
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
     
     # Price and volume data
     high = prices['high'].values
@@ -183,11 +218,11 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from warmup period
-    start = 20  # For Donchian channel
+    start = max(20, 14)  # For Donchian and ADX
     
     for i in range(start, n):
-        # Skip if pivot data not available
-        if np.isnan(pp_aligned[i]):
+        # Skip if required data not available
+        if np.isnan(adx_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -195,41 +230,45 @@ def generate_signals(prices):
             continue
         
         # Donchian channel (20-period)
-        highest_high = np.max(high[i-20:i])
-        lowest_low = np.min(low[i-20:i])
+        if i >= 20:
+            highest_high = np.max(high[i-20:i])
+            lowest_low = np.min(low[i-20:i])
+        else:
+            highest_high = np.max(high[:i+1]) if i > 0 else high[i]
+            lowest_low = np.min(low[:i+1]) if i > 0 else low[i]
         
         # Volume filter (20-period average)
-        vol_ma = np.mean(volume[i-20:i])
-        volume_filter = volume[i] > vol_ma * 1.5
+        if i >= 20:
+            vol_ma = np.mean(volume[i-20:i])
+            volume_filter = volume[i] > vol_ma * 2.0  # Increased threshold to reduce trades
+        else:
+            volume_filter = False
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price closes below Donchian lower OR below S1
-            if close[i] < lowest_low or close[i] < s1_aligned[i]:
+            # Exit: price closes below Donchian lower OR ADX < 25
+            if close[i] < lowest_low or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above Donchian upper OR above R1
-            if close[i] > highest_high or close[i] > r1_aligned[i]:
+            # Exit: price closes above Donchian upper OR ADX < 25
+            if close[i] > highest_high or adx_aligned[i] < 25:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + pivot filter
+            # Look for entries: Donchian breakout + volume + ADX trend
             bull_breakout = close[i] > highest_high
             bear_breakout = close[i] < lowest_low
+            trend_filter = adx_aligned[i] > 30  # Increased threshold for stronger trend
             
-            # Additional filter: breakout should be beyond S1/R1 for strength
-            strong_bull = bull_breakout and close[i] > s1_aligned[i]
-            strong_bear = bear_breakout and close[i] < r1_aligned[i]
-            
-            if strong_bull and volume_filter:
+            if i >= 20 and bull_breakout and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
-            elif strong_bear and volume_filter:
+            elif i >= 20 and bear_breakout and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
             else:
