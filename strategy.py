@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_trix_volume_regime_v1"
+name = "4h_donchian20_1d_ema50_vol_v12"
 timeframe = "4h"
 leverage = 1.0
 
@@ -31,12 +31,11 @@ def generate_signals(prices):
             for i in range(15, n):
                 atr[i] = (atr[i-1] * 13 + tr[i-1]) / 14
     
-    # Get 12h data for TRIX and regime filter
-    df_12h = get_htf_data(prices, '12h')
-    close_12h = df_12h['close'].values
-    volume_12h = df_12h['volume'].values
+    # Get 1d data for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # TRIX (15-period) on 12h close
+    # Calculate EMA(50) on 1d
     def ema(arr, period):
         if len(arr) < period:
             return np.full_like(arr, np.nan)
@@ -47,75 +46,70 @@ def generate_signals(prices):
             ema_val[i] = alpha * arr[i] + (1 - alpha) * ema_val[i-1]
         return ema_val
     
-    ema1 = ema(close_12h, 15)
-    ema2 = ema(ema1, 15)
-    ema3 = ema(ema2, 15)
+    ema_50 = ema(close_1d, 50)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    # TRIX calculation: (EMA3 - previous EMA3) / previous EMA3 * 100
-    trix_raw = np.full_like(ema3, np.nan)
-    trix_raw[1:] = (ema3[1:] - ema3[:-1]) / ema3[:-1] * 100
+    # Donchian channels (20-period) on 4h
+    donchian_high = np.full(n, np.nan)
+    donchian_low = np.full(n, np.nan)
+    for i in range(20, n):
+        donchian_high[i] = np.max(high[i-20:i])
+        donchian_low[i] = np.min(low[i-20:i])
     
-    # TRIX signal line (9-period EMA of TRIX)
-    trix_signal = ema(trix_raw, 9)
-    
-    # Align TRIX and signal to 4h
-    trix_aligned = align_htf_to_ltf(prices, df_12h, trix_raw)
-    trix_signal_aligned = align_htf_to_ltf(prices, df_12h, trix_signal)
-    
-    # Volume spike detection on 12h (current volume > 2x average of last 20)
-    vol_ma_12h = np.full(len(volume_12h), np.nan)
-    for i in range(20, len(volume_12h)):
-        vol_ma_12h[i] = np.mean(volume_12h[i-20:i])
-    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
-    volume_spike = volume > vol_ma_12h_aligned * 2.0
+    # Volume filter: current volume > 1.8x average over last 20 periods
+    vol_ma = np.full(n, np.nan)
+    for i in range(20, n):
+        vol_ma[i] = np.mean(volume[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(30, 20)
+    start = max(50, 20)
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(trix_aligned[i]) or 
-            np.isnan(trix_signal_aligned[i]) or np.isnan(vol_ma_12h_aligned[i])):
+        if np.isnan(atr[i]) or np.isnan(ema_50_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
+        # Volume condition
+        volume_filter = volume[i] > vol_ma[i] * 1.8
+        
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: TRIX crosses below signal or stoploss hit
-            if (trix_aligned[i] < trix_signal_aligned[i] or
+            # Exit: price closes below Donchian low or stoploss hit
+            if (close[i] < donchian_low[i] or
                 close[i] < entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: TRIX crosses above signal or stoploss hit
-            if (trix_aligned[i] > trix_signal_aligned[i] or
+            # Exit: price closes above Donchian high or stoploss hit
+            if (close[i] > donchian_high[i] or
                 close[i] > entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries
-            # Long: TRIX crosses above signal with volume spike
-            if (trix_aligned[i] > trix_signal_aligned[i] and 
-                trix_aligned[i-1] <= trix_signal_aligned[i-1] and 
-                volume_spike[i]):
+            # Look for entries - only long in bull, only short in bear based on daily trend
+            # Long: price breaks above Donchian high, above 1d EMA50, with volume (only in bull market)
+            if (close[i] > donchian_high[i] and 
+                close[i] > ema_50_aligned[i] and 
+                volume_filter):
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            # Short: TRIX crosses below signal with volume spike
-            elif (trix_aligned[i] < trix_signal_aligned[i] and 
-                  trix_aligned[i-1] >= trix_signal_aligned[i-1] and 
-                  volume_spike[i]):
+            # Short: price breaks below Donchian low, below 1d EMA50, with volume (only in bear market)
+            elif (close[i] < donchian_low[i] and 
+                  close[i] < ema_50_aligned[i] and 
+                  volume_filter):
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
