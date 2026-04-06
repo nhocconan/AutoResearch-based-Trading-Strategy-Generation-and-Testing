@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Donchian(20) breakout with weekly trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel during bullish week with volume > 1.5x 20-period average.
-# Short when price breaks below lower Donchian channel during bearish week with volume confirmation.
-# Weekly trend filter avoids counter-trend trades. Donchian channels provide clear breakout points.
-# Target: 75-150 total trades over 4 years (19-38/year) to stay within optimal range.
+# Hypothesis: 6h Donchian breakout with weekly pivot direction and volume confirmation.
+# Long when price breaks above 6h Donchian(20) upper band during bullish week (price > weekly pivot) with volume > 1.5x 20-period average.
+# Short when price breaks below 6h Donchian(20) lower band during bearish week (price < weekly pivot) with volume confirmation.
+# Uses weekly trend filter to avoid counter-trend trades. Target: 50-150 total trades over 4 years (12-38/year).
 
-name = "6h_donchian20_1w_trend_vol_v1"
+name = "6h_donchian20_1w_pivot_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
@@ -24,18 +23,23 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
+    # 6h Donchian channel (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
     upper = high_series.rolling(window=20, min_periods=20).max().values
     lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Weekly trend filter: bullish/bearish week based on close vs open
+    # Weekly pivot point (from 1w data)
     df_1w = get_htf_data(prices, '1w')
-    weekly_open = df_1w['open'].values
+    weekly_high = df_1w['high'].values
+    weekly_low = df_1w['low'].values
     weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open  # True for bullish week
-    weekly_bearish = weekly_close < weekly_open   # True for bearish week
+    weekly_pivot = (weekly_high + weekly_low + weekly_close) / 3.0
+    weekly_pivot_aligned = align_htf_to_ltf(prices, df_1w, weekly_pivot)
+    
+    # Weekly trend: bullish if close > pivot, bearish if close < pivot
+    weekly_bullish = weekly_close > weekly_pivot
+    weekly_bearish = weekly_close < weekly_pivot
     weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
     weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
     
@@ -48,7 +52,7 @@ def generate_signals(prices):
     
     for i in range(20, n):
         # Skip if weekly trend data not available
-        if np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]):
+        if np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]) or np.isnan(weekly_pivot_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -60,7 +64,7 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price drops below lower Donchian or weekly turn bearish
+            # Exit: price drops below 6h Donchian lower or weekly turn bearish
             if (low[i] <= lower[i] or 
                 weekly_bearish_aligned[i]):
                 signals[i] = 0.0
@@ -68,7 +72,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price rises above upper Donchian or weekly turn bullish
+            # Exit: price rises above 6h Donchian upper or weekly turn bullish
             if (high[i] >= upper[i] or 
                 weekly_bullish_aligned[i]):
                 signals[i] = 0.0
@@ -78,14 +82,16 @@ def generate_signals(prices):
         else:
             # Look for entries with volume confirmation and weekly trend filter
             if volume_filter:
-                # Long: break above upper Donchian during bullish week
+                # Long: break above upper Donchian during bullish week AND price above weekly pivot
                 if (high[i] > upper[i] and 
-                    weekly_bullish_aligned[i]):
+                    weekly_bullish_aligned[i] and
+                    close[i] > weekly_pivot_aligned[i]):
                     signals[i] = 0.25
                     position = 1
-                # Short: break below lower Donchian during bearish week
+                # Short: break below lower Donchian during bearish week AND price below weekly pivot
                 elif (low[i] < lower[i] and 
-                      weekly_bearish_aligned[i]):
+                      weekly_bearish_aligned[i] and
+                      close[i] < weekly_pivot_aligned[i]):
                     signals[i] = -0.25
                     position = -1
     
