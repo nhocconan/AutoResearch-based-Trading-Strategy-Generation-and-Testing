@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1w EMA(50) trend filter and volume confirmation
-# Long when price breaks above Donchian upper AND price > 1w EMA(50) AND volume > 2x 20-period average
-# Short when price breaks below Donchian lower AND price < 1w EMA(50) AND volume > 2x 20-period average
+# Hypothesis: 12h Donchian breakout with 1w trend filter and volume confirmation
+# Long when price breaks above Donchian upper (20-period) AND price > 1w EMA(50) AND volume > 2x 20-period average
+# Short when price breaks below Donchian lower (20-period) AND price < 1w EMA(50) AND volume > 2x 20-period average
 # Exit when price crosses Donchian midline (10-period average of upper/lower)
 # Uses 12h timeframe to reduce trade frequency, 1w EMA for trend filter, Donchian for breakout signals
 # Target: 50-150 total trades over 4 years (12-37/year) for optimal 12h performance
