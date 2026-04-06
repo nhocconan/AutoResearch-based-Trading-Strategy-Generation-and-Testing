@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation.
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
 # Enter long when price breaks above Donchian upper with 1d EMA(50) rising and volume > 1.5x avg.
 # Enter short when price breaks below Donchian lower with 1d EMA(50) falling and volume > 1.5x avg.
 # Exit on opposite Donchian breakout or when price crosses 1d EMA(50).
-# Designed for 12h timeframe to target 50-150 total trades over 4 years (12-37/year).
-# Works in bull/bear via trend filter and volatility-adjusted position sizing.
+# Target: 75-200 total trades over 4 years (19-50/year) with controlled risk.
+# This strategy works in both bull and bear markets by filtering breakouts with daily trend.
 
-name = "12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema50_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
