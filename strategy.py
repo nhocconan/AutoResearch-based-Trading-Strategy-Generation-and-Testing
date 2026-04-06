@@ -3,13 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian channel breakout with volume confirmation and weekly EMA trend filter.
-# Donchian(20) captures breakout momentum; volume confirms institutional participation;
-# weekly EMA ensures alignment with higher timeframe momentum to avoid counter-trend trades.
-# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
-# Target: 50-150 total trades over 4 years.
+# Hypothesis: 12-hour Donchian(20) breakout with 1d volume confirmation and 1w EMA trend filter.
+# Uses price channel breakouts for trend capture, volume to confirm institutional interest,
+# and higher timeframe EMA to avoid counter-trend trades. Designed for 50-150 total trades
+# over 4 years by requiring confluence of three conditions: breakout, volume, and trend.
 
-name = "exp_13302_12h_donchian20_vol_ema_v1"
+name = "exp_13302_12h_donchian20_1d_vol_1w_ema_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -35,12 +34,6 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -48,11 +41,18 @@ def generate_signals(prices):
     
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop for volume
+    df_1d = get_htf_data(prices, '1d')
     
     # Calculate weekly EMA for trend filter
     close_1w = df_1w['close'].values
     ema_1w = calculate_ema(close_1w, EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Calculate daily volume MA
+    volume_1d = df_1d['volume'].values
+    volume_ma_1d = pd.Series(volume_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
     
     # Calculate 12h indicators
     high = prices['high'].values
@@ -61,10 +61,8 @@ def generate_signals(prices):
     volume = prices['volume'].values
     
     # Donchian channels
-    donch_upper, donch_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
-    
-    # Volume MA
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
+    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
     # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -75,11 +73,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, VOLUME_MA_PERIOD, DONCHIAN_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if EMA not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]):
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -98,16 +96,16 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        # Volume confirmation (daily volume > 1.5x its 20-period MA)
+        volume_ok = volume[i] > (volume_ma_1d_aligned[i] * VOLUME_THRESHOLD)
         
         # Trend filter: price above/below weekly EMA
         uptrend = close[i] > ema_1w_aligned[i]
         downtrend = close[i] < ema_1w_aligned[i]
         
         # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > donch_upper[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < donch_lower[i-1])
+        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
