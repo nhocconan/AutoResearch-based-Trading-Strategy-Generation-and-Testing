@@ -3,7 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_ema50_vol_v13"
+# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
+# Works in bull/bear markets by only trading in direction of higher timeframe trend.
+# Volume filter reduces false breakouts. Tight entry criteria target 20-50 trades/year.
+
+name = "4h_donchian20_1d_ema50_vol_v14"
 timeframe = "4h"
 leverage = 1.0
 
