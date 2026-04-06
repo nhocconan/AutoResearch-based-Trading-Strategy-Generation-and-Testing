@@ -3,32 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Donchian(20) breakout with daily pivot support/resistance levels and volume confirmation.
-# In bull markets, buy breakouts above pivot resistance (R1) with volume; in bear markets, sell breakdowns below pivot support (S1) with volume.
-# Daily pivot provides institutional reference points, reducing false breakouts. Volume confirms institutional participation.
-# Target: 75-150 total trades over 4 years (19-38/year) to balance opportunity with fee minimization.
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA trend filter and volume confirmation.
+# In bull markets, breakouts capture strong uptrends; in bear markets, they catch sharp downtrends.
+# The daily EMA ensures alignment with higher timeframe momentum, while volume filters out false breakouts.
+# Target: 75-150 total trades over 4 years (19-37/year) to balance signal quality and fee drag.
+# Uses proper Wilder's ATR smoothing for stoploss and maintains position sizing discipline.
 
-name = "exp_13255_6h_donchian20_1d_pivot_vol_v1"
-timeframe = "6h"
+name = "exp_13256_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-PIVOT_LOOKBACK = 1  # Use previous day's pivot
+EMA_PERIOD = 50  # Daily EMA for trend filter
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-
-def calculate_pivot(high, low, close):
-    """Calculate pivot point and support/resistance levels"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    return pivot, r1, s1, r2, s2
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -51,32 +43,12 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily pivot levels for previous day
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Calculate daily EMA for trend filter
     close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    pivot, r1, s1, r2, s2 = calculate_pivot(high_1d, low_1d, close_1d)
-    # Shift by 1 to use previous day's levels (no look-ahead)
-    pivot = np.roll(pivot, 1)
-    r1 = np.roll(r1, 1)
-    s1 = np.roll(s1, 1)
-    r2 = np.roll(r2, 1)
-    s2 = np.roll(s2, 1)
-    # First value is invalid
-    pivot[0] = np.nan
-    r1[0] = np.nan
-    s1[0] = np.nan
-    r2[0] = np.nan
-    s2[0] = np.nan
-    
-    pivot_aligned = align_htf_to_ltf(prices, df_1d, pivot)
-    r1_aligned = align_htf_to_ltf(prices, df_1d, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_1d, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_1d, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_1d, s2)
-    
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -98,11 +70,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if pivot data not available
-        if np.isnan(pivot_aligned[i]):
+        # Skip if EMA not available
+        if np.isnan(ema_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -124,11 +96,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout signals with pivot filters
-        # Long: break above Donchian high AND above R1 pivot (resistance) with volume
-        breakout_up = volume_ok and (high[i] > highest_high[i-1]) and (high[i] > r1_aligned[i])
-        # Short: break below Donchian low AND below S1 pivot (support) with volume
-        breakout_down = volume_ok and (low[i] < lowest_low[i-1]) and (low[i] < s1_aligned[i])
+        # Trend filter: price above/below daily EMA
+        uptrend = close[i] > ema_1d_aligned[i]
+        downtrend = close[i] < ema_1d_aligned[i]
+        
+        # Breakout signals
+        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
