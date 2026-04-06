@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1d trend filter and volume confirmation
-# Long when price breaks above Donchian upper (20-period) AND price > 1d EMA(50) AND volume > 2x 20-period average
-# Short when price breaks below Donchian lower (20-period) AND price < 1d EMA(50) AND volume > 2x 20-period average
-# Exit when price crosses Donchian midline (10-period average of upper/lower)
-# Uses 4h timeframe to target 75-200 trades over 4 years, 1d EMA for trend filter, Donchian for breakout signals
-# Target: 75-200 total trades over 4 years (19-50/year) for optimal 4h performance
+# Hypothesis: 1d Donchian breakout with 1w EMA trend filter and volume confirmation
+# Long when price breaks above Donchian upper (20-period) AND price > 1w EMA(50) AND volume > 2x 20-period average
+# Short when price breaks below Donchian lower (20-period) AND price < 1w EMA(50) AND volume > 2x 20-period average
+# Exit when price crosses Donchian midline (average of upper/lower)
+# Designed to work in both bull and bear markets via trend filter
+# Target: 30-100 total trades over 4 years (7-25/year) for optimal 1d performance
 
-name = "4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "1d_donchian20_1w_ema_vol_v5"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,16 +32,16 @@ def generate_signals(prices):
     donchian_lower = lowest_low.values
     donchian_mid = (donchian_upper + donchian_lower) / 2
     
-    # 1-day EMA(50) trend filter
-    df_1d = get_htf_data(prices, '1d')
-    daily_close = df_1d['close'].values
+    # 1-week EMA(50) trend filter
+    df_1w = get_htf_data(prices, '1w')
+    weekly_close = df_1w['close'].values
     
-    # Calculate 50-period EMA on daily close
-    daily_close_series = pd.Series(daily_close)
-    daily_ema = daily_close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
+    # Calculate 50-period EMA on weekly close
+    weekly_close_series = pd.Series(weekly_close)
+    weekly_ema = weekly_close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align daily EMA to 4h timeframe
-    daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
+    # Align weekly EMA to 1d timeframe
+    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
     
     # Volume confirmation: volume > 2x 20-period average
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
@@ -52,7 +52,7 @@ def generate_signals(prices):
     
     for i in range(50, n):
         # Skip if required data not available
-        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(daily_ema_aligned[i]) or np.isnan(volume_threshold[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(weekly_ema_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -74,14 +74,14 @@ def generate_signals(prices):
                 signals[i] = -0.25
         else:
             # Look for entries with trend filter and volume confirmation
-            # Long: price breaks above Donchian upper AND price > daily EMA AND volume confirmation
+            # Long: price breaks above Donchian upper AND price > weekly EMA AND volume confirmation
             if (close[i] > donchian_upper[i] and close[i-1] <= donchian_upper[i-1] and 
-                close[i] > daily_ema_aligned[i] and volume[i] > volume_threshold[i]):
+                close[i] > weekly_ema_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below Donchian lower AND price < daily EMA AND volume confirmation
+            # Short: price breaks below Donchian lower AND price < weekly EMA AND volume confirmation
             elif (close[i] < donchian_lower[i] and close[i-1] >= donchian_lower[i-1] and 
-                  close[i] < daily_ema_aligned[i] and volume[i] > volume_threshold[i]):
+                  close[i] < weekly_ema_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
     
