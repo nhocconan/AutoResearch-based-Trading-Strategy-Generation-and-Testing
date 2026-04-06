@@ -3,11 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian channel breakout with daily volume confirmation and 
-# weekly EMA trend filter. Donchian channels capture volatility breakouts, volume 
-# confirms institutional participation, and weekly EMA ensures trend alignment. 
-# This combination works in both bull (breakouts above upper band) and bear 
-# markets (breakdowns below lower band). Target: 75-200 total trades over 4 years.
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day volume confirmation and 1-week EMA trend filter.
+# Uses price channel breakouts as institutional entry signals, filtered by higher timeframe trend
+# and volume surge to avoid false breakouts. Designed for 4-8 trades per year per symbol.
+# Works in bull markets (breakouts above upper channel) and bear markets (breakdowns below lower channel).
 
 name = "exp_13329_4h_donchian20_1d_vol_1w_ema_v1"
 timeframe = "4h"
@@ -15,7 +14,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_PERIOD = 21
+EMA_PERIOD = 20      # Weekly EMA
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -46,9 +45,9 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop for EMA trend filter
+    # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
-    # Load daily data ONCE before loop for volume confirmation
+    # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate weekly EMA for trend filter
@@ -56,7 +55,7 @@ def generate_signals(prices):
     ema_1w = calculate_ema(close_1w, EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate daily volume for confirmation
+    # Calculate daily volume MA
     volume_1d = df_1d['volume'].values
     volume_ma_1d = pd.Series(volume_1d).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     volume_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, volume_ma_1d)
@@ -82,8 +81,9 @@ def generate_signals(prices):
     start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA or volume MA not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]):
+        # Skip if indicators not available
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(volume_ma_1d_aligned[i]) or \
+           np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -102,8 +102,9 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation (daily volume > MA * threshold)
-        volume_ok = volume[i] > (volume_ma_1d_aligned[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma_1d_aligned[i]) else False
+        # Volume confirmation: current 4h volume > 1.5x daily average volume
+        # Scale daily volume to 4h: there are 6 four-hour bars in a day
+        volume_ok = volume[i] > (volume_ma_1d_aligned[i] * VOLUME_THRESHOLD / 6.0)
         
         # Trend filter: price above/below weekly EMA
         uptrend = close[i] > ema_1w_aligned[i]
