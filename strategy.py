@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1d volume confirmation and 1d trend filter
-Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d EMA trend for bias and 1d volume for conviction. Works in bull (buy breakouts above 1d EMA) and bear (sell breakdowns below 1d EMA). Target: 75-200 total trades over 4 years (19-50/year).
+4h Donchian(10) breakout with 1d volume confirmation and 1d EMA200 trend filter
+Hypothesis: Narrower Donchian channels capture momentum breakouts with better risk/reward. 
+1d EMA200 filters for primary trend direction. 1d volume surge confirms institutional participation.
+Works in bull (buy breakouts above EMA200) and bear (sell breakdowns below EMA200).
+Target: 100-200 total trades over 4 years (25-50/year) to avoid overtrading.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_trend_vol_v1"
-timeframe = "12h"
+name = "4h_donchian10_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Price and volume data
@@ -36,21 +39,21 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 1d data for trend filter (EMA21)
+    # Get 1d data for trend filter (EMA200)
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
     
-    # EMA21 on 1d close
+    # EMA200 on 1d close
     ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 21:
-        ema_1d[20] = np.mean(close_1d[:21])
-        for i in range(21, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 19) / 21
+    if len(close_1d) >= 200:
+        ema_1d[199] = np.mean(close_1d[:200])
+        for i in range(200, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 198) / 200
     
-    # 1d trend: above EMA21 = bullish, below = bearish
+    # 1d trend: above EMA200 = bullish, below = bearish
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align 1d trend to 12h timeframe
+    # Align 1d trend to 4h timeframe
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
     # Get 1d data for volume confirmation
@@ -61,16 +64,16 @@ def generate_signals(prices):
     for i in range(20, len(volume_1d)):
         vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
     
-    # Align volume MA to 12h timeframe
+    # Align volume MA to 4h timeframe
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
-    # Donchian channels (20-period) from 12h data
+    # Donchian channels (10-period) from 4h data
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
     
-    for i in range(20, n):
-        upper[i] = np.max(high[i-20:i])
-        lower[i] = np.min(low[i-20:i])
+    for i in range(10, n):
+        upper[i] = np.max(high[i-10:i])
+        lower[i] = np.min(low[i-10:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -78,7 +81,7 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 40  # Need enough data for Donchian and alignments
+    start = 50  # Need enough data for Donchian and alignments
     
     for i in range(start, n):
         # Skip if required data not available
@@ -92,9 +95,9 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 12h volume > 1.5x 1d average volume (scaled)
-        # Scale 1d volume to 12h: approx 1/2 of 1d volume (since 2x 12h in 1d)
-        vol_threshold = vol_ma_1d_aligned[i] / 2.0 * 1.5
+        # Volume filter: current 4h volume > 2x 1d average volume (scaled)
+        # Scale 1d volume to 4h: approx 1/6 of 1d volume (since 6x 4h in 1d)
+        vol_threshold = vol_ma_1d_aligned[i] / 6.0 * 2.0
         volume_filter = volume[i] > vol_threshold
         
         # Check exits and stoploss
