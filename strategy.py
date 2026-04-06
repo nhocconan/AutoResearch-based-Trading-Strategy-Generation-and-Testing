@@ -1,38 +1,24 @@
-# 1h Momentum with 4h Trend Filter and ATR Stop
-# Designed for both bull and bear markets:
-# - Bull: rides momentum with trend filter
-# - Bear: avoids false signals with strong trend filter and tight stops
-# Target: 50-150 trades over 4 years (12-38/year) to avoid fee drag
-# Uses momentum (ROC) + trend (EMA) + volatility filter (ATR-based volume)
-# Stops: 2x ATR trailing stop
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12677_1h_momentum_4h_trend_v1"
-timeframe = "1h"
+name = "exp_12678_1d_1w_donchian_vol_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-ROC_PERIOD = 10          # Rate of change period
-EMA_FAST = 12            # Fast EMA for momentum
-EMA_SLOW = 26            # Slow EMA for momentum
-TREND_EMA_PERIOD = 50    # 4h EMA for trend filter
-VOLUME_MA_PERIOD = 20    # Volume moving average
-VOLUME_THRESHOLD = 1.5   # Volume must be 1.5x average
-SIGNAL_SIZE = 0.25       # Position size (25% of capital)
-ATR_PERIOD = 14          # ATR period for stop loss
-ATR_STOP_MULTIPLIER = 2.0 # ATR multiplier for stop
+DONCHIAN_PERIOD = 20
+TREND_EMA_PERIOD = 50
+VOLUME_MA_PERIOD = 20
+VOLUME_THRESHOLD = 2.0
+SIGNAL_SIZE = 0.25
+ATR_PERIOD = 14
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_ema(close, period):
-    """Calculate EMA with proper min_periods"""
+    """Calculate EMA"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
-def calculate_rma(close, period):
-    """Calculate RMA (Wilder's smoothing)"""
-    return pd.Series(close).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -40,44 +26,36 @@ def calculate_atr(high, low, close, period):
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    # Set first TR to first period's average to avoid NaN
-    tr[0] = np.mean(tr[1:period+1]) if len(tr) > period else np.mean(tr[1:]) if len(tr) > 1 else 0
-    atr = calculate_rma(tr, period)
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_roc(close, period):
-    """Calculate Rate of Change"""
-    roc = np.full_like(close, np.nan, dtype=float)
-    roc[period:] = (close[period:] - close[:-period]) / close[:-period] * 100
-    return roc
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h EMA for trend filter
-    ema_4h = calculate_ema(df_4h['close'].values, TREND_EMA_PERIOD)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate weekly EMA for trend
+    ema_1w = calculate_ema(df_1w['close'].values, TREND_EMA_PERIOD)
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate 1h indicators
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Momentum indicators
-    ema_fast = calculate_ema(close, EMA_FAST)
-    ema_slow = calculate_ema(close, EMA_SLOW)
-    macd = ema_fast - ema_slow
-    roc = calculate_roc(close, ROC_PERIOD)
-    
-    # Volatility and volume
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -85,11 +63,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_SLOW, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, ROC_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 4h EMA not available
-        if np.isnan(ema_4h_aligned[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(ema_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -111,19 +89,17 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (4h)
-        uptrend_4h = close[i] > ema_4h_aligned[i]
-        downtrend_4h = close[i] < ema_4h_aligned[i]
+        # Trend filter (weekly)
+        uptrend_1w = close[i] > ema_1w_aligned[i]
+        downtrend_1w = close[i] < ema_1w_aligned[i]
         
-        # Momentum conditions
-        # Long: positive MACD and positive ROC
-        long_momentum = macd[i] > 0 and roc[i] > 0
-        # Short: negative MACD and negative ROC
-        short_momentum = macd[i] < 0 and roc[i] < 0
+        # Donchian breakout conditions
+        long_breakout = close[i] > upper[i-1]  # break above previous upper band
+        short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
         # Entry conditions
-        long_entry = volume_ok and uptrend_4h and long_momentum
-        short_entry = volume_ok and downtrend_4h and short_momentum
+        long_entry = volume_ok and uptrend_1w and long_breakout
+        short_entry = volume_ok and downtrend_1w and short_breakout
         
         # Generate signals
         if position == 0:
