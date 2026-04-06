@@ -3,29 +3,29 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1h RSI mean reversion with 4h trend filter and volume confirmation
-# RSI < 30 in uptrend (4h EMA21 up) = long, RSI > 70 in downtrend (4h EMA21 down) = short
-# Volume > 1.5x average confirms momentum. Works in bull/bear because mean reversion
-# works in ranging markets and trend filter avoids counter-trend trades.
-# Target: 80-150 total trades over 4 years (20-38/year) with session filter (08-20 UTC).
+# Hypothesis: 4h trend filter with 1h pullback entry and volume confirmation.
+# In both bull and bear markets, trends exist but require pullbacks for optimal entry.
+# 4h EMA determines trend direction, 1h RSI identifies pullbacks, volume confirms momentum.
+# Target: 80-150 trades over 4 years (20-38/year) to balance opportunity and cost.
+# Session filter (08-20 UTC) reduces noise during low-liquidity hours.
 
-name = "exp_12914_1h_rsi_meanrev_4htrend_vol_v1"
+name = "exp_12914_1h_4h_trend_pullback_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
+EMA_FAST = 9
+EMA_SLOW = 21
 RSI_PERIOD = 14
 RSI_OVERBOUGHT = 70
 RSI_OVERSOLD = 30
-EMA_TREND_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.20
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_rsi(close, period):
-    """Calculate RSI using Wilder's smoothing"""
     delta = np.diff(close, prepend=close[0])
     gain = np.where(delta > 0, delta, 0)
     loss = np.where(delta < 0, -delta, 0)
@@ -36,7 +36,6 @@ def calculate_rsi(close, period):
     return rsi.values
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -54,8 +53,12 @@ def generate_signals(prices):
     
     # Calculate 4h EMA for trend
     close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=EMA_TREND_PERIOD, adjust=False, min_periods=EMA_TREND_PERIOD).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    ema_fast = pd.Series(close_4h).ewm(span=EMA_FAST, adjust=False, min_periods=EMA_FAST).mean().values
+    ema_slow = pd.Series(close_4h).ewm(span=EMA_SLOW, adjust=False, min_periods=EMA_SLOW).mean().values
+    trend_up = ema_fast > ema_slow
+    
+    # Align trend to 1h
+    trend_up_aligned = align_htf_to_ltf(prices, df_4h, trend_up)
     
     # Calculate 1h indicators
     high = prices['high'].values
@@ -67,16 +70,15 @@ def generate_signals(prices):
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
-    # Pre-compute hour filter
-    hours = prices.index.hour
+    # Pre-compute session hours
+    hours = pd.DatetimeIndex(prices['open_time']).hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period
-    start = max(RSI_PERIOD, EMA_TREND_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_SLOW, RSI_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Session filter: 08-20 UTC
@@ -88,8 +90,8 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Skip if 4h EMA not available
-        if np.isnan(ema_4h_aligned[i]):
+        # Skip if trend data not available
+        if np.isnan(trend_up_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -111,31 +113,30 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend direction from 4h EMA
-        trend_up = ema_4h_aligned[i] > ema_4h_aligned[i-1] if i > 0 else False
-        trend_down = ema_4h_aligned[i] < ema_4h_aligned[i-1] if i > 0 else False
-        
-        # Mean reversion signals
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
-        
-        # Generate signals
-        if position == 0:
-            if rsi_oversold and trend_up and volume_ok:
-                signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif rsi_overbought and trend_down and volume_ok:
-                signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+        # Entry logic: pullback in trend direction
+        if trend_up_aligned[i]:  # uptrend
+            # Look for RSI pullback from overbought
+            if rsi[i] < RSI_OVERBOUGHT and rsi[i-1] >= RSI_OVERBOUGHT:
+                if volume_ok:
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                else:
+                    signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
             else:
-                signals[i] = 0.0
-        elif position == 1:
-            signals[i] = SIGNAL_SIZE
-        elif position == -1:
-            signals[i] = -SIGNAL_SIZE
+                signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+        else:  # downtrend
+            # Look for RSI bounce from oversold
+            if rsi[i] > RSI_OVERSOLD and rsi[i-1] <= RSI_OVERSOLD:
+                if volume_ok:
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                else:
+                    signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
+            else:
+                signals[i] = position * SIGNAL_SIZE if position != 0 else 0.0
     
     return signals
