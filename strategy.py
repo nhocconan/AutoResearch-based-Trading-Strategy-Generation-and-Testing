@@ -3,20 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with 1-day trend filter and volume confirmation
-# Long when price breaks above 4h Donchian(20) high AND 1-day close above EMA(20)
-# Short when price breaks below 4h Donchian(20) low AND 1-day close below EMA(20)
-# Uses daily trend filter to avoid counter-trend trades. Volume filter requires 
-# current volume > 1.5x 20-period average to confirm breakout strength.
-# Target: 100-200 total trades over 4 years (25-50/year) within optimal range.
+# Hypothesis: 6h Williams %R + 1d EMA trend filter with volume confirmation
+# Long when Williams %R(14) crosses above -50 AND price > 1d EMA(50) AND volume > 1.5x 20-period average
+# Short when Williams %R(14) crosses below -50 AND price < 1d EMA(50) AND volume > 1.5x 20-period average
+# Uses 1d EMA for trend filter to avoid counter-trend trades, Williams %R for momentum timing, volume for confirmation
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within optimal range for 6h timeframe
 
-name = "4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "6h_williamsr_1d_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 40:
+    if n < 60:
         return np.zeros(n)
     
     # Price data
@@ -25,70 +24,64 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 4h Donchian Channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
+    # Williams %R (14-period)
+    highest_high = pd.Series(high).rolling(window=14, min_periods=14).max()
+    lowest_low = pd.Series(low).rolling(window=14, min_periods=14).min()
+    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
+    williams_r = williams_r.values  # Convert to numpy array
     
-    donchian_high = high_series.rolling(window=20, min_periods=20).max()
-    donchian_low = low_series.rolling(window=20, min_periods=20).min()
-    
-    # Daily trend filter: EMA(20) on daily close
+    # 1-day EMA(50) trend filter
     df_1d = get_htf_data(prices, '1d')
     daily_close = df_1d['close'].values
     
-    # Calculate 20-period EMA on daily close
+    # Calculate 50-period EMA on daily close
     daily_close_series = pd.Series(daily_close)
-    daily_ema = daily_close_series.ewm(span=20, min_periods=20, adjust=False).mean().values
+    daily_ema = daily_close_series.ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align daily EMA to 4h timeframe
+    # Align daily EMA to 6h timeframe
     daily_ema_aligned = align_htf_to_ltf(prices, df_1d, daily_ema)
     
-    # Volume filter: current volume > 1.5x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean()
-    vol_threshold = vol_ma * 1.5
+    # Volume confirmation: volume > 1.5x 20-period average
+    volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean()
+    volume_threshold = 1.5 * volume_ma.values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
-        # Skip if daily EMA data not available
-        if np.isnan(daily_ema_aligned[i]):
+    for i in range(50, n):
+        # Skip if required data not available
+        if np.isnan(williams_r[i]) or np.isnan(daily_ema_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: reverse position or trend change
+        # Check exits: reverse position or trend filter fails
         if position == 1:  # long position
-            # Exit: price breaks below 4h Donchian low OR daily trend turns bearish
-            if (close[i] <= donchian_low[i] or 
-                daily_close[i] < daily_ema_aligned[i]):
+            # Exit: Williams %R crosses below -50 or price below daily EMA
+            if (williams_r[i] < -50 and williams_r[i-1] >= -50) or close[i] < daily_ema_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above 4h Donchian high OR daily trend turns bullish
-            if (close[i] >= donchian_high[i] or 
-                daily_close[i] > daily_ema_aligned[i]):
+            # Exit: Williams %R crosses above -50 or price above daily EMA
+            if (williams_r[i] > -50 and williams_r[i-1] <= -50) or close[i] > daily_ema_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with daily trend filter and volume confirmation
-            # Long: price breaks above 4h Donchian high AND daily close above daily EMA AND volume confirmation
-            if (close[i] > donchian_high[i] and 
-                daily_close[i] > daily_ema_aligned[i] and
-                volume[i] > vol_threshold[i]):
+            # Look for entries with trend filter and volume confirmation
+            # Long: Williams %R crosses above -50 AND price > daily EMA AND volume confirmation
+            if (williams_r[i] > -50 and williams_r[i-1] <= -50 and 
+                close[i] > daily_ema_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price breaks below 4h Donchian low AND daily close below daily EMA AND volume confirmation
-            elif (close[i] < donchian_low[i] and 
-                  daily_close[i] < daily_ema_aligned[i] and
-                  volume[i] > vol_threshold[i]):
+            # Short: Williams %R crosses below -50 AND price < daily EMA AND volume confirmation
+            elif (williams_r[i] < -50 and williams_r[i-1] >= -50 and 
+                  close[i] < daily_ema_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
     
