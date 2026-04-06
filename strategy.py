@@ -3,27 +3,51 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA trend filter and volume confirmation.
-# Uses 12h price channel breakouts aligned with 1d momentum to capture trending moves.
-# Volume confirmation ensures institutional participation. Works in bull markets (breakouts above upper band)
-# and bear markets (breakdowns below lower band). Target: 50-150 total trades over 4 years (12-37/year).
+# Hypothesis: 1d KAMA trend with weekly RSI filter and volume confirmation. 
+# Uses 1d KAMA for trend direction, weekly RSI for overbought/oversold filtering, 
+# and volume confirmation to ensure institutional participation. Works in bull markets 
+# (KAMA up + RSI not overbought) and bear markets (KAMA down + RSI not oversold). 
+# Target: 30-100 total trades over 4 years (7-25/year).
 
-name = "exp_13422_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+name = "exp_13424_1d_kama_weekly_rsi_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-EMA_PERIOD = 21
+KAMA_EFFICIENCY_PERIOD = 10
+KAMA_FAST = 2
+KAMA_SLOW = 30
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_kama(close, er_period, fast, slow):
+    """Calculate Kaufman Adaptive Moving Average"""
+    close_s = pd.Series(close)
+    change = abs(close_s - close_s.shift(er_period))
+    volatility = abs(close_s.diff()).rolling(window=er_period, min_periods=1).sum()
+    er = change / volatility
+    er = er.fillna(0)
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    kama = [close_s.iloc[0]]
+    for i in range(1, len(close_s)):
+        kama.append(kama[-1] + sc.iloc[i] * (close_s.iloc[i] - kama[-1]))
+    return np.array(kama)
+
+def calculate_rsi(close, period):
+    """Calculate Relative Strength Index"""
+    close_s = pd.Series(close)
+    delta = close_s.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period, min_periods=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period, min_periods=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.fillna(50).values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -39,23 +63,22 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly RSI for trend filter
+    close_weekly = df_weekly['close'].values
+    rsi_weekly = calculate_rsi(close_weekly, RSI_PERIOD)
+    rsi_weekly_aligned = align_htf_to_ltf(prices, df_weekly, rsi_weekly)
     
-    # Calculate 12h indicators
+    # Calculate 1d indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
+    # KAMA
+    kama = calculate_kama(close, KAMA_EFFICIENCY_PERIOD, KAMA_FAST, KAMA_SLOW)
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -69,11 +92,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(KAMA_EFFICIENCY_PERIOD, RSI_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(highest_high[i]) or np.isnan(lowest_low[i]):
+        # Skip if indicators not available
+        if np.isnan(rsi_weekly_aligned[i]) or np.isnan(kama[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -93,24 +116,24 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter: price above/below 1d EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # Trend filter: price above/below KAMA
+        price_above_kama = close[i] > kama[i]
+        price_below_kama = close[i] < kama[i]
         
-        # Breakout signals using Donchian channels
-        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
+        # RSI filter: not overbought for long, not oversold for short
+        rsi_not_overbought = rsi_weekly_aligned[i] < RSI_OVERBOUGHT
+        rsi_not_oversold = rsi_weekly_aligned[i] > RSI_OVERSOLD
         
-        # Generate signals
+        # Entry signals
         if position == 0:
-            if breakout_up:
+            if price_above_kama and rsi_not_overbought and volume_ok:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            elif price_below_kama and rsi_not_oversold and volume_ok:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
