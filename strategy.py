@@ -1,45 +1,51 @@
 #!/usr/bin/env python3
 """
-Experiment #12294: 1h RSI Reversal with 4h Trend Filter and Volume Spike
-Hypothesis: In ranging markets (common in 2025 BTC/ETH), RSI extremes combined with
-4h trend direction and volume spikes provide high-probability reversals. 
-Use 4h EMA for trend filter, 1h RSI(14) for entry timing, and volume confirmation.
-Target: 100-150 total trades over 4 years = 25-38/year.
+Experiment #12299: 6h Ichimoku Cloud + 1d Trend + Volume Confirmation
+Hypothesis: Use 1d Ichimoku for trend direction (price above/below cloud),
+6h Tenkan/Kijun cross for entry timing, and volume spikes for confirmation.
+Ichimoku provides dynamic support/resistance that adapts to volatility,
+working in both bull and bear markets. Target: 100-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+from mtf_data import get_htf_data, align_ltf_to_htf
 
-name = "exp_12294_1h_rsi_reversal_4h_trend_vol_v1"
-timeframe = "1h"
+name = "exp_12299_6h_ichimoku_1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-TREND_EMA_PERIOD = 50
+TENKAN_PERIOD = 9
+KIJUN_PERIOD = 26
+SENKOU_B_PERIOD = 52
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+VOLUME_THRESHOLD = 1.8
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.5
 
-def calculate_rsi(close, period):
-    """Calculate RSI"""
-    delta = np.diff(close, prepend=close[0])
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    rs = avg_gain / (avg_loss + 1e-10)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.values
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_ichimoku(high, low, close):
+    """Calculate Ichimoku components"""
+    # Tenkan-sen (Conversion Line): (9-period high + 9-period low)/2
+    tenkan = (pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
+              pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
+    
+    # Kijun-sen (Base Line): (26-period high + 26-period low)/2
+    kijun = (pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
+             pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
+    
+    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
+    senkou_a = ((tenkan + kijun) / 2).shift(KIJUN_PERIOD)
+    
+    # Senkou Span B (Leading Span B): (52-period high + 52-period low)/2 shifted 26 periods ahead
+    senkou_b = ((pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
+                 pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2).shift(KIJUN_PERIOD)
+    
+    # Chikou Span (Lagging Span): Close shifted 26 periods behind
+    chikou = pd.Series(close).shift(-KIJUN_PERIOD)
+    
+    return tenkan.values, kijun.values, senkou_a.values, senkou_b.values, chikou.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -52,24 +58,29 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load 4h data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 4h EMA for trend
-    ema_4h = calculate_ema(df_4h['close'].values, TREND_EMA_PERIOD)
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate 1d Ichimoku for trend
+    tenkan_1d, kijun_1d, senkou_a_1d, senkou_b_1d, chikou_1d = calculate_ichimoku(
+        df_1d['high'].values, df_1d['low'].values, df_1d['close'].values)
     
-    # Calculate 1h indicators
+    # Align 1d Ichimoku to 6h
+    tenkan_1d_aligned = align_ltf_to_htf(prices, df_1d, tenkan_1d)
+    kijun_1d_aligned = align_ltf_to_htf(prices, df_1d, kijun_1d)
+    senkou_a_1d_aligned = align_ltf_to_htf(prices, df_1d, senkou_a_1d)
+    senkou_b_1d_aligned = align_ltf_to_htf(prices, df_1d, senkou_b_1d)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    rsi = calculate_rsi(close, RSI_PERIOD)
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    tenkan_6h, kijun_6h, _, _, _ = calculate_ichimoku(high, low, close)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -78,11 +89,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(RSI_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(SENKOU_B_PERIOD + KIJUN_PERIOD, TENKAN_PERIOD, KIJUN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if 4h EMA not available
-        if np.isnan(ema_4h_aligned[i]):
+        # Skip if 1d Ichimoku not available
+        if np.isnan(senkou_a_1d_aligned[i]) or np.isnan(senkou_b_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -102,19 +113,23 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
+        volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (4h)
-        uptrend_4h = close[i] > ema_4h_aligned[i]
-        downtrend_4h = close[i] < ema_4h_aligned[i]
+        # 1d Ichimoku trend filter
+        # Price above both Senkou spans = uptrend
+        # Price below both Senkou spans = downtrend
+        # Price between Senkou spans = neutral (no trade)
+        price_above_cloud = close[i] > senkou_a_1d_aligned[i] and close[i] > senkou_b_1d_aligned[i]
+        price_below_cloud = close[i] < senkou_a_1d_aligned[i] and close[i] < senkou_b_1d_aligned[i]
         
-        # RSI reversal conditions
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
+        # 6h Tenkan/Kijun cross for entry
+        tenkan_kijun_cross_up = tenkan_6h[i] > kijun_6h[i] and tenkan_6h[i-1] <= kijun_6h[i-1]
+        tenkan_kijun_cross_down = tenkan_6h[i] < kijun_6h[i] and tenkan_6h[i-1] >= kijun_6h[i-1]
         
         # Entry conditions
-        long_entry = volume_ok and uptrend_4h and rsi_oversold
-        short_entry = volume_ok and downtrend_4h and rsi_overbought
+        long_entry = volume_ok and price_above_cloud and tenkan_kijun_cross_up
+        short_entry = volume_ok and price_below_cloud and tenkan_kijun_cross_down
         
         # Generate signals
         if position == 0:
@@ -136,3 +151,6 @@ def generate_signals(prices):
             signals[i] = -SIGNAL_SIZE
     
     return signals
+
+# Alias for backward compatibility
+align_htf_to_ltf = align_ltf_to_htf
