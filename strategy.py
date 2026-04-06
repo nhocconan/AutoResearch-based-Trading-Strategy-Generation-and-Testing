@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with Volume Confirmation and ADX Trend Filter
+4h Donchian Breakout with Volume Confirmation and 12h ADX Trend Filter
 Hypothesis: Donchian breakouts capture strong momentum moves. Volume confirms institutional participation.
-ADX ensures we only trade in trending markets, avoiding whipsaws in sideways conditions.
+12h ADX ensures we only trade in trending markets, avoiding whipsaws in sideways conditions.
 Works in bull (breakouts above upper band) and bear (breakdowns below lower band).
-Target: 50-100 total trades over 4 years (12-25/year).
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_adx_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_volume_12hadx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,13 +20,13 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load daily data for ADX trend filter (once before loop)
-    df_daily = get_htf_data(prices, '1d')
-    high_daily = df_daily['high'].values
-    low_daily = df_daily['low'].values
-    close_daily = df_daily['close'].values
+    # Load 12h data for ADX trend filter (once before loop)
+    df_12h = get_htf_data(prices, '12h')
+    high_12h = df_12h['high'].values
+    low_12h = df_12h['low'].values
+    close_12h = df_12h['close'].values
     
-    # Daily ADX calculation (14 period)
+    # 12h ADX calculation (14 period)
     def calculate_adx(high, low, close, period=14):
         # True Range
         tr1 = high - low
@@ -59,10 +59,10 @@ def generate_signals(prices):
         
         return adx
     
-    adx_daily = calculate_adx(high_daily, low_daily, close_daily, 14)
-    adx_daily_aligned = align_htf_to_ltf(prices, df_daily, adx_daily)
+    adx_12h = calculate_adx(high_12h, low_12h, close_12h, 14)
+    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -95,7 +95,7 @@ def generate_signals(prices):
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or
-            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(adx_daily_aligned[i])):
+            np.isnan(vol_ma[i]) or np.isnan(atr[i]) or np.isnan(adx_12h_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -103,7 +103,7 @@ def generate_signals(prices):
             continue
         
         # ADX filter: only trade when trending (ADX > 20)
-        trending = adx_daily_aligned[i] > 20
+        trending = adx_12h_aligned[i] > 20
         
         # Check exits
         if position == 1:  # long position
