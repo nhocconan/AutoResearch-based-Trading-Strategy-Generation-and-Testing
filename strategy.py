@@ -1,61 +1,55 @@
 #!/usr/bin/env python3
 """
-6h Weekly Pivot + Volume Confirmation
-Hypothesis: Weekly pivot levels act as strong support/resistance. Price reacting at these levels with volume confirmation provides high-probability entries. Works in both bull and bear markets by fading extremes (R3/S3) and continuing breaks (R4/S4).
-Target: 50-150 total trades over 4 years (12-37/year).
+1d Bollinger Band Mean Reversion + Weekly Trend Filter
+Hypothesis: In ranging markets, price reverts to mean at Bollinger Bands.
+In trending markets (weekly trend), only trade pullbacks in trend direction.
+Exit at mean (BB middle) or stoploss. Works in bull (buy dips) and bear (sell rallies).
+Target: 30-100 total trades over 4 years (7-25/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14347_6h_weekly_pivot_vol_v2"
-timeframe = "6h"
+name = "1d_bb_mean_reversion_weekly_trend_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for pivot calculation (once before loop)
-    df_w = get_htf_data(prices, '1w')
-    high_w = df_w['high'].values
-    low_w = df_w['low'].values
-    close_w = df_w['close'].values
+    # Load weekly data for trend filter (once before loop)
+    df_weekly = get_htf_data(prices, '1w')
+    close_weekly = df_weekly['close'].values
     
-    # Calculate weekly pivot points: P = (H+L+C)/3
-    pivot_w = (high_w + low_w + close_w) / 3.0
-    # Calculate support/resistance levels
-    r1_w = 2 * pivot_w - low_w
-    s1_w = 2 * pivot_w - high_w
-    r2_w = pivot_w + (high_w - low_w)
-    s2_w = pivot_w - (high_w - low_w)
-    r3_w = high_w + 2 * (pivot_w - low_w)
-    s3_w = low_w - 2 * (high_w - pivot_w)
-    r4_w = r3_w + (high_w - low_w)
-    s4_w = s3_w - (high_w - low_w)
+    # Calculate 50-period EMA for weekly trend filter
+    ema_weekly = pd.Series(close_weekly).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
     
-    # Align weekly levels to 6h timeframe
-    pivot_w_a = align_htf_to_ltf(prices, df_w, pivot_w)
-    r1_w_a = align_htf_to_ltf(prices, df_w, r1_w)
-    s1_w_a = align_htf_to_ltf(prices, df_w, s1_w)
-    r2_w_a = align_htf_to_ltf(prices, df_w, r2_w)
-    s2_w_a = align_htf_to_ltf(prices, df_w, s2_w)
-    r3_w_a = align_htf_to_ltf(prices, df_w, r3_w)
-    s3_w_a = align_htf_to_ltf(prices, df_w, s3_w)
-    r4_w_a = align_htf_to_ltf(prices, df_w, r4_w)
-    s4_w_a = align_htf_to_ltf(prices, df_w, s4_w)
-    
-    # 6h data
+    # Daily data
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    # Volume filter: avoid low volume periods
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.2 * vol_ma)  # Require above average volume
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    sma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper = sma + (std * bb_std)
+    lower = sma - (std * bb_std)
+    
+    # Bollinger Band Width for regime filter (low volatility = range)
+    bb_width = (upper - lower) / (sma + 1e-10)
+    # Calculate percentile of BB width over 50 periods to identify ranging markets
+    bb_width_series = pd.Series(bb_width)
+    bb_width_percentile = bb_width_series.rolling(window=50, min_periods=20).apply(
+        lambda x: pd.Series(x).rank(pct=True).iloc[-1] if len(x) > 0 else 0.5, raw=False
+    ).values
+    # Range market: BB width in lower 40th percentile (low volatility)
+    range_filter = bb_width_percentile <= 0.4
     
     # ATR for stoploss
     tr1 = high - low
@@ -70,12 +64,11 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 20
+    start = max(bb_period, 50) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(pivot_w_a[i]) or np.isnan(r3_w_a[i]) or np.isnan(s3_w_a[i]) or \
-           np.isnan(r4_w_a[i]) or np.isnan(s4_w_a[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(ema_weekly_aligned[i]) or np.isnan(sma[i]) or np.isnan(upper[i]) or np.isnan(lower[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -84,41 +77,51 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: stoploss or reversal signal
-            if close[i] <= entry_price - 2.5 * atr[i] or \
-               (close[i] < pivot_w_a[i] and low[i] <= s1_w_a[i]):
+            # Exit: price reaches middle (mean reversion) OR stoploss
+            if close[i] >= sma[i] or close[i] <= entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: stoploss or reversal signal
-            if close[i] >= entry_price + 2.5 * atr[i] or \
-               (close[i] > pivot_w_a[i] and high[i] >= r1_w_a[i]):
+            # Exit: price reaches middle (mean reversion) OR stoploss
+            if close[i] <= sma[i] or close[i] >= entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: fade at R3/S3, break at R4/S4 with volume
-            # Long: price touches/falls below S3 with reversal + volume
-            long_setup = (low[i] <= s3_w_a[i] * 1.001) and (close[i] > s3_w_a[i]) and vol_filter[i]
-            # Short: price touches/rises above R3 with rejection + volume
-            short_setup = (high[i] >= r3_w_a[i] * 0.999) and (close[i] < r3_w_a[i]) and vol_filter[i]
-            # Long breakout: price breaks above R4 with volume
-            long_breakout = (high[i] >= r4_w_a[i] * 0.999) and (close[i] > r4_w_a[i]) and vol_filter[i]
-            # Short breakdown: price breaks below S4 with volume
-            short_breakout = (low[i] <= s4_w_a[i] * 1.001) and (close[i] < s4_w_a[i]) and vol_filter[i]
+            # Look for entries: price at BB extreme + in range market (low volatility)
+            at_upper = close[i] >= upper[i]
+            at_lower = close[i] <= lower[i]
             
-            if long_setup or long_breakout:
-                signals[i] = 0.25
-                position = 1
-                entry_price = close[i]
-            elif short_setup or short_breakout:
-                signals[i] = -0.25
-                position = -1
-                entry_price = close[i]
+            if range_filter[i]:
+                # In ranging market: mean reversion at extremes
+                if at_lower:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close[i]
+                elif at_upper:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close[i]
+                else:
+                    signals[i] = 0.0
             else:
-                signals[i] = 0.0
+                # In trending market: only trade pullbacks in trend direction
+                # Weekly trend up: look for pullbacks to lower BB
+                # Weekly trend down: look for rallies to upper BB
+                weekly_uptrend = close[i] > ema_weekly_aligned[i]
+                if weekly_uptrend and at_lower:
+                    signals[i] = 0.25
+                    position = 1
+                    entry_price = close[i]
+                elif (not weekly_uptrend) and at_upper:
+                    signals[i] = -0.25
+                    position = -1
+                    entry_price = close[i]
+                else:
+                    signals[i] = 0.0
     
     return signals
+</ly>
