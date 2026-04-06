@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12761_4h_donchian20_1d_vol_v1"
-timeframe = "4h"
+name = "exp_12762_12h_donchian20_1d_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.30
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
@@ -42,11 +42,11 @@ def generate_signals(prices):
     # Lower band: lowest low over period
     lower_band = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Align to 4h timeframe
+    # Align to 12h timeframe
     upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
     lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
     
-    # Calculate 4h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
