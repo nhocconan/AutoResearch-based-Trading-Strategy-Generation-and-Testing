@@ -1,37 +1,37 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with 1w Trend Filter and Volume Confirmation
-Hypothesis: Donchian(20) breakouts on daily chart capture strong trends. 1w EMA10 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Designed for low frequency (target: 50-150 trades over 4 years) to minimize fee drag and work in both bull and bear markets.
+4h Donchian(20) breakout with 1d EMA25 filter and volume confirmation.
+Hypothesis: Donchian breakouts capture strong trends. 1d EMA25 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in bull (buy breakouts above) and bear (sell breakouts below). Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_weekly_trend_volume_v7"
-timeframe = "1d"
+name = "4h_donchian20_1d_trend_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1w EMA10 for trend filter
-    close_1w = df_1w['close'].values
-    ema10_1w = pd.Series(close_1w).ewm(span=10, adjust=False, min_periods=10).mean().values
-    ema10_1w_prev = np.roll(ema10_1w, 1)
-    ema10_1w_prev[0] = ema10_1w[0]
-    ema10_rising = ema10_1w > ema10_1w_prev
-    ema10_falling = ema10_1w < ema10_1w_prev
-    ema10_1w_aligned = align_htf_to_ltf(prices, df_1w, ema10_1w)
-    ema10_rising_aligned = align_htf_to_ltf(prices, df_1w, ema10_rising)
-    ema10_falling_aligned = align_htf_to_ltf(prices, df_1w, ema10_falling)
+    # 1d EMA25 for trend filter
+    close_1d = df_1d['close'].values
+    ema25_1d = pd.Series(close_1d).ewm(span=25, adjust=False, min_periods=25).mean().values
+    ema25_1d_prev = np.roll(ema25_1d, 1)
+    ema25_1d_prev[0] = ema25_1d[0]
+    ema25_rising = ema25_1d > ema25_1d_prev
+    ema25_falling = ema25_1d < ema25_1d_prev
+    ema25_1d_aligned = align_htf_to_ltf(prices, df_1d, ema25_1d)
+    ema25_rising_aligned = align_htf_to_ltf(prices, df_1d, ema25_rising)
+    ema25_falling_aligned = align_htf_to_ltf(prices, df_1d, ema25_falling)
     
-    # Daily data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -52,13 +52,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 40  # For EMA10 and Donchian
+    start = 50  # For EMA25 and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(ema10_1w_aligned[i]) or 
-            np.isnan(ema10_rising_aligned[i]) or np.isnan(ema10_falling_aligned[i])):
+            np.isnan(vol_ema[i]) or np.isnan(ema25_1d_aligned[i]) or 
+            np.isnan(ema25_rising_aligned[i]) or np.isnan(ema25_falling_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -87,8 +87,8 @@ def generate_signals(prices):
             bull_breakout = close[i] > highest_high[i]
             bear_breakout = close[i] < lowest_low[i]
             
-            bull_entry = bull_breakout and ema10_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
-            bear_entry = bear_breakout and ema10_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bull_entry = bull_breakout and ema25_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bear_entry = bear_breakout and ema25_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
             
             if bull_entry:
                 signals[i] = 0.25
