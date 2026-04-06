@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
 1d Donchian(20) Breakout + Volume + Weekly ADX Filter
-Hypothesis: On daily timeframe, Donchian breakouts capture multi-week trends in BTC/ETH/SOL.
-Volume confirms institutional participation. Weekly ADX filter ensures we only trade in strong trends.
-Designed for low trade frequency (target: 30-100 total over 4 years) to minimize fee drag.
-Works in both bull (breakouts capture momentum) and bear (short breakdowns) markets.
+Hypothesis: Daily Donchian breakouts capture medium-term trends with institutional participation.
+Weekly ADX filter ensures trading only in trending markets to avoid whipsaws.
+Optimized for 1d timeframe to achieve target trade count of 30-100 total over 4 years.
 """
 
 import numpy as np
@@ -23,7 +22,7 @@ def generate_signals(prices):
     # Load weekly data for ADX (once before loop)
     df_weekly = get_htf_data(prices, '1w')
     
-    # Weekly ADX calculation
+    # ADX calculation on weekly
     high_w = df_weekly['high'].values
     low_w = df_weekly['low'].values
     close_w = df_weekly['close'].values
