@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
-# Long when price breaks above upper Donchian channel during bullish day with volume > 1.3x 20-period average.
-# Short when price breaks below lower Donchian channel during bearish day with volume confirmation.
-# Uses daily trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
-# Target: 75-150 total trades over 4 years (19-38/year) to stay within optimal range.
+# Hypothesis: 6h Camarilla pivot levels from 1d timeframe with volume confirmation.
+# Long when price breaks above R4 level with volume > 1.2x 20-period average.
+# Short when price breaks below S4 level with volume > 1.2x 20-period average.
+# Exit when price crosses back below/above the central pivot (PP) or volume dries up.
+# Uses daily Camarilla levels (calculated from prior day's H/L/C) for institutional support/resistance.
+# Target: 80-180 total trades over 4 years (20-45/year) to stay within optimal range for 6h.
 
-name = "4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "6h_camarilla_pivot_1d_vol_v2"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,22 +25,44 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
-    
-    # Daily trend filter: bullish/bearish day based on close vs open
+    # Get daily data for Camarilla calculation (yesterday's H/L/C)
     df_1d = get_htf_data(prices, '1d')
-    daily_open = df_1d['open'].values
-    daily_close = df_1d['close'].values
-    daily_bullish = daily_close > daily_open  # True for bullish day
-    daily_bearish = daily_close < daily_open   # True for bearish day
-    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
-    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
+    d_high = df_1d['high'].values
+    d_low = df_1d['low'].values
+    d_close = df_1d['close'].values
     
-    # Volume filter: current volume > 1.3x 20-period average
+    # Calculate Camarilla levels for each day (using prior day's data)
+    # R4 = Close + 1.5 * (High - Low)
+    # R3 = Close + 1.1 * (High - Low)
+    # R2 = Close + 0.6 * (High - Low)
+    # R1 = Close + 0.4 * (High - Low)
+    # PP = (High + Low + Close) / 3
+    # S1 = Close - 0.4 * (High - Low)
+    # S2 = Close - 0.6 * (High - Low)
+    # S3 = Close - 1.1 * (High - Low)
+    # S4 = Close - 1.5 * (High - Low)
+    
+    # Shift by 1 to use previous day's data (avoid look-ahead)
+    prev_d_high = np.roll(d_high, 1)
+    prev_d_low = np.roll(d_low, 1)
+    prev_d_close = np.roll(d_close, 1)
+    # First day has no previous data
+    prev_d_high[0] = np.nan
+    prev_d_low[0] = np.nan
+    prev_d_close[0] = np.nan
+    
+    # Calculate levels
+    camarilla_pp = (prev_d_high + prev_d_low + prev_d_close) / 3.0
+    camarilla_range = prev_d_high - prev_d_low
+    camarilla_r4 = prev_d_close + 1.5 * camarilla_range
+    camarilla_s4 = prev_d_close - 1.5 * camarilla_range
+    
+    # Align to 6h timeframe
+    camarilla_pp_aligned = align_htf_to_ltf(prices, df_1d, camarilla_pp)
+    camarilla_r4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_r4)
+    camarilla_s4_aligned = align_htf_to_ltf(prices, df_1d, camarilla_s4)
+    
+    # Volume filter: current volume > 1.2x 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
@@ -47,8 +70,10 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        # Skip if daily trend data not available
-        if np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]):
+        # Skip if Camarilla data not available
+        if (np.isnan(camarilla_pp_aligned[i]) or 
+            np.isnan(camarilla_r4_aligned[i]) or 
+            np.isnan(camarilla_s4_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -56,36 +81,34 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.3
+        volume_filter = volume[i] > vol_ma[i] * 1.2
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price drops below lower Donchian or daily turn bearish
-            if (low[i] <= lower[i] or 
-                daily_bearish_aligned[i]):
+            # Exit: price crosses below pivot OR volume dries up
+            if (close[i] < camarilla_pp_aligned[i] or 
+                not volume_filter):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price rises above upper Donchian or daily turn bullish
-            if (high[i] >= upper[i] or 
-                daily_bullish_aligned[i]):
+            # Exit: price crosses above pivot OR volume dries up
+            if (close[i] > camarilla_pp_aligned[i] or 
+                not volume_filter):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and daily trend filter
+            # Look for entries with volume confirmation
             if volume_filter:
-                # Long: break above upper Donchian during bullish day
-                if (high[i] > upper[i] and 
-                    daily_bullish_aligned[i]):
+                # Long: break above R4 level
+                if high[i] > camarilla_r4_aligned[i]:
                     signals[i] = 0.25
                     position = 1
-                # Short: break below lower Donchian during bearish day
-                elif (low[i] < lower[i] and 
-                      daily_bearish_aligned[i]):
+                # Short: break below S4 level
+                elif low[i] < camarilla_s4_aligned[i]:
                     signals[i] = -0.25
                     position = -1
     
