@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Donchian breakout with daily trend filter and volume confirmation
-# Uses 20-period Donchian channels on 12h timeframe for breakout detection
-# Daily EMA50 for trend filter to align with higher timeframe direction
-# Volume confirmation requires >1.5x 20-period average volume
-# Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag
-# Works in both bull and bear markets by following daily trend
+# Hypothesis: 4-hour Donchian breakout with daily EMA50 trend filter and volume confirmation
+# Uses 20-period Donchian channels for breakout detection, 50-period EMA on daily for trend filter
+# Requires volume > 1.5x 20-period average for confirmation
+# Implements 2x ATR(14) stoploss to manage risk
+# Designed for low trade frequency (target: 75-200 total trades over 4 years) to minimize fee drag
+# Works in both bull and bear markets by following the higher timeframe trend
 
-name = "12h_donchian20_1d_ema50_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema50_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -35,10 +35,10 @@ def generate_signals(prices):
     # EMA50 calculation on 1d
     ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align 1d EMA50 to 12h timeframe
+    # Align 1d EMA50 to 4h timeframe
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
-    # 12h Donchian channels (20-period)
+    # 4h Donchian channels (20-period)
     # Highest high of last 20 periods (excluding current)
     donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().shift(1).values
     # Lowest low of last 20 periods (excluding current)
