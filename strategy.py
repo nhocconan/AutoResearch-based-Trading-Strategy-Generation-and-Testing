@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with volume confirmation and 1d EMA(50) trend filter
-# Enters long when price breaks above 20-period high with volume > 1.5x average and price > 1d EMA(50)
-# Enters short when price breaks below 20-period low with volume > 1.5x average and price < 1d EMA(50)
-# Uses Donchian channels for breakout signals, volume for confirmation, and daily EMA for trend filtering
-# Target: 50-150 trades over 4 years (12-37/year) for 12h timeframe
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation
+# Enter long when: price breaks above Donchian(20) high, price > 1d EMA(50), volume > 1.5x avg
+# Enter short when: price breaks below Donchian(20) low, price < 1d EMA(50), volume > 1.5x avg
+# Exit when: price breaks opposite Donchian band (reverse signal) or opposite extreme
+# Uses daily trend to filter breakouts in weak trends, targeting 75-200 trades over 4 years
 
-name = "12h_donchian20_1dema_vol_filter_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 30:
         return np.zeros(n)
     
     # Price data
@@ -41,7 +41,7 @@ def generate_signals(prices):
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):  # Wait for Donchian to stabilize
+    for i in range(20, n):
         # Skip if required data not available
         if (np.isnan(high_20[i]) or np.isnan(low_20[i]) or 
             np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i])):
@@ -52,21 +52,21 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Exit: price breaks below 20-period low OR price < 1d EMA(50)
-            if close[i] < low_20[i] or close[i] < ema_50_aligned[i]:
+            # Exit: price breaks below Donchian low (reverse signal)
+            if close[i] < low_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above 20-period high OR price > 1d EMA(50)
-            if close[i] > high_20[i] or close[i] > ema_50_aligned[i]:
+            # Exit: price breaks above Donchian high (reverse signal)
+            if close[i] > high_20[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume + trend filter
+            # Look for entries: Donchian breakout + trend filter + volume
             if volume[i] > volume_threshold[i]:
                 if close[i] > high_20[i] and close[i] > ema_50_aligned[i]:
                     # Bullish breakout above 20-period high and above daily EMA
