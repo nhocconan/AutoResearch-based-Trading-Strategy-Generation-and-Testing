@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1d volume confirmation and 1d trend filter (EMA21)
-Hypothesis: Donchian breakouts capture institutional momentum, filtered by daily EMA21 for bias and daily volume for conviction. 
-Works in bull (buy breakouts above daily EMA21) and bear (sell breakdowns below daily EMA21). 
-Target: 50-150 total trades over 4 years (12-37/year).
+12h Donchian(20) breakout with 1d volume confirmation and 1d trend filter
+Hypothesis: Donchian breakouts capture momentum, filtered by daily EMA50 for trend bias and daily volume > 1.5x 20-day average for conviction. Works in bull (buy breakouts above EMA50) and bear (sell breakdowns below EMA50). Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
@@ -38,32 +36,28 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get 1d data for trend filter (EMA21)
+    # Get 1d data for trend filter (EMA50) and volume
     df_1d = get_htf_data(prices, '1d')
     close_1d = df_1d['close'].values
-    
-    # EMA21 on daily close
-    ema_1d = np.full(len(close_1d), np.nan)
-    if len(close_1d) >= 21:
-        ema_1d[20] = np.mean(close_1d[:21])
-        for i in range(21, len(close_1d)):
-            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 19) / 21
-    
-    # Daily trend: above EMA21 = bullish, below = bearish
-    daily_trend = np.where(close_1d > ema_1d, 1, -1)
-    
-    # Align daily trend to 12h timeframe (2 12h bars per day)
-    daily_trend_aligned = align_htf_to_ltf(prices, df_1d, daily_trend)
-    
-    # Get 1d data for volume confirmation
     volume_1d = df_1d['volume'].values
+    
+    # EMA50 on daily close
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_1d[49] = np.mean(close_1d[:50])
+        for i in range(50, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 48) / 50
+    
+    # Daily trend: above EMA50 = bullish, below = bearish
+    daily_trend = np.where(close_1d > ema_1d, 1, -1)
     
     # 20-period average volume on daily
     vol_ma_1d = np.full(len(volume_1d), np.nan)
     for i in range(20, len(volume_1d)):
         vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
     
-    # Align volume MA to 12h timeframe
+    # Align daily trend and volume MA to 12h timeframe
+    daily_trend_aligned = align_htf_to_ltf(prices, df_1d, daily_trend)
     vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     # Donchian channels (20-period) from 12h data
@@ -80,7 +74,7 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 40  # Need enough data for Donchian and alignments
+    start = 50  # Need enough data for Donchian and EMA50
     
     for i in range(start, n):
         # Skip if required data not available
@@ -94,7 +88,7 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 12h volume > 1.5x 12h portion of daily average volume
+        # Volume filter: current 12h volume > 1.5x daily average volume (scaled)
         # Scale daily volume to 12h: approx 1/2 of daily volume (since 2x 12h in 1d)
         vol_threshold = vol_ma_1d_aligned[i] / 2.0 * 1.5
         volume_filter = volume[i] > vol_threshold
@@ -126,8 +120,8 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 4 bars flat (2 days)
-            if bars_since_entry >= 4:
+            # Minimum holding period: only allow new entry after 6 bars flat
+            if bars_since_entry >= 6:
                 # Breakout entries: upper/lower with daily trend
                 bull_breakout = close[i] > upper[i]
                 bear_breakout = close[i] < lower[i]
