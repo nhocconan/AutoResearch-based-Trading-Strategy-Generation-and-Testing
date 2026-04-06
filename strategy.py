@@ -3,39 +3,49 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R(14) with 1d EMA trend filter and volume confirmation.
-# Williams %R identifies overbought/oversold conditions. In strong trends, 
-# pullbacks to extreme levels offer high-probability entries. 
-# 1d EMA filter ensures trades align with higher-timeframe trend.
-# Volume confirmation ensures institutional participation.
-# Works in bull markets (buy oversold in uptrend) and bear markets (sell overbought in downtrend).
-# Target: 75-200 total trades over 4 years (19-50/year).
+# Hypothesis: Daily KAMA direction with weekly RSI filter and volume confirmation.
+# Uses Kaufman Adaptive Moving Average to capture trend direction, filtered by weekly RSI to avoid chop.
+# Volume confirmation ensures institutional participation. Works in bull markets (KAMA up + RSI > 50)
+# and bear markets (KAMA down + RSI < 50). Target: 75-250 total trades over 4 years (19-62/year).
 
-name = "exp_13439_6h_williamsr_1d_ema_vol_v1"
-timeframe = "6h"
+name = "exp_13438_1d_kama_weekly_rsi_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-WILLIAMS_R_PERIOD = 14
-EMA_PERIOD = 21
+KAMA_FAST = 2
+KAMA_SLOW = 30
+RSI_PERIOD = 14
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
-RS_OVERSOLD = -80  # Williams %R oversold level
-RS_OVERBOUGHT = -20  # Williams %R overbought level
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_williams_r(high, low, close, period):
-    """Calculate Williams %R"""
-    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
-    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
-    williams_r = -100 * (highest_high - close) / (highest_high - lowest_low)
-    return williams_r.values
+def calculate_kama(close, fast, slow):
+    """Calculate Kaufman Adaptive Moving Average"""
+    change = np.abs(np.diff(close, prepend=close[0]))
+    volatility = np.abs(np.diff(close)).cumsum()
+    volatility = np.append(0, volatility[1:])
+    er = np.zeros_like(change)
+    er[volatility != 0] = change[volatility != 0] / volatility[volatility != 0]
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_rsi(close, period):
+    """Calculate Relative Strength Index"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = np.divide(avg_gain, avg_loss, out=np.zeros_like(avg_gain), where=avg_loss!=0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -51,22 +61,22 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_weekly = get_htf_data(prices, '1w')
     
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate weekly RSI for trend filter
+    close_weekly = df_weekly['close'].values
+    rsi_weekly = calculate_rsi(close_weekly, RSI_PERIOD)
+    rsi_weekly_aligned = align_htf_to_ltf(prices, df_weekly, rsi_weekly)
     
-    # Calculate 6h indicators
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R
-    williams_r = calculate_williams_r(high, low, close, WILLIAMS_R_PERIOD)
+    # KAMA
+    kama = calculate_kama(close, KAMA_FAST, KAMA_SLOW)
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -80,11 +90,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WILLIAMS_R_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(KAMA_SLOW, RSI_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         # Skip if indicators not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(williams_r[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(rsi_weekly_aligned[i]) or np.isnan(kama[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -104,24 +114,24 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend filter: price above/below 1d EMA
-        uptrend = close[i] > ema_1d_aligned[i]
-        downtrend = close[i] < ema_1d_aligned[i]
+        # KAMA direction
+        kama_up = kama[i] > kama[i-1]
+        kama_down = kama[i] < kama[i-1]
         
-        # Williams %R signals
-        oversold = williams_r[i] <= RS_OVERSOLD
-        overbought = williams_r[i] >= RS_OVERBOUGHT
+        # Weekly RSI filter: >50 for uptrend, <50 for downtrend
+        rsi_bullish = rsi_weekly_aligned[i] > 50
+        rsi_bearish = rsi_weekly_aligned[i] < 50
         
         # Generate signals
         if position == 0:
-            if oversold and uptrend and volume_ok:
+            if volume_ok and kama_up and rsi_bullish:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif overbought and downtrend and volume_ok:
+            elif volume_ok and kama_down and rsi_bearish:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
