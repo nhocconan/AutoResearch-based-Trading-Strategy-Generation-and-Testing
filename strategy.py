@@ -1,66 +1,56 @@
 #!/usr/bin/env python3
 """
-Experiment #11795: 6h Ichimoku Cloud with 1d Kumo Twist and Volume Filter
-Hypothesis: Ichimoku system identifies trend via Kumo (cloud) and momentum via TK cross.
-1d Kumo twist (Senkou A/B cross) filters for major trend changes, while 6h TK cross
-provides timely entries. Volume filter ensures institutional participation.
-Works in bull (TK cross above cloud) and bear (TK cross below cloud) via 1d trend filter.
-Target: 50-150 trades over 4 years.
+Experiment #11799: 6h Williams Alligator + Elder Ray Momentum
+Hypothesis: Williams Alligator (Jaw/Teeth/Lips) identifies trend direction and strength.
+Elder Ray (Bull Power/Bear Power) measures momentum behind the trend.
+Combined, they filter false breakouts in chop while capturing sustained moves.
+Works in bull (Alligator aligned up, Bull Power positive) and bear (aligned down, Bear Power negative).
+Target: 50-150 trades over 4 years. Uses 60-period SMAs for smoother signals.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf  # Note: corrected import
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_11795_6h_ichimoku_kumo_twist_v1"
+name = "exp_11799_6h_williams_alligator_elder_ray_v1"
 timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-TENKAN_PERIOD = 9      # Tenkan-sen (Conversion Line)
-KIJUN_PERIOD = 26      # Kijun-sen (Base Line)
-SENKOU_B_PERIOD = 52   # Senkou Span B
-KUMO_TWIST_LOOKBACK = 26
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+ALLIGATOR_PERIOD = 60  # Base period for smoothed SMAs
+JAW_OFFSET = 3         # Jaw: SMMA(close, 13*8) -> ~624 periods, but we use scaled
+TEETH_OFFSET = 2       # Teeth: SMMA(close, 8*8) -> ~384
+LIPS_OFFSET = 1        # Lips: SMMA(close, 5*8) -> ~240
+ELDER_RAY_PERIOD = 13  # Standard for Elder Ray
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_ichimoku(high, low, close):
-    """Calculate Ichimoku Cloud components"""
-    # Tenkan-sen (Conversion Line): (HH+LL)/2 for past 9 periods
-    tenkan_sen = (pd.Series(high).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
-                  pd.Series(low).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
-    
-    # Kijun-sen (Base Line): (HH+LL)/2 for past 26 periods
-    kijun_sen = (pd.Series(high).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
-                 pd.Series(low).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
-    
-    # Senkou Span A (Leading Span A): (Tenkan + Kijun)/2 shifted 26 periods ahead
-    senkou_a = ((tenkan_sen + kijun_sen) / 2).shift(KIJUN_PERIOD)
-    
-    # Senkou Span B (Leading Span B): (HH+LL)/2 for past 52 periods shifted 26 periods ahead
-    senkou_b = ((pd.Series(high).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
-                 pd.Series(low).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2).shift(KIJUN_PERIOD)
-    
-    # Current Kumo (cloud) - Senkou Span A/B from 26 periods ago
-    senkou_a_current = senkou_a.shift(-KIJUN_PERIOD)
-    senkou_b_current = senkou_b.shift(-KIJUN_PERIOD)
-    
-    return tenkan_sen.values, kijun_sen.values, senkou_a_current.values, senkou_b_current.values
+def smma(source, period):
+    """Smoothed Moving Average (SMMA) - Wilder's smoothing"""
+    return pd.Series(source).ewm(alpha=1/period, adjust=False).mean().values
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_alligator(close, period):
+    """Williams Alligator: Jaw (blue), Teeth (red), Lips (green)"""
+    jaw = smma(close, period * 8)  # 13*8 = 104 smoothed
+    teeth = smma(close, period * 5) # 8*8 = 64 smoothed
+    lips = smma(close, period * 3)  # 5*8 = 40 smoothed
+    return jaw, teeth, lips
+
+def calculate_elder_ray(high, low, close, period):
+    """Elder Ray: Bull Power = High - EMA, Bear Power = Low - EMA"""
+    ema = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+    bull_power = high - ema
+    bear_power = low - ema
+    return bull_power, bear_power
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR"""
+    """ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False).mean().values
     return atr
 
 def generate_signals(prices):
@@ -68,61 +58,18 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
-    
-    # Calculate 1d EMA for trend filter (using close)
-    ema_1d = calculate_ema(df_1d['close'].values, 50)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # Calculate 6h Ichimoku
+    # Calculate indicators
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
     
-    tenkan, kijun, senkou_a, senkou_b = calculate_ichimoku(high, low, close)
+    # Williams Alligator
+    jaw, teeth, lips = calculate_alligator(close, ALLIGATOR_PERIOD)
     
-    # Kumo twist detection on 1d: Senkou A/B cross
-    # We need to detect when Senkou A crosses Senkou B on 1d
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
+    # Elder Ray
+    bull_power, bear_power = calculate_elder_ray(high, low, close, ELDER_RAY_PERIOD)
     
-    # Calculate Ichimoku on 1d for Kumo twist
-    tenkan_1d = (pd.Series(high_1d).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).max() + 
-                 pd.Series(low_1d).rolling(window=TENKAN_PERIOD, min_periods=TENKAN_PERIOD).min()) / 2
-    kijun_1d = (pd.Series(high_1d).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).max() + 
-                pd.Series(low_1d).rolling(window=KIJUN_PERIOD, min_periods=KIJUN_PERIOD).min()) / 2
-    senkou_a_1d = ((tenkan_1d + kijun_1d) / 2).shift(KIJUN_PERIOD)
-    senkou_b_1d = ((pd.Series(high_1d).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).max() + 
-                    pd.Series(low_1d).rolling(window=SENKOU_B_PERIOD, min_periods=SENKOU_B_PERIOD).min()) / 2).shift(KIJUN_PERIOD)
-    
-    # Current Kumo on 1d (shifted back)
-    senkou_a_1d_current = senkou_a_1d.shift(-KIJUN_PERIOD)
-    senkou_b_1d_current = senkou_b_1d.shift(-KIJUN_PERIOD)
-    
-    # Kumo twist: Senkou A crosses Senkou B
-    # Twist up: Senkou A crosses above Senkou B (bullish)
-    # Twist down: Senkou A crosses below Senkou B (bearish)
-    kumo_twist_up = np.zeros(len(df_1d), dtype=bool)
-    kumo_twist_down = np.zeros(len(df_1d), dtype=bool)
-    
-    for i in range(1, len(df_1d)):
-        if not np.isnan(senkou_a_1d_current[i]) and not np.isnan(senkou_b_1d_current[i]):
-            if not np.isnan(senkou_a_1d_current[i-1]) and not np.isnan(senkou_b_1d_current[i-1]):
-                kumo_twist_up[i] = (senkou_a_1d_current[i-1] <= senkou_b_1d_current[i-1] and 
-                                   senkou_a_1d_current[i] > senkou_b_1d_current[i])
-                kumo_twist_down[i] = (senkou_a_1d_current[i-1] >= senkou_b_1d_current[i-1] and 
-                                     senkou_a_1d_current[i] < senkou_b_1d_current[i])
-    
-    # Align Kumo twist to 6h
-    kumo_twist_up_aligned = align_htf_to_ltf(prices, df_1d, kumo_twist_up.astype(float))
-    kumo_twist_down_aligned = align_htf_to_ltf(prices, df_1d, kumo_twist_down.astype(float))
-    
-    # Volume MA
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # ATR
+    # ATR for stops
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -130,12 +77,12 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period
-    start = max(TENKAN_PERIOD, KIJUN_PERIOD, SENKOU_B_PERIOD, VOLUME_MA_PERIOD) + KIJUN_PERIOD + 1
+    # Warmup: need enough data for Alligator
+    start = int(ALLIGATOR_PERIOD * 8) + 10
     
     for i in range(start, n):
-        # Skip if 1d EMA not available
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if indicators not ready
+        if np.isnan(jaw[i]) or np.isnan(teeth[i]) or np.isnan(lips[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -154,34 +101,22 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Ichimoku signals
-        # TK Cross: Tenkan crosses Kijun
-        tk_cross_up = (tenkan[i-1] <= kijun[i-1] and tenkan[i] > kijun[i]) if i > 0 and not np.isnan(tenkan[i-1]) and not np.isnan(kijun[i-1]) and not np.isnan(tenkan[i]) and not np.isnan(kijun[i]) else False
-        tk_cross_down = (tenkan[i-1] >= kijun[i-1] and tenkan[i] < kijun[i]) if i > 0 and not np.isnan(tenkan[i-1]) and not np.isnan(kijun[i-1]) and not np.isnan(tenkan[i]) and not np.isnan(kijun[i]) else False
+        # Alligator alignment: Lips > Teeth > Jaw = uptrend, reverse for downtrend
+        alligator_long = lips[i] > teeth[i] and teeth[i] > jaw[i]
+        alligator_short = lips[i] < teeth[i] and teeth[i] < jaw[i]
         
-        # Price relative to Kumo
-        price_above_kumo = not np.isnan(senkou_a[i]) and not np.isnan(senkou_b[i]) and close[i] > max(senkou_a[i], senkou_b[i])
-        price_below_kumo = not np.isnan(senkou_a[i]) and not np.isnan(senkou_b[i]) and close[i] < min(senkou_a[i], senkou_b[i])
-        
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
-        
-        # Trend filter (1d EMA)
-        uptrend_1d = close[i] > ema_1d_aligned[i]
-        downtrend_1d = close[i] < ema_1d_aligned[i]
-        
-        # Kumo twist filter (1d)
-        twist_up = kumo_twist_up_aligned[i] > 0.5 if not np.isnan(kumo_twist_up_aligned[i]) else False
-        twist_down = kumo_twist_down_aligned[i] > 0.5 if not np.isnan(kumo_twist_down_aligned[i]) else False
+        # Elder Ray confirmation: Bull Power rising, Bear Power falling
+        # Use current vs previous to check momentum
+        if i > 0:
+            bull_power_rising = bull_power[i] > bull_power[i-1]
+            bear_power_falling = bear_power[i] < bear_power[i-1]
+        else:
+            bull_power_rising = False
+            bear_power_falling = False
         
         # Entry conditions
-        # Long: TK cross up + price above Kumo + volume + uptrend 1d + no recent twist down
-        long_entry = (tk_cross_up and price_above_kumo and volume_ok and uptrend_1d and 
-                     not twist_down)
-        
-        # Short: TK cross down + price below Kumo + volume + downtrend 1d + no recent twist up
-        short_entry = (tk_cross_down and price_below_kumo and volume_ok and downtrend_1d and 
-                      not twist_up)
+        long_entry = alligator_long and bull_power_rising and (bull_power[i] > 0)
+        short_entry = alligator_short and bear_power_falling and (bear_power[i] < 0)
         
         # Generate signals
         if position == 0:
