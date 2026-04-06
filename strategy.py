@@ -1,29 +1,21 @@
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
+# 1h strategy for BTC/ETH/SOL USDT-M perpetual futures
+# Combines 1d Supertrend trend filter with 1h RSI mean reversion entries
+# Trend filter reduces false signals in ranging markets, RSI provides entry timing
+# Target: 100-200 total trades over 4 years (25-50/year) to balance frequency and cost
+# Works in bull/bear: Supertrend adapts to volatility, RSI mean reversion works in both regimes
 
-# Hypothesis: 1h trend following with 4h/1d EMA alignment and volume confirmation
-# Uses 4h EMA for trend direction, 1d EMA for stronger trend filter, and volume spike for entry confirmation
-# Works in bull/bear because trend following captures sustained moves, volume filters false breakouts,
-# and multi-timeframe alignment reduces whipsaws. Target: 60-150 total trades over 4 years (15-37/year).
-
-name = "exp_12994_1h_ema_trend_volume_v1"
+name = "exp_12994_1h_supertrend_rsi_v1"
 timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-EMA_FAST_PERIOD = 9
-EMA_SLOW_PERIOD = 21
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.20
+SUPERTREND_PERIOD = 10
+SUPERTREND_MULTIPLIER = 3.0
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -34,91 +26,147 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_supertrend(high, low, close, period, multiplier):
+    """Calculate Supertrend indicator"""
+    atr = calculate_atr(high, low, close, period)
+    
+    # Basic bands
+    basic_upper = (high + low) / 2 + multiplier * atr
+    basic_lower = (high + low) / 2 - multiplier * atr
+    
+    # Final bands
+    final_upper = np.zeros_like(close)
+    final_lower = np.zeros_like(close)
+    
+    for i in range(len(close)):
+        if i == 0:
+            final_upper[i] = basic_upper[i]
+            final_lower[i] = basic_lower[i]
+        else:
+            if basic_upper[i] < final_upper[i-1] or close[i-1] > final_upper[i-1]:
+                final_upper[i] = basic_upper[i]
+            else:
+                final_upper[i] = final_upper[i-1]
+                
+            if basic_lower[i] > final_lower[i-1] or close[i-1] < final_lower[i-1]:
+                final_lower[i] = basic_lower[i]
+            else:
+                final_lower[i] = final_lower[i-1]
+    
+    # Supertrend
+    supertrend = np.zeros_like(close)
+    direction = np.ones_like(close)  # 1 for uptrend, -1 for downtrend
+    
+    for i in range(len(close)):
+        if i == 0:
+            supertrend[i] = final_lower[i]
+            direction[i] = 1
+        else:
+            if supertrend[i-1] == final_upper[i-1]:
+                if close[i] <= final_upper[i]:
+                    supertrend[i] = final_lower[i]
+                    direction[i] = -1
+                else:
+                    supertrend[i] = final_upper[i]
+                    direction[i] = 1
+            else:
+                if close[i] >= final_lower[i]:
+                    supertrend[i] = final_upper[i]
+                    direction[i] = 1
+                else:
+                    supertrend[i] = final_lower[i]
+                    direction[i] = -1
+    
+    return supertrend, direction
+
+def calculate_rsi(close, period):
+    """Calculate RSI"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate EMAs on higher timeframes
-    close_4h = df_4h['close'].values
-    close_1d = df_1d['close'].values
+    # Calculate daily Supertrend
+    high_d = df_daily['high'].values
+    low_d = df_daily['low'].values
+    close_d = df_daily['close'].values
     
-    ema_4h_fast = calculate_ema(close_4h, EMA_FAST_PERIOD)
-    ema_4h_slow = calculate_ema(close_4h, EMA_SLOW_PERIOD)
-    ema_1d_slow = calculate_ema(close_1d, EMA_SLOW_PERIOD)
+    supertrend_d, direction_d = calculate_supertrend(high_d, low_d, close_d, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER)
     
-    # Align to 1h timeframe
-    ema_4h_fast_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_fast)
-    ema_4h_slow_aligned = align_htf_to_ltf(prices, df_4h, ema_4h_slow)
-    ema_1d_slow_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_slow)
+    # Align Supertrend to hourly
+    supertrend_aligned = align_htf_to_ltf(prices, df_daily, supertrend_d)
+    direction_aligned = align_htf_to_ltf(prices, df_daily, direction_d)
     
-    # Calculate 1h indicators
+    # Calculate hourly indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    atr = calculate_atr(high, low, close, ATR_PERIOD)
+    rsi = calculate_rsi(close, RSI_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
-    stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_SLOW_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(SUPERTREND_PERIOD, RSI_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA data not available
-        if np.isnan(ema_4h_fast_aligned[i]) or np.isnan(ema_4h_slow_aligned[i]) or np.isnan(ema_1d_slow_aligned[i]):
+        # Skip if Supertrend not available
+        if np.isnan(supertrend_aligned[i]) or np.isnan(direction_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
         
-        # Check stoploss
+        # Exit conditions
         if position == 1:  # long position
-            if close[i] <= stop_price:
+            # Exit on RSI overbought or trend change
+            if rsi[i] >= RSI_OVERBOUGHT or direction_aligned[i] == -1:
                 signals[i] = 0.0
                 position = 0
                 continue
+            else:
+                signals[i] = SIGNAL_SIZE
+                
         elif position == -1:  # short position
-            if close[i] >= stop_price:
+            # Exit on RSI oversold or trend change
+            if rsi[i] <= RSI_OVERSOLD or direction_aligned[i] == 1:
                 signals[i] = 0.0
                 position = 0
                 continue
-        
-        # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
-        
-        # Trend conditions: 4h fast > slow AND 1d > 4h slow (strong uptrend)
-        # Or: 4h fast < slow AND 1d < 4h slow (strong downtrend)
-        uptrend = ema_4h_fast_aligned[i] > ema_4h_slow_aligned[i] and ema_1d_slow_aligned[i] > ema_4h_slow_aligned[i]
-        downtrend = ema_4h_fast_aligned[i] < ema_4h_slow_aligned[i] and ema_1d_slow_aligned[i] < ema_4h_slow_aligned[i]
-        
-        # Generate signals
-        if position == 0:
-            if uptrend and volume_ok:
+            else:
+                signals[i] = -SIGNAL_SIZE
+                
+        else:  # flat position
+            # Entry conditions
+            if direction_aligned[i] == 1 and rsi[i] <= RSI_OVERSOLD:
+                # Long: uptrend + oversold
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif downtrend and volume_ok:
+            elif direction_aligned[i] == -1 and rsi[i] >= RSI_OVERBOUGHT:
+                # Short: downtrend + overbought
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
-        elif position == 1:
-            signals[i] = SIGNAL_SIZE
-        elif position == -1:
-            signals[i] = -SIGNAL_SIZE
     
     return signals
