@@ -1,31 +1,24 @@
-# 1d/1w Trend Following with Weekly EMA Trend Filter and Daily Momentum Confirmation
-# Uses weekly EMA to establish trend direction, daily EMA for momentum confirmation
-# Volume filter ensures trades occur with conviction
-# Aims for 50-150 total trades over 4 years (12-38/year) to minimize fee drag
-# Works in bull markets (trend following) and bear markets (counter-trend bounces at key levels)
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12890_1d_weekly_ema_trend_daily_momentum_v1"
-timeframe = "1d"
+# Hypothesis: 6h Donchian(20) breakout with 1d trend filter (EMA50) and volume confirmation
+# Works in bull/bear because breakouts capture strong moves, EMA50 filters counter-trend noise,
+# and volume ensures institutional participation. Target: 80-120 total trades over 4 years.
+
+name = "exp_12891_6h_donchian20_1d_ema50_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-WEEKLY_EMA_PERIOD = 21
-DAILY_EMA_FAST = 9
-DAILY_EMA_SLOW = 21
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
-
-def calculate_ema(close, period):
-    """Calculate EMA with proper Wilder's smoothing"""
-    return pd.Series(close).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -36,30 +29,42 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_daily = get_htf_data(prices, '1d')
     
-    # Calculate weekly EMA for trend direction
-    weekly_close = df_weekly['close'].values
-    weekly_ema = calculate_ema(weekly_close, WEEKLY_EMA_PERIOD)
+    # Calculate daily EMA50 for trend filter
+    close_d = df_daily['close'].values
+    ema50_d = calculate_ema(close_d, EMA_PERIOD)
+    ema50_aligned = align_htf_to_ltf(prices, df_daily, ema50_d)
     
-    # Align weekly EMA to daily timeframe
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_weekly, weekly_ema)
-    
-    # Calculate daily indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    daily_ema_fast = calculate_ema(close, DAILY_EMA_FAST)
-    daily_ema_slow = calculate_ema(close, DAILY_EMA_SLOW)
+    # Donchian channels
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    
+    # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    
+    # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
     signals = np.zeros(n)
@@ -68,11 +73,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(WEEKLY_EMA_PERIOD, DAILY_EMA_SLOW, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(weekly_ema_aligned[i]):
+        # Skip if EMA50 not available
+        if np.isnan(ema50_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -94,28 +99,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Daily EMA crossover for momentum
-        ema_bullish = daily_ema_fast[i] > daily_ema_slow[i]
-        ema_bearish = daily_ema_fast[i] < daily_ema_slow[i]
+        # Trend filter: price above/below daily EMA50
+        uptrend = close[i] > ema50_aligned[i]
+        downtrend = close[i] < ema50_aligned[i]
         
-        # Trend filter: weekly EMA slope
-        if i > 1:
-            weekly_ema_rising = weekly_ema_aligned[i] > weekly_ema_aligned[i-1]
-            weekly_ema_falling = weekly_ema_aligned[i] < weekly_ema_aligned[i-1]
-        else:
-            weekly_ema_rising = False
-            weekly_ema_falling = False
+        # Breakout conditions with trend filter
+        breakout_long = volume_ok and uptrend and close[i] >= upper[i]
+        breakout_short = volume_ok and downtrend and close[i] <= lower[i]
         
         # Generate signals
         if position == 0:
-            # Long: weekly uptrend + daily bullish momentum + volume
-            if weekly_ema_rising and ema_bullish and volume_ok:
+            if breakout_long:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            # Short: weekly downtrend + daily bearish momentum + volume
-            elif weekly_ema_falling and ema_bearish and volume_ok:
+            elif breakout_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -123,10 +122,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Stay long until stop
             signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Stay short until stop
             signals[i] = -SIGNAL_SIZE
     
     return signals
