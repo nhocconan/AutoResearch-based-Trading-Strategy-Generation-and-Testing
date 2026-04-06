@@ -3,17 +3,29 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12710_1d_1w_donchian20_volume_v1"
-timeframe = "1d"
+name = "exp_12711_6d_trix_volume_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+Trix_PERIOD = 9
+Trix_SIGNAL_PERIOD = 21
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+CHOP_PERIOD = 14
+CHOP_THRESHOLD = 61.8  # >61.8 = ranging, <38.2 = trending
+
+def calculate_trix(close, period):
+    """Calculate TRIX: triple EMA of % change"""
+    ema1 = pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean()
+    ema2 = ema1.ewm(span=period, adjust=False, min_periods=period).mean()
+    ema3 = ema2.ewm(span=period, adjust=False, min_periods=period).mean()
+    pct_change = ema3.pct_change()
+    trix = pct_change.ewm(span=Trix_SIGNAL_PERIOD, adjust=False, min_periods=Trix_SIGNAL_PERIOD).mean() * 100
+    return trix.values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -24,29 +36,34 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channel"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_chop(high, low, close, period):
+    """Calculate Choppiness Index"""
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    atr_sum = pd.Series(tr).rolling(window=period, min_periods=period).sum()
+    highest_high = pd.Series(high).rolling(window=period, min_periods=period).max()
+    lowest_low = pd.Series(low).rolling(window=period, min_periods=period).min()
+    chop = 100 * np.log10(atr_sum / (highest_high - lowest_low)) / np.log10(period)
+    return chop.values
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load daily data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate weekly trend using EMA(50)
-    close_1w = df_1w['close'].values
-    ema_50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
-    trend_up = ema_50_1w > np.roll(ema_50_1w, 1)  # EMA rising
+    # Calculate daily TRIX
+    close_1d = df_1d['close'].values
+    trix_1d = calculate_trix(close_1d, Trix_PERIOD)
     
-    # Align weekly trend to daily timeframe
-    trend_up_aligned = align_htf_to_ltf(prices, df_1w, trend_up)
+    # Align TRIX to 6h timeframe
+    trix_1d_aligned = align_htf_to_ltf(prices, df_1d, trix_1d)
     
-    # Calculate daily indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -54,7 +71,7 @@ def generate_signals(prices):
     
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    chop = calculate_chop(high, low, close, CHOP_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -62,11 +79,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, Trix_PERIOD + Trix_SIGNAL_PERIOD, CHOP_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly trend not available
-        if np.isnan(trend_up_aligned[i]):
+        # Skip if TRIX not available
+        if np.isnan(trix_1d_aligned[i]) or np.isnan(chop[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -88,18 +105,42 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Donchian breakout with weekly trend filter
-        breakout_long = volume_ok and close[i] >= donchian_upper[i-1] and trend_up_aligned[i]
-        breakout_short = volume_ok and close[i] <= donchian_lower[i-1] and not trend_up_aligned[i]
+        # TRIX momentum + Chop regime filter
+        # In ranging markets (CHOP > 61.8): fade TRIX extremes
+        # In trending markets (CHOP < 38.2): follow TRIX direction
+        trix = trix_1d_aligned[i]
+        ranging = chop[i] > CHOP_THRESHOLD
+        trending = chop[i] < (100 - CHOP_THRESHOLD)  # 38.2
+        
+        # Fade signals in ranging market: sell high TRIX, buy low TRIX
+        fade_long = volume_ok and ranging and trix < -0.5
+        fade_short = volume_ok and ranging and trix > 0.5
+        
+        # Trend signals in trending market: buy rising TRIX, sell falling TRIX
+        # Need previous TRIX to check direction
+        if i > start:
+            prev_trix = trix_1d_aligned[i-1]
+            trix_rising = trix > prev_trix
+            trix_falling = trix < prev_trix
+        else:
+            trix_rising = False
+            trix_falling = False
+            
+        trend_long = volume_ok and trending and trix_rising and trix > 0
+        trend_short = volume_ok and trending and trix_falling and trix < 0
+        
+        # Entry conditions
+        long_entry = fade_long or trend_long
+        short_entry = fade_short or trend_short
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_short:
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
