@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with 1d volume confirmation and 1w trend filter.
-# Long when price breaks above Donchian(20) high with daily volume > 1.5x weekly average.
-# Short when price breaks below Donchian(20) low with daily volume > 1.5x weekly average.
-# Weekly trend filter: only trade long when price > weekly EMA(50), short when < weekly EMA(50).
-# Target: 50-150 total trades over 4 years (12-37/year) to stay within optimal range.
-# Uses 12h timeframe for lower frequency, daily volume for confirmation, weekly EMA for trend filter.
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel during bullish 12h period with volume > 1.5x 20-period average.
+# Short when price breaks below lower Donchian channel during bearish 12h period with volume confirmation.
+# Uses 12-hour trend filter to avoid counter-trend trades and reduce whipsaw.
+# Target: 75-200 total trades over 4 years (19-50/year) to stay within optimal range.
 
-name = "12h_donchian20_1d_vol_1w_ema_v1"
-timeframe = "12h"
+name = "4h_donchian20_12h_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,75 +18,75 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Price data
+    # Price and volume data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 12h Donchian channels (20-period)
+    # Donchian channel (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    donchian_high = high_series.rolling(window=20, min_periods=20).max()
-    donchian_low = low_series.rolling(window=20, min_periods=20).min()
+    upper = high_series.rolling(window=20, min_periods=20).max().values
+    lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # 1d volume average (daily volume, then average)
-    df_1d = get_htf_data(prices, '1d')
-    daily_volume = df_1d['volume'].values
-    daily_vol_ma = pd.Series(daily_volume).rolling(window=20, min_periods=20).mean().values
-    daily_vol_ma_aligned = align_htf_to_ltf(prices, df_1d, daily_vol_ma)
+    # 12-hour trend filter: bullish/bearish based on close vs open
+    df_12h = get_htf_data(prices, '12h')
+    open_12h = df_12h['open'].values
+    close_12h = df_12h['close'].values
+    bullish_12h = close_12h > open_12h  # True for bullish 12h period
+    bearish_12h = close_12h < open_12h   # True for bearish 12h period
+    bullish_12h_aligned = align_htf_to_ltf(prices, df_12h, bullish_12h)
+    bearish_12h_aligned = align_htf_to_ltf(prices, df_12h, bearish_12h)
     
-    # 1w EMA trend filter (50-period)
-    df_1w = get_htf_data(prices, '1w')
-    weekly_close = df_1w['close'].values
-    weekly_ema = pd.Series(weekly_close).ewm(span=50, adjust=False).mean().values
-    weekly_ema_aligned = align_htf_to_ltf(prices, df_1w, weekly_ema)
+    # Volume filter: current volume > 1.5x 20-period average
+    volume_series = pd.Series(volume)
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
     for i in range(20, n):
-        # Skip if weekly trend data not available
-        if np.isnan(weekly_ema_aligned[i]):
+        # Skip if 12h trend data not available
+        if np.isnan(bullish_12h_aligned[i]) or np.isnan(bearish_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: reverse signal or stoploss via signal change
+        # Volume condition
+        volume_filter = volume[i] > vol_ma[i] * 1.5
+        
+        # Check exits
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low or weekly trend turns bearish
-            if (close[i] < donchian_low[i] or 
-                close[i] < weekly_ema_aligned[i]):
+            # Exit: price drops below lower Donchian or 12h turn bearish
+            if (low[i] <= lower[i] or 
+                bearish_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high or weekly trend turns bullish
-            if (close[i] > donchian_high[i] or 
-                close[i] > weekly_ema_aligned[i]):
+            # Exit: price rises above upper Donchian or 12h turn bullish
+            if (high[i] >= upper[i] or 
+                bullish_12h_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Check for entries with volume confirmation
-            # Volume condition: daily volume > 1.5x weekly average volume
-            vol_condition = volume[i] > 1.5 * daily_vol_ma_aligned[i]
-            
-            # Long: price breaks above Donchian high with volume confirmation and bullish weekly trend
-            if (close[i] > donchian_high[i] and 
-                vol_condition and 
-                close[i] > weekly_ema_aligned[i]):
-                signals[i] = 0.25
-                position = 1
-            # Short: price breaks below Donchian low with volume confirmation and bearish weekly trend
-            elif (close[i] < donchian_low[i] and 
-                  vol_condition and 
-                  close[i] < weekly_ema_aligned[i]):
-                signals[i] = -0.25
-                position = -1
+            # Look for entries with volume confirmation and 12h trend filter
+            if volume_filter:
+                # Long: break above upper Donchian during bullish 12h period
+                if (high[i] > upper[i] and 
+                    bullish_12h_aligned[i]):
+                    signals[i] = 0.25
+                    position = 1
+                # Short: break below lower Donchian during bearish 12h period
+                elif (low[i] < lower[i] and 
+                      bearish_12h_aligned[i]):
+                    signals[i] = -0.25
+                    position = -1
     
     return signals
