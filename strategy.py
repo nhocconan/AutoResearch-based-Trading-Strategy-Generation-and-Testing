@@ -3,18 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12868_12h_donchian20_1d_vol_v1"
-timeframe = "12h"
+name = "exp_12869_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 24
+EMA_FAST_PERIOD = 21
+EMA_SLOW_PERIOD = 55
+VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 20  # Max 10 days (20 * 12h)
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -25,6 +26,10 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+
 def calculate_donchian(high, low, period):
     """Calculate Donchian channels"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
@@ -33,28 +38,28 @@ def calculate_donchian(high, low, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_daily = get_htf_data(prices, '1d')
+    # Load 1d data ONCE before loop
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Donchian channels
-    high_d = df_daily['high'].values
-    low_d = df_daily['low'].values
-    close_d = df_daily['close'].values
-    upper_d, lower_d = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
+    # Calculate 1d EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_fast_1d = calculate_ema(close_1d, EMA_FAST_PERIOD)
+    ema_slow_1d = calculate_ema(close_1d, EMA_SLOW_PERIOD)
+    ema_trend_1d = ema_fast_1d - ema_slow_1d  # Positive = uptrend
     
-    # Align to 12h timeframe
-    upper_aligned = align_htf_to_ltf(prices, df_daily, upper_d)
-    lower_aligned = align_htf_to_ltf(prices, df_daily, lower_d)
+    # Align EMA trend to 4h
+    ema_trend_aligned = align_htf_to_ltf(prices, df_1d, ema_trend_1d)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -65,13 +70,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_SLOW_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if Donchian levels not available
-        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
+        # Skip if EMA trend not available
+        if np.isnan(ema_trend_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -92,19 +97,12 @@ def generate_signals(prices):
                 bars_since_entry = 0
                 continue
         
-        # Time-based exit to prevent overtrading
-        if bars_since_entry >= MAX_HOLD_BARS:
-            signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
-            continue
-        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above upper or below lower Donchian
-        breakout_long = volume_ok and close[i] >= upper_aligned[i]
-        breakout_short = volume_ok and close[i] <= lower_aligned[i]
+        # Donchian breakout with EMA trend filter
+        breakout_long = volume_ok and close[i] >= donchian_upper[i] and ema_trend_aligned[i] > 0
+        breakout_short = volume_ok and close[i] <= donchian_lower[i] and ema_trend_aligned[i] < 0
         
         # Generate signals
         if position == 0:
