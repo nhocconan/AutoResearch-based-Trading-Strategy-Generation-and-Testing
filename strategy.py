@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
 """
-6h Weekly Pivot Point + Volume Confirmation Strategy
-Hypothesis: Weekly pivot points (PP, R1, S1, R2, S2) act as strong support/resistance levels. 
-Price rejecting S1/R1 with volume confirmation indicates institutional interest. 
-In bull market: buy near S1/S2 with bullish weekly candle. 
-In bear market: sell near R1/R2 with bearish weekly candle.
-Uses weekly pivot from previous week (no look-ahead) and 6h volume spike for confirmation.
-Target: 60-120 total trades over 4 years (15-30/year).
+12h Donchian(20) breakout with 1d volume confirmation and 1d trend filter (EMA21)
+Hypothesis: Donchian breakouts capture institutional momentum, filtered by daily EMA21 for bias and daily volume for conviction. 
+Works in bull (buy breakouts above daily EMA21) and bear (sell breakdowns below daily EMA21). 
+Target: 50-150 total trades over 4 years (12-37/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_weeklypivot_volume_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -28,7 +25,7 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 14-period ATR for stoploss
+    # 14-period ATR
     atr = np.full(n, np.nan)
     if n >= 14:
         tr = np.maximum(
@@ -41,45 +38,41 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Get weekly OHLC for pivot calculation (previous week's data)
-    df_weekly = get_htf_data(prices, '1w')
-    weekly_high = df_weekly['high'].values
-    weekly_low = df_weekly['low'].values
-    weekly_close = df_weekly['close'].values
-    weekly_open = df_weekly['open'].values
+    # Get 1d data for trend filter (EMA21)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate weekly pivot points: PP = (H + L + C)/3
-    # R1 = 2*PP - L, S1 = 2*PP - H
-    # R2 = PP + (H - L), S2 = PP - (H - L)
-    pp = np.full(len(weekly_close), np.nan)
-    r1 = np.full(len(weekly_close), np.nan)
-    s1 = np.full(len(weekly_close), np.nan)
-    r2 = np.full(len(weekly_close), np.nan)
-    s2 = np.full(len(weekly_close), np.nan)
+    # EMA21 on daily close
+    ema_1d = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 21:
+        ema_1d[20] = np.mean(close_1d[:21])
+        for i in range(21, len(close_1d)):
+            ema_1d[i] = (close_1d[i] * 2 + ema_1d[i-1] * 19) / 21
     
-    for i in range(len(weekly_close)):
-        if not (np.isnan(weekly_high[i]) or np.isnan(weekly_low[i]) or np.isnan(weekly_close[i])):
-            pp[i] = (weekly_high[i] + weekly_low[i] + weekly_close[i]) / 3.0
-            r1[i] = 2 * pp[i] - weekly_low[i]
-            s1[i] = 2 * pp[i] - weekly_high[i]
-            r2[i] = pp[i] + (weekly_high[i] - weekly_low[i])
-            s2[i] = pp[i] - (weekly_high[i] - weekly_low[i])
+    # Daily trend: above EMA21 = bullish, below = bearish
+    daily_trend = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align weekly pivot levels to 6h timeframe (use previous week's values)
-    pp_aligned = align_htf_to_ltf(prices, df_weekly, pp)
-    r1_aligned = align_htf_to_ltf(prices, df_weekly, r1)
-    s1_aligned = align_htf_to_ltf(prices, df_weekly, s1)
-    r2_aligned = align_htf_to_ltf(prices, df_weekly, r2)
-    s2_aligned = align_htf_to_ltf(prices, df_weekly, s2)
+    # Align daily trend to 12h timeframe (2 12h bars per day)
+    daily_trend_aligned = align_htf_to_ltf(prices, df_1d, daily_trend)
     
-    # Weekly candle direction (bullish/bearish) from previous week
-    weekly_bullish = np.where(weekly_close > weekly_open, 1, -1)
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_weekly, weekly_bullish)
+    # Get 1d data for volume confirmation
+    volume_1d = df_1d['volume'].values
     
-    # 20-period average volume on 6h data
-    vol_ma = np.full(n, np.nan)
+    # 20-period average volume on daily
+    vol_ma_1d = np.full(len(volume_1d), np.nan)
+    for i in range(20, len(volume_1d)):
+        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    
+    # Align volume MA to 12h timeframe
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    
+    # Donchian channels (20-period) from 12h data
+    upper = np.full(n, np.nan)
+    lower = np.full(n, np.nan)
+    
     for i in range(20, n):
-        vol_ma[i] = np.mean(volume[i-20:i])
+        upper[i] = np.max(high[i-20:i])
+        lower[i] = np.min(low[i-20:i])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -87,13 +80,13 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 40  # Need enough data for calculations
+    start = 40  # Need enough data for Donchian and alignments
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(atr[i]) or np.isnan(pp_aligned[i]) or np.isnan(r1_aligned[i]) or 
-            np.isnan(s1_aligned[i]) or np.isnan(r2_aligned[i]) or np.isnan(s2_aligned[i]) or
-            np.isnan(weekly_bullish_aligned[i]) or np.isnan(vol_ma[i])):
+        if (np.isnan(atr[i]) or np.isnan(daily_trend_aligned[i]) or 
+            np.isnan(upper[i]) or np.isnan(lower[i]) or
+            np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -101,22 +94,17 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current volume > 1.8x average volume
-        volume_filter = volume[i] > vol_ma[i] * 1.8
-        
-        # Price levels
-        pp_level = pp_aligned[i]
-        r1_level = r1_aligned[i]
-        s1_level = s1_aligned[i]
-        r2_level = r2_aligned[i]
-        s2_level = s2_aligned[i]
+        # Volume filter: current 12h volume > 1.5x 12h portion of daily average volume
+        # Scale daily volume to 12h: approx 1/2 of daily volume (since 2x 12h in 1d)
+        vol_threshold = vol_ma_1d_aligned[i] / 2.0 * 1.5
+        volume_filter = volume[i] > vol_threshold
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price falls below S1 OR weekly turns bearish
+            # Exit: price breaks below lower Donchian OR against daily trend
             # Stoploss: price drops 2*ATR below entry
-            if (close[i] < s1_level or
-                weekly_bullish_aligned[i] == -1 or
+            if (close[i] < lower[i] or
+                daily_trend_aligned[i] == -1 or
                 close[i] < entry_price - 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -125,10 +113,10 @@ def generate_signals(prices):
                 signals[i] = 0.25
             bars_since_entry += 1
         elif position == -1:  # short position
-            # Exit: price rises above R1 OR weekly turns bullish
+            # Exit: price breaks above upper Donchian OR against daily trend
             # Stoploss: price rises 2*ATR above entry
-            if (close[i] > r1_level or
-                weekly_bullish_aligned[i] == 1 or
+            if (close[i] > upper[i] or
+                daily_trend_aligned[i] == 1 or
                 close[i] > entry_price + 2.0 * atr[i]):
                 signals[i] = 0.0
                 position = 0
@@ -138,26 +126,20 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 12 bars flat
-            if bars_since_entry >= 12:
-                # Long setup: price near S1/S2 with bullish weekly candle + volume
-                near_s1 = abs(close[i] - s1_level) < (pp_level - s1_level) * 0.3
-                near_s2 = abs(close[i] - s2_level) < (pp_level - s2_level) * 0.3
-                near_support = near_s1 or near_s2
+            # Minimum holding period: only allow new entry after 4 bars flat (2 days)
+            if bars_since_entry >= 4:
+                # Breakout entries: upper/lower with daily trend
+                bull_breakout = close[i] > upper[i]
+                bear_breakout = close[i] < lower[i]
                 
-                # Short setup: price near R1/R2 with bearish weekly candle + volume
-                near_r1 = abs(close[i] - r1_level) < (r1_level - pp_level) * 0.3
-                near_r2 = abs(close[i] - r2_level) < (r2_level - pp_level) * 0.3
-                near_resistance = near_r1 or near_r2
-                
-                # Long: near support with bullish weekly + volume
-                if near_support and weekly_bullish_aligned[i] == 1 and volume_filter:
+                # Long: breakout above upper with bullish daily trend + volume
+                if bull_breakout and daily_trend_aligned[i] == 1 and volume_filter:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
                     bars_since_entry = 0
-                # Short: near resistance with bearish weekly + volume
-                elif near_resistance and weekly_bullish_aligned[i] == -1 and volume_filter:
+                # Short: breakdown below lower with bearish daily trend + volume
+                elif bear_breakout and daily_trend_aligned[i] == -1 and volume_filter:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
