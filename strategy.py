@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA(20) trend filter and volume confirmation.
+# Hypothesis: 4-hour Donchian(20) breakout with 12-hour EMA(50) trend filter and volume confirmation.
 # Uses 12h trend to capture medium-term trend while using 4h breakouts for entries.
-# Volume confirmation ensures institutional participation. Target: 75-200 total trades over 4 years.
+# Volume confirmation ensures institutional participation. Target: 100-150 total trades over 4 years.
 # Works in bull markets (breakouts with volume) and bear markets (shorts on breakdowns with volume).
 
 name = "exp_13693_4h_donchian20_12h_ema_vol_v1"
@@ -14,7 +14,7 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 20
+TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 10
 VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
