@@ -3,24 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour strategy using 1d Donchian(20) breakouts with 1w EMA(50) trend filter and volume confirmation.
-# Uses 1w trend for direction (bull/bear filter), 1d Donchian breakouts for entries, volume for confirmation.
-# Designed for ~100-150 total trades over 4 years (25-38/year) to avoid excessive fees.
+# Hypothesis: 12-hour strategy using 1-day Donchian(20) breakouts with 1-week EMA(50) trend filter and volume confirmation.
+# Uses 1w trend for direction, 1d Donchian breakouts for entries, volume for confirmation.
+# Designed for ~100-180 total trades over 4 years (25-45/year) to avoid excessive fees.
 # Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
-# Target: 100-200 total trades, 0.25 position size, max DD < -50%.
+# Target: 100-180 total trades, 0.25 position size, max DD < -50%.
 
-name = "exp_13741_4h_donchian20_1w_ema_vol_v1"
-timeframe = "4h"
+name = "exp_13742_12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters - tuned for moderate trade frequency
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
-VOLUME_MA_PERIOD = 8
-VOLUME_THRESHOLD = 1.5
+VOLUME_MA_PERIOD = 10
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -38,7 +38,7 @@ def calculate_ema(close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 100:
         return np.zeros(n)
     
     # Load 1d and 1w data for filters ONCE before loop
@@ -56,7 +56,7 @@ def generate_signals(prices):
     close_1d = df_1d['close'].values
     volume_1d = df_1d['volume'].values
     
-    # ATR for stop loss (using 4h data)
+    # ATR for stop loss (using 12h data)
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
