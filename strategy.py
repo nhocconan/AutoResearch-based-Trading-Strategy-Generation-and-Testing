@@ -7,7 +7,6 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Uses 4h price channel breakouts aligned with 12h momentum to capture trending moves.
 # Volume confirmation ensures institutional participation. Works in bull markets (breakouts above upper band)
 # and bear markets (breakdowns below lower band). Target: 75-200 total trades over 4 years (19-50/year).
-# Focus on reducing false breaks by requiring volume surge and trend alignment.
 
 name = "exp_13413_4h_donchian20_12h_ema_vol_v1"
 timeframe = "4h"
@@ -17,10 +16,10 @@ leverage = 1.0
 DONCHIAN_PERIOD = 20
 EMA_PERIOD = 21
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0  # Increased to reduce false signals
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5  # Slightly wider stop to avoid premature exits
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -93,16 +92,16 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation - require significant volume surge
+        # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter: price above/below 12h EMA
         uptrend = close[i] > ema_12h_aligned[i]
         downtrend = close[i] < ema_12h_aligned[i]
         
-        # Breakout signals using Donchian channels - require close outside channel
-        breakout_up = volume_ok and uptrend and (close[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (close[i] < lowest_low[i-1])
+        # Breakout signals using Donchian channels
+        breakout_up = volume_ok and uptrend and (high[i] > highest_high[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
