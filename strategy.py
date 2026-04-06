@@ -1,15 +1,15 @@
-#/usr/bin/env python3
+#!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13932_12h_donchian20_1d_ema_vol_v1"
+name = "exp_13932_12h_donchian20_1d_ema_vol_v2"
 timeframe = "12h"
 leverage = 1.0
 
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation (2.0x)
-# Works in bull (breaks out to new highs) and bear (breaks down to new lows)
-# Target: 50-150 trades over 4 years by using strict volume threshold (2.0x) and
+# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation (1.5x)
+# Designed to work in bull (breaks out to new highs) and bear (breaks down to new lows)
+# Target: 100-200 trades over 4 years by using moderate volume threshold (1.5x) and
 # requiring alignment with daily trend to avoid counter-trend whipsaws
 # Added: ATR-based trailing stop (2.5x) and exit on Donchian reversal or trend change
 
@@ -93,8 +93,8 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation - higher threshold to reduce trades
-        volume_ok = volume[i] > (volume_ma[i] * 2.0)
+        # Volume confirmation - moderate threshold to increase trades
+        volume_ok = volume[i] > (volume_ma[i] * 1.5)
         
         # Trend filter from 1d EMA
         trend_up = close[i] > ema_1d_aligned[i]
