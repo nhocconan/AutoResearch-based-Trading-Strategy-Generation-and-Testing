@@ -3,46 +3,42 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 12-hour ADX trend filter and volume confirmation.
-# Donchian channels capture breakouts; ADX > 25 ensures trending markets to avoid whipsaws.
-# Volume > 1.5x 20-period MA confirms institutional participation. Works in bull (breakouts up) and bear (breakdowns down).
-# Target: 100-200 total trades over 4 years (25-50/year).
+# Hypothesis: 1h momentum breakouts filtered by 4h RSI and daily trend (EMA50).
+# Uses 4h RSI to avoid overextended moves and daily EMA50 for trend alignment.
+# Entry only during active London/NY session (08-20 UTC) to reduce noise.
+# Target: 60-150 total trades over 4 years = 15-37/year for 1h.
+# Works in bull markets (breakouts above resistance with bullish 4h RSI) and
+# bear markets (breakdowns below support with bearish 4h RSI).
 
-name = "exp_13353_4h_donchian20_12h_adx_vol_v1"
-timeframe = "4h"
+name = "exp_13354_1h_momentum_4hrsi_dailyema_v1"
+timeframe = "1h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-ADX_PERIOD = 14
-ADX_THRESHOLD = 25
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
-SIGNAL_SIZE = 0.25
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
+EMA_PERIOD = 50
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+SIGNAL_SIZE = 0.20
+VOLUME_MULTIPLIER = 1.5
+VOLUME_AVG_PERIOD = 20
 
-def calculate_adx(high, low, close, period):
-    """Calculate ADX using Wilder's smoothing"""
-    tr1 = high - low
-    tr2 = np.abs(high - np.roll(close, 1))
-    tr3 = np.abs(low - np.roll(close, 1))
-    tr = np.maximum(np.maximum(tr1, tr2), tr3)
-    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    
-    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
-                       np.maximum(high - np.roll(high, 1), 0), 0)
-    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
-                        np.maximum(np.roll(low, 1) - low, 0), 0)
-    
-    plus_dm = pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    minus_dm = pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    
-    plus_di = 100 * plus_dm / atr
-    minus_di = 100 * minus_dm / atr
-    dx = np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100
-    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
-    return adx.values
+def calculate_rsi(close, period):
+    """Calculate RSI"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi.values
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -58,31 +54,35 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 12h data ONCE before loop
-    df_12h = get_htf_data(prices, '12h')
+    # Load 4h data ONCE before loop for RSI
+    df_4h = get_htf_data(prices, '4h')
+    # Load daily data ONCE before loop for EMA
+    df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 12h ADX
-    high_12h = df_12h['high'].values
-    low_12h = df_12h['low'].values
-    close_12h = df_12h['close'].values
-    adx_12h = calculate_adx(high_12h, low_12h, close_12h, ADX_PERIOD)
-    adx_12h_aligned = align_htf_to_ltf(prices, df_12h, adx_12h)
+    # Calculate 4h RSI for trend filter
+    close_4h = df_4h['close'].values
+    rsi_4h = calculate_rsi(close_4h, RSI_PERIOD)
+    rsi_4h_aligned = align_htf_to_ltf(prices, df_4h, rsi_4h)
     
-    # Calculate 4h indicators
+    # Calculate daily EMA for trend filter
+    close_1d = df_1d['close'].values
+    ema_1d = calculate_ema(close_1d, EMA_PERIOD)
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    
+    # Calculate 1h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    highest_high = pd.Series(high).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
-    lowest_low = pd.Series(low).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
-    
-    # Volume MA
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    # Volume average
+    volume_avg = pd.Series(volume).rolling(window=VOLUME_AVG_PERIOD, min_periods=VOLUME_AVG_PERIOD).mean().values
     
     # ATR
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Precompute session hours (08-20 UTC)
+    hours = prices.index.hour
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -90,16 +90,21 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, ADX_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(RSI_PERIOD, EMA_PERIOD, VOLUME_AVG_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if ADX not available
-        if np.isnan(adx_12h_aligned[i]):
+        # Skip if indicators not available
+        if (np.isnan(rsi_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or
+            np.isnan(volume_avg[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
+        
+        # Session filter: 08-20 UTC
+        hour = hours[i]
+        in_session = 8 <= hour <= 20
         
         # Check stoploss
         if position == 1:  # long position
@@ -114,32 +119,47 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
+        volume_ok = volume[i] > (volume_avg[i] * VOLUME_MULTIPLIER)
         
-        # Trend filter: ADX > 25 indicates trending market
-        trending = adx_12h_aligned[i] > ADX_THRESHOLD
+        # Trend filters
+        rsi_bullish = rsi_4h_aligned[i] > 50  # 4h bullish
+        rsi_bearish = rsi_4h_aligned[i] < 50  # 4h bearish
+        price_above_ema = close[i] > ema_1d_aligned[i]
+        price_below_ema = close[i] < ema_1d_aligned[i]
         
-        # Breakout signals
-        breakout_up = volume_ok and trending and (high[i] > highest_high[i-1])
-        breakout_down = volume_ok and trending and (low[i] < lowest_low[i-1])
+        # Momentum conditions: price breaking recent high/low
+        lookback = 3
+        recent_high = np.max(high[i-lookback:i])
+        recent_low = np.min(low[i-lookback:i])
+        breakout_up = close[i] > recent_high
+        breakout_down = close[i] < recent_low
         
-        # Generate signals
-        if position == 0:
-            if breakout_up:
+        # Generate signals only during session
+        if in_session and volume_ok:
+            if position == 0:
+                # Long: 4h bullish, price above daily EMA, breaking recent high
+                if rsi_bullish and price_above_ema and breakout_up:
+                    signals[i] = SIGNAL_SIZE
+                    position = 1
+                    entry_price = close[i]
+                    stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                # Short: 4h bearish, price below daily EMA, breaking recent low
+                elif rsi_bearish and price_below_ema and breakout_down:
+                    signals[i] = -SIGNAL_SIZE
+                    position = -1
+                    entry_price = close[i]
+                    stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                else:
+                    signals[i] = 0.0
+            elif position == 1:
                 signals[i] = SIGNAL_SIZE
-                position = 1
-                entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_down:
+            elif position == -1:
                 signals[i] = -SIGNAL_SIZE
-                position = -1
-                entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+        else:
+            # Outside session or low volume: hold current position
+            if position != 0:
+                signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
-        elif position == 1:
-            signals[i] = SIGNAL_SIZE
-        elif position == -1:
-            signals[i] = -SIGNAL_SIZE
     
     return signals
