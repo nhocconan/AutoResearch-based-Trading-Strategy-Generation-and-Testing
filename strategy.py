@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1d Donchian(20) breakout with 1w trend filter (EMA50 slope) and volume confirmation.
-# Uses Donchian breakouts as primary signal with trend alignment to avoid counter-trend trades.
-# Volume filter ensures institutional participation. Designed for low frequency to minimize fee drag.
-# Works in bull markets (buy breakouts in uptrend) and bear markets (sell breakdowns in downtrend).
-# Target: 15-25 trades/year by requiring Donchian breakout + trend + volume confirmation.
+# Hypothesis: 6h Donchian(20) breakout with 12h trend filter and volume confirmation.
+# Breakouts above the 20-bar high or below the 20-bar low capture strong momentum moves.
+# Only take breakouts in the direction of the 12h EMA(50) trend to avoid counter-trend trades.
+# Volume confirmation ensures institutional participation. This works in both bull and bear markets
+# as it captures momentum in the prevailing trend direction. Target: 12-37 trades/year.
 
-name = "exp_13638_1d_donchian20_1w_trend_vol_v1"
-timeframe = "1d"
+name = "exp_13639_6h_donchian20_12h_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
@@ -20,7 +20,7 @@ VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_donchian(high, low, period):
     """Calculate Donchian channels"""
@@ -44,26 +44,26 @@ def calculate_atr(high, low, close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 60:
+    if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for trend filter ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data for trend filter ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1w EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, TREND_EMA_PERIOD)
-    ema_1w_slope = np.diff(ema_1w, prepend=ema_1w[0])  # slope approximation
-    ema_1w_slope_aligned = align_htf_to_ltf(prices, df_1w, ema_1w_slope)
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
+    ema_12h_slope = np.diff(ema_12h, prepend=ema_12h[0])  # slope approximation
+    ema_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_slope)
     
-    # Calculate 1d indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
     # Donchian channels
-    donch_upper, donch_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    donchian_upper, donchian_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -81,7 +81,8 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1w_slope_aligned[i]) or np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(volume_ma[i]):
+        if (np.isnan(ema_12h_slope_aligned[i]) or np.isnan(donchian_upper[i]) or 
+            np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -103,23 +104,23 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 1w EMA slope
-        uptrend = ema_1w_slope_aligned[i] > 0
-        downtrend = ema_1w_slope_aligned[i] < 0
+        # Trend direction from 12h EMA slope
+        uptrend = ema_12h_slope_aligned[i] > 0
+        downtrend = ema_12h_slope_aligned[i] < 0
         
         # Donchian breakout signals
         # Avoid lookback by checking current and previous values
-        if i > 0 and not np.isnan(donch_upper[i-1]) and not np.isnan(donch_lower[i-1]):
-            donch_upper_prev = donch_upper[i-1]
-            donch_lower_prev = donch_lower[i-1]
-            close_prev = close[i-1]
-            close_curr = close[i]
+        if i > 0 and not np.isnan(donchian_upper[i-1]) and not np.isnan(donchian_lower[i-1]):
+            upper_prev = donchian_upper[i-1]
+            lower_prev = donchian_lower[i-1]
+            upper_curr = donchian_upper[i]
+            lower_curr = donchian_lower[i]
             
-            # Long signal: Close breaks above Donchian upper in uptrend with volume
-            long_signal = volume_ok and uptrend and close_prev <= donch_upper_prev and close_curr > donch_upper[i]
+            # Long signal: price breaks above Donchian upper in uptrend
+            long_signal = volume_ok and uptrend and close[i] > upper_curr and close[i-1] <= upper_prev
             
-            # Short signal: Close breaks below Donchian lower in downtrend with volume
-            short_signal = volume_ok and downtrend and close_prev >= donch_lower_prev and close_curr < donch_lower[i]
+            # Short signal: price breaks below Donchian lower in downtrend
+            short_signal = volume_ok and downtrend and close[i] < lower_curr and close[i-1] >= lower_prev
         else:
             long_signal = False
             short_signal = False
@@ -139,10 +140,14 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on opposite Donchian break or stop loss
-            if i > 0 and not np.isnan(donch_lower[i-1]) and not np.isnan(donch_lower[i]):
-                # Exit if close breaks below Donchian lower (trend change)
-                if close[i] < donch_lower[i]:
+            # Exit long on opposite Donchian breakout or stop loss
+            if i > 0 and not np.isnan(donchian_upper[i-1]) and not np.isnan(donchian_lower[i-1]):
+                upper_prev = donchian_upper[i-1]
+                lower_prev = donchian_lower[i-1]
+                upper_curr = donchian_upper[i]
+                lower_curr = donchian_lower[i]
+                # Exit if price breaks below Donchian lower (end of uptrend)
+                if close[i] < lower_curr and close[i-1] >= lower_prev:
                     signals[i] = 0.0
                     position = 0
                 else:
@@ -150,10 +155,14 @@ def generate_signals(prices):
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on opposite Donchian break or stop loss
-            if i > 0 and not np.isnan(donch_upper[i-1]) and not np.isnan(donch_upper[i]):
-                # Exit if close breaks above Donchian upper (trend change)
-                if close[i] > donch_upper[i]:
+            # Exit short on opposite Donchian breakout or stop loss
+            if i > 0 and not np.isnan(donchian_upper[i-1]) and not np.isnan(donchian_lower[i-1]):
+                upper_prev = donchian_upper[i-1]
+                lower_prev = donchian_lower[i-1]
+                upper_curr = donchian_upper[i]
+                lower_curr = donchian_lower[i]
+                # Exit if price breaks above Donchian upper (end of downtrend)
+                if close[i] > upper_curr and close[i-1] <= upper_prev:
                     signals[i] = 0.0
                     position = 0
                 else:
