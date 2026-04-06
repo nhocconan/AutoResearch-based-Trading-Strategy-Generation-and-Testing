@@ -4,11 +4,11 @@ import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
 # Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation
-# Long when price breaks above 20-period Donchian high and 1d EMA(50) is rising
-# Short when price breaks below 20-period Donchian low and 1d EMA(50) is falling
-# Uses volume > 20-period average to confirm breakouts
-# Target: 75-200 total trades over 4 years with controlled risk in both bull and bear markets
-# Uses ATR-based stoploss (2*ATR) for risk management
+# Long when price breaks above 20-period Donchian high, 1d EMA(50) is rising, and volume > 20-period average
+# Short when price breaks below 20-period Donchian low, 1d EMA(50) is falling, and volume > 20-period average
+# Uses ATR-based stoploss (2.5 * ATR) to limit drawdown
+# Target: 100-200 total trades over 4 years (25-50/year) with controlled risk in both bull and bear markets
+# Works in bull markets via breakout captures, in bear via shorting breakdowns with trend filter
 
 name = "4h_donchian20_1d_ema_vol_v1"
 timeframe = "4h"
@@ -42,7 +42,7 @@ def generate_signals(prices):
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     vol_filter = volume > vol_ma
     
-    # ATR for stoploss calculation
+    # ATR for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -66,8 +66,8 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2 * ATR
-            if close[i] < entry_price - 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] < entry_price - 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -79,8 +79,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2 * ATR
-            if close[i] > entry_price + 2.0 * atr[i]:
+            # Stoploss: 2.5 * ATR
+            if close[i] > entry_price + 2.5 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
