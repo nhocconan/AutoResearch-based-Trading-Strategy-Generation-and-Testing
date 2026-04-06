@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian Breakout with Weekly ADX Filter and Volume Confirmation
-Hypothesis: Donchian breakouts on 12h capture momentum moves. Weekly ADX ensures
-we trade only in trending markets (avoiding whipsaws in ranges). Volume confirms
-institutional participation. Works in bull (breakouts above upper band) and bear
-(breakdowns below lower band). Target: 75-150 total trades over 4 years.
+4h Donchian Breakout with Volume Confirmation and Weekly ADX Filter
+Hypothesis: Donchian breakouts capture strong momentum moves. Volume confirms institutional participation.
+Weekly ADX ensures we only trade in trending markets, avoiding whipsaws in sideways conditions.
+Works in bull (breakouts above upper band) and bear (breakdowns below lower band).
+Target: 75-200 total trades over 4 years (19-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian_breakout_volume_adx_v1"
-timeframe = "12h"
+name = "4h_donchian_breakout_volume_adx_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -62,7 +62,7 @@ def generate_signals(prices):
     adx_weekly = calculate_adx(high_weekly, low_weekly, close_weekly, 14)
     adx_weekly_aligned = align_htf_to_ltf(prices, df_weekly, adx_weekly)
     
-    # 12h data
+    # 4h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
