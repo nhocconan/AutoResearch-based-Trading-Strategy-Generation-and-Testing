@@ -3,12 +3,12 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly EMA(20) trend filter and volume confirmation.
-# The weekly EMA provides long-term trend filtering to avoid counter-trend trades.
-# Works in bull markets by capturing momentum breakouts. Works in bear markets by using weekly EMA to avoid false breakdowns.
-# Volume filter ensures institutional participation. Target: 30-100 trades over 4 years.
-name = "exp_14164_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(20) trend filter and volume confirmation.
+# The 1-day EMA provides higher timeframe trend filtering to avoid counter-trend trades.
+# Works in bull markets by capturing momentum breakouts. Works in bear markets by using 1d EMA to avoid false breakdowns.
+# Volume filter ensures institutional participation. Target: 75-150 trades over 4 years.
+name = "exp_14165_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period):
@@ -26,17 +26,17 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for EMA(20) trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 1d data for EMA(20) trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA(20) on weekly close
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate EMA(20) on 1d close
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align EMA to daily timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    # Align EMA to 12h timeframe
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
     
-    # Daily data
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -87,8 +87,8 @@ def generate_signals(prices):
                 continue
         
         # Donchian breakout signals with volume and EMA filter
-        # Long: break above upper band + above weekly EMA + volume
-        # Short: break below lower band + below weekly EMA + volume
+        # Long: break above upper band + above 1d EMA + volume
+        # Short: break below lower band + below 1d EMA + volume
         breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_20_aligned[i]) and vol_filter[i]
         breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_20_aligned[i]) and vol_filter[i]
         
@@ -124,18 +124,17 @@ def generate_signals(prices):
     return signals
 
 </think>
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with weekly EMA(20) trend filter and volume confirmation.
-# The weekly EMA provides long-term trend filtering to avoid counter-trend trades.
-# Works in bull markets by capturing momentum breakouts. Works in bear markets by using weekly EMA to avoid false breakdowns.
-# Volume filter ensures institutional participation. Target: 30-100 trades over 4 years.
-name = "exp_14164_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+# Hypothesis: 12-hour Donchian(20) breakout with 1-day EMA(20) trend filter and volume confirmation.
+# The 1-day EMA provides higher timeframe trend filtering to avoid counter-trend trades.
+# Works in bull markets by capturing momentum breakouts. Works in bear markets by using 1d EMA to avoid false breakdowns.
+# Volume filter ensures institutional participation. Target: 75-150 trades over 4 years.
+name = "exp_14165_12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def calculate_atr(high, low, close, period):
@@ -153,17 +152,17 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for EMA(20) trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
+    # Load 1d data for EMA(20) trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # Calculate EMA(20) on weekly close
-    ema_20 = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # Calculate EMA(20) on 1d close
+    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False, min_periods=20).mean().values
     
-    # Align EMA to daily timeframe
-    ema_20_aligned = align_htf_to_ltf(prices, df_1w, ema_20)
+    # Align EMA to 12h timeframe
+    ema_20_aligned = align_htf_to_ltf(prices, df_1d, ema_20)
     
-    # Daily data
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -214,8 +213,8 @@ def generate_signals(prices):
                 continue
         
         # Donchian breakout signals with volume and EMA filter
-        # Long: break above upper band + above weekly EMA + volume
-        # Short: break below lower band + below weekly EMA + volume
+        # Long: break above upper band + above 1d EMA + volume
+        # Short: break below lower band + below 1d EMA + volume
         breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_20_aligned[i]) and vol_filter[i]
         breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_20_aligned[i]) and vol_filter[i]
         
