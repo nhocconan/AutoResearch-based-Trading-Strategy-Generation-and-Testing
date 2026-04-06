@@ -3,18 +3,18 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian channel breakout with weekly trend filter and volume confirmation.
-# Works in bull/bear because breakouts capture strong directional moves, weekly trend filter
-# ensures we trade with the higher timeframe momentum, and volume confirmation filters weak signals.
-# Target: 50-100 trades over 4 years (12-25/year) to balance opportunity and cost.
+# Hypothesis: Daily Donchian channel breakout with weekly ADX trend filter and volume confirmation.
+# Works in bull/bear because breakouts capture strong moves, ADX filter ensures we trade only in trending markets,
+# and volume confirms institutional participation. Target: 50-100 trades over 4 years (12-25/year).
 
-name = "exp_13098_1d_donchian20_1w_ema_vol_v1"
+name = "exp_13098_1d_donchian20_1w_adx_vol_v1"
 timeframe = "1d"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-EMA_WEEKLY_PERIOD = 20
+ADX_PERIOD = 14
+ADX_THRESHOLD = 25
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -30,9 +30,26 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_adx(high, low, close, period):
+    """Calculate ADX"""
+    plus_dm = np.where((high - np.roll(high, 1)) > (np.roll(low, 1) - low), 
+                       np.maximum(high - np.roll(high, 1), 0), 0)
+    minus_dm = np.where((np.roll(low, 1) - low) > (high - np.roll(high, 1)), 
+                        np.maximum(np.roll(low, 1) - low, 0), 0)
+    
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(np.maximum(tr1, tr2), tr3)
+    
+    plus_di = 100 * pd.Series(plus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / \
+              pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    minus_di = 100 * pd.Series(minus_dm).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values / \
+               pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = pd.Series(dx).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    return adx
 
 def generate_signals(prices):
     n = len(prices)
@@ -42,10 +59,12 @@ def generate_signals(prices):
     # Load weekly data ONCE before loop
     df_1w = get_htf_data(prices, '1w')
     
-    # Calculate weekly EMA for trend filter
+    # Calculate weekly ADX for trend filter
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, EMA_WEEKLY_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    adx_1w = calculate_adx(high_1w, low_1w, close_1w, ADX_PERIOD)
+    adx_1w_aligned = align_htf_to_ltf(prices, df_1w, adx_1w)
     
     # Calculate daily indicators
     high = prices['high'].values
@@ -69,11 +88,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, EMA_WEEKLY_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, ADX_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(ema_1w_aligned[i]):
+        # Skip if ADX not available
+        if np.isnan(adx_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -95,13 +114,12 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: price above/below weekly EMA
-        uptrend = close[i] > ema_1w_aligned[i]
-        downtrend = close[i] < ema_1w_aligned[i]
+        # Trend filter: weekly ADX > threshold indicates trending market
+        trending = adx_1w_aligned[i] > ADX_THRESHOLD
         
         # Breakout signals
-        breakout_up = volume_ok and uptrend and (i == 0 or high[i] > highest_high[i-1])
-        breakout_down = volume_ok and downtrend and (i == 0 or low[i] < lowest_low[i-1])
+        breakout_up = volume_ok and trending and (i > 0 and high[i] > highest_high[i-1])
+        breakout_down = volume_ok and trending and (i > 0 and low[i] < lowest_low[i-1])
         
         # Generate signals
         if position == 0:
