@@ -8,7 +8,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Designed for fewer trades (target 75-200 over 4 years) to minimize fee drift.
 # Works in bull/bear by only trading with higher timeframe trend.
 
-name = "4h_donchian20_1d_ema50_vol_v1"
+name = "4h_donchian20_1d_ema50_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
