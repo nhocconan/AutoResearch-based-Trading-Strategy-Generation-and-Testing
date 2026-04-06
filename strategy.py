@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation.
-# Long when price breaks above 12h upper band during bullish day with volume > 1.5x 12-period average.
-# Short when price breaks below 12h lower band during bearish day with volume confirmation.
-# Uses daily trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
-# Target: 50-150 total trades over 4 years (12-37/year) to stay within optimal range.
+# Hypothesis: 4h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above upper Donchian band during bullish day with volume > 1.5x 20-period average.
+# Short when price breaks below lower Donchian band during bearish day with volume confirmation.
+# Uses daily trend filter to avoid counter-trend trades. Donchian provides clear breakout points.
+# Target: 75-200 total trades over 4 years (19-50/year) to stay within optimal range.
 
-name = "12h_donchian20_1d_trend_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_1d_trend_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,11 +24,15 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Calculate 12h Donchian channels (20-period)
+    # Previous day's high/low for Donchian calculation (20-period)
+    # We'll calculate Donchian channels using 20-period lookback on 4h data
+    # But use 1d for trend filter
+    
+    # 20-period Donchian channels on 4h data
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    upper = high_series.rolling(window=20, min_periods=20).max().values
-    lower = low_series.rolling(window=20, min_periods=20).min().values
+    upper_donchian = high_series.rolling(window=20, min_periods=20).max().values
+    lower_donchian = low_series.rolling(window=20, min_periods=20).min().values
     
     # Daily trend filter: bullish/bearish day based on close vs open
     df_1d = get_htf_data(prices, '1d')
@@ -39,14 +43,14 @@ def generate_signals(prices):
     daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
     daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
     
-    # Volume filter: current volume > 1.5x 12-period average
+    # Volume filter: current volume > 1.5x 20-period average
     volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=12, min_periods=12).mean().values
+    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(20, n):
+    for i in range(20, n):  # Start after Donchian warmup
         # Skip if daily trend data not available
         if np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]):
             if position != 0:
@@ -60,16 +64,16 @@ def generate_signals(prices):
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price drops below lower band or daily turn bearish
-            if (low[i] <= lower[i] or 
+            # Exit: price drops below lower Donchian or daily turn bearish
+            if (low[i] <= lower_donchian[i] or 
                 daily_bearish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price rises above upper band or daily turn bullish
-            if (high[i] >= upper[i] or 
+            # Exit: price rises above upper Donchian or daily turn bullish
+            if (high[i] >= upper_donchian[i] or 
                 daily_bullish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
@@ -78,13 +82,13 @@ def generate_signals(prices):
         else:
             # Look for entries with volume confirmation and daily trend filter
             if volume_filter:
-                # Long: break above upper band during bullish day
-                if (high[i] > upper[i] and 
+                # Long: break above upper Donchian during bullish day
+                if (high[i] > upper_donchian[i] and 
                     daily_bullish_aligned[i]):
                     signals[i] = 0.25
                     position = 1
-                # Short: break below lower band during bearish day
-                elif (low[i] < lower[i] and 
+                # Short: break below lower Donchian during bearish day
+                elif (low[i] < lower_donchian[i] and 
                       daily_bearish_aligned[i]):
                     signals[i] = -0.25
                     position = -1
