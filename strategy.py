@@ -3,12 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian(20) breakout + 1-week ADX trend filter + 1-week volume confirmation.
-# Breakouts capture strong trends. ADX filters for trending markets to avoid false breakouts in ranges.
-# Volume confirmation ensures institutional participation. Designed for 1d timeframe to target 30-100 trades over 4 years.
+# Hypothesis: 6-hour Donchian(20) breakout with 1-day trend filter and volume confirmation.
+# Uses 1-day EMA(50) to determine trend direction: long when price > EMA50, short when price < EMA50.
+# Entry on 6h Donchian breakout in direction of 1d trend, with volume > 1.5x 20-period average.
+# Designed for 6h timeframe to target 50-150 trades over 4 years with moderate frequency.
+# Works in bull markets via trend-following breakouts and in bear via short breakdowns.
 
-name = "1d_donchian20_1w_adx_vol_v1"
-timeframe = "1d"
+name = "6h_donchian20_1d_trend_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -22,132 +24,78 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # 1-day Donchian channels (20-period)
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(19, n):
-        highest_high[i] = np.max(high[i-19:i+1])
-        lowest_low[i] = np.min(low[i-19:i+1])
+    # 1-day EMA(50) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
     
-    # 1-week ADX(14) for trend strength filtering
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # Calculate EMA(50) on daily data
+    ema_50 = np.full(len(close_1d), np.nan)
+    if len(close_1d) >= 50:
+        ema_50[49] = np.mean(close_1d[:50])  # Simple average for first value
+        for i in range(50, len(close_1d)):
+            ema_50[i] = (close_1d[i] * 2/51) + (ema_50[i-1] * (1 - 2/51))
     
-    # True Range and Directional Movement
-    tr = np.full(len(close_1w), np.nan)
-    dm_plus = np.full(len(close_1w), np.nan)
-    dm_minus = np.full(len(close_1w), np.nan)
+    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
     
-    if len(close_1w) > 1:
-        tr[0] = high_1w[0] - low_1w[0]
-        dm_plus[0] = 0
-        dm_minus[0] = 0
-        for i in range(1, len(close_1w)):
-            tr[i] = max(high_1w[i] - low_1w[i],
-                       abs(high_1w[i] - close_1w[i-1]),
-                       abs(low_1w[i] - close_1w[i-1]))
-            dm_plus[i] = max(high_1w[i] - high_1w[i-1], 0)
-            dm_minus[i] = max(low_1w[i-1] - low_1w[i], 0)
-            dm_plus[i] = dm_plus[i] if dm_plus[i] > dm_minus[i] else 0
-            dm_minus[i] = dm_minus[i] if dm_minus[i] > dm_plus[i] else 0
-    
-    # Smoothed TR, DM+, DM-
-    atr_1w = np.full(len(close_1w), np.nan)
-    s_dm_plus = np.full(len(close_1w), np.nan)
-    s_dm_minus = np.full(len(close_1w), np.nan)
-    
-    if len(close_1w) >= 14:
-        atr_1w[13] = np.nansum(tr[1:14])
-        s_dm_plus[13] = np.nansum(dm_plus[1:14])
-        s_dm_minus[13] = np.nansum(dm_minus[1:14])
-        for i in range(14, len(close_1w)):
-            atr_1w[i] = atr_1w[i-1] - (atr_1w[i-1]/14) + tr[i]
-            s_dm_plus[i] = s_dm_plus[i-1] - (s_dm_plus[i-1]/14) + dm_plus[i]
-            s_dm_minus[i] = s_dm_minus[i-1] - (s_dm_minus[i-1]/14) + dm_minus[i]
-    
-    # DI+ and DI-
-    di_plus = np.full(len(close_1w), np.nan)
-    di_minus = np.full(len(close_1w), np.nan)
-    dx = np.full(len(close_1w), np.nan)
-    
-    for i in range(13, len(close_1w)):
-        if atr_1w[i] != 0:
-            di_plus[i] = 100 * s_dm_plus[i] / atr_1w[i]
-            di_minus[i] = 100 * s_dm_minus[i] / atr_1w[i]
-            if di_plus[i] + di_minus[i] != 0:
-                dx[i] = 100 * abs(di_plus[i] - di_minus[i]) / (di_plus[i] + di_minus[i])
-    
-    # ADX calculation
-    adx = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 27:  # Need 14 for DX + 14 for smoothing
-        dx_valid = dx[13:]  # Skip first 14 where DX is NaN
-        if len(dx_valid) >= 14:
-            adx[26] = np.nanmean(dx_valid[:14])  # First ADX at index 26
-            for i in range(27, len(close_1w)):
-                adx[i] = (adx[i-1] * 13 + dx[i]) / 14
-    
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # 1-week volume average for confirmation
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = np.full(len(vol_1w), np.nan)
-    for i in range(4, len(vol_1w)):  # 5-period average
-        vol_ma_1w[i] = np.mean(vol_1w[i-4:i+1])
-    
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    # 6-day volume average for confirmation (20 periods on 6h ≈ 5 days)
+    vol_ma = np.full(len(volume), np.nan)
+    for i in range(19, len(volume)):  # 20-period moving average
+        vol_ma[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(19, 27, 4)  # Donchian needs 19, ADX needs 27, volume needs 4
+    start = max(50, 20)  # EMA needs 50, Donchian needs 20
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if np.isnan(ema_50_aligned[i]) or np.isnan(vol_ma[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.3x weekly average
-        volume_filter = volume[i] > vol_ma_aligned[i] * 1.3
+        # Calculate 6h Donchian channels (20-period)
+        highest_high = np.max(high[i-19:i+1])
+        lowest_low = np.min(low[i-19:i+1])
         
-        # ADX filter: only trade when trending (ADX > 20)
-        trending_market = adx_aligned[i] > 20
+        # Volume condition: current volume > 1.5x 20-period average
+        volume_filter = volume[i] > vol_ma[i] * 1.5
+        
+        # Trend condition from 1d EMA50
+        uptrend = close > ema_50_aligned[i]
+        downtrend = close < ema_50_aligned[i]
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: price below Donchian lower band or stoploss
-            if (close[i] < lowest_low[i] or 
-                close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
+            # Exit: price breaks below Donchian lower band or stoploss
+            if (close[i] < lowest_low or 
+                close[i] < entry_price - 2.5 * (highest_high - lowest_low)):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price above Donchian upper band or stoploss
-            if (close[i] > highest_high[i] or 
-                close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
+            # Exit: price breaks above Donchian upper band or stoploss
+            if (close[i] > highest_high or 
+                close[i] > entry_price + 2.5 * (highest_high - lowest_low)):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries in trending markets
-            if trending_market and volume_filter:
-                # Long: price breaks above Donchian upper band
-                if close[i] > highest_high[i]:
+            # Look for entries: breakout in direction of 1d trend with volume
+            if volume_filter:
+                # Long: breakout above upper band in uptrend
+                if close[i] > highest_high and uptrend:
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: price breaks below Donchian lower band
-                elif close[i] < lowest_low[i]:
+                # Short: breakdown below lower band in downtrend
+                elif close[i] < lowest_low and downtrend:
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
