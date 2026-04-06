@@ -3,17 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation (2.0x 20-period average)
-# Long when price breaks above Donchian high, price > 1d EMA(50), and volume > 2.0x average
-# Short when price breaks below Donchian low, price < 1d EMA(50), and volume > 2.0x average
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA(50) trend filter and volume confirmation (2x 20-period average)
+# Long when price breaks above Donchian high, price > 1d EMA(50), and volume > 2x average
+# Short when price breaks below Donchian low, price < 1d EMA(50), and volume > 2x average
 # Exit on opposite Donchian break or when price crosses below/above EMA
-# Stoploss at 2.5 * ATR(14)
+# Stoploss at 2.0 * ATR(14)
 # Position size: 0.25 (25% of capital)
 # Uses 1d trend to avoid false breakouts in counter-trend moves
-# Higher volume threshold (2.0x) and longer trend filter (1d) to reduce trade frequency
+# Higher volume threshold to reduce trade frequency
 # Target: 75-200 trades over 4 years (19-50/year)
 
-name = "4h_donchian20_1d_ema_vol_v1"
+name = "4h_donchian20_1d_ema_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -70,8 +70,8 @@ def generate_signals(prices):
             continue
         
         if position == 1:  # long position
-            # Stoploss: 2.5 * ATR
-            if close[i] < entry_price - 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] < entry_price - 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
@@ -83,8 +83,8 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2.5 * ATR
-            if close[i] > entry_price + 2.5 * atr[i]:
+            # Stoploss: 2.0 * ATR
+            if close[i] > entry_price + 2.0 * atr[i]:
                 signals[i] = 0.0
                 position = 0
                 entry_price = 0.0
