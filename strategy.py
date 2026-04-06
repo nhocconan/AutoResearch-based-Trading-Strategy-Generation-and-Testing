@@ -3,67 +3,30 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13898_1d_kama_rsi_chop_v1"
-timeframe = "1d"
+name = "exp_13900_4h_donchian20_1d_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-KAMA_PERIOD = 10
-FAST_EMA = 2
-SLOW_EMA = 30
-RSI_PERIOD = 14
-RSI_OVERBOUGHT = 70
-RSI_OVERSOLD = 30
-CHOP_PERIOD = 14
-CHOP_THRESHOLD = 61.8
-SIGNAL_SIZE = 0.30
+DONCHIAN_PERIOD = 20
+EMA_TREND = 50
+VOLUME_MA = 20
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_kama(close, period, fast, slow):
-    """Calculate Kaufman's Adaptive Moving Average"""
-    close_series = pd.Series(close)
-    diff = np.abs(close_series.diff(1)).values
-    diff[0] = 0
-    change = np.abs(close_series - np.roll(close_series, period))
-    change[:period] = 0
-    er = np.zeros_like(close)
-    er[period:] = change[period:] / (np.convolve(diff, np.ones(period), 'valid') + 1e-10)
-    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
-    kama = np.zeros_like(close)
-    kama[0] = close[0]
-    for i in range(1, len(close)):
-        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
-    return kama
+def calculate_donchian_high(low, period):
+    """Calculate Donchian high"""
+    return pd.Series(low).rolling(window=period, min_periods=period).max().values
 
-def calculate_rsi(close, period):
-    """Calculate Relative Strength Index"""
-    delta = np.diff(close)
-    seed = delta[:period]
-    up = seed[seed >= 0].sum() / period
-    down = -seed[seed < 0].sum() / period
-    if down == 0:
-        rs = 0
-    else:
-        rs = up / down
-    rsi = np.zeros_like(close)
-    rsi[:period] = 100. - (100. / (1. + rs))
-    for i in range(period, len(close)):
-        delta = close[i] - close[i-1]
-        if delta > 0:
-            upval = delta
-            downval = 0.
-        else:
-            upval = 0.
-            downval = -delta
-        up = (up * (period-1) + upval) / period
-        down = (down * (period-1) + downval) / period
-        if down == 0:
-            rs = 0
-        else:
-            rs = up / down
-        rsi[i] = 100. - (100. / (1. + rs))
-    return rsi
+def calculate_donchian_low(high, period):
+    """Calculate Donchian low"""
+    return pd.Series(high).rolling(window=period, min_periods=period).min().values
+
+def calculate_ema(close, period):
+    """Calculate EMA"""
+    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -72,68 +35,37 @@ def calculate_atr(high, low, close, period):
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(np.maximum(tr1, tr2), tr3)
     tr[0] = tr1[0]
-    atr = np.zeros_like(close)
-    atr[0] = tr[0]
-    for i in range(1, len(close)):
-        atr[i] = (atr[i-1] * (period-1) + tr[i]) / period
+    atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
-
-def calculate_chop(high, low, close, period):
-    """Calculate Choppiness Index"""
-    atr = calculate_atr(high, low, close, 1)
-    sum_atr = np.zeros_like(close)
-    for i in range(len(close)):
-        if i < period:
-            sum_atr[i] = np.sum(atr[:i+1])
-        else:
-            sum_atr[i] = np.sum(atr[i-period+1:i+1])
-    max_high = np.zeros_like(close)
-    min_low = np.zeros_like(close)
-    for i in range(len(close)):
-        if i < period:
-            max_high[i] = np.max(high[:i+1])
-            min_low[i] = np.min(low[:i+1])
-        else:
-            max_high[i] = np.max(high[i-period+1:i+1])
-            min_low[i] = np.min(low[i-period+1:i+1])
-    chop = np.zeros_like(close)
-    for i in range(len(close)):
-        if max_high[i] != min_low[i] and sum_atr[i] > 0:
-            chop[i] = 100 * np.log10(sum_atr[i] / (max_high[i] - min_low[i])) / np.log10(period)
-        else:
-            chop[i] = 50
-    return chop
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 100:
         return np.zeros(n)
     
-    # Load weekly data for regime filter ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1h data for trend filter ONCE before loop
+    df_1h = get_htf_data(prices, '1h')
     
-    # Calculate weekly EMA200 for trend regime
-    close_weekly = df_weekly['close'].values
-    ema200_weekly = pd.Series(close_weekly).ewm(span=200, adjust=False, min_periods=200).mean().values
-    ema200_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema200_weekly)
+    # Calculate 1h EMA for trend direction
+    close_1h = df_1h['close'].values
+    ema_1h = calculate_ema(close_1h, EMA_TREND)
+    ema_1h_aligned = align_htf_to_ltf(prices, df_1h, ema_1h)
     
-    # Daily data for indicators
+    # 4h data for Donchian, ATR, and volume
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # KAMA for trend direction
-    kama = calculate_kama(close, KAMA_PERIOD, FAST_EMA, SLOW_EMA)
-    
-    # RSI for momentum
-    rsi = calculate_rsi(close, RSI_PERIOD)
-    
-    # Choppiness Index for regime
-    chop = calculate_chop(high, low, close, CHOP_PERIOD)
+    # Donchian channels
+    donchian_high = calculate_donchian_high(low, DONCHIAN_PERIOD)
+    donchian_low = calculate_donchian_low(high, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    
+    # Volume confirmation
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA, min_periods=VOLUME_MA).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -141,11 +73,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(KAMA_PERIOD, RSI_PERIOD, CHOP_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, EMA_TREND, VOLUME_MA) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(kama[i]) or np.isnan(rsi[i]) or np.isnan(chop[i]) or np.isnan(ema200_weekly_aligned[i]):
+        if np.isnan(ema_1h_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -167,20 +99,16 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Regime filter: only trade in ranging markets (chop > threshold)
-        market_ranging = chop[i] > CHOP_THRESHOLD
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # KAMA trend direction
-        price_above_kama = close[i] > kama[i]
-        price_below_kama = close[i] < kama[i]
+        # Trend filter from 1h EMA
+        trend_up = close[i] > ema_1h_aligned[i]
+        trend_down = close[i] < ema_1h_aligned[i]
         
-        # RSI momentum
-        rsi_oversold = rsi[i] < RSI_OVERSOLD
-        rsi_overbought = rsi[i] > RSI_OVERBOUGHT
-        
-        # Entry signals
-        long_signal = market_ranging and price_above_kama and rsi_oversold
-        short_signal = market_ranging and price_below_kama and rsi_overbought
+        # Donchian breakout signals
+        long_signal = volume_ok and trend_up and close[i] > donchian_high[i-1]
+        short_signal = volume_ok and trend_down and close[i] < donchian_low[i-1]
         
         # Generate signals
         if position == 0:
@@ -197,15 +125,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on RSI overbought or price below KAMA
-            if rsi[i] > RSI_OVERBOUGHT or close[i] < kama[i]:
+            # Exit long on Donchian low break
+            if close[i] < donchian_low[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Exit short on RSI oversold or price above KAMA
-            if rsi[i] < RSI_OVERSOLD or close[i] > kama[i]:
+            # Exit short on Donchian high break
+            if close[i] > donchian_high[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
