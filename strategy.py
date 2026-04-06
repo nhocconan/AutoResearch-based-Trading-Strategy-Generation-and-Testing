@@ -1,19 +1,18 @@
-# I will now state my hypothesis and then write the code accordingly.
-
-# Hypothesis: 12h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-# Price breaking out of a 20-period Donchian channel indicates strong momentum.
-# We filter by the 1d EMA(50) slope to trade only in the direction of the higher timeframe trend.
-# Volume confirmation ensures the breakout is supported by participation.
-# This strategy aims for low trade frequency (target: 12-37/year) by using strict breakout conditions
-# and works in both bull and bear markets by following the 1d trend.
-
 #!/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13622_12h_donchian20_1d_ema_vol_v1"
-timeframe = "12h"
+# Hypothesis: 4h Donchian(20) breakout with 12h EMA(50) trend filter, volume confirmation, and ATR stop loss.
+# Donchian channels identify breakouts with clear support/resistance levels. 
+# EMA(50) on 12h provides trend direction to avoid counter-trend trades.
+# Volume confirmation ensures institutional participation in breakouts.
+# ATR-based stop loss manages risk. Designed to work in both bull and bear markets
+# by following the trend direction from higher timeframe.
+# Target: 20-50 trades/year by requiring Donchian breakout + trend + volume confirmation.
+
+name = "exp_13623_4h_donchian20_12h_ema_vol_v1"
+timeframe = "4h"
 leverage = 1.0
 
 # Parameters
@@ -23,10 +22,10 @@ VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian Channel upper and lower bands"""
+def calculate_donchian_channels(high, low, period):
+    """Calculate Donchian channels: upper and lower bands"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
@@ -34,10 +33,6 @@ def calculate_donchian(high, low, period):
 def calculate_ema(close, period):
     """Calculate EMA"""
     return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
-
-def calculate_ema_slope(ema):
-    """Calculate EMA slope (change over one period)"""
-    return np.diff(ema, prepend=ema[0])
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -54,23 +49,23 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for trend filter ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load 12h data for trend filter ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1d EMA for trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, TREND_EMA_PERIOD)
-    ema_1d_slope = calculate_ema_slope(ema_1d)
-    ema_1d_slope_aligned = align_htf_to_ltf(prices, df_1d, ema_1d_slope)
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
+    ema_12h_slope = np.diff(ema_12h, prepend=ema_12h[0])  # slope approximation
+    ema_12h_slope_aligned = align_htf_to_ltf(prices, df_12h, ema_12h_slope)
     
-    # Calculate 12h indicators
+    # Calculate 4h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel
-    donch_upper, donch_lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
+    # Donchian channels
+    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
@@ -88,7 +83,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_slope_aligned[i]) or np.isnan(donch_upper[i]) or np.isnan(donch_lower[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_12h_slope_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -107,27 +102,28 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Breakout conditions
-        breakout_up = close[i] > donch_upper[i-1]  # Using previous bar's upper band
-        breakout_down = close[i] < donch_lower[i-1]  # Using previous bar's lower band
-        
-        # Trend direction from 1d EMA slope
-        uptrend = ema_1d_slope_aligned[i] > 0
-        downtrend = ema_1d_slope_aligned[i] < 0
-        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
+        # Trend direction from 12h EMA slope
+        uptrend = ema_12h_slope_aligned[i] > 0
+        downtrend = ema_12h_slope_aligned[i] < 0
+        
+        # Donchian breakout signals
+        # Long: price breaks above upper band in uptrend with volume
+        long_signal = volume_ok and uptrend and close[i] > donchian_upper[i]
+        
+        # Short: price breaks below lower band in downtrend with volume
+        short_signal = volume_ok and downtrend and close[i] < donchian_lower[i]
+        
         # Generate signals
         if position == 0:
-            # Long: upward breakout in uptrend with volume
-            if breakout_up and uptrend and volume_ok:
+            if long_signal:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            # Short: downward breakout in downtrend with volume
-            elif breakout_down and downtrend and volume_ok:
+            elif short_signal:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
@@ -135,15 +131,15 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Long: exit on downward breakout or stop loss
-            if close[i] < donch_lower[i-1]:  # Opposite breakout
+            # Exit long on opposite Donchian break or stop loss
+            if close[i] < donchian_lower[i]:  # Break below lower band
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = SIGNAL_SIZE
         elif position == -1:
-            # Short: exit on upward breakout or stop loss
-            if close[i] > donch_upper[i-1]:  # Opposite breakout
+            # Exit short on opposite Donchian break or stop loss
+            if close[i] > donchian_upper[i]:  # Break above upper band
                 signals[i] = 0.0
                 position = 0
             else:
