@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 12h Donchian(20) Breakout + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts on 12h timeframe capture momentum, volume confirms breakout strength, ATR stoploss limits drawdown. Designed for low trade frequency (target 50-150 total over 4 years) to minimize fee decay.
+Hypothesis: Donchian breakouts on 12h timeframe capture medium-term momentum, volume confirms breakout strength, and ATR stoploss controls drawdown. Designed for low trade frequency (target 50-150 total over 4 years) to minimize fee decay and work in both bull and bear markets.
 """
 
 import numpy as np
