@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) breakout with 1-week EMA50 trend filter and volume confirmation
-Hypothesis: 1d Donchian breakouts capture intermediate-term momentum in BTC/ETH/SOL.
-Filter by 1-week EMA50 for trend bias and volume confirmation for conviction.
-Works in bull (buy breakouts above 1w EMA50) and bear (sell breakdowns below 1w EMA50).
-Target: 30-100 total trades over 4 years (7-25/year) for low-frequency, low-cost trading.
+1d Donchian(20) breakout with 1w EMA50 trend filter and volume confirmation
+Hypothesis: Daily Donchian breakouts capture longer-term momentum. Filter by weekly EMA50 for trend bias and daily volume confirmation for conviction. Works in bull (buy breakouts above weekly EMA50) and bear (sell breakdowns below weekly EMA50). Target: 30-100 total trades over 4 years.
 """
 
 import numpy as np
@@ -96,8 +93,8 @@ def generate_signals(prices):
             continue
         
         # Volume filter: current 1d volume > 1.5x 1w average volume (scaled)
-        # Scale 1w volume to 1d: approx 1/7 of 1w volume (since 7x 1d in 1w)
-        vol_threshold = vol_ma_1w_aligned[i] / 7.0 * 1.5
+        # Scale 1w volume to 1d: approx 1/5 of 1w volume (since 5x 1d in 1w)
+        vol_threshold = vol_ma_1w_aligned[i] / 5.0 * 1.5
         volume_filter = volume[i] > vol_threshold
         
         # Check exits and stoploss
@@ -127,8 +124,8 @@ def generate_signals(prices):
             bars_since_entry += 1
         else:
             # Look for entries
-            # Minimum holding period: only allow new entry after 6 bars flat
-            if bars_since_entry >= 6:
+            # Minimum holding period: only allow new entry after 5 bars flat
+            if bars_since_entry >= 5:
                 # Breakout entries: upper/lower with 1w trend
                 bull_breakout = close[i] > upper[i]
                 bear_breakout = close[i] < lower[i]
