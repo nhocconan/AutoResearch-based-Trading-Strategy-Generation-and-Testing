@@ -3,14 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h ATR-based breakout with 1d trend filter and volume confirmation
-# Long when price breaks above ATR(14) upper band AND 1d EMA(50) trend up AND volume > 1.5x avg
-# Short when price breaks below ATR(14) lower band AND 1d EMA(50) trend down AND volume > 1.5x avg
-# Exit when price crosses back through ATR midpoint
-# Target: 75-200 total trades over 4 years (19-50/year) for optimal 4h performance
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation
+# Long when price breaks above Donchian(20) upper band AND price > 1d EMA(50) AND volume > 1.5x 20-period average
+# Short when price breaks below Donchian(20) lower band AND price < 1d EMA(50) AND volume > 1.5x 20-period average
+# Exit when price crosses back through Donchian center (mean of upper/lower bands)
+# Uses Donchian channels for breakout signals, EMA for trend filter, volume for confirmation
+# Target: 50-150 total trades over 4 years (12-37/year) for optimal 12h performance
 
-name = "4h_atr_breakout_1d_ema_vol_v1"
-timeframe = "4h"
+name = "12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,22 +25,12 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # ATR(14) for volatility bands
+    # Donchian channels (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    
-    tr1 = high_series - low_series
-    tr2 = abs(high_series - close_series.shift(1))
-    tr3 = abs(low_series - close_series.shift(1))
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=14, min_periods=14).mean().values
-    
-    # ATR bands (ATR multiplier = 2.0)
-    atr_mult = 2.0
-    atr_upper = close + atr * atr_mult
-    atr_lower = close - atr * atr_mult
-    atr_mid = close  # midpoint for exit
+    donchian_upper = high_series.rolling(window=20, min_periods=20).max().values
+    donchian_lower = low_series.rolling(window=20, min_periods=20).min().values
+    donchian_middle = (donchian_upper + donchian_lower) / 2
     
     # 1d EMA(50) trend filter
     df_1d = get_htf_data(prices, '1d')
@@ -57,37 +48,35 @@ def generate_signals(prices):
     
     for i in range(60, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(one_day_ema_aligned[i]) or np.isnan(volume_threshold[i]):
+        if np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(donchian_middle[i]) or np.isnan(one_day_ema_aligned[i]) or np.isnan(volume_threshold[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: price crosses back through ATR midpoint
+        # Check exits: price crosses Donchian middle
         if position == 1:  # long position
-            if close[i] <= atr_mid[i]:
+            if close[i] <= donchian_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] >= atr_mid[i]:
+            if close[i] >= donchian_middle[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
             # Look for entries with trend filter and volume confirmation
-            # Long: price > ATR upper band AND 1d EMA trending up AND volume confirmation
-            if (close[i] > atr_upper[i] and one_day_ema_aligned[i] > one_day_ema_aligned[max(i-1,0)] and volume[i] > volume_threshold[i]):
+            # Long: price breaks above Donchian upper AND price > 1d EMA(50) AND volume confirmation
+            if (close[i] > donchian_upper[i] and close[i] > one_day_ema_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = 0.25
                 position = 1
-            # Short: price < ATR lower band AND 1d EMA trending down AND volume confirmation
-            elif (close[i] < atr_lower[i] and one_day_ema_aligned[i] < one_day_ema_aligned[max(i-1,0)] and volume[i] > volume_threshold[i]):
+            # Short: price breaks below Donchian lower AND price < 1d EMA(50) AND volume confirmation
+            elif (close[i] < donchian_lower[i] and close[i] < one_day_ema_aligned[i] and volume[i] > volume_threshold[i]):
                 signals[i] = -0.25
                 position = -1
     
     return signals
-
-</think>
