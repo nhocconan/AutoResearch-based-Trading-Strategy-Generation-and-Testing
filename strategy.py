@@ -3,24 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian breakout with volume confirmation and weekly trend filter
-# Uses Donchian channels (20) for breakout signals, volume filter to avoid false breakouts,
-# and weekly EMA trend filter to ensure we trade in the direction of higher timeframe momentum.
-# Designed for 1d timeframe with low trade frequency (target: 50-100 total over 4 years) to minimize fee drag.
-# Works in both bull and bear markets by filtering breakouts with trend and volume confirmation.
+# Hypothesis: 6h ATR breakout with 12h mean reversion filter
+# Works in bull/bear because breakouts capture strong moves, while 12h RSI mean reversion
+# filters out false breakouts in choppy markets. Uses volatility expansion (ATR) to
+# detect genuine breakouts and RSI to avoid overextended moves. Target: 75-150 total trades.
 
-name = "exp_13018_1d_donchian20_volume_trend_v1"
-timeframe = "1d"
+name = "exp_13019_6h_atr_breakout_12h_rsi_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+ATR_PERIOD = 14
+ATR_MULTIPLIER = 1.5
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 70
+RSI_OVERSOLD = 30
+SIGNAL_SIZE = 0.25
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
-EMA_WEEKLY_PERIOD = 20
-SIGNAL_SIZE = 0.25
-ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -31,39 +31,40 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_rsi(close, period):
+    """Calculate RSI"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 12h data ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate weekly EMA for trend filter
-    close_weekly = df_weekly['close'].values
-    ema_weekly = pd.Series(close_weekly).ewm(span=EMA_WEEKLY_PERIOD, adjust=False, min_periods=EMA_WEEKLY_PERIOD).mean().values
-    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    # Calculate 12h RSI
+    close_12h = df_12h['close'].values
+    rsi_12h = calculate_rsi(close_12h, RSI_PERIOD)
+    rsi_12h_aligned = align_htf_to_ltf(prices, df_12h, rsi_12h)
     
-    # Calculate daily indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
-    
-    # Volume moving average
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
-    
-    # ATR for stoploss
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -71,11 +72,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, EMA_WEEKLY_PERIOD) + 1
+    start = max(ATR_PERIOD, VOLUME_MA_PERIOD, RSI_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if weekly EMA not available
-        if np.isnan(ema_weekly_aligned[i]):
+        # Skip if RSI not available
+        if np.isnan(rsi_12h_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -97,26 +98,29 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter: only take longs above weekly EMA, shorts below
-        trend_filter_long = close[i] > ema_weekly_aligned[i]
-        trend_filter_short = close[i] < ema_weekly_aligned[i]
+        # ATR breakout conditions
+        breakout_up = volume_ok and (high[i] > close[i-1] + ATR_MULTIPLIER * atr[i-1])
+        breakout_down = volume_ok and (low[i] < close[i-1] - ATR_MULTIPLIER * atr[i-1])
         
-        # Breakout conditions
-        breakout_long = volume_ok and trend_filter_long and close[i] >= donchian_upper[i]
-        breakout_short = volume_ok and trend_filter_short and close[i] <= donchian_lower[i]
+        # 12h RSI mean reversion filter
+        rsi_not_extreme = (rsi_12h_aligned[i] > RSI_OVERSOLD) and (rsi_12h_aligned[i] < RSI_OVERBOUGHT)
+        rsi_oversold = rsi_12h_aligned[i] < RSI_OVERSOLD
+        rsi_overbought = rsi_12h_aligned[i] > RSI_OVERBOUGHT
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            # Long: breakout up with RSI not overbought (or oversold for mean reversion)
+            if breakout_up and (rsi_not_extreme or rsi_oversold):
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
-                stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_short:
+                stop_price = entry_price - (ATR_MULTIPLIER * atr[i])
+            # Short: breakout down with RSI not oversold (or overbought for mean reversion)
+            elif breakout_down and (rsi_not_extreme or rsi_overbought):
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
-                stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                stop_price = entry_price + (ATR_MULTIPLIER * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
