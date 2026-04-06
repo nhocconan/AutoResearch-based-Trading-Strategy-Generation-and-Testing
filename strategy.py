@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
 4h Donchian(20) Breakout + 1d EMA Trend + Volume Spike + ATR Stop
-Hypothesis: Combines price channel breakouts with daily trend bias and volume confirmation to capture momentum while avoiding chop. Works in bull (breakouts with trend) and bear (short breakdowns with trend). Designed for moderate trade frequency (~25-40/year) to minimize fee drift.
+Hypothesis: Combines price channel breakouts with daily trend bias and volume confirmation.
+Works in bull (breakouts with trend) and bear (breakdowns with trend).
+Designed for moderate trade frequency (~20-40/year) to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1detrend_vol_v3"
+name = "4h_donchian20_1dtrend_vol_v3"
 timeframe = "4h"
 leverage = 1.0
 
@@ -129,5 +131,3 @@ def generate_signals(prices):
                 bars_since_entry += 1
     
     return signals
-
-</answer>
