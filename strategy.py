@@ -3,21 +3,48 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: Daily Donchian(20) breakout with 1-day volume confirmation and ATR stoploss
-# Works in bull/bear because breakouts capture strong momentum moves, volume filters weak signals,
-# and ATR-based stops adapt to volatility. Target: 75-200 trades over 4 years (19-50/year).
+# Hypothesis: Daily KAMA trend with RSI filter and 4h volume confirmation
+# Works in bull/bear because KAMA adapts to market noise, RSI filters overbought/oversold,
+# and volume confirmation ensures genuine momentum. Target: 80-150 trades over 4 years.
 
-name = "exp_12926_4h_donchian20_1d_vol_atr_v1"
+name = "exp_12926_4h_kama_rsi_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
+KAMA_FAST = 2
+KAMA_SLOW = 30
+RSI_PERIOD = 14
+RSI_OVERBOUGHT = 65
+RSI_OVERSOLD = 35
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+
+def calculate_kama(close, fast, slow):
+    """Calculate Kaufman Adaptive Moving Average"""
+    change = np.abs(close - np.roll(close, 10))
+    volatility = np.sum(np.abs(np.diff(close, n=1)), axis=0)
+    er = np.where(volatility != 0, change / volatility, 0)
+    sc = (er * (2/(fast+1) - 2/(slow+1)) + 2/(slow+1)) ** 2
+    kama = np.zeros_like(close)
+    kama[0] = close[0]
+    for i in range(1, len(close)):
+        kama[i] = kama[i-1] + sc[i] * (close[i] - kama[i-1])
+    return kama
+
+def calculate_rsi(close, period):
+    """Calculate RSI using Wilder's smoothing"""
+    delta = np.diff(close, n=1)
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = np.where(avg_loss != 0, avg_gain / avg_loss, 0)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -28,28 +55,18 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load daily data ONCE before loop for trend filter
     df_daily = get_htf_data(prices, '1d')
+    close_daily = df_daily['close'].values
     
-    # Calculate daily Donchian channels
-    high_d = df_daily['high'].values
-    low_d = df_daily['low'].values
-    donchian_upper, donchian_lower = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
-    
-    # Align to 4h timeframe
-    donchian_upper_4h = align_htf_to_ltf(prices, df_daily, donchian_upper)
-    donchian_lower_4h = align_htf_to_ltf(prices, df_daily, donchian_lower)
+    # Calculate daily KAMA for trend filter
+    kama_daily = calculate_kama(close_daily, KAMA_FAST, KAMA_SLOW)
+    kama_daily_aligned = align_htf_to_ltf(prices, df_daily, kama_daily)
     
     # Calculate 4h indicators
     high = prices['high'].values
@@ -57,8 +74,9 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
+    rsi = calculate_rsi(close, RSI_PERIOD)
     atr = calculate_atr(high, low, close, ATR_PERIOD)
+    volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -66,11 +84,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(RSI_PERIOD, ATR_PERIOD, VOLUME_MA_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily channels not available
-        if np.isnan(donchian_upper_4h[i]) or np.isnan(donchian_lower_4h[i]):
+        # Skip if KAMA not available
+        if np.isnan(kama_daily_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -92,18 +110,24 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above upper or breakdown below lower
-        breakout_long = volume_ok and close[i] >= donchian_upper_4h[i]
-        breakout_short = volume_ok and close[i] <= donchian_lower_4h[i]
+        # Trend filter: price above/below daily KAMA
+        price_above_kama = close[i] > kama_daily_aligned[i]
+        price_below_kama = close[i] < kama_daily_aligned[i]
+        
+        # RSI filter
+        rsi_not_overbought = rsi[i] < RSI_OVERBOUGHT
+        rsi_not_oversold = rsi[i] > RSI_OVERSOLD
         
         # Generate signals
         if position == 0:
-            if breakout_long:
+            # Long: price above KAMA, not overbought, volume confirmation
+            if price_above_kama and rsi_not_overbought and volume_ok:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif breakout_short:
+            # Short: price below KAMA, not oversold, volume confirmation
+            elif price_below_kama and rsi_not_oversold and volume_ok:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
