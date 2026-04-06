@@ -3,18 +3,17 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12691_6d_elder_ray_volume_v1"
-timeframe = "6h"
+name = "exp_12692_12h_donchian20_1d_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
-EMA13_PERIOD = 13
-EMA13_LONG_PERIOD = 26
+DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 1.5
+VOLUME_THRESHOLD = 2.0
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.5
+ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_ema(close, period):
     """Calculate EMA"""
@@ -29,6 +28,12 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channel upper and lower bands"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -37,26 +42,16 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily Elder Ray components (Bull/Bear Power)
+    # Calculate daily Donchian channel
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
+    upper_1d, lower_1d = calculate_donchian(high_1d, low_1d, DONCHIAN_PERIOD)
     
-    # EMA13 and EMA26 on daily
-    ema13_1d = calculate_ema(close_1d, EMA13_PERIOD)
-    ema26_1d = calculate_ema(close_1d, EMA13_LONG_PERIOD)
+    # Align Donchian levels to 12h timeframe
+    upper_1d_aligned = align_htf_to_ltf(prices, df_1d, upper_1d)
+    lower_1d_aligned = align_htf_to_ltf(prices, df_1d, lower_1d)
     
-    # Bull Power = High - EMA13, Bear Power = Low - EMA26
-    bull_power_1d = high_1d - ema13_1d
-    bear_power_1d = low_1d - ema26_1d
-    
-    # Align to 6h timeframe
-    bull_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bull_power_1d)
-    bear_power_1d_aligned = align_htf_to_ltf(prices, df_1d, bear_power_1d)
-    ema13_1d_aligned = align_htf_to_ltf(prices, df_1d, ema13_1d)
-    ema26_1d_aligned = align_htf_to_ltf(prices, df_1d, ema26_1d)
-    
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -71,11 +66,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(VOLUME_MA_PERIOD, ATR_PERIOD, EMA13_LONG_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily data not available
-        if np.isnan(bull_power_1d_aligned[i]) or np.isnan(bear_power_1d_aligned[i]):
+        # Skip if daily Donchian levels not available
+        if np.isnan(upper_1d_aligned[i]) or np.isnan(lower_1d_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -97,20 +92,22 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Elder Ray signals with volume confirmation
-        # Long: Bull Power > 0 and Bear Power < 0 (bulls in control)
-        long_signal = volume_ok and (bull_power_1d_aligned[i] > 0) and (bear_power_1d_aligned[i] < 0)
-        # Short: Bull Power < 0 and Bear Power > 0 (bears in control)
-        short_signal = volume_ok and (bull_power_1d_aligned[i] < 0) and (bear_power_1d_aligned[i] > 0)
+        # Donchian breakout with volume confirmation
+        breakout_long = volume_ok and close[i] > upper_1d_aligned[i]
+        breakout_short = volume_ok and close[i] < lower_1d_aligned[i]
+        
+        # Entry conditions
+        long_entry = breakout_long
+        short_entry = breakout_short
         
         # Generate signals
         if position == 0:
-            if long_signal:
+            if long_entry:
                 signals[i] = SIGNAL_SIZE
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-            elif short_signal:
+            elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
