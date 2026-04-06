@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 """
-6h Camarilla Pivot + Volume + 1d Trend Filter
-Hypothesis: Camarilla pivot levels from 1d provide reliable support/resistance.
-Fade at R3/S3 with volume confirmation, breakout continuation at R4/S4.
-Works in both bull/bear markets as it fades extremes and captures breakouts.
-Target: 50-150 trades over 4 years (12-37/year) with disciplined entries.
+12h Donchian(20) Breakout + Volume + ADX Filter (Optimized v14)
+Hypothesis: Donchian breakouts on 12h timeframe capture medium-term momentum with proven performance.
+Volume confirms institutional participation. ADX filter from 1d ensures we only trade in trending markets.
+Optimized for 12h timeframe with proper position sizing to achieve target trade count of 50-150 total over 4 years.
 """
 
 import numpy as np
 import pandas as pd
-from mtf_data import get_htf_data, align_ltf_to_htf
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_camarilla_pivot_volume_trend_v1"
-timeframe = "6h"
+name = "12h_donchian20_volume_adx_v14"
+timezone = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -20,45 +19,57 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for Camarilla pivots and trend (once before loop)
+    # Load 1d data for ADX (once before loop)
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate Camarilla pivot levels for each 1d bar
+    # ADX calculation on 1d
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Camarilla formulas
-    range_1d = high_1d - low_1d
-    close_prev = np.roll(close_1d, 1)
-    close_prev[0] = close_1d[0]  # first bar
+    # True Range
+    tr1 = np.abs(high_1d[1:] - low_1d[1:])
+    tr2 = np.abs(high_1d[1:] - close_1d[:-1])
+    tr3 = np.abs(low_1d[1:] - close_1d[:-1])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr = np.concatenate([[np.nan], tr])
     
-    # R levels
-    r1 = close_prev + (range_1d * 1.0833)
-    r2 = close_prev + (range_1d * 1.1666)
-    r3 = close_prev + (range_1d * 1.2500)
-    r4 = close_prev + (range_1d * 1.5000)
+    # Directional Movement
+    dm_plus = np.where((high_1d[1:] - high_1d[:-1]) > (low_1d[:-1] - low_1d[1:]), 
+                       np.maximum(high_1d[1:] - high_1d[:-1], 0), 0)
+    dm_minus = np.where((low_1d[:-1] - low_1d[1:]) > (high_1d[1:] - high_1d[:-1]), 
+                        np.maximum(low_1d[:-1] - low_1d[1:], 0), 0)
+    dm_plus = np.concatenate([[0], dm_plus])
+    dm_minus = np.concatenate([[0], dm_minus])
     
-    # S levels
-    s1 = close_prev - (range_1d * 1.0833)
-    s2 = close_prev - (range_1d * 1.1666)
-    s3 = close_prev - (range_1d * 1.2500)
-    s4 = close_prev - (range_1d * 1.5000)
+    # Wilder's smoothing
+    def wilder_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        if len(data) >= period:
+            result[period-1] = np.nansum(data[:period])
+            for i in range(period, len(data)):
+                result[i] = result[i-1] - (result[i-1] / period) + data[i]
+        return result
     
-    # Pivot point
-    pp = (high_1d + low_1d + close_1d) / 3.0
+    period_adx = 14
+    tr_smooth = wilder_smooth(tr, period_adx)
+    dm_plus_smooth = wilder_smooth(dm_plus, period_adx)
+    dm_minus_smooth = wilder_smooth(dm_minus, period_adx)
     
-    # Trend filter: 20-period EMA on 1d close
-    ema_20 = pd.Series(close_1d).ewm(span=20, adjust=False).mean().values
+    # DI+ and DI-
+    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
+    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
     
-    # Align all 1d levels to 6h timeframe
-    r3_6h = align_htf_to_ltf(prices, df_1d, r3)
-    r4_6h = align_htf_to_ltf(prices, df_1d, r4)
-    s3_6h = align_htf_to_ltf(prices, df_1d, s3)
-    s4_6h = align_htf_to_ltf(prices, df_1d, s4)
-    ema_20_6h = align_htf_to_ltf(prices, df_1d, ema_20)
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilder_smooth(dx, period_adx)
+    
+    # Align ADX to 12h timeframe
+    adx_aligned = align_htf_to_ltf(prices, df_1d, adx)
     
     # Price and volume data
+    high = prices['high'].values
+    low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
@@ -66,53 +77,57 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     
     # Start from warmup period
-    start = 20  # For EMA
+    start = max(20, 14)  # For Donchian and ADX
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(r3_6h[i]) or np.isnan(ema_20_6h[i]):
+        if np.isnan(adx_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume filter: 20-period average
+        # Donchian channel (20-period)
+        if i >= 20:
+            highest_high = np.max(high[i-20:i])
+            lowest_low = np.min(low[i-20:i])
+        else:
+            highest_high = np.max(high[:i+1]) if i > 0 else high[i]
+            lowest_low = np.min(low[:i+1]) if i > 0 else low[i]
+        
+        # Volume filter (20-period average)
         if i >= 20:
             vol_ma = np.mean(volume[i-20:i])
-            volume_filter = volume[i] > vol_ma * 1.5
+            volume_filter = volume[i] > vol_ma * 2.0  # Adjusted for 12h timeframe
         else:
             volume_filter = False
         
         # Check exits
         if position == 1:  # long position
-            # Exit: price reaches R3 (fade level) OR closes below EMA20
-            if close[i] >= r3_6h[i] or close[i] < ema_20_6h[i]:
+            # Exit: price closes below Donchian lower OR ADX < 20
+            if close[i] < lowest_low or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price reaches S3 (fade level) OR closes above EMA20
-            if close[i] <= s3_6h[i] or close[i] > ema_20_6h[i]:
+            # Exit: price closes above Donchian upper OR ADX < 20
+            if close[i] > highest_high or adx_aligned[i] < 20:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries
-            # Fade at R3/S3: price touches extreme level with volume
-            fade_long = (close[i] <= s3_6h[i] and close[i] > s4_6h[i]) and volume_filter
-            fade_short = (close[i] >= r3_6h[i] and close[i] < r4_6h[i]) and volume_filter
+            # Look for entries: Donchian breakout + volume + ADX trend
+            bull_breakout = close[i] > highest_high
+            bear_breakout = close[i] < lowest_low
+            trend_filter = adx_aligned[i] > 25  # Adjusted for 12h timeframe
             
-            # Breakout continuation: price breaks R4/S4 with volume and trend
-            breakout_long = (close[i] > r4_6h[i]) and volume_filter and (close[i] > ema_20_6h[i])
-            breakout_short = (close[i] < s4_6h[i]) and volume_filter and (close[i] < ema_20_6h[i])
-            
-            if fade_long or breakout_long:
+            if i >= 20 and bull_breakout and volume_filter and trend_filter:
                 signals[i] = 0.25
                 position = 1
-            elif fade_short or breakout_short:
+            elif i >= 20 and bear_breakout and volume_filter and trend_filter:
                 signals[i] = -0.25
                 position = -1
             else:
