@@ -1,11 +1,17 @@
-# 1d_iceberg_breakout_v1
-# Detects institutional iceberg orders via volume anomalies at key levels
-# Uses: 1d price action + 1w trend filter + volume spike detection
-# Works in bull/bear: accumulation (bull) and distribution (bear) both show volume anomalies
-# Target: 50-100 total trades over 4 years (12-25/year)
+#!/usr/bin/env python3
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_iceberg_breakout_v1"
-timeframe = "1d"
+# Hypothesis: 6-hour Williams %R with Daily EMA Filter and Volume Confirmation.
+# Uses Williams %R(14) on 6h timeframe for oversold/overbought conditions.
+# Filters trades by 6h EMA(50) for trend direction (long above EMA, short below).
+# Requires volume > 1.5x 20-period average to ensure quality signals.
+# Works in bull/bear markets via EMA filter that adapts to trend direction.
+# Target: 50-150 trades over 4 years (12-37/year).
+
+name = "6h_williamsr_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,83 +25,88 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Weekly trend filter (1w)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    # Weekly EMA(21) for trend direction
-    ema_21 = pd.Series(close_1w).ewm(span=21, adjust=False).mean().values
-    ema_21_aligned = align_htf_to_ltf(prices, df_1w, ema_21)
+    # Williams %R(14) calculation
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(13, n):
+        highest_high[i] = np.max(high[i-13:i+1])
+        lowest_low[i] = np.min(low[i-13:i+1])
     
-    # Daily ATR(14) for volatility and stoploss
-    tr1 = high[1:] - low[1:]
-    tr2 = np.abs(high[1:] - close[:-1])
-    tr3 = np.abs(low[1:] - close[:-1])
-    tr = np.concatenate([[np.max([high[0] - low[0], np.abs(high[0] - close[0]), np.abs(low[0] - close[0])])], np.maximum(tr1, np.maximum(tr2, tr3))])
-    atr = np.zeros(n)
-    for i in range(14, n):
-        atr[i] = np.mean(tr[i-13:i+1])
+    williams_r = np.full(n, np.nan)
+    for i in range(13, n):
+        if highest_high[i] != lowest_low[i]:
+            williams_r[i] = -100 * (highest_high[i] - close[i]) / (highest_high[i] - lowest_low[i])
+        else:
+            williams_r[i] = -50  # neutral when no range
     
-    # Volume anomaly detection: current volume > 2.5x 20-day average
-    vol_ma20 = np.full(n, np.nan)
+    # EMA(50) on 6h timeframe
+    ema50 = np.full(n, np.nan)
+    alpha = 2.0 / (50 + 1)
+    for i in range(n):
+        if i == 0:
+            ema50[i] = close[i]
+        elif not np.isnan(close[i]):
+            ema50[i] = alpha * close[i] + (1 - alpha) * ema50[i-1]
+        else:
+            ema50[i] = ema50[i-1]
+    
+    # Volume filter: current volume > 1.5x 20-period average
+    vol_ma = np.full(n, np.nan)
     for i in range(19, n):
-        vol_ma20[i] = np.mean(volume[i-19:i+1])
-    volume_spike = volume > (vol_ma20 * 2.5)
-    
-    # Price channels: Donchian(20) for breakout levels
-    donch_high = np.full(n, np.nan)
-    donch_low = np.full(n, np.nan)
-    for i in range(19, n):
-        donch_high[i] = np.max(high[i-19:i+1])
-        donch_low[i] = np.min(low[i-19:i+1])
+        vol_ma[i] = np.mean(volume[i-19:i+1])
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    for i in range(20, n):
-        # Skip if data not ready
-        if (np.isnan(ema_21_aligned[i]) or np.isnan(atr[i]) or 
-            np.isnan(donch_high[i]) or np.isnan(donch_low[i]) or 
-            np.isnan(vol_ma20[i])):
+    for i in range(50, n):
+        # Skip if data not available
+        if (np.isnan(williams_r[i]) or np.isnan(ema50[i]) or 
+            np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
+        # Volume condition
+        volume_filter = volume[i] > vol_ma[i] * 1.5
+        
         # Check exits and stoploss
         if position == 1:  # long position
-            # Stoploss: 2 * ATR below entry
-            stop_loss = entry_price - 2.0 * atr[i]
+            # Exit: Williams %R crosses above -20 (overbought) or stoploss
+            atr_approx = max(high[i] - low[i], 0.001)
+            stop_loss_level = entry_price - 2.0 * atr_approx
             
-            # Exit: price breaks below Donchian low (failed breakout) or stoploss
-            if (close[i] < donch_low[i] or close[i] < stop_loss):
+            if (williams_r[i] >= -20 or 
+                close[i] < stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Stoploss: 2 * ATR above entry
-            stop_loss = entry_price + 2.0 * atr[i]
+            # Exit: Williams %R crosses below -80 (oversold) or stoploss
+            atr_approx = max(high[i] - low[i], 0.001)
+            stop_loss_level = entry_price + 2.0 * atr_approx
             
-            # Exit: price breaks above Donchian high (failed breakdown) or stoploss
-            if (close[i] > donch_high[i] or close[i] > stop_loss):
+            if (williams_r[i] <= -80 or 
+                close[i] > stop_loss_level):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and trend alignment
-            if volume_spike[i]:
-                # Volume spike + breakout above Donchian high in uptrend
-                if (close[i] > donch_high[i] and close[i-1] <= donch_high[i] and 
-                    close[i] > ema_21_aligned[i]):
+            # Look for entries with volume confirmation
+            if volume_filter:
+                # Long: Williams %R crosses above -80 from below AND price above EMA50
+                if (williams_r[i] > -80 and williams_r[i-1] <= -80 and 
+                    close[i] > ema50[i]):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Volume spike + breakdown below Donchian low in downtrend
-                elif (close[i] < donch_low[i] and close[i-1] >= donch_low[i] and 
-                      close[i] < ema_21_aligned[i]):
+                # Short: Williams %R crosses below -20 from above AND price below EMA50
+                elif (williams_r[i] < -20 and williams_r[i-1] >= -20 and 
+                      close[i] < ema50[i]):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
