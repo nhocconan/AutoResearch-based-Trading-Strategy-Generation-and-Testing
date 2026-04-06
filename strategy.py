@@ -3,11 +3,11 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12771_6d_donchian20_1d_vol_v1"
-timeframe = "6h"
+name = "exp_12772_12h_donchian20_1w_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
-# Parameters
+# Parameters - optimized for 12h timeframe
 DONCHIAN_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 2.0
@@ -16,7 +16,7 @@ ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR"""
+    """Calculate ATR using Wilder's smoothing (EMA)"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -29,24 +29,31 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
+    # Load weekly data ONCE before loop for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    
+    # Calculate weekly EMA for trend filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    
+    # Load daily data ONCE before loop for Donchian channels
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate daily Donchian channels
     high_1d = df_1d['high'].values
     low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
     
     # Upper band: highest high over period
     upper_band = pd.Series(high_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).max().values
     # Lower band: lowest low over period
     lower_band = pd.Series(low_1d).rolling(window=DONCHIAN_PERIOD, min_periods=DONCHIAN_PERIOD).min().values
     
-    # Align to 6h timeframe
+    # Align to 12h timeframe
     upper_band_aligned = align_htf_to_ltf(prices, df_1d, upper_band)
     lower_band_aligned = align_htf_to_ltf(prices, df_1d, lower_band)
     
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -61,7 +68,7 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, 50) + 1
     
     for i in range(start, n):
         # Skip if Donchian bands not available
@@ -87,9 +94,13 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
+        # Trend filter: only trade in direction of weekly EMA
+        trend_up = close[i] > ema_1w_aligned[i] if not np.isnan(ema_1w_aligned[i]) else False
+        trend_down = close[i] < ema_1w_aligned[i] if not np.isnan(ema_1w_aligned[i]) else False
+        
         # Breakout above upper band or breakdown below lower band
-        breakout_long = volume_ok and close[i] >= upper_band_aligned[i]
-        breakout_short = volume_ok and close[i] <= lower_band_aligned[i]
+        breakout_long = volume_ok and trend_up and close[i] >= upper_band_aligned[i]
+        breakout_short = volume_ok and trend_down and close[i] <= lower_band_aligned[i]
         
         # Generate signals
         if position == 0:
