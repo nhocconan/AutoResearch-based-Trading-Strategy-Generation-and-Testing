@@ -3,19 +3,19 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12-hour Camarilla pivot levels (from daily) with volume confirmation and
-# weekly EMA trend filter. Pivots act as support/resistance zones; breaks with volume
-# indicate institutional interest. Weekly EMA ensures alignment with higher timeframe
-# momentum to avoid counter-trend trades. Target: 50-150 total trades over 4 years.
-# Works in bull markets (breakouts above resistance) and bear markets (breakdowns below support).
+# Hypothesis: Daily Donchian channel breakout with weekly EMA trend filter and volume confirmation.
+# Daily timeframe avoids overtrading (target: 75-200 trades over 4 years). Donchian provides
+# objective breakout levels, weekly EMA ensures trend alignment, volume confirms institutional interest.
+# Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band).
+# Includes ATR-based stoploss to manage risk.
 
-name = "exp_13288_12h_camarilla_pivot_vol_ema_v1"
-timeframe = "12h"
+name = "exp_13290_1d_donchian20_1w_ema_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 # Parameters
-PIVOT_PERIOD = 1  # Daily pivot
-EMA_PERIOD = 20   # Weekly EMA
+DONCHIAN_PERIOD = 20
+EMA_PERIOD = 20
 VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
@@ -35,42 +35,33 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channels"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
+
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data ONCE before loop
+    # Load weekly data ONCE before loop for EMA trend filter
     df_1w = get_htf_data(prices, '1w')
-    # Load daily data ONCE before loop for pivots
-    df_1d = get_htf_data(prices, '1d')
     
     # Calculate weekly EMA for trend filter
     close_1w = df_1w['close'].values
     ema_1w = calculate_ema(close_1w, EMA_PERIOD)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # Calculate daily pivots (Camarilla)
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
-    close_1d = df_1d['close'].values
-    
-    # Camarilla levels: H4 = C + 1.1*(H-L), L4 = C - 1.1*(H-L)
-    # H3 = C + 1.1*(H-L)/2, L3 = C - 1.1*(H-L)/2
-    # We use H3/L3 as primary breakout levels
-    pivot_range = high_1d - low_1d
-    h3 = close_1d + 1.1 * pivot_range / 2
-    l3 = close_1d - 1.1 * pivot_range / 2
-    
-    # Align pivots to 12h timeframe
-    h3_aligned = align_htf_to_ltf(prices, df_1d, h3)
-    l3_aligned = align_htf_to_ltf(prices, df_1d, l3)
-    
-    # Calculate 12h indicators
+    # Calculate daily indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
+    
+    # Donchian channels
+    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     
     # Volume MA
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
@@ -84,11 +75,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if EMA not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(h3_aligned[i]) or np.isnan(l3_aligned[i]):
+        # Skip if weekly EMA not available
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(upper[i]) or np.isnan(lower[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -114,9 +105,9 @@ def generate_signals(prices):
         uptrend = close[i] > ema_1w_aligned[i]
         downtrend = close[i] < ema_1w_aligned[i]
         
-        # Breakout signals using Camarilla H3/L3
-        breakout_up = volume_ok and uptrend and (high[i] > h3_aligned[i-1])
-        breakout_down = volume_ok and downtrend and (low[i] < l3_aligned[i-1])
+        # Breakout signals using Donchian channels
+        breakout_up = volume_ok and uptrend and (high[i] > upper[i-1])
+        breakout_down = volume_ok and downtrend and (low[i] < lower[i-1])
         
         # Generate signals
         if position == 0:
