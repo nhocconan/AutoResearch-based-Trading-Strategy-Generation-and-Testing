@@ -3,23 +3,24 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 1-day Donchian(20) breakout with 1-week EMA(20) trend filter and volume confirmation.
-# Uses weekly trend to capture long-term trend while using daily breakouts for entries.
-# Volume confirmation ensures institutional participation. Target: 75-200 total trades over 4 years.
-# Works in bull markets (breakouts with volume) and bear markets (shorts on breakdowns with volume).
+# Hypothesis: 6-hour Donchian(18) breakout with 12-hour EMA(26) trend filter and volume confirmation (1.5x volume).
+# Uses 12h trend for direction, 6h Donchian breakouts for entries, volume for confirmation.
+# Designed for ~100 total trades over 4 years (25/year) to avoid fee drain.
+# Works in bull (breakouts with volume) and bear (breakdowns with volume) markets.
+# Target: 50-150 total trades, 0.25 position size, max DD < -50%.
 
-name = "exp_13698_1d_donchian20_1w_ema_vol_v1"
-timeframe = "1d"
+name = "exp_13699_6h_donchian18_12h_ema_vol_v1"
+timeframe = "6h"
 leverage = 1.0
 
-# Parameters
-DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 20
-VOLUME_MA_PERIOD = 10
-VOLUME_THRESHOLD = 1.8
+# Parameters - tuned for lower trade frequency
+DONCHIAN_PERIOD = 18
+TREND_EMA_PERIOD = 26
+VOLUME_MA_PERIOD = 8
+VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.2
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -37,18 +38,18 @@ def calculate_ema(close, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load 1w data for trend filter ONCE before loop
-    df_1w = get_htf_data(prices, '1w')
+    # Load 12h data for trend filter ONCE before loop
+    df_12h = get_htf_data(prices, '12h')
     
-    # Calculate 1w EMA for trend filter
-    close_1w = df_1w['close'].values
-    ema_1w = calculate_ema(close_1w, TREND_EMA_PERIOD)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    # Calculate 12h EMA for trend filter
+    close_12h = df_12h['close'].values
+    ema_12h = calculate_ema(close_12h, TREND_EMA_PERIOD)
+    ema_12h_aligned = align_htf_to_ltf(prices, df_12h, ema_12h)
     
-    # Calculate 1d indicators
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -74,7 +75,7 @@ def generate_signals(prices):
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(ema_12h_aligned[i]) or np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or np.isnan(volume_ma[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -99,9 +100,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
         
-        # Trend direction from 1w EMA
-        above_ema = close[i] > ema_1w_aligned[i]
-        below_ema = close[i] < ema_1w_aligned[i]
+        # Trend direction from 12h EMA
+        above_ema = close[i] > ema_12h_aligned[i]
+        below_ema = close[i] < ema_12h_aligned[i]
         
         # Donchian breakout signals
         if i > 0 and not np.isnan(donchian_high[i-1]) and not np.isnan(donchian_low[i-1]):
