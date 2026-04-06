@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-4h Donchian breakout with 1d EMA50 trend filter and volume confirmation
-Hypothesis: Donchian breakouts capture breakout momentum; 1d EMA50 ensures trading in trend direction; volume confirms institutional participation.
-Works in bull markets (breakouts above upper band) and bear markets (breakdowns below lower band). Target: 75-200 total trades over 4 years.
+6h ADX + RSI Extreme with 1d Trend Filter
+Hypothesis: In trending markets (ADX>25), RSI extremes (<20 or >80) with 1d trend alignment provide high-probability entries. 
+ADX filters out ranging markets where RSI mean-reversion fails. Works in bull (buy RSI<20 in uptrend) and bear (sell RSI>80 in downtrend).
+Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_ema_vol_v1"
-timeframe = "4h"
+name = "6h_adx_rsi_extreme_1d_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,71 +33,98 @@ def generate_signals(prices):
     ema50_rising_aligned = align_htf_to_ltf(prices, df_1d, ema50_rising)
     ema50_falling_aligned = align_htf_to_ltf(prices, df_1d, ema50_falling)
     
-    # 4h data
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian Channel (20-period)
-    lookback = 20
-    highest_high = np.full(n, np.nan)
-    lowest_low = np.full(n, np.nan)
-    for i in range(lookback - 1, n):
-        highest_high[i] = np.max(high[i - lookback + 1:i + 1])
-        lowest_low[i] = np.min(low[i - lookback + 1:i + 1])
+    # ADX calculation (14-period)
+    # +DM and -DM
+    up_move = high[1:] - high[:-1]
+    down_move = low[:-1] - low[1:]
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    # Pad to same length
+    plus_dm = np.concatenate([[0.0], plus_dm])
+    minus_dm = np.concatenate([[0.0], minus_dm])
     
-    # Volume filter: 20-period EMA
-    vol_ema = pd.Series(volume).ewm(span=20, adjust=False, min_periods=20).mean().values
+    # True Range
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr1[0] = high[0] - low[0]
+    tr2[0] = np.abs(high[0] - close[0])
+    tr3[0] = np.abs(low[0] - close[0])
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    
+    # Smoothed values (using Wilder's smoothing = EMA with alpha=1/period)
+    def wilders_smoothing(data, period):
+        alpha = 1.0 / period
+        return pd.Series(data).ewm(alpha=alpha, adjust=False).values
+    
+    atr = wilders_smoothing(tr, 14)
+    plus_di = 100 * wilders_smoothing(plus_dm, 14) / atr
+    minus_di = 100 * wilders_smoothing(minus_dm, 14) / atr
+    dx = 100 * np.abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = wilders_smoothing(dx, 14)
+    
+    # RSI (14-period)
+    delta = np.diff(close)
+    delta = np.concatenate([[0.0], delta])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/14, adjust=False).values
+    avg_loss = pd.Series(loss).ewm(alpha=1/14, adjust=False).values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start from warmup period
-    start = 50  # For EMA50 and Donchian
+    # Start from warmup period (ADX and RSI need ~28 bars)
+    start = 35
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(ema50_1d_aligned[i]) or 
-            np.isnan(ema50_rising_aligned[i]) or np.isnan(ema50_falling_aligned[i])):
+        if (np.isnan(adx[i]) or np.isnan(rsi[i]) or 
+            np.isnan(ema50_1d_aligned[i]) or np.isnan(ema50_rising_aligned[i]) or 
+            np.isnan(ema50_falling_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: opposite breakout or stoploss
+        # Check exits: reverse signal or stoploss
         if position == 1:  # long position
-            # Exit: price breaks below lower Donchian band OR stoploss
-            if (close[i] <= lowest_low[i] or 
-                close[i] <= entry_price - 2.5 * (highest_high[i] - lowest_low[i])):
+            # Exit: RSI > 60 (take profit) OR ADX < 20 (trend weakening) OR stoploss
+            if (rsi[i] > 60 or adx[i] < 20 or 
+                close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above upper Donchian band OR stoploss
-            if (close[i] >= highest_high[i] or 
-                close[i] >= entry_price + 2.5 * (highest_high[i] - lowest_low[i])):
+            # Exit: RSI < 40 (take profit) OR ADX < 20 (trend weakening) OR stoploss
+            if (rsi[i] < 40 or adx[i] < 20 or 
+                close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + trend + volume
-            breakout_up = close[i] > highest_high[i]
-            breakout_down = close[i] < lowest_low[i]
+            # Look for entries: ADX > 25 (trending) + RSI extreme + 1d trend
+            strong_trend = adx[i] > 25
+            rsi_oversold = rsi[i] < 20
+            rsi_overbought = rsi[i] > 80
             
-            long_entry = breakout_up and ema50_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
-            short_entry = breakout_down and ema50_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
-            
-            if long_entry:
+            if strong_trend and rsi_oversold and ema50_rising_aligned[i]:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_entry:
+            elif strong_trend and rsi_overbought and ema50_falling_aligned[i]:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
