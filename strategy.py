@@ -7,11 +7,11 @@ name = "exp_12661_4h_donchian20_1d_trend_vol_v1"
 timeframe = "4h"
 leverage = 1.0
 
-# Parameters
+# Parameters - Optimized for 75-200 trades over 4 years
 DONCHIAN_PERIOD = 20
 TREND_EMA_PERIOD = 50
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 2.5  # Higher threshold to reduce trades
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
@@ -86,18 +86,18 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation
+        # Volume confirmation - require volume > 2.5x MA
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Trend filter (daily)
         uptrend_1d = close[i] > ema_1d_aligned[i]
         downtrend_1d = close[i] < ema_1d_aligned[i]
         
-        # Donchian breakout conditions
+        # Donchian breakout conditions - break above/below previous band
         long_breakout = close[i] > upper[i-1]  # break above previous upper band
         short_breakout = close[i] < lower[i-1]  # break below previous lower band
         
-        # Entry conditions
+        # Entry conditions - require BOTH volume and trend confirmation
         long_entry = volume_ok and uptrend_1d and long_breakout
         short_entry = volume_ok and downtrend_1d and short_breakout
         
