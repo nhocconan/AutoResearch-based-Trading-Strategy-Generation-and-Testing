@@ -8,13 +8,11 @@ timeframe = "6h"
 leverage = 1.0
 
 def calculate_donchian(high, low, period):
-    """Calculate Donchian upper and lower bands"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
 
 def calculate_atr(high, low, close, period):
-    """Calculate ATR using Wilder's smoothing"""
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
@@ -24,7 +22,6 @@ def calculate_atr(high, low, close, period):
     return atr
 
 def calculate_pivot_points(high, low, close):
-    """Calculate daily pivot points and support/resistance levels"""
     pivot = (high + low + close) / 3.0
     r1 = 2 * pivot - low
     s1 = 2 * pivot - high
@@ -36,10 +33,10 @@ def calculate_pivot_points(high, low, close):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load daily data for pivot points and trend filter (once before loop)
+    # Load daily data once
     df_1d = get_htf_data(prices, '1d')
     
     # Calculate daily pivot points
