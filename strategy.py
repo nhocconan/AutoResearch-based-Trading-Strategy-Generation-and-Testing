@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + Volume Filter + ATR Stoploss
-Hypothesis: Donchian breakouts capture momentum with low frequency (12h bars), volume confirms breakout strength, ATR stoploss limits drawdown. Designed for 50-150 total trades over 4 years to minimize fee decay.
+4h Donchian(20) Breakout + Volume Filter + ATR Stoploss (v4)
+Hypothesis: Donchian breakouts capture momentum, volume confirms breakout strength, ATR stoploss limits drawdown.
+Trades only in direction of price relative to prior 4h bar's close to avoid whipsaw. Designed for low trade frequency (target 75-200 total over 4 years) to minimize fee decay.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_vol_atr_v1"
-timeframe = "12h"
+name = "4h_donchian20_vol_atr_v4"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
