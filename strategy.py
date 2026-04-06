@@ -3,9 +3,9 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian breakout with volume confirmation and weekly trend filter.
-# Uses weekly EMA to filter trades in higher timeframe trend direction.
-# Breakouts capture strong moves, volume filters weak signals, weekly EMA ensures trading with weekly trend.
+# Hypothesis: 4-hour Donchian channel breakout with volume confirmation and 1-week EMA trend filter.
+# Breakouts capture strong directional moves, volume filters out weak/false signals, and weekly EMA ensures
+# alignment with higher-timeframe momentum, improving performance in both bull and bear markets.
 # Target: 100-200 trades over 4 years (25-50/year) to balance opportunity and cost.
 
 name = "exp_13141_4h_donchian20_1w_ema_vol_v1"
