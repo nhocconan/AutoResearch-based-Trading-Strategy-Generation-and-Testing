@@ -3,8 +3,8 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12847_6h_donchian20_1d_pivot_breakout_v1"
-timeframe = "6h"
+name = "exp_12848_12h_donchian20_1d_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
@@ -14,7 +14,7 @@ VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 48  # Max 12 days (48 * 6h)
+MAX_HOLD_BARS = 24  # Max 12 days (24 * 12h)
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -25,22 +25,11 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian_channels(high, low, period):
-    """Calculate Donchian channels"""
+def calculate_donchian(high, low, period):
+    """Calculate Donchian channel upper and lower bands"""
     upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
     lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
     return upper, lower
-
-def calculate_pivot_points(high, low, close):
-    """Calculate daily pivot points"""
-    pivot = (high + low + close) / 3.0
-    r1 = 2 * pivot - low
-    s1 = 2 * pivot - high
-    r2 = pivot + (high - low)
-    s2 = pivot - (high - low)
-    r3 = high + 2 * (pivot - low)
-    s3 = low - 2 * (high - pivot)
-    return pivot, r1, r2, r3, s1, s2, s3
 
 def generate_signals(prices):
     n = len(prices)
@@ -50,39 +39,17 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_daily = get_htf_data(prices, '1d')
     
-    # Calculate daily pivot points
+    # Calculate daily Donchian channel
     high_d = df_daily['high'].values
     low_d = df_daily['low'].values
     close_d = df_daily['close'].values
+    upper_d, lower_d = calculate_donchian(high_d, low_d, DONCHIAN_PERIOD)
     
-    pivot_vals = np.zeros(len(close_d))
-    r1_vals = np.zeros(len(close_d))
-    r2_vals = np.zeros(len(close_d))
-    r3_vals = np.zeros(len(close_d))
-    s1_vals = np.zeros(len(close_d))
-    s2_vals = np.zeros(len(close_d))
-    s3_vals = np.zeros(len(close_d))
+    # Align to 12h timeframe
+    upper_aligned = align_htf_to_ltf(prices, df_daily, upper_d)
+    lower_aligned = align_htf_to_ltf(prices, df_daily, lower_d)
     
-    for i in range(len(close_d)):
-        pivot, r1, r2, r3, s1, s2, s3 = calculate_pivot_points(high_d[i], low_d[i], close_d[i])
-        pivot_vals[i] = pivot
-        r1_vals[i] = r1
-        r2_vals[i] = r2
-        r3_vals[i] = r3
-        s1_vals[i] = s1
-        s2_vals[i] = s2
-        s3_vals[i] = s3
-    
-    # Align to 6h timeframe
-    pivot_aligned = align_htf_to_ltf(prices, df_daily, pivot_vals)
-    r1_aligned = align_htf_to_ltf(prices, df_daily, r1_vals)
-    r2_aligned = align_htf_to_ltf(prices, df_daily, r2_vals)
-    r3_aligned = align_htf_to_ltf(prices, df_daily, r3_vals)
-    s1_aligned = align_htf_to_ltf(prices, df_daily, s1_vals)
-    s2_aligned = align_htf_to_ltf(prices, df_daily, s2_vals)
-    s3_aligned = align_htf_to_ltf(prices, df_daily, s3_vals)
-    
-    # Calculate 6h indicators
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -90,7 +57,6 @@ def generate_signals(prices):
     
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
-    donchian_upper, donchian_lower = calculate_donchian_channels(high, low, DONCHIAN_PERIOD)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -104,8 +70,8 @@ def generate_signals(prices):
     for i in range(start, n):
         bars_since_entry += 1
         
-        # Skip if daily pivot levels not available
-        if np.isnan(pivot_aligned[i]) or np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
+        # Skip if Donchian levels not available
+        if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -136,9 +102,9 @@ def generate_signals(prices):
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout above R3 with Donchian confirmation or breakdown below S3
-        breakout_long = volume_ok and close[i] >= r3_aligned[i] and close[i] >= donchian_upper[i]
-        breakout_short = volume_ok and close[i] <= s3_aligned[i] and close[i] <= donchian_lower[i]
+        # Breakout above upper band or breakdown below lower band
+        breakout_long = volume_ok and close[i] >= upper_aligned[i]
+        breakout_short = volume_ok and close[i] <= lower_aligned[i]
         
         # Generate signals
         if position == 0:
