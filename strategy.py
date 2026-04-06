@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6h Williams %R with 1-week trend filter and volume confirmation.
-# Long when Williams %R < -80 (oversold) during bullish weekly trend with volume > 1.5x 20-period average.
-# Short when Williams %R > -20 (overbought) during bearish weekly trend with volume confirmation.
-# Uses weekly trend to avoid counter-trend trades. Williams %R provides mean reversion signals in ranging markets.
-# Target: 100-200 total trades over 4 years (25-50/year) to stay within optimal range.
+# Hypothesis: 12h Donchian(20) breakout with 1d trend filter and volume confirmation.
+# Long when price breaks above upper Donchian channel during bullish day with volume > 1.3x 20-period average.
+# Short when price breaks below lower Donchian channel during bearish day with volume confirmation.
+# Uses daily trend filter to avoid counter-trend trades. Donchian channels provide clear breakout points.
+# Target: 50-150 total trades over 4 years (12-37/year) to stay within optimal range for 12h timeframe.
 
-name = "6h_williamsr_1w_trend_vol_v2"
-timeframe = "6h"
+name = "12h_donchian20_1d_trend_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -24,34 +24,31 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Williams %R (14-period)
+    # Donchian channel (20-period)
     high_series = pd.Series(high)
     low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    highest_high = high_series.rolling(window=14, min_periods=14).max()
-    lowest_low = low_series.rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close_series) / (highest_high - lowest_low)
-    williams_r = williams_r.replace(0, np.nan).fillna(0).values  # Handle division by zero
+    upper = high_series.rolling(window=20, min_periods=20).max().values
+    lower = low_series.rolling(window=20, min_periods=20).min().values
     
-    # Weekly trend filter: bullish/bearish week based on close vs open
-    df_1w = get_htf_data(prices, '1w')
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open  # True for bullish week
-    weekly_bearish = weekly_close < weekly_open   # True for bearish week
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
+    # Daily trend filter: bullish/bearish day based on close vs open
+    df_1d = get_htf_data(prices, '1d')
+    daily_open = df_1d['open'].values
+    daily_close = df_1d['close'].values
+    daily_bullish = daily_close > daily_open  # True for bullish day
+    daily_bearish = daily_close < daily_open   # True for bearish day
+    daily_bullish_aligned = align_htf_to_ltf(prices, df_1d, daily_bullish)
+    daily_bearish_aligned = align_htf_to_ltf(prices, df_1d, daily_bearish)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.3x 20-period average
     volume_series = pd.Series(volume)
     vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     
-    for i in range(14, n):
-        # Skip if weekly trend data not available
-        if np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]):
+    for i in range(20, n):
+        # Skip if daily trend data not available
+        if np.isnan(daily_bullish_aligned[i]) or np.isnan(daily_bearish_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -59,133 +56,36 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        volume_filter = volume[i] > vol_ma[i] * 1.3
         
         # Check exits
         if position == 1:  # long position
-            # Exit: Williams %R > -50 (overbought) or weekly turn bearish
-            if (williams_r[i] > -50 or 
-                weekly_bearish_aligned[i]):
+            # Exit: price drops below lower Donchian or daily turn bearish
+            if (low[i] <= lower[i] or 
+                daily_bearish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: Williams %R < -50 (oversold) or weekly turn bullish
-            if (williams_r[i] < -50 or 
-                weekly_bullish_aligned[i]):
+            # Exit: price rises above upper Donchian or daily turn bullish
+            if (high[i] >= upper[i] or 
+                daily_bullish_aligned[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume confirmation and weekly trend filter
+            # Look for entries with volume confirmation and daily trend filter
             if volume_filter:
-                # Long: Williams %R < -80 (oversold) during bullish week
-                if (williams_r[i] < -80 and 
-                    weekly_bullish_aligned[i]):
+                # Long: break above upper Donchian during bullish day
+                if (high[i] > upper[i] and 
+                    daily_bullish_aligned[i]):
                     signals[i] = 0.25
                     position = 1
-                # Short: Williams %R > -20 (overbought) during bearish week
-                elif (williams_r[i] > -20 and 
-                      weekly_bearish_aligned[i]):
-                    signals[i] = -0.25
-                    position = -1
-    
-    return signals
-
-</think>
-#!/usr/bin/env python3
-import numpy as np
-import pandas as pd
-from mtf_data import get_htf_data, align_htf_to_ltf
-
-# Hypothesis: 6h Williams %R with 1-week trend filter and volume confirmation.
-# Long when Williams %R < -80 (oversold) during bullish weekly trend with volume > 1.5x 20-period average.
-# Short when Williams %R > -20 (overbought) during bearish weekly trend with volume confirmation.
-# Uses weekly trend to avoid counter-trend trades. Williams %R provides mean reversion signals in ranging markets.
-# Target: 100-200 total trades over 4 years (25-50/year) to stay within optimal range.
-
-name = "6h_williamsr_1w_trend_vol_v2"
-timeframe = "6h"
-leverage = 1.0
-
-def generate_signals(prices):
-    n = len(prices)
-    if n < 50:
-        return np.zeros(n)
-    
-    # Price and volume data
-    high = prices['high'].values
-    low = prices['low'].values
-    close = prices['close'].values
-    volume = prices['volume'].values
-    
-    # Williams %R (14-period)
-    high_series = pd.Series(high)
-    low_series = pd.Series(low)
-    close_series = pd.Series(close)
-    highest_high = high_series.rolling(window=14, min_periods=14).max()
-    lowest_low = low_series.rolling(window=14, min_periods=14).min()
-    williams_r = -100 * (highest_high - close_series) / (highest_high - lowest_low)
-    williams_r = williams_r.replace(0, np.nan).fillna(0).values  # Handle division by zero
-    
-    # Weekly trend filter: bullish/bearish week based on close vs open
-    df_1w = get_htf_data(prices, '1w')
-    weekly_open = df_1w['open'].values
-    weekly_close = df_1w['close'].values
-    weekly_bullish = weekly_close > weekly_open  # True for bullish week
-    weekly_bearish = weekly_close < weekly_open   # True for bearish week
-    weekly_bullish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bullish)
-    weekly_bearish_aligned = align_htf_to_ltf(prices, df_1w, weekly_bearish)
-    
-    # Volume filter: current volume > 1.5x 20-period average
-    volume_series = pd.Series(volume)
-    vol_ma = volume_series.rolling(window=20, min_periods=20).mean().values
-    
-    signals = np.zeros(n)
-    position = 0  # 0: flat, 1: long, -1: short
-    
-    for i in range(14, n):
-        # Skip if weekly trend data not available
-        if np.isnan(weekly_bullish_aligned[i]) or np.isnan(weekly_bearish_aligned[i]):
-            if position != 0:
-                signals[i] = position * 0.25
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.5
-        
-        # Check exits
-        if position == 1:  # long position
-            # Exit: Williams %R > -50 (overbought) or weekly turn bearish
-            if (williams_r[i] > -50 or 
-                weekly_bearish_aligned[i]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = 0.25
-        elif position == -1:  # short position
-            # Exit: Williams %R < -50 (oversold) or weekly turn bullish
-            if (williams_r[i] < -50 or 
-                weekly_bullish_aligned[i]):
-                signals[i] = 0.0
-                position = 0
-            else:
-                signals[i] = -0.25
-        else:
-            # Look for entries with volume confirmation and weekly trend filter
-            if volume_filter:
-                # Long: Williams %R < -80 (oversold) during bullish week
-                if (williams_r[i] < -80 and 
-                    weekly_bullish_aligned[i]):
-                    signals[i] = 0.25
-                    position = 1
-                # Short: Williams %R > -20 (overbought) during bearish week
-                elif (williams_r[i] > -20 and 
-                      weekly_bearish_aligned[i]):
+                # Short: break below lower Donchian during bearish day
+                elif (low[i] < lower[i] and 
+                      daily_bearish_aligned[i]):
                     signals[i] = -0.25
                     position = -1
     
