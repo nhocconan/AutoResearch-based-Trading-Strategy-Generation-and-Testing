@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-4h Donchian Breakout with 1d Trend Filter and Volume Confirmation
+4h Donchian Breakout with 1d Trend Filter and Volume Confirmation - Version 2
 Hypothesis: Breakouts from Donchian channels on 4h, filtered by 1d trend and volume spikes,
 capture momentum in both bull and bear markets. The 1d trend filter avoids counter-trend
 trades, while volume ensures breakout legitimacy. ATR-based stops limit drawdown.
@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1d_trend_vol_v1"
+name = "4h_donchian20_1d_trend_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
