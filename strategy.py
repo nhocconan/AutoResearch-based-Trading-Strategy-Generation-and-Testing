@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Daily Donchian breakout with weekly EMA filter and volume confirmation.
-Hypothesis: Daily breakouts aligned with weekly trend (EMA50) capture momentum in both bull and bear markets.
-Weekly EMA filter reduces false breakouts. Volume confirmation ensures participation.
-Target: 30-100 trades over 4 years (7-25/year).
+1d Donchian breakout with weekly EMA filter and volume concentration.
+Hypothesis: Breakouts aligned with weekly trend (EMA20) and volume concentration
+capture medium-term trends while avoiding false breakouts. Volume concentration
+(>2x average) confirms institutional participation. Works in bull (breakouts)
+and bear (breakdowns) with proper filtering. Target: 30-100 trades over 4 years.
 """
 
 import numpy as np
@@ -33,12 +34,12 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for EMA filter (once before loop)
+    # Load 1w data for EMA filter (once before loop)
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
     
-    # Calculate weekly EMA(50)
-    ema_1w = calculate_ema(close_1w, 50)
+    # Calculate 1w EMA(20)
+    ema_1w = calculate_ema(close_1w, 20)
     ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Daily data
@@ -51,9 +52,9 @@ def generate_signals(prices):
     highest_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
     lowest_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: volume > 1.5x 20-period average
+    # Volume concentration: volume > 2x 20-period average (stricter filter)
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_filter = volume > (1.5 * vol_ma)
+    vol_concentration = volume > (2.0 * vol_ma)
     
     # ATR for stop loss (14-period)
     atr = calculate_atr(high, low, close, 14)
@@ -63,15 +64,15 @@ def generate_signals(prices):
     entry_price = 0.0
     stop_price = 0.0
     
-    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 50 for EMA)
-    start = max(20, 20, 14, 50) + 1
+    # Start from warmup period (max of 20 for Donchian, 20 for volume, 14 for ATR, 20 for EMA)
+    start = max(20, 20, 14, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
         if np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or np.isnan(ema_1w_aligned[i]) or \
            np.isnan(atr[i]) or np.isnan(vol_ma[i]):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.30
             else:
                 signals[i] = 0.0
             continue
@@ -91,21 +92,21 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Donchian breakout signals with weekly EMA filter and volume
-        # Long: break above upper band + price > weekly EMA + volume
-        # Short: break below lower band + price < weekly EMA + volume
-        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_1w_aligned[i]) and vol_filter[i]
-        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_1w_aligned[i]) and vol_filter[i]
+        # Donchian breakout signals with 1w EMA filter and volume concentration
+        # Long: break above upper band + price > 1w EMA + volume concentration
+        # Short: break below lower band + price < 1w EMA + volume concentration
+        breakout_long = (close[i] > highest_high[i-1]) and (close[i] > ema_1w_aligned[i]) and vol_concentration[i]
+        breakout_short = (close[i] < lowest_low[i-1]) and (close[i] < ema_1w_aligned[i]) and vol_concentration[i]
         
         # Generate signals
         if position == 0:
             if breakout_long:
-                signals[i] = 0.25
+                signals[i] = 0.30
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (2.0 * atr[i])
             elif breakout_short:
-                signals[i] = -0.25
+                signals[i] = -0.30
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (2.0 * atr[i])
@@ -117,13 +118,13 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:
             # Exit short on stop or breakout of upper band
             if close[i] >= stop_price or close[i] > highest_high[i-1]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
     
     return signals
