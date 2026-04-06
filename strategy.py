@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA50 trend filter and volume confirmation
+# Hypothesis: 4-hour Donchian(20) breakout with 1-day EMA50 trend filter and volume confirmation
 # Long when price breaks above Donchian(20) high + close > EMA50 + volume > 1.5x average
 # Short when price breaks below Donchian(20) low + close < EMA50 + volume > 1.5x average
-# Uses 1d EMA50 for trend filter to avoid counter-trend trades
+# Uses 1-day EMA50 for trend filter to avoid counter-trend trades
 # Target: 75-200 total trades over 4 years with controlled risk
 # ATR-based stoploss to limit drawdown
 
@@ -25,17 +25,17 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d data for EMA50 trend filter
+    # 1-day data for EMA50 trend filter
     df_1d = get_htf_data(prices, '1d')
     if len(df_1d) < 50:
         return np.zeros(n)
     
     close_1d = df_1d['close'].values
     
-    # EMA50 calculation
+    # EMA50 calculation with minimum period
     ema50_1d = pd.Series(close_1d).ewm(span=50, min_periods=50, adjust=False).mean().values
     
-    # Align 1d EMA50 to 4h timeframe
+    # Align 1-day EMA50 to 4-hour timeframe
     ema50_1d_aligned = align_htf_to_ltf(prices, df_1d, ema50_1d)
     
     # Donchian channels (20-period)
