@@ -7,7 +7,7 @@ from mtf_data import get_htf_data, align_htf_to_ltf
 # Long when price breaks above Donchian(20) high + close > EMA50 + volume > 2.0x average
 # Short when price breaks below Donchian(20) low + close < EMA50 + volume > 2.0x average
 # Uses 1w EMA50 for trend filter to avoid counter-trend trades
-# Target: 40-80 total trades over 4 years with controlled risk
+# Target: 50-150 total trades over 4 years with controlled risk
 # ATR-based stoploss to limit drawdown
 
 name = "1d_donchian20_1w_ema50_vol_v1"
