@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) Breakout + 1d EMA Trend + Volume Filter
-Hypothesis: On 12h timeframe, Donchian breakouts combined with 1d EMA trend filter and volume confirmation 
-capture significant moves while maintaining low trade frequency. 1d EMA filter ensures we only trade 
+4h Donchian(20) Breakout + 1d EMA Trend + Volume Filter
+Hypothesis: On 4h timeframe, Donchian breakouts combined with 1d EMA trend filter and volume confirmation
+capture significant moves while maintaining low trade frequency. 1d EMA filter ensures we only trade
 in the direction of the higher timeframe trend, reducing whipsaws in both bull and bear markets.
-Target: 50-150 total trades over 4 years (12-37/year) to minimize fee drag and improve test generalization.
+Target: 75-200 total trades over 4 years (19-50/year) with low frequency to minimize fee drag.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1dema_volume_v1"
-timeframe = "12h"
+name = "4h_donchian20_1dema_volume_v1"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -32,7 +32,7 @@ def generate_signals(prices):
         for i in range(1, len(close_1d)):
             ema_1d[i] = (close_1d[i] * multiplier) + (ema_1d[i-1] * (1 - multiplier))
     
-    # Align EMA to 12h timeframe
+    # Align EMA to 4h timeframe
     ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
     # Price and volume data
