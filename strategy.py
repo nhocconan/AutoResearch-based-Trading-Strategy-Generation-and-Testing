@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """
-12h Donchian(20) breakout with 1d volume confirmation and 1d trend filter
-Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d EMA trend for bias and 1d volume for conviction. Works in bull (buy breakouts above 1d EMA) and bear (sell breakdowns below 1d EMA). Target: 75-200 total trades over 4 years (19-50/year).
+4h Donchian(20) breakout with 12h volume confirmation and 1d trend filter
+Hypothesis: Donchian breakouts capture institutional momentum, filtered by 1d EMA trend for bias and 12h volume for conviction. 
+Works in bull (buy breakouts above 1d EMA) and bear (sell breakdowns below 1d EMA). 
+Target: 100-250 total trades over 4 years (25-60/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "12h_donchian20_1d_trend_vol_v1"
-timeframe = "12h"
+name = "4h_donchian20_12h_vol_1d_trend_v2"
+timeframe = "4h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -50,21 +52,22 @@ def generate_signals(prices):
     # 1d trend: above EMA21 = bullish, below = bearish
     trend_1d = np.where(close_1d > ema_1d, 1, -1)
     
-    # Align 1d trend to 12h timeframe
+    # Align 1d trend to 4h timeframe
     trend_1d_aligned = align_htf_to_ltf(prices, df_1d, trend_1d)
     
-    # Get 1d data for volume confirmation
-    volume_1d = df_1d['volume'].values
+    # Get 12h data for volume confirmation
+    df_12h = get_htf_data(prices, '12h')
+    volume_12h = df_12h['volume'].values
     
-    # 20-period average volume on 1d
-    vol_ma_1d = np.full(len(volume_1d), np.nan)
-    for i in range(20, len(volume_1d)):
-        vol_ma_1d[i] = np.mean(volume_1d[i-20:i])
+    # 20-period average volume on 12h
+    vol_ma_12h = np.full(len(volume_12h), np.nan)
+    for i in range(20, len(volume_12h)):
+        vol_ma_12h[i] = np.mean(volume_12h[i-20:i])
     
-    # Align volume MA to 12h timeframe
-    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
+    # Align volume MA to 4h timeframe
+    vol_ma_12h_aligned = align_htf_to_ltf(prices, df_12h, vol_ma_12h)
     
-    # Donchian channels (20-period) from 12h data
+    # Donchian channels (20-period) from 4h data
     upper = np.full(n, np.nan)
     lower = np.full(n, np.nan)
     
@@ -84,7 +87,7 @@ def generate_signals(prices):
         # Skip if required data not available
         if (np.isnan(atr[i]) or np.isnan(trend_1d_aligned[i]) or 
             np.isnan(upper[i]) or np.isnan(lower[i]) or
-            np.isnan(vol_ma_1d_aligned[i])):
+            np.isnan(vol_ma_12h_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -92,9 +95,9 @@ def generate_signals(prices):
             bars_since_entry += 1
             continue
         
-        # Volume filter: current 12h volume > 1.5x 1d average volume (scaled)
-        # Scale 1d volume to 12h: approx 1/2 of 1d volume (since 2x 12h in 1d)
-        vol_threshold = vol_ma_1d_aligned[i] / 2.0 * 1.5
+        # Volume filter: current 4h volume > 1.5x 12h average volume (scaled)
+        # Scale 12h volume to 4h: approx 1/3 of 12h volume (since 3x 4h in 12h)
+        vol_threshold = vol_ma_12h_aligned[i] / 3.0 * 1.5
         volume_filter = volume[i] > vol_threshold
         
         # Check exits and stoploss
