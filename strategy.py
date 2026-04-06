@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-1d Donchian(20) Breakout + Volume Spike + 1w EMA Trend Filter + ATR Stoploss
-Hypothesis: Daily Donchian breakouts with volume spike (>2x average) and strong weekly trend (price > EMA200) capture high-probability moves. Weekly EMA filter reduces whipsaws and works in both bull/bear by aligning with higher timeframe trend. Target: 30-100 total trades over 4 years.
+1d Donchian(20) Breakout + Weekly Volume Spike + 1w EMA Trend Filter + ATR Stoploss
+Hypothesis: Donchian breakouts on daily timeframe with volume spike (>2x weekly average) and strong weekly trend (price > weekly EMA50) capture high-probability moves. Weekly EMA filter reduces whipsaws and aligns with higher timeframe trend, working in both bull/bear markets. Target: 50-100 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_vol_1wema_v1"
+name = "1d_donchian20_weekly_vol_ema50_v1"
 timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 250:  # Need enough data for weekly EMA200 (200 weeks)
+    if n < 50:
         return np.zeros(n)
     
     # Price and volume data
@@ -36,15 +36,15 @@ def generate_signals(prices):
             for i in range(2, n):
                 atr[i] = (tr[i-1] * 13 + atr[i-1]) / 14
     
-    # Weekly EMA200 for trend filter (using mtf_data)
+    # 1w EMA50 for trend filter (using mtf_data)
     df_1w = get_htf_data(prices, '1w')
     close_1w = df_1w['close'].values
-    ema_200_1w = np.full(len(close_1w), np.nan)
-    if len(close_1w) >= 200:
-        ema_200_1w[199] = np.mean(close_1w[:200])
-        for i in range(200, len(close_1w)):
-            ema_200_1w[i] = (close_1w[i] * 2 + ema_200_1w[i-1] * 199) / 200
-    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
+    ema_50_1w = np.full(len(close_1w), np.nan)
+    if len(close_1w) >= 50:
+        ema_50_1w[49] = np.mean(close_1w[:50])
+        for i in range(50, len(close_1w)):
+            ema_50_1w[i] = (close_1w[i] * 2 + ema_50_1w[i-1] * 49) / 50
+    ema_50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_50_1w)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
@@ -52,11 +52,11 @@ def generate_signals(prices):
     bars_since_entry = 0
     
     # Start from warmup period
-    start = 200  # For weekly EMA200
+    start = 50  # For EMA50
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(atr[i]) or np.isnan(ema_200_1w_aligned[i]):
+        if np.isnan(atr[i]) or np.isnan(ema_50_1w_aligned[i]):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -68,12 +68,12 @@ def generate_signals(prices):
         highest_high = np.max(high[i-20:i])
         lowest_low = np.min(low[i-20:i])
         
-        # Volume filter (20-period average)
+        # Volume filter (20-period average on daily)
         vol_ma = np.mean(volume[i-20:i])
         volume_filter = volume[i] > vol_ma * 2.0
         
-        # Weekly EMA200 trend filter
-        trend_filter = close[i] > ema_200_1w_aligned[i]
+        # 1w EMA50 trend filter
+        trend_filter = close[i] > ema_50_1w_aligned[i]
         
         # Check exits and stoploss
         if position == 1:  # long position
@@ -99,7 +99,7 @@ def generate_signals(prices):
                 signals[i] = -0.25
             bars_since_entry += 1
         else:
-            # Look for entries: Donchian breakout + volume + weekly EMA trend filter
+            # Look for entries: Donchian breakout + volume + 1w EMA trend filter
             # Minimum holding period: only allow new entry after 20 bars flat
             if bars_since_entry >= 20:
                 bull_breakout = close[i] > highest_high
