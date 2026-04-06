@@ -1,16 +1,16 @@
-#!/usr/bin/env python3
+#/usr/bin/env python3
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 12h Donchian breakout with daily trend filter and volume confirmation.
+# Hypothesis: 12h Donchian breakout with 1d trend filter and volume confirmation.
 # Uses 12h Donchian channel (20-period) breakouts for trend continuation.
 # Daily trend filter (price above/below 20-day EMA) ensures alignment with higher timeframe trend.
-# Volume confirmation (current volume > 1.5x 20-period average) filters low-quality breakouts.
+# Volume confirmation (current volume > 1.3x 20-period average) filters low-quality breakouts.
 # Works in bull markets via upward breakouts and in bear markets via downward breakdowns.
-# Target: 50-150 trades over 4 years (12-37/year).
+# Target: 100-200 trades over 4 years (25-50/year) to stay within optimal range.
 
-name = "12h_donchian20_1d_ema_vol_v1"
+name = "12h_donchian20_1d_trend_vol_v1"
 timeframe = "12h"
 leverage = 1.0
 
@@ -43,7 +43,7 @@ def generate_signals(prices):
             ema_20d[i] = close_1d[i] * 2/(20+1) + ema_20d[i-1] * (1 - 2/(20+1))
     ema_20d_aligned = align_htf_to_ltf(prices, df_1d, ema_20d)
     
-    # Volume filter: current volume > 1.5x 20-period average
+    # Volume filter: current volume > 1.3x 20-period average
     vol_ma = np.full(n, np.nan)
     for i in range(19, n):
         vol_ma[i] = np.mean(volume[i-19:i+1])
@@ -62,7 +62,7 @@ def generate_signals(prices):
             continue
         
         # Volume condition
-        volume_filter = volume[i] > vol_ma[i] * 1.5
+        volume_filter = volume[i] > vol_ma[i] * 1.3
         
         # Check exits and stoploss
         if position == 1:  # long position
