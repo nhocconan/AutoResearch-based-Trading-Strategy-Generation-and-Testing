@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-1h RSI Mean Reversion with 4h Trend Filter and Volume Confirmation
-Hypothesis: In strong trends (filtered by 4h EMA50), 1h RSI extremes provide high-probability mean reversion entries. Volume confirms momentum exhaustion. Works in bull (buy dips in uptrend) and bear (sell rallies in downtrend). Target: 60-150 total trades over 4 years.
+1h RSI Reversal with 4h Trend Filter and Volume Confirmation
+Hypothesis: In 1h timeframe, RSI extremes combined with 4h trend direction provide
+high-probability mean-reversion entries. Volume confirms momentum exhaustion.
+Works in bull markets (buy oversold dips in uptrend) and bear markets (sell
+overbought rallies in downtrend). Target: 100-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1h_rsi_mean_reversion_4h_trend_volume_v1"
+name = "1h_rsi_reversal_4h_trend_volume_v1"
 timeframe = "1h"
 leverage = 1.0
 
@@ -23,15 +26,14 @@ def generate_signals(prices):
     # 4h EMA50 for trend filter
     close_4h = df_4h['close'].values
     ema50_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema50_rising = ema50_4h > np.roll(ema50_4h, 1)
-    ema50_falling = ema50_4h < np.roll(ema50_4h, 1)
-    ema50_rising[0] = False
-    ema50_falling[0] = False
-    ema50_4h_aligned = align_htf_to_ltf(prices, df_4h, ema50_4h)
+    ema50_4h_prev = np.roll(ema50_4h, 1)
+    ema50_4h_prev[0] = ema50_4h[0]
+    ema50_rising = ema50_4h > ema50_4h_prev
+    ema50_falling = ema50_4h < ema50_4h_prev
     ema50_rising_aligned = align_htf_to_ltf(prices, df_4h, ema50_rising)
     ema50_falling_aligned = align_htf_to_ltf(prices, df_4h, ema50_falling)
     
-    # 1h data
+    # 1h indicators
     close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
@@ -54,13 +56,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 60  # For RSI and EMA50
+    start = 100  # For RSI and EMA50
     
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(rsi[i]) or np.isnan(vol_ema[i]) or 
-            np.isnan(ema50_4h_aligned[i]) or np.isnan(ema50_rising_aligned[i]) or 
-            np.isnan(ema50_falling_aligned[i])):
+            np.isnan(ema50_rising_aligned[i]) or np.isnan(ema50_falling_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.20
             else:
@@ -69,7 +70,7 @@ def generate_signals(prices):
         
         # Check exits: RSI mean reversion or stoploss
         if position == 1:  # long position
-            # Exit: RSI returns to neutral (50) OR stoploss
+            # Exit: RSI returns to neutral (50) or stoploss
             if (rsi[i] >= 50 or 
                 close[i] <= entry_price - 2.0 * (high[i] - low[i])):
                 signals[i] = 0.0
@@ -77,7 +78,7 @@ def generate_signals(prices):
             else:
                 signals[i] = 0.20
         elif position == -1:  # short position
-            # Exit: RSI returns to neutral (50) OR stoploss
+            # Exit: RSI returns to neutral (50) or stoploss
             if (rsi[i] <= 50 or 
                 close[i] >= entry_price + 2.0 * (high[i] - low[i])):
                 signals[i] = 0.0
@@ -89,14 +90,14 @@ def generate_signals(prices):
             rsi_oversold = rsi[i] < 30
             rsi_overbought = rsi[i] > 70
             
-            bull_entry = rsi_oversold and ema50_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
-            bear_entry = rsi_overbought and ema50_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            long_entry = rsi_oversold and ema50_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            short_entry = rsi_overbought and ema50_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
             
-            if bull_entry:
+            if long_entry:
                 signals[i] = 0.20
                 position = 1
                 entry_price = close[i]
-            elif bear_entry:
+            elif short_entry:
                 signals[i] = -0.20
                 position = -1
                 entry_price = close[i]
@@ -104,3 +105,4 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
+</p>
