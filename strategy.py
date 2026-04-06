@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout + Volume Spike + ADX Filter
-Hypothesis: Donchian breakouts with volume confirmation and ADX trend filter
-capture significant moves in both bull and bear markets. Using 1d timeframe
-reduces trade frequency to avoid fee drag, while 1w ADX provides trend strength
-filter to avoid whipsaws. Volatility filter ensures trades occur during
-expanded volatility periods. Target: 50-100 total trades over 4 years.
+6h Bollinger Band Squeeze with 1d MACD Trend Filter
+Hypothesis: Bollinger Band squeeze identifies low volatility periods preceding breakouts.
+Trades are taken in the direction of the 1d MACD trend (bullish or bearish).
+Breakouts are confirmed by volume expansion.
+Works in both bull and bear markets as it captures volatility breakouts in the prevailing trend direction.
+Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian_breakout_volume_adx_v1"
-timeframe = "1d"
+name = "14451_6h_bb_squeeze_macd_trend_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -21,119 +21,99 @@ def generate_signals(prices):
     if n < 100:
         return np.zeros(n)
     
-    # Load 1d data for Donchian calculation (once before loop)
+    # Load 1d data for MACD trend filter (once before loop)
     df_1d = get_htf_data(prices, '1d')
-    high_1d = df_1d['high'].values
-    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
     
-    # Load 1w data for ADX trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
-    close_1w = df_1w['close'].values
+    # 1d MACD (12, 26, 9)
+    ema12 = pd.Series(close_1d).ewm(span=12, adjust=False).mean().values
+    ema26 = pd.Series(close_1d).ewm(span=26, adjust=False).mean().values
+    macd_line = ema12 - ema26
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False).mean().values
+    macd_trend = macd_line - signal_line  # Positive = bullish, Negative = bearish
     
-    # Donchian Channel (20-period)
-    donchian_period = 20
-    donchian_high = pd.Series(high_1d).rolling(window=donchian_period, min_periods=donchian_period).max().values
-    donchian_low = pd.Series(low_1d).rolling(window=donchian_period, min_periods=donchian_period).min().values
+    # Align MACD trend to 6h timeframe
+    macd_trend_aligned = align_htf_to_ltf(prices, df_1d, macd_trend)
     
-    # ADX calculation (14-period) on 1w data
-    adx_period = 14
-    # True Range
-    tr1 = high_1w - low_1w
-    tr2 = np.abs(high_1w - np.roll(close_1w, 1))
-    tr3 = np.abs(low_1w - np.roll(close_1w, 1))
-    tr = np.maximum(tr1, np.maximum(tr2, tr3))
-    tr[0] = tr1[0]
-    # Directional Movement
-    dm_plus = np.where((high_1w[1:] - high_1w[:-1]) > (low_1w[:-1] - low_1w[1:]), 
-                       np.maximum(high_1w[1:] - high_1w[:-1], 0), 0)
-    dm_minus = np.where((low_1w[:-1] - low_1w[1:]) > (high_1w[1:] - high_1w[:-1]), 
-                        np.maximum(low_1w[:-1] - low_1w[1:], 0), 0)
-    dm_plus = np.concatenate([[0], dm_plus])
-    dm_minus = np.concatenate([[0], dm_minus])
-    # Smoothed TR, DM+
-    atr = pd.Series(tr).rolling(window=adx_period, min_periods=adx_period).mean().values
-    dm_plus_smooth = pd.Series(dm_plus).rolling(window=adx_period, min_periods=adx_period).mean().values
-    dm_minus_smooth = pd.Series(dm_minus).rolling(window=adx_period, min_periods=adx_period).mean().values
-    # DI+ and DI-
-    di_plus = np.where(atr > 0, 100 * dm_plus_smooth / atr, 0)
-    di_minus = np.where(atr > 0, 100 * dm_minus_smooth / atr, 0)
-    # DX and ADX
-    dx = np.where((di_plus + di_minus) > 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
-    adx = pd.Series(dx).rolling(window=adx_period, min_periods=adx_period).mean().values
-    
-    # Align indicators to 1d timeframe
-    donchian_high_aligned = align_htf_to_ltf(prices, df_1d, donchian_high)
-    donchian_low_aligned = align_htf_to_ltf(prices, df_1d, donchian_low)
-    adx_aligned = align_htf_to_ltf(prices, df_1w, adx)
-    
-    # 1d data
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Volume filter: volume spike (2x 20-day average)
-    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
-    vol_spike = volume > (2.0 * vol_ma)
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    ma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = ma + (bb_std * std_dev)
+    lower_band = ma - (bb_std * std_dev)
+    bb_width = upper_band - lower_band
     
-    # ATR for stoploss (14-period)
+    # Bollinger Band Squeeze: width below 20-period average width
+    avg_width = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < (0.8 * avg_width)  # Squeeze when width < 80% of average
+    
+    # Volume filter: require volume above average for breakout confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.2 * vol_ma)  # Volume 20% above average
+    
+    # ATR for stoploss
     tr1 = high - low
     tr2 = np.abs(high - np.roll(close, 1))
     tr3 = np.abs(low - np.roll(close, 1))
     tr = np.maximum(tr1, np.maximum(tr2, tr3))
     tr[0] = tr1[0]
-    atr_1d = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
     # Start from warmup period
-    start = max(donchian_period, adx_period) + 1
+    start = max(bb_period, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(donchian_high_aligned[i]) or np.isnan(donchian_low_aligned[i]) or
-            np.isnan(adx_aligned[i]) or np.isnan(vol_ma[i]) or np.isnan(atr_1d[i])):
+        if (np.isnan(ma[i]) or np.isnan(std_dev[i]) or np.isnan(avg_width[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(macd_trend_aligned[i]) or np.isnan(atr[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # ADX trend filter: only trade when trend is strong (ADX > 25)
-        strong_trend = adx_aligned[i] > 25
-        
         # Check exits
         if position == 1:  # long position
-            # Exit: price breaks below Donchian low OR trend weakens OR stoploss
-            if (close[i] <= donchian_low_aligned[i] or not strong_trend or
-                close[i] <= entry_price - 2.5 * atr_1d[i]):
+            # Exit: price closes below middle band OR MACD turns bearish OR stoploss
+            if (close[i] <= ma[i] or macd_trend_aligned[i] < 0 or
+                close[i] <= entry_price - 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price breaks above Donchian high OR trend weakens OR stoploss
-            if (close[i] >= donchian_high_aligned[i] or not strong_trend or
-                close[i] >= entry_price + 2.5 * atr_1d[i]):
+            # Exit: price closes above middle band OR MACD turns bullish OR stoploss
+            if (close[i] >= ma[i] or macd_trend_aligned[i] > 0 or
+                close[i] >= entry_price + 2.5 * atr[i]):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + volume spike + strong trend
-            long_breakout = close[i] > donchian_high_aligned[i]
-            short_breakout = close[i] < donchian_low_aligned[i]
+            # Look for entries: Bollinger Band breakout + MACD trend + volume
+            long_breakout = close[i] > upper_band[i]
+            short_breakout = close[i] < lower_band[i]
             
-            if long_breakout and vol_spike[i] and strong_trend:
+            # Only take breakouts in direction of 1d MACD trend
+            long_setup = long_breakout and (macd_trend_aligned[i] > 0) and vol_filter[i] and squeeze[i-1]
+            short_setup = short_breakout and (macd_trend_aligned[i] < 0) and vol_filter[i] and squeeze[i-1]
+            
+            if long_setup:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
-            elif short_breakout and vol_spike[i] and strong_trend:
+            elif short_setup:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
@@ -141,3 +121,130 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
+
+</think>
+#!/usr/bin/env python3
+"""
+6h Bollinger Band Squeeze with 1d MACD Trend Filter
+Hypothesis: Bollinger Band squeeze identifies low volatility periods preceding breakouts.
+Trades are taken in the direction of the 1d MACD trend (bullish or bearish).
+Breakouts are confirmed by volume expansion.
+Works in both bull and bear markets as it captures volatility breakouts in the prevailing trend direction.
+Target: 100-200 total trades over 4 years (25-50/year).
+"""
+
+import numpy as np
+import pandas as pd
+from mtf_data import get_htf_data, align_htf_to_ltf
+
+name = "14451_6h_bb_squeeze_macd_trend_v1"
+timeframe = "6h"
+leverage = 1.0
+
+def generate_signals(prices):
+    n = len(prices)
+    if n < 100:
+        return np.zeros(n)
+    
+    # Load 1d data for MACD trend filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    
+    # 1d MACD (12, 26, 9)
+    ema12 = pd.Series(close_1d).ewm(span=12, adjust=False).mean().values
+    ema26 = pd.Series(close_1d).ewm(span=26, adjust=False).mean().values
+    macd_line = ema12 - ema26
+    signal_line = pd.Series(macd_line).ewm(span=9, adjust=False).mean().values
+    macd_trend = macd_line - signal_line  # Positive = bullish, Negative = bearish
+    
+    # Align MACD trend to 6h timeframe
+    macd_trend_aligned = align_htf_to_ltf(prices, df_1d, macd_trend)
+    
+    # 6h data
+    high = prices['high'].values
+    low = prices['low'].values
+    close = prices['close'].values
+    volume = prices['volume'].values
+    
+    # Bollinger Bands (20, 2)
+    bb_period = 20
+    bb_std = 2
+    ma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
+    std_dev = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
+    upper_band = ma + (bb_std * std_dev)
+    lower_band = ma - (bb_std * std_dev)
+    bb_width = upper_band - lower_band
+    
+    # Bollinger Band Squeeze: width below 20-period average width
+    avg_width = pd.Series(bb_width).rolling(window=20, min_periods=20).mean().values
+    squeeze = bb_width < (0.8 * avg_width)  # Squeeze when width < 80% of average
+    
+    # Volume filter: require volume above average for breakout confirmation
+    vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
+    vol_filter = volume > (1.2 * vol_ma)  # Volume 20% above average
+    
+    # ATR for stoploss
+    tr1 = high - low
+    tr2 = np.abs(high - np.roll(close, 1))
+    tr3 = np.abs(low - np.roll(close, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]
+    atr = pd.Series(tr).rolling(window=14, min_periods=14).mean().values
+    
+    signals = np.zeros(n)
+    position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
+    
+    # Start from warmup period
+    start = max(bb_period, 20) + 1
+    
+    for i in range(start, n):
+        # Skip if required data not available
+        if (np.isnan(ma[i]) or np.isnan(std_dev[i]) or np.isnan(avg_width[i]) or
+            np.isnan(vol_ma[i]) or np.isnan(macd_trend_aligned[i]) or np.isnan(atr[i])):
+            if position != 0:
+                signals[i] = position * 0.25
+            else:
+                signals[i] = 0.0
+            continue
+        
+        # Check exits
+        if position == 1:  # long position
+            # Exit: price closes below middle band OR MACD turns bearish OR stoploss
+            if (close[i] <= ma[i] or macd_trend_aligned[i] < 0 or
+                close[i] <= entry_price - 2.5 * atr[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = 0.25
+        elif position == -1:  # short position
+            # Exit: price closes above middle band OR MACD turns bullish OR stoploss
+            if (close[i] >= ma[i] or macd_trend_aligned[i] > 0 or
+                close[i] >= entry_price + 2.5 * atr[i]):
+                signals[i] = 0.0
+                position = 0
+            else:
+                signals[i] = -0.25
+        else:
+            # Look for entries: Bollinger Band breakout + MACD trend + volume
+            long_breakout = close[i] > upper_band[i]
+            short_breakout = close[i] < lower_band[i]
+            
+            # Only take breakouts in direction of 1d MACD trend
+            long_setup = long_breakout and (macd_trend_aligned[i] > 0) and vol_filter[i] and squeeze[i-1]
+            short_setup = short_breakout and (macd_trend_aligned[i] < 0) and vol_filter[i] and squeeze[i-1]
+            
+            if long_setup:
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+            elif short_setup:
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
+            else:
+                signals[i] = 0.0
+    
+    return signals
+
+</think>
