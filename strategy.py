@@ -3,15 +3,14 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 6-hour Elder Ray Index (Bull/Bear Power) with weekly trend filter and volume confirmation.
-# Elder Ray measures bullish/bearish power relative to EMA13. 
-# Weekly trend filter (EMA50 slope) ensures trades align with higher timeframe momentum.
+# Hypothesis: 12-hour Donchian channel breakout with 1-day EMA trend filter and volume confirmation.
+# Donchian breakouts capture momentum in trending markets.
+# EMA filter ensures we trade with the dominant trend on higher timeframe.
 # Volume confirmation filters for institutional participation.
-# Designed for 6h timeframe to target 50-150 trades over 4 years with controlled frequency.
-# Works in bull markets (buy bullish dips) and bear markets (sell bearish rallies).
+# Designed for 12h timeframe to target 50-150 trades over 4 years with low frequency.
 
-name = "6h_elderray1w_vol_v1"
-timeframe = "6h"
+name = "12h_donchian20_1d_ema_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,82 +24,73 @@ def generate_signals(prices):
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # EMA13 for Elder Ray (13-period)
-    close_s = pd.Series(close)
-    ema13 = close_s.ewm(span=13, adjust=False).mean().values
+    # 20-period Donchian channels on 12h
+    highest_high = np.full(n, np.nan)
+    lowest_low = np.full(n, np.nan)
+    for i in range(19, n):
+        highest_high[i] = np.max(high[i-19:i+1])
+        lowest_low[i] = np.min(low[i-19:i+1])
     
-    # Elder Ray: Bull Power = High - EMA13, Bear Power = Low - EMA13
-    bull_power = high - ema13
-    bear_power = low - ema13
+    # 1-day EMA(50) for trend filter
+    df_1d = get_htf_data(prices, '1d')
+    close_1d = df_1d['close'].values
+    ema_1d = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
+    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
     
-    # Weekly EMA50 for trend filter (slope)
-    df_1w = get_htf_data(prices, '1w')
-    close_1w = df_1w['close'].values
-    close_1w_s = pd.Series(close_1w)
-    ema50_1w = close_1w_s.ewm(span=50, adjust=False).mean().values
-    # EMA50 slope: positive = uptrend, negative = downtrend
-    ema50_slope = np.zeros_like(ema50_1w)
-    ema50_slope[1:] = ema50_1w[1:] - ema50_1w[:-1]
-    ema50_slope_aligned = align_htf_to_ltf(prices, df_1w, ema50_slope)
-    
-    # Weekly volume average for confirmation
-    vol_1w = df_1w['volume'].values
-    vol_ma_1w = np.zeros_like(vol_1w)
-    for i in range(19, len(vol_1w)):  # 20-period average
-        vol_ma_1w[i] = np.mean(vol_1w[i-19:i+1])
-    vol_ma_aligned = align_htf_to_ltf(prices, df_1w, vol_ma_1w)
+    # 1-day volume average for confirmation
+    vol_1d = df_1d['volume'].values
+    vol_ma_1d = pd.Series(vol_1d).rolling(window=20, min_periods=20).mean().values
+    vol_ma_1d_aligned = align_htf_to_ltf(prices, df_1d, vol_ma_1d)
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start from warmup period (EMA13 needs 13, EMA50 slope needs 51, vol needs 20)
-    start = max(13, 51, 20)
+    # Start from warmup period
+    start = 20  # Donchian needs 20 periods
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(bull_power[i]) or np.isnan(bear_power[i]) or 
-            np.isnan(ema50_slope_aligned[i]) or np.isnan(vol_ma_aligned[i])):
+        if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
+            np.isnan(ema_1d_aligned[i]) or np.isnan(vol_ma_1d_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Volume condition: current volume > 1.5x weekly average
-        volume_filter = volume[i] > vol_ma_aligned[i] * 1.5
-        
-        # Trend filter: weekly EMA50 slope
-        uptrend = ema50_slope_aligned[i] > 0
-        downtrend = ema50_slope_aligned[i] < 0
+        # Volume condition: current volume > 1.5x daily average
+        volume_filter = volume[i] > vol_ma_1d_aligned[i] * 1.5
         
         # Check exits and stoploss
         if position == 1:  # long position
-            # Exit: bear power turns positive (selling pressure) or stoploss
-            if (bear_power[i] > 0 or 
+            # Exit: price touches lower Donchian band or stoploss
+            if (close[i] <= lowest_low[i] or 
                 close[i] < entry_price - 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: bull power turns negative (buying pressure) or stoploss
-            if (bull_power[i] < 0 or 
+            # Exit: price touches upper Donchian band or stoploss
+            if (close[i] >= highest_high[i] or 
                 close[i] > entry_price + 2.5 * np.abs(high[i] - low[i])):
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries with volume filter
+            # Look for entries: breakout with volume and trend filter
             if volume_filter:
-                # Long: bullish power positive in uptrend OR extreme bullish power
-                if (bull_power[i] > 0 and uptrend) or (bull_power[i] > np.percentile(bull_power[max(0,i-100):i+1], 80)):
+                # Long: breakout above upper band with uptrend
+                if (close[i] > highest_high[i] and 
+                    close[i] > ema_1d_aligned[i]):
                     signals[i] = 0.25
                     position = 1
                     entry_price = close[i]
-                # Short: bearish power negative in downtrend OR extreme bearish power
-                elif (bear_power[i] < 0 and downtrend) or (bear_power[i] < np.percentile(bear_power[max(0,i-100):i+1], 20)):
+                # Short: breakout below lower band with downtrend
+                elif (close[i] < lowest_low[i] and 
+                      close[i] < ema_1d_aligned[i]):
                     signals[i] = -0.25
                     position = -1
                     entry_price = close[i]
