@@ -3,22 +3,29 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12506_4h_donchian20_1d_trend_vol_v1"
-timeframe = "4h"
+name = "exp_12507_6d_camarilla1d_v1"
+timeframe = "6h"
 leverage = 1.0
 
 # Parameters
-DONCHIAN_PERIOD = 20
-TREND_EMA_PERIOD = 50
+PIVOT_PERIOD = 1  # Daily pivots
+CAMARILLA_MULT = 1.1  # For R3/S3, R4/S4
 VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
+VOLUME_THRESHOLD = 1.8
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
+MAX_HOLD_BARS = 48  # Max 8 days (48 * 6h)
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels"""
+    pivot = (high + low + close) / 3.0
+    range_val = high - low
+    r3 = pivot + (range_val * CAMARILLA_MULT * 1.1)
+    s3 = pivot - (range_val * CAMARILLA_MULT * 1.1)
+    r4 = pivot + (range_val * CAMARILLA_MULT * 1.5)
+    s4 = pivot - (range_val * CAMARILLA_MULT * 1.5)
+    return r3, s3, r4, s4
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -29,12 +36,6 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian channels"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
-
 def generate_signals(prices):
     n = len(prices)
     if n < 50:
@@ -43,17 +44,23 @@ def generate_signals(prices):
     # Load daily data ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate daily EMA for trend
-    ema_1d = calculate_ema(df_1d['close'].values, TREND_EMA_PERIOD)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    # Calculate daily Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # Calculate 4h indicators
+    r3, s3, r4, s4 = calculate_camarilla(high_1d, low_1d, close_1d)
+    r3_aligned = align_htf_to_ltf(prices, df_1d, r3)
+    s3_aligned = align_htf_to_ltf(prices, df_1d, s3)
+    r4_aligned = align_htf_to_ltf(prices, df_1d, r4)
+    s4_aligned = align_htf_to_ltf(prices, df_1d, s4)
+    
+    # Calculate 6h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    upper, lower = calculate_donchian(high, low, DONCHIAN_PERIOD)
     volume_ma = pd.Series(volume).rolling(window=VOLUME_MA_PERIOD, min_periods=VOLUME_MA_PERIOD).mean().values
     atr = calculate_atr(high, low, close, ATR_PERIOD)
     
@@ -61,45 +68,51 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
+    bars_since_entry = 0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, TREND_EMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if daily EMA not available
-        if np.isnan(ema_1d_aligned[i]):
+        # Skip if daily Camarilla not available
+        if np.isnan(r3_aligned[i]) or np.isnan(s3_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
                 signals[i] = 0.0
             continue
         
-        # Check stoploss
+        # Update bars since entry
+        if position != 0:
+            bars_since_entry += 1
+        
+        # Check stoploss or max hold
+        exit_signal = False
         if position == 1:  # long position
-            if close[i] <= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
+            if close[i] <= stop_price or bars_since_entry >= MAX_HOLD_BARS:
+                exit_signal = True
         elif position == -1:  # short position
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                continue
+            if close[i] >= stop_price or bars_since_entry >= MAX_HOLD_BARS:
+                exit_signal = True
+        
+        if exit_signal:
+            signals[i] = 0.0
+            position = 0
+            bars_since_entry = 0
+            continue
         
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Trend filter (daily)
-        uptrend_1d = close[i] > ema_1d_aligned[i]
-        downtrend_1d = close[i] < ema_1d_aligned[i]
-        
-        # Donchian breakout conditions
-        long_breakout = close[i] > upper[i-1]  # break above previous upper band
-        short_breakout = close[i] < lower[i-1]  # break below previous lower band
+        # Fade at R3/S3, breakout at R4/S4
+        fade_long = close[i] < s3_aligned[i] and close[i] > s4_aligned[i]
+        fade_short = close[i] > r3_aligned[i] and close[i] < r4_aligned[i]
+        breakout_long = close[i] > r4_aligned[i]
+        breakout_short = close[i] < s4_aligned[i]
         
         # Entry conditions
-        long_entry = volume_ok and uptrend_1d and long_breakout
-        short_entry = volume_ok and downtrend_1d and short_breakout
+        long_entry = volume_ok and (fade_long or breakout_long)
+        short_entry = volume_ok and (fade_short or breakout_short)
         
         # Generate signals
         if position == 0:
@@ -108,11 +121,13 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
+                bars_since_entry = 0
             elif short_entry:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
+                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
