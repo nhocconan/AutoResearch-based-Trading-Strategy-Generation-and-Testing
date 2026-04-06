@@ -7,11 +7,9 @@ name = "exp_14015_6h_donchian20_1w_ema_vol_v1"
 timeframe = "6h"
 leverage = 1.0
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian upper and lower bands"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_ema(values, span):
+    """Calculate EMA with proper min_periods"""
+    return pd.Series(values).ewm(span=span, adjust=False, min_periods=span).mean().values
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -23,19 +21,21 @@ def calculate_atr(high, low, close, period):
     atr = pd.Series(tr).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
     return atr
 
-def calculate_ema(values, span):
-    """Calculate EMA"""
-    return pd.Series(values).ewm(span=span, adjust=False, min_periods=span).mean().values
+def calculate_donchian(high, low, period):
+    """Calculate Donchian upper and lower bands"""
+    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
+    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
+    return upper, lower
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 100:
+    if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for EMA trend filter (once before loop)
+    # Load weekly data for EMA trend (once before loop)
     df_1w = get_htf_data(prices, '1w')
-    ema_1w = calculate_ema(df_1w['close'].values, 21)
-    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
+    ema_200_1w = calculate_ema(df_1w['close'].values, 200)
+    ema_200_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_200_1w)
     
     # 6h data for Donchian, ATR, and volume
     high = prices['high'].values
@@ -58,11 +58,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(50, 20, 20) + 1
+    start = max(200, 20, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1w_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
+        if np.isnan(ema_200_1w_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or \
            np.isnan(volume_ma[i]) or np.isnan(atr[i]):
             if position != 0:
                 signals[i] = position * 0.25
@@ -92,16 +92,18 @@ def generate_signals(prices):
         breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
         breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
         
+        # Trend filter: weekly EMA200
+        uptrend = close[i] > ema_200_1w_aligned[i]
+        downtrend = close[i] < ema_200_1w_aligned[i]
+        
         # Generate signals
         if position == 0:
-            # Long: price breaks above Donchian upper + weekly uptrend + volume
-            if breakout_up and close[i] > ema_1w_aligned[i] and volume_ok:
+            if breakout_up and volume_ok and uptrend:
                 signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (2.0 * atr[i])
-            # Short: price breaks below Donchian lower + weekly downtrend + volume
-            elif breakout_down and close[i] < ema_1w_aligned[i] and volume_ok:
+            elif breakout_down and volume_ok and downtrend:
                 signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
@@ -110,14 +112,14 @@ def generate_signals(prices):
                 signals[i] = 0.0
         elif position == 1:
             # Exit long on stop or trend reversal
-            if close[i] <= stop_price or close[i] < ema_1w_aligned[i]:
+            if close[i] <= stop_price or not uptrend:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:
             # Exit short on stop or trend reversal
-            if close[i] >= stop_price or close[i] > ema_1w_aligned[i]:
+            if close[i] >= stop_price or not downtrend:
                 signals[i] = 0.0
                 position = 0
             else:
