@@ -3,17 +3,28 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_12746_4h_donchian20_1d_vol_filter_v1"
-timeframe = "4h"
+name = "exp_12748_12h_donchian20_1w_ma_vol_v1"
+timeframe = "12h"
 leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 20
-VOLUME_THRESHOLD = 2.0
-SIGNAL_SIZE = 0.30
+WMA_PERIOD = 50
+VOLUME_MA_PERIOD = 30
+VOLUME_THRESHOLD = 1.5
+SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
-ATR_STOP_MULTIPLIER = 2.0
+ATR_STOP_MULTIPLIER = 2.5
+
+def calculate_wma(arr, period):
+    """Weighted Moving Average"""
+    if len(arr) < period:
+        return np.full_like(arr, np.nan, dtype=float)
+    weights = np.arange(1, period + 1)
+    wma = np.convolve(arr, weights[::-1], mode='valid') / weights.sum()
+    result = np.full_like(arr, np.nan, dtype=float)
+    result[period-1:] = wma
+    return result
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR"""
@@ -32,13 +43,18 @@ def calculate_donchian(high, low, period):
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
-    # Load daily data ONCE before loop
-    df_1d = get_htf_data(prices, '1d')
+    # Load weekly data ONCE before loop
+    df_1w = get_htf_data(prices, '1w')
     
-    # Calculate 4h indicators
+    # Calculate weekly WMA for trend filter
+    close_1w = df_1w['close'].values
+    wma_1w = calculate_wma(close_1w, WMA_PERIOD)
+    wma_1w_aligned = align_htf_to_ltf(prices, df_1w, wma_1w)
+    
+    # Calculate 12h indicators
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -54,11 +70,11 @@ def generate_signals(prices):
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
+    start = max(WMA_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD, DONCHIAN_PERIOD) + 1
     
     for i in range(start, n):
-        # Skip if ATR not ready
-        if np.isnan(atr[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
+        # Skip if weekly WMA not available
+        if np.isnan(wma_1w_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
             else:
@@ -78,11 +94,15 @@ def generate_signals(prices):
                 continue
         
         # Volume confirmation
-        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD)
+        volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
-        # Breakout entry with volume confirmation
-        breakout_long = volume_ok and close[i] > donchian_upper[i-1]  # break above prior upper band
-        breakout_short = volume_ok and close[i] < donchian_lower[i-1]  # break below prior lower band
+        # Trend filter: price above/below weekly WMA
+        price_above_wma = close[i] > wma_1w_aligned[i]
+        price_below_wma = close[i] < wma_1w_aligned[i]
+        
+        # Donchian breakout with volume and trend filter
+        breakout_long = volume_ok and price_above_wma and close[i] >= donchian_upper[i]
+        breakout_short = volume_ok and price_below_wma and close[i] <= donchian_lower[i]
         
         # Generate signals
         if position == 0:
