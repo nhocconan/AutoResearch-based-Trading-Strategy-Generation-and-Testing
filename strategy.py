@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with 1w Trend Filter and Volume Confirmation
-Hypothesis: Donchian(20) breakouts on daily capture strong trends. 1w EMA25 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in bull (buy breakouts above) and bear (sell breakouts below). Target: 30-100 total trades over 4 years.
+6h Donchian Breakout with 1d ADX Filter and Volume Confirmation
+Hypothesis: Donchian(20) breakouts capture strong trends. 1d ADX > 25 ensures trending markets to avoid chop. Volume confirms breakout strength. Works in bull (buy breakouts above) and bear (sell breakouts below). Target: 75-200 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_1w_trend_volume_v1"
-timeframe = "1d"
+name = "6h_donchian20_1d_adx_volume_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -17,21 +17,63 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1w data for trend filter (once before loop)
-    df_1w = get_htf_data(prices, '1w')
+    # Load 1d data for ADX filter (once before loop)
+    df_1d = get_htf_data(prices, '1d')
     
-    # 1w EMA25 for trend filter
-    close_1w = df_1w['close'].values
-    ema25_1w = pd.Series(close_1w).ewm(span=25, adjust=False, min_periods=25).mean().values
-    ema25_1w_prev = np.roll(ema25_1w, 1)
-    ema25_1w_prev[0] = ema25_1w[0]
-    ema25_rising = ema25_1w > ema25_1w_prev
-    ema25_falling = ema25_1w < ema25_1w_prev
-    ema25_1w_aligned = align_htf_to_ltf(prices, df_1w, ema25_1w)
-    ema25_rising_aligned = align_htf_to_ltf(prices, df_1w, ema25_rising)
-    ema25_falling_aligned = align_htf_to_ltf(prices, df_1w, ema25_falling)
+    # 1d ADX calculation
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
+    close_1d = df_1d['close'].values
     
-    # 1d data
+    # True Range
+    tr1 = high_1d - low_1d
+    tr2 = np.abs(high_1d - np.roll(close_1d, 1))
+    tr3 = np.abs(low_1d - np.roll(close_1d, 1))
+    tr = np.maximum(tr1, np.maximum(tr2, tr3))
+    tr[0] = tr1[0]  # First value
+    
+    # Directional Movement
+    dm_plus = np.where((high_1d - np.roll(high_1d, 1)) > (np.roll(low_1d, 1) - low_1d),
+                       np.maximum(high_1d - np.roll(high_1d, 1), 0), 0)
+    dm_minus = np.where((np.roll(low_1d, 1) - low_1d) > (high_1d - np.roll(high_1d, 1)),
+                        np.maximum(np.roll(low_1d, 1) - low_1d, 0), 0)
+    dm_plus[0] = 0
+    dm_minus[0] = 0
+    
+    # Smooth with Wilder's smoothing (alpha = 1/period)
+    def wilders_smooth(data, period):
+        result = np.full_like(data, np.nan)
+        alpha = 1.0 / period
+        for i in range(len(data)):
+            if np.isnan(result[i-1]) if i > 0 else True:
+                result[i] = data[i]
+            else:
+                result[i] = alpha * data[i] + (1 - alpha) * result[i-1]
+        return result
+    
+    period = 14
+    tr_smooth = wilders_smooth(tr, period)
+    dm_plus_smooth = wilders_smooth(dm_plus, period)
+    dm_minus_smooth = wilders_smooth(dm_minus, period)
+    
+    # DI+ and DI-
+    di_plus = np.where(tr_smooth != 0, 100 * dm_plus_smooth / tr_smooth, 0)
+    di_minus = np.where(tr_smooth != 0, 100 * dm_minus_smooth / tr_smooth, 0)
+    
+    # DX and ADX
+    dx = np.where((di_plus + di_minus) != 0, 100 * np.abs(di_plus - di_minus) / (di_plus + di_minus), 0)
+    adx = wilders_smooth(dx, period)
+    
+    # ADX > 25 indicates trending market
+    adx_trending = adx > 25
+    adx_trending_prev = np.roll(adx_trending, 1)
+    adx_trending_prev[0] = adx_trending[0]
+    
+    # Align to 6h timeframe
+    adx_trending_aligned = align_htf_to_ltf(prices, df_1d, adx_trending)
+    adx_trending_prev_aligned = align_htf_to_ltf(prices, df_1d, adx_trending_prev)
+    
+    # 6h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -52,13 +94,12 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 50  # For EMA25 and Donchian
+    start = max(50, 20 + 14 + 14)  # For Donchian, ADX smoothing
     
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(ema25_1w_aligned[i]) or 
-            np.isnan(ema25_rising_aligned[i]) or np.isnan(ema25_falling_aligned[i])):
+            np.isnan(vol_ema[i]) or np.isnan(adx_trending_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -83,12 +124,12 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + trend + volume
+            # Look for entries: Donchian breakout + ADX trending + volume
             bull_breakout = close[i] > highest_high[i]
             bear_breakout = close[i] < lowest_low[i]
             
-            bull_entry = bull_breakout and ema25_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
-            bear_entry = bear_breakout and ema25_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bull_entry = bull_breakout and adx_trending_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bear_entry = bear_breakout and adx_trending_aligned[i] and volume[i] > vol_ema[i] * 1.5
             
             if bull_entry:
                 signals[i] = 0.25
