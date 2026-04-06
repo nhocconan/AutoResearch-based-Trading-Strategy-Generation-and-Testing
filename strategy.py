@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-1d Donchian Breakout with Weekly Trend Filter and Volume Confirmation
-Hypothesis: Daily Donchian(20) breakouts capture strong trends. Weekly EMA20 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in bull (buy breakouts above) and bear (sell breakouts below). Target: 50-100 total trades over 4 years.
+1d Donchian Breakout with Weekly Trend Filter and Volume Confirmation v1
+Hypothesis: Donchian(20) breakouts on 1d capture strong trends. Weekly EMA20 filters trend direction to avoid counter-trend trades. Volume confirms breakout strength. Works in bull (buy breakouts above) and bear (sell breakouts below). Target: 50-100 total trades over 4 years.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_donchian20_weekly_trend_volume_v8"
+name = "1d_donchian20_weekly_trend_volume_v1"
 timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 50:
+    if n < 60:
         return np.zeros(n)
     
     # Load weekly data for trend filter (once before loop)
@@ -31,7 +31,7 @@ def generate_signals(prices):
     ema20_rising_aligned = align_htf_to_ltf(prices, df_weekly, ema20_rising)
     ema20_falling_aligned = align_htf_to_ltf(prices, df_weekly, ema20_falling)
     
-    # Daily data
+    # 1d data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -52,7 +52,7 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 50  # For EMA20 and Donchian
+    start = 40  # For EMA20 and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
