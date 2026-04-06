@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
-1h Donchian breakout with 4h/1d trend filter and volume confirmation.
-Hypothesis: 1h entries aligned with 4h/1d trend capture momentum with controlled frequency.
-Volume filters false breakouts. Uses 1h for entry timing, 4h/1d for direction.
-Target: 60-150 total trades over 4 years (15-37/year) to minimize fee drag.
+6h Elder Ray Index + 1w regime filter.
+Hypothesis: Elder Ray (bull/bear power) captures institutional buying/selling pressure.
+Weekly trend filter ensures we only take Elder Ray signals in the direction of the higher timeframe trend.
+Volume confirmation adds confluence. Works in both bull (buy power > 0 in uptrend) and bear (bear power < 0 in downtrend).
+Target: 100-200 total trades over 4 years (25-50/year).
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_14314_1h_donchian20_4h1d_vol_v1"
-timeframe = "1h"
+name = "exp_14315_6h_elder_ray_1w_regime_v1"
+timeframe = "6h"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -19,29 +20,27 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 4h and 1d data ONCE before loop
-    df_4h = get_htf_data(prices, '4h')
-    df_1d = get_htf_data(prices, '1d')
+    # Load 1w data for trend filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    high_1w = df_1w['high'].values
+    low_1w = df_1w['low'].values
     
-    # 4h EMA(50) for trend filter
-    close_4h = df_4h['close'].values
-    ema_4h = pd.Series(close_4h).ewm(span=50, adjust=False, min_periods=50).mean().values
-    ema_4h_aligned = align_htf_to_ltf(prices, df_4h, ema_4h)
+    # Calculate 13-period EMA for weekly trend (Elder Ray standard)
+    ema_1w = pd.Series(close_1w).ewm(span=13, adjust=False, min_periods=13).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
-    # 1d EMA(100) for stronger trend filter
-    close_1d = df_1d['close'].values
-    ema_1d = pd.Series(close_1d).ewm(span=100, adjust=False, min_periods=100).mean().values
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
-    
-    # 1h data for entry timing
+    # Calculate 13-period EMA for 6x data (used in Elder Ray)
+    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
-    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channel (20-period) on 1h
-    donchian_high = pd.Series(high).rolling(window=20, min_periods=20).max().values
-    donchian_low = pd.Series(low).rolling(window=20, min_periods=20).min().values
+    ema_6h = pd.Series(close).ewm(span=13, adjust=False, min_periods=13).mean().values
+    
+    # Elder Ray components
+    bull_power = high - ema_6h      # Bull Power = High - EMA(13)
+    bear_power = low - ema_6h       # Bear Power = Low - EMA(13)
     
     # Volume confirmation: volume > 1.5x 20-period average
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
@@ -59,46 +58,45 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     
-    # Start from warmup period
-    start = max(20, 50, 100) + 1
+    # Start from warmup period (max of 13 for EMA, 20 for volume)
+    start = max(13, 20) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(donchian_high[i]) or np.isnan(donchian_low[i]) or \
-           np.isnan(ema_4h_aligned[i]) or np.isnan(ema_1d_aligned[i]) or \
-           np.isnan(vol_ma[i]) or np.isnan(atr[i]):
+        if np.isnan(ema_1w_aligned[i]) or np.isnan(bull_power[i]) or \
+           np.isnan(bear_power[i]) or np.isnan(vol_ma[i]) or np.isnan(atr[i]):
             if position != 0:
-                signals[i] = position * 0.20
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: stoploss (2*ATR) or trend reversal
+        # Check exits: stoploss (2*ATR) or Elder Ray divergence
         if position == 1:  # long position
-            if close[i] <= entry_price - 2.0 * atr[i] or close[i] <= ema_4h_aligned[i]:
+            if close[i] <= entry_price - 2.0 * atr[i] or bull_power[i] < 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:  # short position
-            if close[i] >= entry_price + 2.0 * atr[i] or close[i] >= ema_4h_aligned[i]:
+            if close[i] >= entry_price + 2.0 * atr[i] or bear_power[i] > 0:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout with trend and volume confirmation
-            # Long when price breaks above Donchian high in uptrend with volume
-            # Short when price breaks below Donchian low in downtrend with volume
-            long_setup = (close[i] > donchian_high[i-1]) and (close[i] > ema_4h_aligned[i]) and vol_confirm[i]
-            short_setup = (close[i] < donchian_low[i-1]) and (close[i] < ema_4h_aligned[i]) and vol_confirm[i]
+            # Look for entries: Elder Ray signals with weekly trend and volume confirmation
+            # Long when bull power > 0 in weekly uptrend with volume
+            # Short when bear power < 0 in weekly downtrend with volume
+            long_setup = (bull_power[i] > 0) and (close[i] > ema_1w_aligned[i]) and vol_confirm[i]
+            short_setup = (bear_power[i] < 0) and (close[i] < ema_1w_aligned[i]) and vol_confirm[i]
             
             if long_setup:
-                signals[i] = 0.20
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
             elif short_setup:
-                signals[i] = -0.20
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
             else:
