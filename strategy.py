@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "4h_donchian20_1dema_vol_v3"
+name = "4h_donchian20_1dema_vol_v2"
 timeframe = "4h"
 leverage = 1.0
 
@@ -124,3 +124,4 @@ def generate_signals(prices):
                 bars_since_entry += 1
     
     return signals
+</response>
