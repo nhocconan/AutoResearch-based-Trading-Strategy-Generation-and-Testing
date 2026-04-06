@@ -3,15 +3,15 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-# Hypothesis: 4h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation.
-# Enter long when price breaks above Donchian(20) upper band in uptrend (1d EMA50 rising).
-# Enter short when price breaks below Donchian(20) lower band in downtrend (1d EMA50 falling).
+# Hypothesis: 1D Donchian(20) breakout with 1W EMA(50) trend filter and volume confirmation.
+# Enter long when price breaks above Donchian(20) upper band in uptrend (1W EMA50 rising).
+# Enter short when price breaks below Donchian(20) lower band in downtrend (1W EMA50 falling).
 # Volume > 1.5x 20-period average confirms breakout strength.
-# Exit on opposite Donchian breakout or when price crosses 1d EMA50.
-# Target: 100-200 total trades over 4 years (25-50/year) to balance signal quality and fee drag.
+# Exit on opposite Donchian breakout or when price crosses 1W EMA50.
+# Target: 40-100 total trades over 4 years (10-25/year) to balance signal quality and fee drag.
 
-name = "4h_donchian20_1dema50_vol_v1"
-timeframe = "4h"
+name = "1d_donchian20_1wema50_vol_v1"
+timeframe = "1d"
 leverage = 1.0
 
 def generate_signals(prices):
@@ -25,11 +25,11 @@ def generate_signals(prices):
     low = prices['low'].values
     volume = prices['volume'].values
     
-    # 1d EMA(50) for trend filter
-    df_1d = get_htf_data(prices, '1d')
-    close_1d = df_1d['close'].values
-    ema_50 = pd.Series(close_1d).ewm(span=50, adjust=False).mean().values
-    ema_50_aligned = align_htf_to_ltf(prices, df_1d, ema_50)
+    # 1W EMA(50) for trend filter
+    df_1w = get_htf_data(prices, '1w')
+    close_1w = df_1w['close'].values
+    ema_50 = pd.Series(close_1w).ewm(span=50, adjust=False).mean().values
+    ema_50_aligned = align_htf_to_ltf(prices, df_1w, ema_50)
     
     # Donchian(20) channels
     highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
@@ -46,7 +46,7 @@ def generate_signals(prices):
         # Skip if required data not available
         if (np.isnan(ema_50_aligned[i]) or np.isnan(volume_threshold[i])):
             if position != 0:
-                signals[i] = position * 0.25
+                signals[i] = position * 0.30
             else:
                 signals[i] = 0.0
             continue
@@ -57,24 +57,24 @@ def generate_signals(prices):
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.25
+                signals[i] = 0.30
         elif position == -1:  # short position
             # Exit: price breaks above Donchian upper OR crosses above EMA50
             if close[i] > highest_high_20[i] or close[i] > ema_50_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.25
+                signals[i] = -0.30
         else:
             # Look for entries: Donchian breakout + EMA50 trend + volume
             if volume[i] > volume_threshold[i]:
                 if close[i] > highest_high_20[i] and close[i] > ema_50_aligned[i]:
                     # Breakout above upper band in uptrend: long
-                    signals[i] = 0.25
+                    signals[i] = 0.30
                     position = 1
                 elif close[i] < lowest_low_20[i] and close[i] < ema_50_aligned[i]:
                     # Breakdown below lower band in downtrend: short
-                    signals[i] = -0.25
+                    signals[i] = -0.30
                     position = -1
     
     return signals
