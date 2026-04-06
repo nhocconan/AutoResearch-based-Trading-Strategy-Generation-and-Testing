@@ -1,44 +1,40 @@
 #!/usr/bin/env python3
 """
-6h Donchian(20) Breakout + Weekly Pivot Direction + Volume Confirmation
-Hypothesis: On 6h timeframe, Donchian breakouts aligned with weekly pivot bias (from 1w high/low) capture strong momentum.
-Weekly pivot bias: price > weekly midpoint = bullish bias, price < weekly midpoint = bearish bias.
+12h Donchian Breakout with Weekly Trend Filter and Volume Confirmation
+Hypothesis: Donchian(20) breakouts on 12h timeframe capture medium-term momentum.
+Weekly EMA50 filters trend direction to avoid counter-trend trades.
 Volume confirms breakout strength. Designed for 50-150 trades over 4 years to minimize fee drag.
-Works in bull (buy breakouts above with bullish bias) and bear (sell breakouts below with bearish bias).
+Works in bull (buy breakouts above) and bear (sell breakouts below) via trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "6h_donchian20_1w_pivot_volume_v1"
-timeframe = "6h"
+name = "12h_donchian20_1w_trend_volume_v1"
+timeframe = "12h"
 leverage = 1.0
 
 def generate_signals(prices):
     n = len(prices)
-    if n < 200:
+    if n < 300:
         return np.zeros(n)
     
-    # Load weekly data for pivot bias (once before loop)
+    # Load weekly data for trend filter (once before loop)
     df_1w = get_htf_data(prices, '1w')
     
-    # Weekly high, low, close for pivot calculations
-    high_1w = df_1w['high'].values
-    low_1w = df_1w['low'].values
+    # Weekly EMA50 for trend filter
     close_1w = df_1w['close'].values
+    ema50_1w = pd.Series(close_1w).ewm(span=50, adjust=False, min_periods=50).mean().values
+    ema50_1w_prev = np.roll(ema50_1w, 1)
+    ema50_1w_prev[0] = ema50_1w[0]
+    ema50_rising = ema50_1w > ema50_1w_prev
+    ema50_falling = ema50_1w < ema50_1w_prev
+    ema50_1w_aligned = align_htf_to_ltf(prices, df_1w, ema50_1w)
+    ema50_rising_aligned = align_htf_to_ltf(prices, df_1w, ema50_rising)
+    ema50_falling_aligned = align_htf_to_ltf(prices, df_1w, ema50_falling)
     
-    # Weekly pivot points: P = (H + L + C)/3
-    # Bias: price > P = bullish, price < P = bearish
-    pivot_1w = (high_1w + low_1w + close_1w) / 3.0
-    bullish_bias = close_1w > pivot_1w  # weekly close above pivot = bullish bias
-    bearish_bias = close_1w < pivot_1w  # weekly close below pivot = bearish bias
-    
-    # Align weekly bias to 6h timeframe
-    bullish_bias_aligned = align_htf_to_ltf(prices, df_1w, bullish_bias)
-    bearish_bias_aligned = align_htf_to_ltf(prices, df_1w, bearish_bias)
-    
-    # 6h data
+    # 12h data
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
@@ -59,13 +55,13 @@ def generate_signals(prices):
     entry_price = 0.0
     
     # Start from warmup period
-    start = 200  # Ensure weekly data alignment
+    start = 300  # For weekly EMA50 and Donchian
     
     for i in range(start, n):
         # Skip if required data not available
         if (np.isnan(highest_high[i]) or np.isnan(lowest_low[i]) or 
-            np.isnan(vol_ema[i]) or np.isnan(bullish_bias_aligned[i]) or 
-            np.isnan(bearish_bias_aligned[i])):
+            np.isnan(vol_ema[i]) or np.isnan(ema50_1w_aligned[i]) or 
+            np.isnan(ema50_rising_aligned[i]) or np.isnan(ema50_falling_aligned[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
@@ -90,12 +86,12 @@ def generate_signals(prices):
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Donchian breakout + weekly pivot bias + volume
+            # Look for entries: Donchian breakout + trend + volume
             bull_breakout = close[i] > highest_high[i]
             bear_breakout = close[i] < lowest_low[i]
             
-            bull_entry = bull_breakout and bullish_bias_aligned[i] and volume[i] > vol_ema[i] * 1.5
-            bear_entry = bear_breakout and bearish_bias_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bull_entry = bull_breakout and ema50_rising_aligned[i] and volume[i] > vol_ema[i] * 1.5
+            bear_entry = bear_breakout and ema50_falling_aligned[i] and volume[i] > vol_ema[i] * 1.5
             
             if bull_entry:
                 signals[i] = 0.25
@@ -109,3 +105,5 @@ def generate_signals(prices):
                 signals[i] = 0.0
     
     return signals
+
+</think>
