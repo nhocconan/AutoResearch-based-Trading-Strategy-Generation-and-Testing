@@ -9,12 +9,11 @@ leverage = 1.0
 
 # Parameters
 DONCHIAN_PERIOD = 20
-VOLUME_MA_PERIOD = 10
+VOLUME_MA_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
 SIGNAL_SIZE = 0.25
 ATR_PERIOD = 14
 ATR_STOP_MULTIPLIER = 2.0
-MAX_HOLD_BARS = 30  # Max 15 days (30 * 12h)
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -61,15 +60,24 @@ def generate_signals(prices):
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
-    bars_since_entry = 0
     
     # Start from warmup period
     start = max(DONCHIAN_PERIOD, VOLUME_MA_PERIOD, ATR_PERIOD) + 1
     
     for i in range(start, n):
-        bars_since_entry += 1
+        # Check stoploss
+        if position == 1:  # long position
+            if close[i] <= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
+        elif position == -1:  # short position
+            if close[i] >= stop_price:
+                signals[i] = 0.0
+                position = 0
+                continue
         
-        # Skip if Donchian levels not available
+        # Skip if daily levels not available
         if np.isnan(upper_aligned[i]) or np.isnan(lower_aligned[i]):
             if position != 0:
                 signals[i] = position * SIGNAL_SIZE
@@ -77,33 +85,12 @@ def generate_signals(prices):
                 signals[i] = 0.0
             continue
         
-        # Check stoploss
-        if position == 1:  # long position
-            if close[i] <= stop_price:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
-        elif position == -1:  # short position
-            if close[i] >= stop_price:
-                signals[i] = 0.0
-                position = 0
-                bars_since_entry = 0
-                continue
-        
-        # Time-based exit to prevent overtrading
-        if bars_since_entry >= MAX_HOLD_BARS:
-            signals[i] = 0.0
-            position = 0
-            bars_since_entry = 0
-            continue
-        
         # Volume confirmation
         volume_ok = volume[i] > (volume_ma[i] * VOLUME_THRESHOLD) if not np.isnan(volume_ma[i]) else False
         
         # Breakout above upper or breakdown below lower
         breakout_long = volume_ok and close[i] >= upper_aligned[i]
-        breakout_short = volume_ok and close[i] <= lower_aligned[i]
+        breakdown_short = volume_ok and close[i] <= lower_aligned[i]
         
         # Generate signals
         if position == 0:
@@ -112,13 +99,11 @@ def generate_signals(prices):
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
-            elif breakout_short:
+            elif breakdown_short:
                 signals[i] = -SIGNAL_SIZE
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (ATR_STOP_MULTIPLIER * atr[i])
-                bars_since_entry = 0
             else:
                 signals[i] = 0.0
         elif position == 1:
