@@ -3,25 +3,36 @@ import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "exp_13934_1h_donchian20_1d_ema_vol_v1"
-timeframe = "1h"
+name = "exp_13935_6d_camarilla1d_fade_v1"
+timeframe = "6h"
 leverage = 1.0
 
-# Hypothesis: 1h Donchian(20) breakout with 1d EMA(50) trend filter and volume confirmation (2.0x)
-# Uses 1d EMA for trend direction, 1h for entry timing. Volume filter reduces false breakouts.
-# Target: 60-150 total trades over 4 years by using strict volume threshold (2.0x) and
-# requiring alignment with daily trend to avoid counter-trend whipsaws.
-# Session filter (08-20 UTC) reduces noise trades.
+# Hypothesis: 6h Camarilla pivot fade strategy using daily pivots
+# Fade at R3/S3 (mean reversion), breakout continuation at R4/S4 (trend follow)
+# Works in both bull and bear by adapting to price action at key levels
+# Target: 50-150 total trades over 4 years by using strict pivot levels
+# Volume confirmation reduces false signals
 
-def calculate_donchian(high, low, period):
-    """Calculate Donchian upper and lower bands"""
-    upper = pd.Series(high).rolling(window=period, min_periods=period).max().values
-    lower = pd.Series(low).rolling(window=period, min_periods=period).min().values
-    return upper, lower
+def calculate_camarilla(high, low, close):
+    """Calculate Camarilla pivot levels for given period"""
+    range_val = high - low
+    pivot = (high + low + close) / 3
+    r4 = pivot + (range_val * 1.1)
+    r3 = pivot + (range_val * 0.55)
+    s3 = pivot - (range_val * 0.55)
+    s4 = pivot - (range_val * 1.1)
+    return r4, r3, s3, s4
 
-def calculate_ema(close, period):
-    """Calculate EMA"""
-    return pd.Series(close).ewm(span=period, adjust=False, min_periods=period).mean().values
+def calculate_rsi(close, period):
+    """Calculate RSI"""
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0)
+    loss = np.where(delta < 0, -delta, 0)
+    avg_gain = pd.Series(gain).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    avg_loss = pd.Series(loss).ewm(alpha=1/period, adjust=False, min_periods=period).mean().values
+    rs = avg_gain / (avg_loss + 1e-10)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 def calculate_atr(high, low, close, period):
     """Calculate ATR using Wilder's smoothing"""
@@ -38,22 +49,27 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load 1d data for trend filter ONCE before loop
+    # Load daily data for Camarilla pivots ONCE before loop
     df_1d = get_htf_data(prices, '1d')
     
-    # Calculate 1d EMA for trend direction
+    # Calculate daily Camarilla levels
+    high_1d = df_1d['high'].values
+    low_1d = df_1d['low'].values
     close_1d = df_1d['close'].values
-    ema_1d = calculate_ema(close_1d, 50)
-    ema_1d_aligned = align_htf_to_ltf(prices, df_1d, ema_1d)
+    r4_1d, r3_1d, s3_1d, s4_1d = calculate_camarilla(high_1d, low_1d, close_1d)
+    r4_1d_a = align_htf_to_ltf(prices, df_1d, r4_1d)
+    r3_1d_a = align_htf_to_ltf(prices, df_1d, r3_1d)
+    s3_1d_a = align_htf_to_ltf(prices, df_1d, s3_1d)
+    s4_1d_a = align_htf_to_ltf(prices, df_1d, s4_1d)
     
-    # 1h data for Donchian, ATR, and volume
+    # 6h data for entry
     high = prices['high'].values
     low = prices['low'].values
     close = prices['close'].values
     volume = prices['volume'].values
     
-    # Donchian channels
-    donchian_upper, donchian_lower = calculate_donchian(high, low, 20)
+    # RSI for overbought/oversold confirmation
+    rsi = calculate_rsi(close, 14)
     
     # ATR for stop loss
     atr = calculate_atr(high, low, close, 14)
@@ -61,32 +77,19 @@ def generate_signals(prices):
     # Volume confirmation
     volume_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
-    # Session filter: 08-20 UTC
-    hours = prices.index.hour
-    session_mask = (hours >= 8) & (hours <= 20)
-    
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
     entry_price = 0.0
     stop_price = 0.0
     
     # Start from warmup period
-    start = max(20, 50, 20) + 1
+    start = max(20, 14) + 1
     
     for i in range(start, n):
         # Skip if required data not available
-        if np.isnan(ema_1d_aligned[i]) or np.isnan(donchian_upper[i]) or np.isnan(donchian_lower[i]) or np.isnan(volume_ma[i]):
+        if np.isnan(r4_1d_a[i]) or np.isnan(r3_1d_a[i]) or np.isnan(s3_1d_a[i]) or np.isnan(s4_1d_a[i]) or np.isnan(rsi[i]) or np.isnan(volume_ma[i]):
             if position != 0:
-                signals[i] = position * 0.20
-            else:
-                signals[i] = 0.0
-            continue
-        
-        # Session filter
-        if not session_mask[i]:
-            if position != 0:
-                signals[i] = 0.0  # close position outside session
-                position = 0
+                signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
@@ -106,48 +109,54 @@ def generate_signals(prices):
                 position = 0
                 continue
         
-        # Volume confirmation - higher threshold to reduce trades
-        volume_ok = volume[i] > (volume_ma[i] * 2.0)
+        # Volume confirmation
+        volume_ok = volume[i] > (volume_ma[i] * 1.5)
         
-        # Trend filter from 1d EMA
-        trend_up = close[i] > ema_1d_aligned[i]
-        trend_down = close[i] < ema_1d_aligned[i]
+        # Fade logic: sell at R3, buy at S3 with RSI extremes
+        fade_short = volume_ok and (close[i] >= r3_1d_a[i]) and (rsi[i] > 60)
+        fade_long = volume_ok and (close[i] <= s3_1d_a[i]) and (rsi[i] < 40)
         
-        # Donchian breakout signals
-        breakout_up = close[i] > donchian_upper[i-1]  # break above previous upper band
-        breakout_down = close[i] < donchian_lower[i-1]  # break below previous lower band
-        
-        # Entry signals
-        long_signal = volume_ok and trend_up and breakout_up
-        short_signal = volume_ok and trend_down and breakout_down
+        # Breakout logic: buy at R4 break, sell at S4 break
+        breakout_long = volume_ok and (close[i] > r4_1d_a[i])
+        breakout_short = volume_ok and (close[i] < s4_1d_a[i])
         
         # Generate signals
         if position == 0:
-            if long_signal:
-                signals[i] = 0.20
+            if fade_long:
+                signals[i] = 0.25
+                position = 1
+                entry_price = close[i]
+                stop_price = entry_price - (2.0 * atr[i])
+            elif fade_short:
+                signals[i] = -0.25
+                position = -1
+                entry_price = close[i]
+                stop_price = entry_price + (2.0 * atr[i])
+            elif breakout_long:
+                signals[i] = 0.25
                 position = 1
                 entry_price = close[i]
                 stop_price = entry_price - (2.5 * atr[i])
-            elif short_signal:
-                signals[i] = -0.20
+            elif breakout_short:
+                signals[i] = -0.25
                 position = -1
                 entry_price = close[i]
                 stop_price = entry_price + (2.5 * atr[i])
             else:
                 signals[i] = 0.0
         elif position == 1:
-            # Exit long on Donchian breakdown or trend change
-            if close[i] < donchian_lower[i] or not trend_up:
+            # Exit long on fade at R3 or stop loss
+            if close[i] >= r3_1d_a[i] or close[i] <= stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = 0.20
+                signals[i] = 0.25
         elif position == -1:
-            # Exit short on Donchian breakout or trend change
-            if close[i] > donchian_upper[i] or not trend_down:
+            # Exit short on fade at S3 or stop loss
+            if close[i] <= s3_1d_a[i] or close[i] >= stop_price:
                 signals[i] = 0.0
                 position = 0
             else:
-                signals[i] = -0.20
+                signals[i] = -0.25
     
     return signals
