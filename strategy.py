@@ -1,18 +1,14 @@
 #!/usr/bin/env python3
 """
-1d Bollinger Breakout with Weekly Trend Filter and Volume Confirmation v1
-Hypothesis: Bollinger Band breakouts capture momentum bursts; weekly EMA filter ensures
-trading in the direction of the higher timeframe trend; volume confirms breakout strength.
-Designed for 75-150 trades over 4 years to minimize fee drag while adapting to bull/bear
-markets via weekly trend filter. Works in both regimes: breakouts work in trending
-markets, and the trend filter prevents counter-trend trades in choppy/ranging markets.
+1d Donchian Breakout with 1w EMA Filter and Volume Confirmation
+Hypothesis: Daily Donchian(20) breakouts capture strong trends; weekly EMA(20) filters counter-trend trades; volume confirms breakout strength. Designed for 30-100 trades over 4 years to minimize fee drag while adapting to bull/bear markets via weekly trend filter.
 """
 
 import numpy as np
 import pandas as pd
 from mtf_data import get_htf_data, align_htf_to_ltf
 
-name = "1d_bollinger_breakout_weekly_trend_v1"
+name = "1d_donchian20_1w_ema_volume_v1"
 timeframe = "1d"
 leverage = 1.0
 
@@ -21,74 +17,75 @@ def generate_signals(prices):
     if n < 50:
         return np.zeros(n)
     
-    # Load weekly data for trend filter (once before loop)
-    df_weekly = get_htf_data(prices, '1w')
+    # Load 1w data for EMA filter (once before loop)
+    df_1w = get_htf_data(prices, '1w')
     
-    # Weekly EMA(50) for trend filter
-    close_weekly = df_weekly['close'].values
-    ema_weekly = pd.Series(close_weekly).ewm(span=50, min_periods=50, adjust=False).mean().values
-    ema_weekly_aligned = align_htf_to_ltf(prices, df_weekly, ema_weekly)
+    # Weekly EMA(20) filter
+    close_1w = df_1w['close'].values
+    ema_1w = pd.Series(close_1w).ewm(span=20, adjust=False, min_periods=20).mean().values
+    ema_1w_aligned = align_htf_to_ltf(prices, df_1w, ema_1w)
     
     # Daily data
-    close = prices['close'].values
     high = prices['high'].values
     low = prices['low'].values
+    close = prices['close'].values
     volume = prices['volume'].values
     
-    # Bollinger Bands (20, 2)
-    bb_period = 20
-    bb_std = 2
-    ma = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).mean().values
-    std = pd.Series(close).rolling(window=bb_period, min_periods=bb_period).std().values
-    upper = ma + bb_std * std
-    lower = ma - bb_std * std
+    # Daily Donchian(20) channels
+    highest_high_20 = pd.Series(high).rolling(window=20, min_periods=20).max().values
+    lowest_low_20 = pd.Series(low).rolling(window=20, min_periods=20).min().values
     
-    # Volume filter: 20-period average
+    # Volume filter
     vol_ma = pd.Series(volume).rolling(window=20, min_periods=20).mean().values
     
     signals = np.zeros(n)
     position = 0  # 0: flat, 1: long, -1: short
+    entry_price = 0.0
     
     # Start from warmup period
-    start = max(bb_period, 20)  # Bollinger and volume
+    start = max(20, 20)  # For Donchian and volume
     
     for i in range(start, n):
         # Skip if required data not available
-        if (np.isnan(ma[i]) or np.isnan(std[i]) or np.isnan(ema_weekly_aligned[i]) or
-            np.isnan(vol_ma[i])):
+        if (np.isnan(highest_high_20[i]) or np.isnan(lowest_low_20[i]) or
+            np.isnan(ema_1w_aligned[i]) or np.isnan(vol_ma[i])):
             if position != 0:
                 signals[i] = position * 0.25
             else:
                 signals[i] = 0.0
             continue
         
-        # Check exits: opposite Bollinger breakout or weekly trend reversal
+        # Check exits: opposite Donchian breakout or EMA filter violation
         if position == 1:  # long position
-            # Exit: price closes below middle band OR weekly trend turns down
-            if close[i] < ma[i] or close[i] < ema_weekly_aligned[i]:
+            # Exit: price breaks below lower Donchian OR weekly EMA turns bearish
+            if close[i] < lowest_low_20[i] or close[i] < ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = 0.25
         elif position == -1:  # short position
-            # Exit: price closes above middle band OR weekly trend turns up
-            if close[i] > ma[i] or close[i] > ema_weekly_aligned[i]:
+            # Exit: price breaks above upper Donchian OR weekly EMA turns bullish
+            if close[i] > highest_high_20[i] or close[i] > ema_1w_aligned[i]:
                 signals[i] = 0.0
                 position = 0
             else:
                 signals[i] = -0.25
         else:
-            # Look for entries: Bollinger breakout + weekly trend + volume
-            bull_breakout = close[i] > upper[i] and close[i] > ema_weekly_aligned[i]
-            bear_breakout = close[i] < lower[i] and close[i] < ema_weekly_aligned[i]
+            # Look for entries: Donchian breakout + EMA filter + volume
+            bull_breakout = close[i] > highest_high_20[i]
+            bear_breakout = close[i] < lowest_low_20[i]
+            ema_bullish = close[i] > ema_1w_aligned[i]
+            ema_bearish = close[i] < ema_1w_aligned[i]
             volume_filter = volume[i] > vol_ma[i] * 1.5
             
-            if bull_breakout and volume_filter:
+            if bull_breakout and ema_bullish and volume_filter:
                 signals[i] = 0.25
                 position = 1
-            elif bear_breakout and volume_filter:
+                entry_price = close[i]
+            elif bear_breakout and ema_bearish and volume_filter:
                 signals[i] = -0.25
                 position = -1
+                entry_price = close[i]
             else:
                 signals[i] = 0.0
     
